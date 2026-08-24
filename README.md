@@ -1,45 +1,111 @@
-# ommega
+# Ommega
 
-Ommega 三端远程 TEE 认证系统：A 端（服务提供端）通过真实硬件 TEE 提供远程认证、签名与解密能力；B 端（客户端）与 B 端 App 通过 server 中转接入；server 负责管理、计费与数据中转。
+Ommega 是一个三端远程 TEE 认证系统：让一台设备（B 端）的真实硬件 TEE 能力通过网络提供给另一台设备（A 端）使用。A 端应用发起的密钥认证（attestation）、签名（sign）、解密（decrypt）请求，经过 server 中转调度，由 B 端设备的真实硬件 TEE（KeyMint / StrongBox）执行并返回结果，从而为 A 端应用提供真实可信的硬件级安全认证。
 
 源码版本：1.3.0（打包日期：2026-08-22）
 
-## 目录结构
+## 系统组成
+
+| 端 | 角色 | 形态 | 安装方式 |
+|----|------|------|----------|
+| **A 端（a-side）** | 服务请求端。keymint 守护进程 + inject 注入器拦截本机 keystore 调用，将认证/签名/解密请求转发到远程 B 端真实 TEE | Magisk 模块（arm64-v8a） | Magisk / KernelSU 刷入 zip |
+| **B 端（b-side）** | 服务提供端。relay 守护进程长轮询 server 领取任务，调用本机真实硬件 TEE 执行认证/签名/解密并回传结果 | Magisk 模块（arm64-v8a） | Magisk / KernelSU 刷入 zip |
+| **B 端 App（b-app）** | B 端管理界面，用于查看设备状态、配置连接参数 | Android APK | 直接安装 APK |
+| **Server（server）** | 中转与调度中心。任务队列、设备管理、卡片计费、密钥盒（keybox）管理、在线设备状态展示 | 独立二进制 | Linux x86_64 / Windows x86_64 部署 |
+
+## 主要功能
+
+- **真实硬件 TEE 远程认证**：B 端使用真实 KeyMint / StrongBox 生成 attestation 证书链，A 端应用获得真实硬件安全级别（StrongBox / TEE）的认证结果
+- **远程签名与解密**：A 端密钥操作完整转发到 B 端真实 TEE 执行
+- **KeyMint 版本自适应**：自动探测并兼容不同 Android 版本的 KeyMint HAL 接口
+- **StrongBox 优先与降级策略**：优先使用 StrongBox 安全级别，按策略处理不可用场景
+- **在线设备状态页**：server 提供公开的设备在线状态展示界面
+- **卡片计费体系**：server 内置卡片购买、激活与用量管理
+- **管理后台**：设备管理、任务查看、密钥盒上传与自动刷新
+
+## 快速使用（官方在线服务）
+
+不想自己搭建的话，直接使用官方在线服务即可，以下配置填入即用：
+
+| 项目 | 值 |
+|------|-----|
+| 在线设备展示 | `http://110.40.170.96:10886/status/` |
+| 配置 URL（A 端 / B 端 / App 统一填写） | `https://110.40.170.96:8443`（TLS 自签名证书，客户端自动接受） |
+| A / B 端 Token | `db5a4965a1a2127d31f1c7dff91dff2cbdb2de6730aed02e` |
+| 设备 ID（B 端默认） | `device-b-2` |
+
+### B 端配置（b-side 模块 + b-app）
+
+1. 安装 `client-b-app-release.apk`，刷入 `ommegaclient-b-release-arm64-v8a-1.3.0.zip` 并重启
+2. 编辑 `/data/adb/ommega/relay.conf`，填入官方配置：
+
+```
+OMMEGA_RELAY_SERVER=https://110.40.170.96:8443
+OMMEGA_RELAY_DEVICE_ID=device-b-2
+OMMEGA_RELAY_TOKEN=db5a4965a1a2127d31f1c7dff91dff2cbdb2de6730aed02e
+```
+
+3. 执行 `touch /data/adb/ommega/restart.all` 重启 relay 服务
+
+### A 端配置（a-side 模块）
+
+1. 刷入 `ommega-a-release-arm64-v8a-1.3.0.zip` 并重启
+2. 编辑 `/data/adb/ommega/config`（或模块 WebUI 中配置），填入官方配置：
+
+```
+url: https://110.40.170.96:8443
+token: db5a4965a1a2127d31f1c7dff91dff2cbdb2de6730aed02e
+device_id: device-b-2
+tls_insecure: true
+remote: on
+```
+
+配置后 A 端认证/签名/解密请求即通过官方 server 中转，由在线 B 端设备的真实 TEE 执行。
+
+## 自行部署
+
+### 目录结构
 
 ```
 ommega/
-├── a-side/                  # A 端（服务提供端，Magisk 模块）
-│   ├── source/              #   完整源码（Rust 工程：keymint 守护进程 + inject 注入器）
-│   │                        #   已排除 target/、.git 编译中间产物
-│   └── build/
-│       └── ommega-a-release-arm64-v8a-1.3.0.zip   # A 端安装包（6.4MB，Magisk 刷入）
-├── b-side/                  # B 端（客户端，Magisk 模块）
-│   ├── source/              #   完整源码（Rust 工程：relay 守护进程）
-│   │                        #   已排除 target/、.git
-│   └── build/
-│       └── ommegaclient-b-release-arm64-v8a-1.3.0.zip  # B 端安装包（1.8MB，Magisk 刷入）
+├── a-side/                  # A 端（Magisk 模块）
+│   ├── source/              #   Rust 源码（keymint 守护进程 + ommega-inject 注入器）
+│   └── build/               #   ommega-a-release-arm64-v8a-1.3.0.zip 安装包
+├── b-side/                  # B 端（Magisk 模块）
+│   ├── source/              #   Rust 源码（relay 守护进程）
+│   └── build/               #   ommegaclient-b-release-arm64-v8a-1.3.0.zip 安装包
 ├── b-app/                   # B 端 Android App（Kotlin 工程）
-│   ├── source/              #   完整源码（app/src、Gradle 配置）
-│   │                        #   已排除 app/build、.gradle 编译产物
-│   └── build/
-│       └── client-b-app-release.apk               # B 端 App 安装包（4.6MB）
+│   ├── source/              #   app 源码 + Gradle 配置
+│   └── build/               #   client-b-app-release.apk
 └── server/                  # 服务端
-    ├── source/              #   完整源码（Rust src/ + 运维脚本、测试、证书/诊断文件等）
-    └── build/
-        └── relay_rs-linux-x86_64-musl    # 服务端二进制（Linux x86_64 musl，约 12.4MB）
+    ├── source/              #   Rust 源码 + 运维脚本
+    └── build/               #   relay_rs-linux-x86_64-musl / relay_rs-windows-x86_64-msvc.exe
 ```
 
-## 三端说明
+### Server 部署
 
-| 端 | 角色 | 安装方式 | 关键产物 |
-|----|------|----------|----------|
-| a-side | A 端（注入方），Magisk 模块，含 keymint 守护与 inject 注入器 | Magisk 刷入 zip | ommega-a-release-arm64-v8a-1.3.0.zip |
-| b-side | B 端（被注入方），Magisk 模块，relay 守护进程 | Magisk 刷入 zip | ommegaclient-b-release-arm64-v8a-1.3.0.zip |
-| b-app | B 端管理 App，Android 界面 | adb install 安装 | client-b-app-release.apk |
-| server | 服务端，提供管理接口与数据 | 部署 server/build 下二进制 | relay_rs-linux-x86_64-musl（12.4MB，05:18 构建） |
+1. 按系统选择二进制：
+   - Linux x86_64：`relay_rs-linux-x86_64-musl`（musl 静态编译，无 libc 依赖，`chmod +x` 后直接运行）
+   - Windows x86_64：`relay_rs-windows-x86_64-msvc.exe`
+2. 参考 `server/source/.env.pay.example` 的格式创建并配置 `.env`：RELAY_TOKEN、MySQL 连接、TLS 证书、HTTP/HTTPS 端口（默认 10886 / 8443）
+3. 运行二进制即完成部署，管理后台与设备状态页自动可用
 
-## 备注
+### 模块与 App 构建
 
-- 源码均为当时打包状态，未做任何修改。
-- 复制的源码已排除 Rust target/ 编译缓存、Android .gradle/build 中间产物，重新构建时正常执行
-  `python build.py`（a-side / b-side）或 Gradle（b-app）即可。
+- A/B 端模块：在 `a-side/source`、`b-side/source` 下执行 `python build.py` 生成 zip
+- B 端 App：在 `b-app/source` 下执行 Gradle 构建生成 APK
+
+## 参考项目
+
+Ommega 参考并借鉴了以下开源项目，在此致谢（排名不分先后）：
+
+| 项目 | 作者 | GitHub |
+|------|------|--------|
+| Tricky Store（tricky-store-rs） | 5ec1cff | [5ec1cff/TrickyStore](https://github.com/5ec1cff/TrickyStore) |
+| Tricky Addon（trickyaddonmodule） | KOWX712 | [KOWX712/Tricky-Addon-Update-Target-List](https://github.com/KOWX712/Tricky-Addon-Update-Target-List) |
+| OhMyKeymint | James Clef（qwq233） | [qwq233/OhMyKeymint](https://github.com/qwq233/OhMyKeymint) |
+| KeyAttestation | vvb2060 | [vvb2060/KeyAttestation](https://github.com/vvb2060/KeyAttestation) |
+
+## 交流与支持
+
+QQ 群：**2167063739**
