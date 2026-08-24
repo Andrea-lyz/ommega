@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>卡密购买 · Relay</title>
+<style>
+:root {
+  --bg: #0e1117; --panel: #161b22; --panel2: #1c2129;
+  --border: #2d333b; --text: #e6edf3; --muted: #8b949e;
+  --green: #3fb950; --blue: #58a6ff; --warn: #d29922; --off: #f85149;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text); min-height: 100vh; padding: 32px 16px;
+  background: var(--bg) url('/static/bg.png') center top / cover no-repeat fixed;
+}
+body::before { content: ""; position: fixed; inset: 0; background: rgba(14,17,23,.82); z-index: -1; pointer-events: none; }
+.wrap { max-width: 760px; margin: 0 auto; }
+h1 { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+.sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }
+.panel h2 { font-size: 15px; font-weight: 600; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+.body { padding: 18px; }
+.cards { display: flex; gap: 14px; flex-wrap: wrap; }
+.card {
+  flex: 1; min-width: 200px; background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 20px; text-align: center; cursor: pointer; transition: .15s;
+}
+.card:hover { border-color: var(--blue); }
+.card.sel { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(88,166,255,.25); }
+.card .price { font-size: 28px; font-weight: 700; color: var(--green); margin: 10px 0; }
+.card .name { font-size: 15px; font-weight: 600; }
+.card .desc { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.btn {
+  width: 100%; padding: 12px; font-size: 15px; font-weight: 600; cursor: pointer;
+  background: var(--blue); color: #fff; border: none; border-radius: 8px; margin-top: 16px;
+}
+.btn:hover { opacity: .9; }
+.btn.sec { background: var(--panel2); border: 1px solid var(--border); color: var(--text); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.result { margin-top: 14px; padding: 12px 14px; border-radius: 8px; font-size: 13px; display: none; word-break: break-all; }
+.result.ok { display: block; background: rgba(63,185,80,.1); border: 1px solid rgba(63,185,80,.35); color: var(--green); }
+.result.err { display: block; background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.35); color: var(--off); }
+.mono { font-family: "SF Mono", "Cascadia Code", Consolas, monospace; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 12px; line-height: 1.6; }
+.foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px; }
+.foot a { color: var(--blue); text-decoration: none; }
+input[type=text] {
+  width:100%; padding:10px 12px; background:var(--panel2);
+  border:1px solid var(--border); color:var(--text); border-radius:8px; font-size:13px;
+}
+label { color: var(--muted); font-size: 13px; display: block; margin-bottom: 6px; }
+/* payment method picker */
+.pays { display: flex; gap: 12px; margin-top: 14px; }
+.pay-opt {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px; cursor: pointer; transition: .15s; font-size: 14px; font-weight: 600;
+}
+.pay-opt:hover { border-color: var(--blue); }
+.pay-opt.sel { border-color: var(--green); box-shadow: 0 0 0 2px rgba(63,185,80,.22); }
+.pay-opt .logo { width: 22px; height: 22px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; color: #fff; }
+.pay-opt .logo.alipay { background: #1677ff; }
+.pay-opt .logo.wxpay { background: #07c160; }
+/* QR pay area */
+.qr-box { display: none; text-align: center; margin-top: 16px; padding: 18px; background: #fff; border-radius: 10px; }
+.qr-box img { width: 220px; height: 220px; display: block; margin: 0 auto; }
+.qr-box .qr-tip { color: #333; font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+.qr-box .order-id { color: #888; font-size: 12px; margin-top: 10px; word-break: break-all; }
+.qr-box .open-link { display: inline-block; margin-top: 12px; padding: 8px 16px; background: #1677ff; color: #fff; border-radius: 6px; font-size: 13px; text-decoration: none; }
+.qr-box .open-link.wx { background: #07c160; }
+.qr-status { display: none; margin-top: 12px; font-size: 13px; color: var(--muted); text-align: center; }
+.qr-status .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: var(--blue); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>卡密购买</h1>
+  <div class="sub">购买年卡获取 A/B 端接入令牌 · 支持支付宝 / 微信扫码支付</div>
+
+  <div class="panel">
+    <h2>选择卡密</h2>
+    <div class="body">
+      <div class="cards">
+        <div class="card sel" id="cardA" onclick="select('a')">
+          <div class="name">A 端年卡</div>
+          <div class="price">¥5</div>
+          <div class="desc">A 端设备接入 · 有效期 1 年</div>
+        </div>
+        <div class="card" id="cardB" onclick="select('b')">
+          <div class="name">B 端年卡</div>
+          <div class="price">¥5</div>
+          <div class="desc">B 端设备接入 · 有效期 1 年</div>
+        </div>
+      </div>
+      <div style="margin-top:14px;">
+        <label for="contactInput">联系方式（用于付款后查询卡密）</label>
+        <input type="text" id="contactInput" placeholder="填写 QQ / 微信 / 手机号等">
+      </div>
+      <div>
+        <label style="margin-top:14px;">支付方式</label>
+        <div class="pays">
+          <div class="pay-opt sel" id="payAlipay" onclick="selectPay('alipay')">
+            <span class="logo alipay">支</span> 支付宝
+          </div>
+          <div class="pay-opt" id="payWxpay" onclick="selectPay('wxpay')">
+            <span class="logo wxpay">微</span> 微信支付
+          </div>
+        </div>
+      </div>
+      <button class="btn" id="buyBtn" onclick="buy()">下单购买（¥5）</button>
+      <div class="result" id="buyResult"></div>
+      <div class="qr-box" id="qrBox">
+        <div class="qr-tip" id="qrTip">请使用手机扫码支付</div>
+        <img id="qrImg" alt="支付二维码">
+        <div class="order-id" id="qrOrderId"></div>
+        <a class="open-link" id="qrOpen" href="#" target="_blank">打开收银台</a>
+      </div>
+      <div class="qr-status" id="qrStatus"><span class="spinner"></span><span id="qrStatusText">等待支付结果…</span></div>
+      <div class="result" id="payDone"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>抽奖</h2>
+    <div class="body">
+      <p class="hint" style="margin-top:0;">每天限抽 3 次，购买年卡额外赠送抽奖次数。中奖可得 7 天卡（A 端）。</p>
+      <button class="btn sec" onclick="lottery()">立即抽奖</button>
+      <div class="result" id="lotteryResult"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>查询卡密</h2>
+    <div class="body">
+      <p class="hint" style="margin-top:0;">付款后，输入下单时填写的联系方式即可查询已发放的卡密。</p>
+      <input type="text" id="queryInput" placeholder="输入下单时的联系方式" style="margin-top:10px;">
+      <button class="btn sec" onclick="queryCard()">查询卡密</button>
+      <div class="result" id="queryResult"></div>
+    </div>
+  </div>
+
+  <div class="foot">支持支付宝 / 微信扫码支付 · <a href="/status/">返回设备状态页</a></div>
+</div>
+
+<script>
+let selectedRole = 'a';
+let selectedPay = 'alipay';
+let pollTimer = null;
+
+function $(s) { return document.querySelector(s); }
+
+function select(role) {
+  selectedRole = role;
+  $('#cardA').classList.toggle('sel', role === 'a');
+  $('#cardB').classList.toggle('sel', role === 'b');
+}
+
+function selectPay(p) {
+  selectedPay = p;
+  $('#payAlipay').classList.toggle('sel', p === 'alipay');
+  $('#payWxpay').classList.toggle('sel', p === 'wxpay');
+  const link = $('#qrOpen');
+  link.classList.toggle('wx', p === 'wxpay');
+  link.textContent = p === 'wxpay' ? '打开微信收银台' : '打开支付宝收银台';
+}
+
+function showResult(el, ok, html) {
+  el.className = ok ? 'result ok' : 'result err';
+  el.innerHTML = html;
+}
+
+function showQr(d) {
+  const box = $('#qrBox');
+  const status = $('#qrStatus');
+  $('#payDone').className = 'result';
+  box.style.display = d.pay_qr_svg || d.pay_url ? 'block' : 'none';
+  status.style.display = 'block';
+  $('#qrStatusText').textContent = '等待支付结果…';
+  if (d.pay_qr_svg) {
+    $('#qrImg').src = d.pay_qr_svg;
+    $('#qrImg').style.display = 'block';
+  } else {
+    $('#qrImg').style.display = 'none';
+  }
+  $('#qrOrderId').textContent = '订单号：' + d.order_id;
+  const link = $('#qrOpen');
+  if (d.pay_url) {
+    link.href = d.pay_url;
+    link.style.display = 'inline-block';
+    link.classList.toggle('wx', selectedPay === 'wxpay');
+    link.textContent = selectedPay === 'wxpay' ? '打开微信收银台' : '打开支付宝收银台';
+  } else {
+    link.style.display = 'none';
+  }
+}
+
+function startPolling(orderId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/card/order/status/', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id: orderId })
+      });
+      const d = await resp.json();
+      if (d.order_status === 'delivered' && d.token) {
+        clearInterval(pollTimer); pollTimer = null;
+        $('#qrStatus').style.display = 'none';
+        $('#payDone').className = 'result ok';
+        $('#payDone').innerHTML =
+          `支付成功！卡密 Token：<span class="mono">${d.token}</span><br>` +
+          `（${d.role === 'a' ? 'A端' : 'B端'} 年卡，请妥善保存）`;
+        $('#buyBtn').disabled = false;
+        $('#buyBtn').textContent = '下单购买（¥5）';
+      }
+    } catch (e) { /* keep polling */ }
+  }, 3000);
+}
+
+async function buy() {
+  const r = $('#buyResult');
+  const contact = $('#contactInput').value.trim();
+  if (!contact) { showResult(r, false, '请先填写联系方式'); return; }
+  r.className = 'result'; r.textContent = '提交中…';
+  $('#buyBtn').disabled = true; $('#buyBtn').textContent = '正在创建订单…';
+  try {
+    const resp = await fetch('/api/card/order/', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ card_type: 'year', role: selectedRole, contact, pay_type: selectedPay })
+    });
+    const d = await resp.json();
+    if (resp.ok) {
+      r.className = 'result'; r.textContent = '';
+      showQr(d);
+      if (d.pay_error) {
+        showResult(r, false, `订单已创建：<span class="mono">${d.order_id}</span><br>${d.message || '支付通道暂不可用，请联系管理员处理。'}`);
+      } else if (d.pay_url || d.pay_qr_svg) {
+        showResult(r, true, `订单已创建：<span class="mono">${d.order_id}</span>，请使用<span class="mono">${selectedPay === 'wxpay' ? '微信' : '支付宝'}</span>扫码支付。`);
+        startPolling(d.order_id);
+      } else {
+        showResult(r, false, `订单已创建：<span class="mono">${d.order_id}</span><br>${d.message || '支付通道未配置，请联系管理员。'}`);
+      }
+    } else {
+      showResult(r, false, d.error || '下单失败');
+      $('#buyBtn').disabled = false; $('#buyBtn').textContent = '下单购买（¥5）';
+    }
+  } catch (e) {
+    showResult(r, false, '网络错误：' + e.message);
+    $('#buyBtn').disabled = false; $('#buyBtn').textContent = '下单购买（¥5）';
+  }
+}
+
+async function queryCard() {
+  const r = $('#queryResult');
+  const contact = $('#queryInput').value.trim();
+  if (!contact) { showResult(r, false, '请输入联系方式'); return; }
+  r.className = 'result'; r.textContent = '查询中…';
+  try {
+    const resp = await fetch('/api/card/query/', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contact })
+    });
+    const d = await resp.json();
+    if (resp.ok) {
+      const cards = d.cards || [];
+      if (!cards.length) {
+        showResult(r, false, '未查到该联系方式的已发卡订单（可能未付款或未发放）');
+      } else {
+        showResult(r, true, cards.map(c =>
+          `<span class="mono">${c.token}</span>（${c.role === 'a' ? 'A端' : 'B端'} ${c.card_type === 'year' ? '年卡' : '月卡'}）`
+        ).join('<br>'));
+      }
+    } else {
+      showResult(r, false, d.error || '查询失败');
+    }
+  } catch (e) {
+    showResult(r, false, '网络错误：' + e.message);
+  }
+}
+
+async function lottery() {
+  const r = $('#lotteryResult');
+  r.className = 'result'; r.textContent = '抽奖中…';
+  try {
+    const resp = await fetch('/api/card/lottery/', { method: 'POST' });
+    const d = await resp.json();
+    if (resp.ok && d.won) {
+      showResult(r, true, `恭喜中奖！7 天卡 Token：<span class="mono">${d.token}</span>`);
+    } else if (resp.ok) {
+      r.className = 'result'; r.style.display = 'block';
+      r.style.background = 'rgba(88,166,255,.1)'; r.style.border = '1px solid rgba(88,166,255,.35)'; r.style.color = 'var(--blue)';
+      r.textContent = '很遗憾未中奖，明天再来吧～';
+    } else {
+      showResult(r, false, d.error || '抽奖失败');
+    }
+  } catch (e) {
+    showResult(r, false, '网络错误：' + e.message);
+  }
+}
+</script>
+</body>
+</html>

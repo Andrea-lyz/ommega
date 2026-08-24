@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relay 设备状态</title>
+<style>
+:root {
+  --bg: #0e1117; --panel: #161b22; --panel2: #1c2129;
+  --border: #2d333b; --text: #e6edf3; --muted: #8b949e;
+  --green: #3fb950; --blue: #58a6ff; --warn: #d29922; --off: #f85149;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text); min-height: 100vh; padding: 32px 16px;
+  background: var(--bg) url('/static/bg.png') center top / cover no-repeat fixed;
+}
+body::before {
+  content: ""; position: fixed; inset: 0; background: rgba(14,17,23,.78);
+  z-index: -1; pointer-events: none;
+}
+.wrap { max-width: 900px; margin: 0 auto; }
+h1 { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+.sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+.badges { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+.badge {
+  padding: 6px 14px; border-radius: 999px; font-size: 13px;
+  background: var(--panel2); border: 1px solid var(--border);
+}
+.badge.mode { background: rgba(88,166,255,.12); border-color: rgba(88,166,255,.35); color: var(--blue); }
+.badge.on { background: rgba(63,185,80,.12); border-color: rgba(63,185,80,.35); color: var(--green); }
+.panel {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; margin-bottom: 20px; overflow: hidden;
+}
+.panel h2 {
+  font-size: 15px; font-weight: 600; padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.panel h2 span { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
+table { width: 100%; border-collapse: collapse; }
+.table-wrap { overflow-x: auto; }
+th, td { text-align: left; padding: 11px 18px; font-size: 13px; }
+th { color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); }
+tbody tr { border-bottom: 1px solid var(--border); }
+tbody tr:last-child { border-bottom: none; }
+.mono { font-family: "SF Mono", "Cascadia Code", Consolas, monospace; }
+.mono.id { max-width: 260px; }
+.id-box {
+  font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  width: 100%;
+  max-width: 360px;
+  color: var(--text);
+  cursor: text;
+  user-select: all;
+  -webkit-user-select: all;
+  box-sizing: border-box;
+}
+.id-box:focus { outline: 1px solid var(--blue); }
+td.id-cell { padding: 6px 18px; }
+.empty { color: var(--muted); text-align: center; padding: 28px !important; }
+.tag { padding: 2px 8px; border-radius: 6px; font-size: 11px; }
+.tag.ec { background: rgba(88,166,255,.15); color: var(--blue); }
+.tag.rsa { background: rgba(210,153,34,.15); color: var(--warn); }
+.tag.on { background: rgba(63,185,80,.15); color: var(--green); }
+.tag.off { background: rgba(248,81,73,.15); color: var(--off); }
+.dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--green); margin-right:6px; }
+.foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px; }
+.foot a { color: var(--blue); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Relay 设备状态</h1>
+  <div class="sub" id="sub">加载中…</div>
+
+  <div class="badges">
+    <span class="badge mode" id="modeBadge">模式：…</span>
+    <span class="badge on" id="onlineBadge">在线设备：…</span>
+    <span class="badge" id="certBadge">证书设备：…</span>
+  </div>
+
+  <div class="panel">
+    <h2>在线 B 端设备<span>按负载升序排列</span></h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>设备 ID</th><th>负载</th><th>最后在线</th></tr></thead>
+      <tbody id="bBody"><tr><td colspan="3" class="empty">加载中…</td></tr></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <h2>已保存证书的设备<span>已上传 keybox 证书的设备 ID</span></h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>设备 ID</th><th>算法</th><th>状态</th></tr></thead>
+      <tbody id="cBody"><tr><td colspan="3" class="empty">加载中…</td></tr></tbody>
+    </table></div>
+  </div>
+
+  <div class="foot">
+    本页面为公开只读状态页 · 每 5 秒自动刷新 · <a href="/card/">购买卡密 / 抽奖 →</a>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtTime(ms) {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  if (isNaN(d)) return '—';
+  return d.toLocaleString();
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/status/');
+    const d = await r.json();
+    $('#modeBadge').textContent = '模式：' + (d.mode === 'serverbox' ? 'serverbox（服务器出证）' : 'physical（A/B 转发）');
+
+    const b = d.online_b_devices || [];
+    $('#onlineBadge').textContent = '在线设备：' + b.length;
+    $('#bBody').innerHTML = b.length
+      ? b.map(x => `<tr><td class="id-cell"><input class="id-box" type="text" value="${esc(x.device_id)}" readonly onclick="this.select()"></td><td>${x.load ?? 0}</td><td>${fmtTime(x.last_seen_ms)}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty">暂无 B 端设备在线</td></tr>';
+
+    const c = d.cert_devices || [];
+    $('#certBadge').textContent = '证书设备：' + c.length;
+    $('#cBody').innerHTML = c.length
+      ? c.map(x => `<tr>
+          <td class="id-cell"><input class="id-box" type="text" value="${esc(x.device_id)}" readonly onclick="this.select()"></td>
+          <td>${(x.algorithms || []).map(a => `<span class="tag ${a}">${esc(String(a).toUpperCase())}</span>`).join(' ')}</td>
+          <td>${x.active ? '<span class="tag on">启用</span>' : '<span class="tag off">停用</span>'}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="3" class="empty">暂无已保存证书的设备</td></tr>';
+
+    $('#sub').textContent = '最后更新：' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $('#sub').textContent = '加载失败：' + e.message;
+  }
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

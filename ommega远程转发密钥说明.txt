@@ -1,0 +1,503 @@
+===========================================================
+  Ommega 远程转发系统 使用说明
+===========================================================
+
+  本文档面向持有安装包（构建产物）的使用者，
+  按步骤操作即可完成部署，无需编程基础。
+  部署前建议通读【九】的流程清单，了解整体顺序。
+
+
+【一、系统概述】
+
+Ommega 是一套分布式 Android 密钥认证转发系统，
+将一台设备（B端）的硬件认证能力（TEE/StrongBox attestation）
+转发给另一台设备（A端）使用。
+
+系统由三个部分组成：
+
+  A端      认证发起端，部署 Magisk 模块
+  B端      认证执行端（真机），部署 Magisk 模块 或 独立 APP
+  服务器   中转节点，负责任务调度、设备管理、Token 发放
+
+工作流程：
+A 端应用发起密钥认证 → 请求经注入器拦截后发送至服务器 →
+服务器按设备ID 将任务派发给对应 B 端 → B 端在真实硬件上
+生成证书链 → 结果返回 A 端，完成认证。
+
+典型用途：A 端设备借助 B 端真机的 TEE/StrongBox 能力，
+通过基于硬件安全等级的密钥认证检测。
+
+项目背景：
+本项目的 A 端模块参考了 trickystore-rs、OhMyKeymint、
+keysttestation 等开源项目源码，主要基于 OhMyKeymint
+作为框架进行重构与二次修改开发，并完成纯 Rust 化改造。
+
+
+【二、文件清单】
+
+所有文件位于群文件「ommega密钥转发文件夹」（QQ群: 2167063739）：
+
+  服务器端:  relay_rs-linux-x86_64-musl
+             （Linux x86_64 服务器，静态编译，无运行库依赖）
+
+  A端:       ommega-a-release-arm64-v8a-1.3.0-20260822.zip
+             （A端 Magisk/KernelSU 模块）
+
+  B端模块:   ommegaclient-b-release-arm64-v8a-1.3.0-20260822.zip
+             （B端 Magisk 模块，可满足三绿检测）
+
+  B端APP:    client-b-app-release.apk
+             （B端独立 APP，与模块二选一，无法满足三绿检测）
+
+
+【三、服务器部署】
+
+3.1 环境要求
+
+   - 系统: Ubuntu 20.04+ / Debian 11+ 等 x86_64 Linux 发行版
+   - 硬件: 1 核 CPU / 512MB 内存即可
+   - 网络: 公网 IP，防火墙放行 10886 端口
+     （8443 为可选 HTTPS 端口，仅配置证书后生效，见 3.2 第5步）
+   - 依赖: 无需安装任何运行环境，二进制为静态编译（musl）
+
+3.2 部署步骤
+
+  第 1 步: 上传二进制
+
+     将 relay_rs-linux-x86_64-musl 上传至服务器，如 /opt/ommega/：
+
+       chmod +x relay_rs-linux-x86_64-musl
+
+  第 2 步: 创建配置文件 .env（与二进制同目录）
+
+     用 vi/nano 创建文本文件 .env，内容如下，
+     将标注「改成你的」的项替换为自定义值：
+
+     # ===== 服务端口 =====
+     RELAY_BIND=0.0.0.0
+     RELAY_HTTP_PORT=10886
+     RELAY_HTTPS_PORT=8443
+
+     # ===== 访问Token（A端/B端设备连接服务器所需凭证）=====
+     RELAY_TOKEN=改成你的Token
+
+     # ===== 后台管理员账号密码 =====
+     RELAY_ADMIN_USER=admin
+     RELAY_ADMIN_PASSWORD=改成你的管理员密码
+
+     # ===== 数据库（可选，见【四】）=====
+     # 暂不配置数据库时请删除本行或行首加 # 注释，
+     # 否则启动日志将出现 DB open failed 报错（不影响运行）
+     MYSQL_URL=mysql://用户名:密码@127.0.0.1:3306/ommega
+
+     # ===== 转发模式 =====
+     # physical       由真实B端设备执行（默认）
+     # server_keybox  服务器本地keybox执行
+     ATTEST_SOURCE=physical
+
+     Windows 用户注意:
+       建议直接在服务器上编辑 .env；
+       如需在 Windows 编辑后上传，
+       请使用 UTF-8（无BOM）编码 + LF 换行。
+
+  第 3 步: 启动
+
+     在 .env 所在目录执行：
+
+       ./relay_rs-linux-x86_64-musl
+
+     日志出现 HTTP listening on 0.0.0.0:10886 即启动成功。
+     后台运行：
+
+       nohup ./relay_rs-linux-x86_64-musl > relay.out.log 2>&1 &
+
+  第 4 步: 验证
+
+     浏览器访问 http://你的服务器IP:10886/status
+     可正常打开设备状态页即部署成功。
+
+  第 5 步（可选）: 启用 HTTPS
+
+     在程序目录下创建 data/tls/，放入 server.crt 与 server.key，
+     重启服务后自动同时监听 10886（HTTP）与 8443（HTTPS）。
+     未配置证书则仅使用 HTTP，不影响功能。
+
+
+【四、配置数据库（可选但推荐）】
+
+数据库用于持久化保存：发放的 Token、服务器 keybox、
+设备使用记录、客户端诊断信息。
+未配置数据库时服务以内存模式运行，重启后上述数据全部丢失。
+
+4.1 安装 MySQL（已安装可跳过）
+
+   apt install mysql-server
+
+4.2 创建数据库
+
+   mysql -u root -p
+
+   CREATE DATABASE ommega CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   CREATE USER 'ommega'@'localhost' IDENTIFIED BY '改成你的数据库密码';
+   GRANT ALL PRIVILEGES ON ommega.* TO 'ommega'@'localhost';
+   FLUSH PRIVILEGES;
+
+4.3 创建数据表（复制执行全部 SQL）
+
+   USE ommega;
+
+   CREATE TABLE IF NOT EXISTS device_server_identity (
+     device_id VARCHAR(64) PRIMARY KEY,
+     algorithm VARCHAR(16) NOT NULL DEFAULT 'ec',
+     certificate_chain_pem TEXT NOT NULL,
+     private_key_pem_cipher TEXT NOT NULL,
+     active TINYINT NOT NULL DEFAULT 1,
+     machine_id VARCHAR(64) NOT NULL DEFAULT '',
+     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+   CREATE TABLE IF NOT EXISTS api_token (
+     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+     token VARCHAR(64) NOT NULL UNIQUE,
+     role VARCHAR(8) NOT NULL DEFAULT 'a',
+     duration_seconds BIGINT NOT NULL DEFAULT 0,
+     note VARCHAR(255) NOT NULL DEFAULT '',
+     enabled TINYINT NOT NULL DEFAULT 1,
+     activated_at DATETIME NULL,
+     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     last_ip VARCHAR(45) NOT NULL DEFAULT '',
+     last_used_at DATETIME NULL
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+   CREATE TABLE IF NOT EXISTS token_usage_log (
+     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+     token VARCHAR(64) NOT NULL,
+     ip VARCHAR(45) NOT NULL DEFAULT '',
+     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     KEY idx_token (token)
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+   CREATE TABLE IF NOT EXISTS client_report (
+     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+     device_id VARCHAR(64) NOT NULL DEFAULT '',
+     level VARCHAR(16) NOT NULL DEFAULT 'info',
+     code INT NOT NULL DEFAULT 0,
+     message TEXT,
+     detail_json TEXT,
+     client_ip VARCHAR(45) NOT NULL DEFAULT '',
+     user_agent VARCHAR(255) NOT NULL DEFAULT '',
+     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+4.4 通过数据库直接发放 Token（可选）
+
+   除后台界面外，可直接 INSERT 一条记录发放 Token，
+   例如发放 B 端 Token（有效期一年）：
+
+   INSERT INTO api_token (token, role, duration_seconds, note)
+   VALUES ('改成你的Token值', 'b', 31536000, '朋友的B端');
+
+   role 字段: 'a' 为 A 端凭证，'b' 为 B 端凭证。
+   时长单位: 秒（一年=31536000，一月=2592000，一周=604800）。
+
+4.5 启动验证
+
+   确认 .env 中 MYSQL_URL 指向已创建的库与账号，重启服务。
+   若启动日志出现 DB open failed，
+   说明数据库连接失败（账号/密码/库名错误或 MySQL 未启动），
+   此时服务以降级为无持久化模式运行，需排查后重启。
+
+
+【五、A端部署（Magisk模块）】
+
+5.1 环境要求
+
+   - 设备已 Root（Magisk 或 KernelSU）
+   - Android 10 及以上
+   - arm64-v8a 架构
+
+5.2 安装
+
+   1. 下载 ommega-a-release-arm64-v8a-1.3.0-20260822.zip
+   2. Magisk → 模块 → 从本地安装，选择该 zip，重启设备
+      （KernelSU: 模块管理 → 本地安装）
+   3. 开机后模块自动拉起两个守护进程：
+      - daemon          主服务，接管系统 KeyMint（密钥管理）
+      - daemon-injector 注入器，拦截目标应用的认证请求
+   4. 模块列表确认卡片状态为「运行中」
+
+5.3 配置（WebUI 界面）
+
+   入口: Magisk/KernelSU 模块列表 → A端模块卡片齿轮图标，
+   打开网页配置界面（无需安装额外 APP）。
+
+   配置项说明:
+
+   1. 服务器地址:  http://你的服务器IP:10886
+   2. Token:      与服务器 .env 中 RELAY_TOKEN 保持一致
+   3. 设备ID:     必填，必须与 B 端 relay.conf 中的
+                  OMMEGA_RELAY_DEVICE_ID 完全一致（如 device-b-2），
+                  否则任务无法路由至 B 端
+   4. 远程模式:   开启（默认），请求经服务器转发
+   5. 密钥值(bootkey): 可选，默认即可
+   6. 哈希值:     可选
+   7. 安全补丁日期: 可选
+   8. TLS跳过校验: 使用 HTTPS 且非正式证书时开启（默认开启）
+
+   保存后需重启设备生效。
+
+5.4 工作原理
+
+   目标应用发起认证时：
+   注入器拦截请求 → 主服务封装为任务发送至服务器 →
+   服务器按设备ID 路由至 B 端 → B 端生成证书链返回 → A 端完成认证。
+
+   默认拦截目标（可自定义，见 5.6）:
+   密钥认证APP、Google 服务（GMS）、Play 商店、DuckDetector 等
+
+5.5 验证
+
+   1. 模块卡片状态为「运行中」
+   2. 被拦截应用可正常完成一次认证
+   3. 服务器后台「任务管理」出现对应任务记录
+   4. 任务状态由「等待B端领取」变为「已完成」即链路打通
+
+5.6 自定义拦截列表
+
+   配置文件: /data/adb/ommega/injector.toml
+   （模块自带默认列表，一般无需修改）
+
+   使用 root 文件管理器编辑 scoop 列表（包名格式），
+   修改后重启设备生效。
+
+5.7 日志与卸载
+
+   - 日志:
+     logcat tag: ommega
+     （root 终端: logcat -s ommega）
+     文件日志: /data/misc/keystore/ommega/logs/keymint.log
+   - 卸载: 模块列表直接卸载；
+     残留数据目录 /data/adb/ommega 可手动删除
+
+
+【六、B端部署（两种方案二选一）】
+
+  ── 方案一: Magisk 模块版（可满足三绿检测，推荐）──
+
+6.1 环境要求
+
+   - 设备已 Root
+   - 未解锁 BL（可伪回锁/越狱，如 Y700）
+   - 原生支持 StrongBox 效果最佳（无 StrongBox 可走 TEE）
+
+6.2 安装
+
+   1. 下载 ommegaclient-b-release-arm64-v8a-1.3.0-20260822.zip
+   2. Magisk 刷入，重启设备
+   3. 首次开机模块自动生成配置文件:
+      /data/adb/ommega/relay.conf
+   4. 使用 root 文件管理器编辑 relay.conf
+
+6.3 配置文件 relay.conf
+
+   位置: /data/adb/ommega/relay.conf
+   格式: KEY=VALUE，行首 # 为注释
+
+   必改项:
+
+   OMMEGA_RELAY_SERVER=http://你的服务器IP:10886
+      服务器地址，支持 http/https；
+      服务器未配置证书时使用 http://IP:10886
+
+   OMMEGA_RELAY_DEVICE_ID=device-b-2
+      本机设备ID，用于服务器任务路由，
+      必须与 A 端 WebUI 配置的设备ID一致
+
+   OMMEGA_RELAY_TOKEN=你的Token
+      必须与服务器 .env 中 RELAY_TOKEN 一致
+
+   可选项（默认即可）:
+
+   OMMEGA_RELAY_MACHINE_ID=
+      机器ID，可留空
+
+   OMMEGA_RELAY_LOG_ENABLED=true
+      文件日志开关（/data/adb/ommega/logs/relay.log）
+
+   OMMEGA_RELAY_LOG_LEVEL=debug
+      文件日志级别: debug/info/warn/error
+
+   OMMEGA_RELAY_LOGCAT_ENABLED=true
+      logcat 输出开关（tag: ommegaclient-b）
+
+   OMMEGA_RELAY_LOGCAT_LEVEL=info
+      logcat 日志级别
+
+6.4 配置生效机制
+
+   保存 relay.conf 后 1~2 秒内自动热加载，无需重启设备。
+   如未生效（如多设备共用配置），可强制重载:
+
+     touch /data/adb/ommega/restart.all
+
+   （该标记文件开机时自动清除）
+
+   完全重启服务（如更换二进制）:
+
+     sh /data/adb/modules/ommegaclient_b/service.sh
+
+   （脚本会先终止旧进程再启动新进程）
+
+6.5 验证
+
+   1. 模块卡片状态为「运行中」
+   2. 日志: cat /data/adb/ommega/logs/relay.log
+      出现轮询及任务处理记录说明已连通服务器
+   3. 服务器后台「设备管理」中该设备在线
+   4. A 端发起认证后，B 端日志出现处理记录
+
+6.6 二进制更新（可选）
+
+   将新 relay 二进制放置于 /data/adb/ommega/relay
+   （该路径优先级高于模块自带），然后执行:
+
+     sh /data/adb/modules/ommegaclient_b/service.sh
+
+   旧进程自动清理，新进程接管。
+
+  ── 方案二: 独立 APP 版（无法满足三绿检测）──
+
+6.7 环境要求
+
+   - 无需 Root，兼容绝大多数 Android 设备
+   - 限制: 无法满足三绿检测
+
+6.8 安装与配置
+
+   1. 安装 client-b-app-release.apk
+   2. 打开 APP 填写:
+      - 服务器地址: http://你的服务器IP:10886
+      - 设备ID: 自定义（如 device-b-1）
+      - Token: 服务器 .env 中 RELAY_TOKEN
+      - TLS跳过校验: 使用 HTTPS 且非正式证书时开启（默认开启）
+   3. 保存后 APP 自动启动后台转发服务
+
+6.9 验证
+
+   APP 界面显示连接状态；
+   服务器后台「设备管理」可见该设备在线。
+   开机或打开 APP 时自动启动转发服务。
+
+
+【七、管理后台】
+
+  后台入口:
+
+   状态页（公开）:   http://服务器IP:10886/status
+   管理后台:         http://服务器IP:10886/jiyin004/
+   登录页:           http://服务器IP:10886/login/
+
+  登录凭证: 部署时在 .env 中设置的 RELAY_ADMIN_USER / RELAY_ADMIN_PASSWORD
+
+  功能一览:
+
+   1. 总览       在线设备、任务统计、Token 用量
+   2. 设备管理   B 端设备查看/禁用/删除
+   3. 任务管理   认证/签名/解密任务查看，取消待处理任务
+   4. Token管理  生成（A端/B端角色）、启用/禁用/删除、
+                 IP 使用记录查询
+   5. Keybox     上传/查看/删除服务器 keybox（server_keybox 模式）
+   6. 自动Keybox 定时拉取上游 keybox，可开关、手动刷新
+   7. StrongBox强健模式
+                 开: B 端 StrongBox 失败自动降级 TEE 重试
+                 关: 失败直接回退下一层（默认）
+   8. IP过滤     限制访问来源 IP
+   9. 客户端报告 A 端诊断信息，用于认证失败排查
+
+
+【八、常见问题】
+
+  Q: A端搭配B端模块版，环境校验不通过？
+     多为 StrongBox 兼容性问题。解决:
+     1. 更换原生支持 StrongBox、可返回完整证书链的 B 端机型
+     2. 或在后台开启「StrongBox强健模式」降级为 TEE
+     验证: 查看密钥认证页面安全模块选项是否全部正常
+
+  Q: A端 WebUI 无法打开？
+     1. 确认模块已安装并重启设备
+     2. 确认 Magisk/KernelSU 版本支持 WebUI
+     3. 部分管理器需在设置中启用 WebUI 功能
+
+  Q: B端模块状态「启动失败」？
+     1. 查看日志: cat /data/adb/ommega/logs/relay.log
+     2. 常见原因: Token 不一致、服务器地址错误、服务器未运行
+     3. 修正后 touch /data/adb/ommega/restart.all 重载
+
+  Q: 配置完成但认证仍走本地？
+     1. 确认 A 端 WebUI「远程模式」已开启
+     2. 确认 A/B 端 Token 均与服务器 RELAY_TOKEN 一致
+     3. 确认服务器防火墙放行端口、网络可达
+
+  Q: 服务器提示端口被占用？
+     netstat -tlnp | grep -E '10886|8443' 定位占用进程，
+     终止或修改 .env 端口配置。
+
+  Q: 后台登录失败？
+     检查 .env 是否设置 RELAY_ADMIN_PASSWORD，
+     注意大小写，修改后重启服务。
+
+  Q: B端设备无法连接服务器？
+     1. 检查防火墙放行 10886/8443
+     2. 检查 B 端服务器地址与 Token
+     3. 查看 B 端日志 /data/adb/ommega/logs/relay.log
+
+  Q: 重启服务器后 Token、设备记录丢失？
+     未配置数据库时为内存模式，重启即清空。
+     按【四】配置 MySQL 即可持久化。
+
+
+【九、快速跑通全流程（部署顺序清单）】
+
+   按序执行，每步验证通过后进入下一步:
+
+   □ 第1步 服务器（见【三】）
+      上传二进制 → 配置 .env（含管理员密码）→ 启动 →
+      访问 http://服务器IP:10886/status 确认
+
+   □ 第2步 数据库（可选，见【四】）
+      建库建表 → .env 配置 MYSQL_URL → 重启服务
+
+   □ 第3步 B端设备（见【六】）
+      安装模块/APP → 配置 relay.conf（地址、设备ID、Token）
+      → 确认模块运行 → 后台可见设备在线
+
+   □ 第4步 A端设备（见【五】）
+      安装模块 → 重启 → WebUI 配置地址、Token、
+      （设备ID须与第3步 B 端一致）→ 重启设备
+
+   □ 第5步 首次串联测试
+      1. A 端打开被拦截应用执行一次认证
+      2. 后台「任务管理」出现任务且状态为「已完成」即成功
+      3. 若任务持续「等待B端领取」:
+         检查 B 端日志 /data/adb/ommega/logs/relay.log
+         核对两端设备ID与 Token 一致性
+
+   □ 第6步 日常管理
+      Token 发放: 后台「Token管理」或直接 INSERT 数据库
+      问题排查: 后台「客户端报告」+ 三端日志（见【八】）
+
+   关键一致性约束（三项必须一致）:
+
+     1. A端 Token = B端 Token = 服务器 RELAY_TOKEN
+     2. A端设备ID = B端 OMMEGA_RELAY_DEVICE_ID
+     3. A/B端服务器地址 = 服务器实际地址
+
+
+【十、联系与支持】
+
+  QQ群: 2167063739
+  服务端开源地址（深入了解可查阅）:
+    https://github.com/jiyin004-jpg/ommega-relay-server
+
+  按步骤操作可独立完成部署；
+  如遇文档未覆盖的问题，可在群内咨询。

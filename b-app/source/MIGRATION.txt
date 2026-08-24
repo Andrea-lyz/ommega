@@ -1,0 +1,10 @@
+Ommega Client-B
+===============
+
+本目录是 Client-B 的主实现，负责设备侧联动、回传与辅助校验。
+
+当前约定：
+  - 包名 / applicationId：org.ommega.deviceb
+  - MainActivity、RelayService、KeystoreHelper、CustomKeyboxAttest、ServerClient 以本目录为准
+
+签名：若存在 `../debug.keystore`，release 可绑定该 keystore。

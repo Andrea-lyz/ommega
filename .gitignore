@@ -1,0 +1,55 @@
+# ===== 重复打包副本 / 内部知识库 =====
+ommega-三端全量-20260822-v3/
+.qoder/
+
+# ===== 根目录本地运维脚本 =====
+/pull_b_log.sh
+/tail_server_logs.py
+/simulate_a_side.py
+/deploy_remote.py
+
+# ===== 构建缓存 / 中间产物 =====
+**/target/
+**/.gradle/
+**/.kotlin/
+**/app/build/
+**/node_modules/
+**/*.iml
+**/__pycache__/
+**/*.pyc
+
+# ===== 本地环境配置（含本地路径/签名私钥）=====
+**/.cargo/
+**/local.properties
+**/debug.keystore
+**/.idea/
+
+# ===== 密钥 / 证书 / 日志 / 数据库 =====
+**/.env
+**/*.log
+**/*.der
+**/*.pem
+**/*.db
+**/*.xdb
+**/*.key
+server/source/cert.json
+server/source/data/
+server/source/chain_*.txt
+
+# ===== server 调试 / 诊断 / 运维遗留（不随源码公开）=====
+server/source/*.py
+server/source/*.ps1
+server/source/zig-musl-*
+server/source/zig-tools/
+server/source/run_apis*.ps1
+server/source/start_*.ps1
+server/source/test_*.ps1
+server/source/smoke_*.ps1
+
+# ===== b-side 本地调试脚本（含本机 adb 路径）=====
+b-side/source/check_logs.py
+b-side/source/clean_instances.py
+b-side/source/diag*.py
+b-side/source/fix_pid.py
+b-side/source/restart_relay_for_logs.py
+b-side/source/watch_relay.py

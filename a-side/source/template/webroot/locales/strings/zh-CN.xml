@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<resources>
+
+    <string name="system_default">系统默认</string>
+
+    <string name="more_language">更多</string>
+
+    <!-- Header -->
+
+    <string name="header_title">Ommega</string>
+
+    <!-- Help Menu-->
+
+    <string name="help_help_instructions">使用说明</string>
+
+    <string name="help_save_and_update_description">将当前配置保存到 target.txt。</string>
+
+    <string name="help_select_denylist">从排除列表选择</string>
+
+    <string name="help_select_denylist_description">仅在 Magisk 中可用，选择 DenyList 中的应用。推荐。</string>
+
+    <string name="help_deselect_unnecessary">取消非必要应用</string>
+
+    <string name="help_deselect_unnecessary_description">非必要类别：Xposed 模块、root 管理器、root 相关应用以及从不检查引导加载程序状态的一般应用。此选项需要网络连接。</string>
+
+    <string name="help_add_system_app">添加系统应用</string>
+
+    <string name="help_add_system_app_description">将特定系统应用添加到应用列表。</string>
+
+    <string name="help_set_keybox">设置 AOSP 和有效密钥箱</string>
+
+    <string name="help_set_keybox_description">替换 Ommega keybox.xml。有效密钥箱选项需要网络连接且并非始终可用。</string>
+
+    <string name="help_set_custom_keybox">设置自定义密钥箱</string>
+
+    <string name="help_set_custom_keybox_description">从设备存储导入密钥箱。仅支持 xml 文件。</string>
+
+    <string name="help_set_security_patch">设置安全补丁</string>
+
+    <string name="help_set_security_patch_description">设置自定义安全补丁伪装。自动配置将使用 PIF 模块的安全补丁。留空并保存以禁用自动配置。</string>
+
+    <string name="help_set_verified_boot_hash">设置已验证启动哈希</string>
+
+    <string name="help_set_verified_boot_hash_description">从 Key Attestation Demo 获取 verifiedBootHash 值。通过重置 ro.boot.vbmeta.digest 修复异常启动状态。</string>
+
+    <!-- Update -->
+
+    <string name="update_update_available">新版本已就绪</string>
+
+    <string name="update_redirect_to_release">点击下载最新版本</string>
+
+    <string name="update_changelog">更新日志</string>
+
+    <string name="update_install">安装</string>
+
+    <string name="update_reboot">重启</string>
+
+    <!-- Search -->
+
+    <string name="search_bar_search_placeholder">搜索</string>
+
+    <!-- Functional Button -->
+
+    <string name="functional_button_save">保存</string>
+
+    <string name="functional_button_uninstall_webui">卸载 WebUI</string>
+
+    <string name="functional_button_close">关闭</string>
+
+    <string name="functional_button_cancel">取消</string>
+
+    <string name="functional_button_confirm">确认</string>
+
+    <!-- Loading -->
+
+    <string name="loading_loading">加载中...</string>
+
+    <!-- Menu -->
+
+    <string name="menu_refresh">刷新</string>
+
+    <string name="menu_select_all">全选</string>
+
+    <string name="menu_deselect_all">取消全选</string>
+
+    <string name="menu_select_denylist">从排除列表选择</string>
+
+    <string name="menu_deselect_unnecessary">取消非必要应用</string>
+
+    <string name="menu_add_system_app">添加系统应用</string>
+
+    <string name="menu_keybox">密钥</string>
+
+    <string name="menu_keybox_aosp">AOSP</string>
+
+    <string name="menu_keybox_unknown">未知</string>
+
+    <string name="menu_keybox_valid">有效</string>
+
+    <string name="menu_keybox_custom">自定义</string>
+
+    <string name="menu_set_verified_boot_hash">设置哈希值</string>
+
+    <string name="menu_set_security_patch">设置安全补丁</string>
+
+    <string name="menu_set_remote_config">远程配置</string>
+
+    <string name="menu_set_devconfig">设置 DevConfig</string>
+
+    <string name="menu_help">帮助</string>
+
+    <string name="menu_language">语言</string>
+
+    <string name="menu_about">关于</string>
+
+    <!-- Boot Hash -->
+
+    <string name="boot_hash_title">哈希值</string>
+
+    <string name="boot_hash_input_placeholder">在此粘贴哈希值</string>
+
+    <!-- About -->
+
+    <string name="about_module_name_line1">Ommega</string>
+
+    <string name="about_module_name_line2">远程认证中继</string>
+
+    <string name="about_disclaimer">Ommega 认证中继模块</string>
+
+    <string name="about_description">通过远程中继服务器执行 KeyMint 认证，并具备本地密钥箱回退。管理目标应用列表、配置密钥箱、设置安全补丁并连接到远程中继服务器。</string>
+
+    <!-- Remote Config -->
+
+    <string name="remote_config_title">远程配置</string>
+
+    <string name="remote_config_url">服务器地址</string>
+
+    <string name="remote_config_device_id">设备 ID</string>
+
+    <string name="remote_config_token">令牌</string>
+
+    <string name="remote_config_remote">启用远程</string>
+
+    <string name="remote_config_local_hw">本地密钥使用硬件</string>
+
+    <string name="remote_config_tls_insecure">禁用 TLS 验证</string>
+
+    <string name="remote_config_debug_logging">启用调试日志</string>
+
+    <string name="remote_config_debug_logging_description">启用详细调试日志，记录所有操作、调用链和数据。日志将写入配置目录。</string>
+
+    <string name="remote_config_save_success">配置保存成功</string>
+
+    <string name="remote_config_save_failed">配置保存失败</string>
+
+    <!-- Prompt -->
+
+    <string name="prompt_no_internet">请检查网络连接</string>
+
+    <string name="prompt_aosp_key_set">AOSP 密钥箱设置成功</string>
+
+    <string name="prompt_key_set_error">更新密钥箱失败</string>
+
+    <string name="prompt_unknown_key_set">未知密钥箱设置成功</string>
+
+    <string name="prompt_valid_key_set">有效密钥箱设置成功</string>
+
+    <string name="prompt_no_valid">未找到有效密钥箱。</string>
+
+    <string name="prompt_boot_hash_set">哈希值保存成功，重启后生效</string>
+    <string name="menu_set_verified_boot_key">设置密钥值</string>
+    <string name="boot_key_title">密钥值</string>
+    <string name="boot_key_input_placeholder">在此粘贴密钥值</string>
+    <string name="prompt_boot_key_set">密钥值保存成功，重启后生效</string>
+    <string name="prompt_boot_key_cleared">密钥值已清除，重启后生效</string>
+
+    <string name="prompt_boot_hash_cleared">哈希值已清除，重启后生效</string>
+
+    <string name="prompt_boot_hash_set_error">哈希值保存失败</string>
+
+    <string name="prompt_saved_target">保存成功</string>
+
+    <string name="prompt_save_error">保存失败</string>
+
+    <string name="prompt_uninstall_prompt">WebUI 将在重启后移除</string>
+
+    <string name="prompt_uninstall_failed">卸载 WebUI 失败</string>
+
+    <string name="prompt_checking_update">正在检查更新...</string>
+
+    <string name="prompt_new_update">有新版本可用！</string>
+
+    <string name="prompt_no_update">当前没有可用更新</string>
+
+    <string name="prompt_downloading">正在下载新版本...</string>
+
+    <string name="prompt_downloaded">下载完成</string>
+
+    <string name="prompt_download_fail">下载更新失败</string>
+
+    <string name="prompt_installing">正在安装更新...</string>
+
+    <string name="prompt_installed">安装成功，立即重启。</string>
+
+    <string name="prompt_install_fail">安装失败，请手动更新</string>
+
+    <string name="prompt_rebooting">正在重启...</string>
+
+    <string name="prompt_reboot_fail">重启失败，请手动重启</string>
+
+    <string name="prompt_translation_updated">翻译包更新成功</string>
+
+    <string name="prompt_translation_update_failed">翻译包更新失败</string>
+
+    <string name="prompt_custom_key_set">自定义密钥箱设置成功</string>
+
+    <string name="prompt_custom_key_set_error">设置自定义密钥箱失败</string>
+
+    <string name="prompt_no_file_selected">未选择文件</string>
+
+    <string name="prompt_system_app_not_found">未找到系统应用</string>
+
+    <string name="prompt_system_app_error">添加系统应用失败</string>
+
+    <!-- Security Patch -->
+
+    <string name="security_patch_title">安全补丁</string>
+
+    <string name="security_patch_advanced_mode">高级</string>
+
+    <string name="security_patch_get_date">获取安全补丁日期</string>
+
+    <string name="security_patch_auto">自动</string>
+
+    <string name="security_patch_fetching">获取中...</string>
+
+    <string name="security_patch_fetched">完成</string>
+
+    <string name="security_patch_get_failed">获取安全补丁日期失败</string>
+
+    <string name="security_patch_unable_to_connect">无法连接到 source.android.com</string>
+
+    <string name="security_patch_auto_success">自动配置启用成功</string>
+
+    <string name="security_patch_auto_failed">启用自动配置失败</string>
+
+    <string name="security_patch_save_success">安全补丁保存成功</string>
+
+    <string name="security_patch_save_failed">保存安全补丁失败</string>
+
+    <string name="security_patch_value_empty">安全补丁配置已禁用</string>
+
+    <string name="security_patch_invalid_all">格式无效</string>
+
+    <string name="security_patch_invalid_boot">启动格式无效</string>
+
+    <string name="security_patch_invalid_system">系统格式无效</string>
+
+    <string name="security_patch_invalid_vendor">供应商格式无效</string>
+
+    <!-- Add System App -->
+
+    <string name="add_system_app_title">添加系统应用</string>
+
+    <string name="add_system_app_add">添加</string>
+
+    <string name="add_system_app_current_list">当前系统应用列表</string>
+
+    <!-- Uninstall confirmation -->
+
+    <string name="confirmation_uninstall_title">确认卸载？</string>
+
+    <string name="confirmation_uninstall_message">您确定要卸载 Ommega 吗</string>
+
+    <!-- Mode dialog -->
+
+    <string name="mode_dialog_title">模式</string>
+
+    <string name="mode_auto">自动</string>
+
+    <string name="mode_certificate_generating">证书生成 (!)</string>
+
+    <string name="mode_leaf_hack">叶子破解 (?)</string>
+
+    <!-- Keybox Automation -->
+
+    <string name="menu_automation">自动密钥</string>
+
+    <string name="automation_title">密钥箱自动化</string>
+
+    <string name="automation_keybox_header">密钥箱自动获取</string>
+
+    <string name="automation_keybox_auto">密钥箱自动获取</string>
+
+    <string name="automation_enable">启用</string>
+
+    <string name="automation_src_primary">主源</string>
+
+    <string name="automation_src_mirror">KOWX712 镜像</string>
+
+    <string name="automation_src_device">设备生成</string>
+
+    <string name="automation_src_stock">库存密钥箱</string>
+
+    <string name="automation_patch_auto">安全补丁自动获取</string>
+
+    <string name="automation_source">来源</string>
+
+    <string name="automation_interval_header">获取间隔</string>
+
+    <string name="automation_interval">获取间隔</string>
+
+    <string name="automation_interval_custom">自定义</string>
+
+    <string name="automation_interval_set">设置</string>
+
+    <string name="automation_interval_hours">小时</string>
+
+    <string name="automation_manual_header">手动操作</string>
+
+    <string name="automation_fetch_now">立即获取</string>
+
+    <string name="automation_fetch_key">获取密钥</string>
+
+    <string name="automation_set_patch_now">立即设置补丁</string>
+
+    <string name="automation_set_patch">设置补丁</string>
+
+    <string name="automation_patch_header">安全补丁自动更新</string>
+
+    <string name="prompt_keybox_auto_enabled">密钥箱自动获取已启用</string>
+
+    <string name="prompt_patch_auto_enabled">安全补丁自动获取已启用</string>
+
+    <string name="prompt_source_selected">已选择来源</string>
+
+    <string name="prompt_interval_set">间隔已更新</string>
+
+    <string name="prompt_invalid_interval">间隔值无效</string>
+
+    <string name="prompt_fetching_key">正在获取密钥箱...</string>
+
+    <string name="prompt_setting_patch">正在设置安全补丁...</string>
+
+    <string name="prompt_security_patch_saved_restart">安全补丁已保存，重启后生效</string>
+</resources>
+

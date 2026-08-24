@@ -1,0 +1,60 @@
+[package]
+name = "relay_rs"
+authors = ["jiyin004"]
+version = "1.3.0"
+edition = "2021"
+description = "Rust port of the ommega relay_server (A/B relay protocol + server_keybox)"
+license = "MIT"
+
+[[bin]]
+name = "relay_rs"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["json", "query"] }
+# `tls-rustls` would force rustls/aws-lc-rs; use the provider-agnostic variant
+# so the ring-only rustls config above is honored.
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# No `minimal` feature: it forces flate2/zlib (libz-sys -> C zlib), which breaks
+# the musl cross-build. flate2 is enabled below with the pure-Rust backend.
+mysql = { version = "24", default-features = false }
+rand = "0.8"
+base64 = "0.22"
+sha1 = "0.10"
+sha2 = "0.10"
+yasna = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
+http = "1"
+anyhow = "1"
+# Pure-Rust crypto (no system OpenSSL needed)
+p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+p384 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+p521 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+ecdsa = { version = "0.16", features = ["pem", "signing"] }
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+x509-parser = "0.16"
+pem = "3"
+pkcs8 = { version = "0.10", features = ["pem"] }
+digest = "0.10"
+roxmltree = "0.20"
+fernet = { version = "0.2", default-features = false, features = ["rustcrypto"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+md-5 = "0.10"
+qrcode = "0.14"
+# ring-only crypto provider: rustls's default provider is aws-lc-rs, whose
+# C build (aws-lc-sys) does not cross-compile to musl. main.rs already installs
+# the ring provider at runtime, so keep only ring here.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# mysql's compression uses flate2; give it the pure-Rust (miniz_oxide) backend so
+# no C zlib (libz-sys) is linked in the musl cross-build.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[profile.release]
+opt-level = 2

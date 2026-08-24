@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relay 管理后台登录</title>
+<style>
+:root {
+  --bg: #0e1117; --panel: #161b22; --panel2: #1c2129;
+  --border: #2d333b; --text: #e6edf3; --muted: #8b949e;
+  --green: #3fb950; --blue: #58a6ff; --off: #f85149;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text); min-height: 100vh;
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: var(--bg) url('/static/bg.png') center top / cover no-repeat fixed;
+}
+body::before {
+  content: ""; position: fixed; inset: 0; background: rgba(14,17,23,.82);
+  z-index: -1; pointer-events: none;
+}
+.card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+  width: 100%; max-width: 380px; padding: 36px 32px;
+}
+h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+.sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+input {
+  width: 100%; padding: 10px 14px; margin-bottom: 18px; font-size: 14px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); outline: none;
+}
+input:focus { border-color: var(--blue); }
+button {
+  width: 100%; padding: 11px; font-size: 14px; font-weight: 600; cursor: pointer;
+  background: var(--blue); color: #fff; border: none; border-radius: 8px;
+}
+button:hover { opacity: .9; }
+.err { color: var(--off); font-size: 13px; margin-top: 14px; min-height: 18px; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 18px; text-align: center; }
+.hint a { color: var(--blue); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Relay 管理后台</h1>
+  <div class="sub">请输入管理员账号密码登录</div>
+  <form id="f">
+    <label>账号</label>
+    <input type="text" id="u" autocomplete="username" placeholder="管理员账号" required>
+    <label>密码</label>
+    <input type="password" id="p" autocomplete="current-password" placeholder="管理员密码" required>
+    <button type="submit">登 录</button>
+  </form>
+  <div class="err" id="err"></div>
+  <div class="hint"><a href="/status/">查看公开设备状态页 →</a></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+$('#f').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('#err').textContent = '';
+  const username = $('#u').value.trim();
+  const password = $('#p').value;
+  try {
+    const r = await fetch('/api/admin/login/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const d = await r.json();
+    if (r.ok && d.session) {
+      localStorage.setItem('relaySession', d.session);
+      localStorage.setItem('relaySessionUser', d.username);
+      location.href = '/jiyin004/';
+    } else {
+      $('#err').textContent = d.error || '登录失败';
+    }
+  } catch (err) {
+    $('#err').textContent = '网络错误：' + err.message;
+  }
+});
+</script>
+</body>
+</html>
