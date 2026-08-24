@@ -30,7 +30,7 @@ Ommega 是一个三端远程 TEE 认证系统：让一台设备（B 端）的真
 | 项目 | 值 |
 |------|-----|
 | 在线设备展示 | `http://110.40.170.96:10886/status/` |
-| 配置 URL（A 端 / B 端 / App 统一填写） | `https://110.40.170.96:8443`（TLS 自签名证书，客户端自动接受） |
+| 配置 URL（A 端 / B 端 / App 统一填写） | `http://110.40.170.96:10886` |
 | A 端 Token | `aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd` |
 | B 端 Token | `Mytju8b0_lhLlqTKcEUhuwSbAsAtjom0` |
 | 设备 ID（B 端默认） | `device-b-2` |
@@ -41,7 +41,7 @@ Ommega 是一个三端远程 TEE 认证系统：让一台设备（B 端）的真
 2. 编辑 `/data/adb/ommega/relay.conf`，填入官方配置：
 
 ```
-OMMEGA_RELAY_SERVER=https://110.40.170.96:8443
+OMMEGA_RELAY_SERVER=http://110.40.170.96:10886
 OMMEGA_RELAY_DEVICE_ID=device-b-2
 OMMEGA_RELAY_TOKEN=Mytju8b0_lhLlqTKcEUhuwSbAsAtjom0
 ```
@@ -54,7 +54,7 @@ OMMEGA_RELAY_TOKEN=Mytju8b0_lhLlqTKcEUhuwSbAsAtjom0
 2. 编辑 `/data/adb/ommega/config`（或模块 WebUI 中配置），填入官方配置：
 
 ```
-url: https://110.40.170.96:8443
+url: http://110.40.170.96:10886
 token: aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd
 device_id: device-b-2
 tls_insecure: true
