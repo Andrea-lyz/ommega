@@ -187,10 +187,11 @@ pub struct RemoteRef {
 
 /// Root of trust + attestation version reported by the remote (B-side) TEE
 /// attestation. The child leaf signed by a remote attestation key must reuse
-/// both the root-of-trust AND the attestation/keymint version of the
-/// attestation key — otherwise sign_key and attest_key disagree within one
-/// chain and detectors flag the attestation key as tampered.
-#[derive(Clone, PartialEq, Eq, Debug, AsCborValue)]
+/// the root-of-trust, attestation/keymint version, AND the OS/vendor/boot
+/// patch tags of the attestation key — otherwise sign_key and attest_key
+/// disagree within one chain and detectors flag the attestation key as
+/// tampered.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RemoteRootOfTrust {
     pub verified_boot_key: Vec<u8>,
     pub device_locked: bool,
@@ -200,6 +201,64 @@ pub struct RemoteRootOfTrust {
     pub attestation_version: i32,
     /// `keymasterVersion` from the remote attestation extension.
     pub keymaster_version: i32,
+    /// `OS_VERSION` (tag 705) from the remote hw-enforced list, when present.
+    pub os_version: Option<u32>,
+    /// `OS_PATCHLEVEL` (tag 706) from the remote hw-enforced list, when present.
+    pub os_patchlevel: Option<u32>,
+    /// `VENDOR_PATCHLEVEL` (tag 718) from the remote hw-enforced list, when present.
+    pub vendor_patchlevel: Option<u32>,
+    /// `BOOT_PATCHLEVEL` (tag 719) from the remote hw-enforced list, when present.
+    pub boot_patchlevel: Option<u32>,
+}
+
+impl AsCborValue for RemoteRootOfTrust {
+    fn from_cbor_value(value: cbor::value::Value) -> Result<Self, CborError> {
+        // 6-element arrays are the original ROT-only encoding; 10-element arrays
+        // append the four optional version/patch tags (each `Option<u32>`).
+        let mut a = match value {
+            cbor::value::Value::Array(a) if a.len() == 6 || a.len() == 10 => a,
+            other => return cbor_type_error(&other, "arr len 6 or 10"),
+        };
+        let (os_version, os_patchlevel, vendor_patchlevel, boot_patchlevel) = if a.len() == 10 {
+            (
+                <Option<u32>>::from_cbor_value(a.remove(6))?,
+                <Option<u32>>::from_cbor_value(a.remove(6))?,
+                <Option<u32>>::from_cbor_value(a.remove(6))?,
+                <Option<u32>>::from_cbor_value(a.remove(6))?,
+            )
+        } else {
+            (None, None, None, None)
+        };
+        Ok(Self {
+            keymaster_version: <i32>::from_cbor_value(a.remove(5))?,
+            attestation_version: <i32>::from_cbor_value(a.remove(4))?,
+            verified_boot_hash: <Vec<u8>>::from_cbor_value(a.remove(3))?,
+            verified_boot_state: <i32>::from_cbor_value(a.remove(2))?,
+            device_locked: <bool>::from_cbor_value(a.remove(1))?,
+            verified_boot_key: <Vec<u8>>::from_cbor_value(a.remove(0))?,
+            os_version,
+            os_patchlevel,
+            vendor_patchlevel,
+            boot_patchlevel,
+        })
+    }
+
+    fn to_cbor_value(self) -> Result<cbor::value::Value, CborError> {
+        let mut v = Vec::new();
+        v.try_reserve(10)
+            .map_err(|_e| CborError::AllocationFailed)?;
+        v.push(self.verified_boot_key.to_cbor_value()?);
+        v.push(self.device_locked.to_cbor_value()?);
+        v.push(self.verified_boot_state.to_cbor_value()?);
+        v.push(self.verified_boot_hash.to_cbor_value()?);
+        v.push(self.attestation_version.to_cbor_value()?);
+        v.push(self.keymaster_version.to_cbor_value()?);
+        v.push(self.os_version.to_cbor_value()?);
+        v.push(self.os_patchlevel.to_cbor_value()?);
+        v.push(self.vendor_patchlevel.to_cbor_value()?);
+        v.push(self.boot_patchlevel.to_cbor_value()?);
+        Ok(cbor::value::Value::Array(v))
+    }
 }
 
 /// Macro that extracts the explicit key from an [`OpaqueOr`] wrapper.
@@ -714,5 +773,52 @@ impl<T: AesCmac> Ckdf for T {
             ));
         }
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod remote_root_of_trust_cbor_tests {
+    use super::*;
+
+    fn sample() -> RemoteRootOfTrust {
+        RemoteRootOfTrust {
+            verified_boot_key: vec![1; 32],
+            device_locked: true,
+            verified_boot_state: 0,
+            verified_boot_hash: vec![2; 32],
+            attestation_version: 400,
+            keymaster_version: 400,
+            os_version: Some(160000),
+            os_patchlevel: Some(202608),
+            vendor_patchlevel: Some(20260805),
+            boot_patchlevel: Some(20260805),
+        }
+    }
+
+    #[test]
+    fn roundtrip_includes_patch_tags() {
+        let rot = sample();
+        let encoded = rot.clone().to_cbor_value().unwrap();
+        let decoded = RemoteRootOfTrust::from_cbor_value(encoded).unwrap();
+        assert_eq!(rot, decoded);
+    }
+
+    #[test]
+    fn legacy_six_element_array_has_no_patch_tags() {
+        let rot = sample();
+        let encoded = cbor::value::Value::Array(vec![
+            rot.verified_boot_key.clone().to_cbor_value().unwrap(),
+            rot.device_locked.to_cbor_value().unwrap(),
+            rot.verified_boot_state.to_cbor_value().unwrap(),
+            rot.verified_boot_hash.clone().to_cbor_value().unwrap(),
+            rot.attestation_version.to_cbor_value().unwrap(),
+            rot.keymaster_version.to_cbor_value().unwrap(),
+        ]);
+        let decoded = RemoteRootOfTrust::from_cbor_value(encoded).unwrap();
+        assert_eq!(decoded.attestation_version, 400);
+        assert_eq!(decoded.os_version, None);
+        assert_eq!(decoded.os_patchlevel, None);
+        assert_eq!(decoded.vendor_patchlevel, None);
+        assert_eq!(decoded.boot_patchlevel, None);
     }
 }

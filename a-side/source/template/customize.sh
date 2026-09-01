@@ -60,6 +60,36 @@ fi
 extract "$ZIPFILE" 'customize.sh'  "$TMPDIR/.vunzip"
 extract "$ZIPFILE" 'verify.sh'     "$TMPDIR/.vunzip"
 
+# WebUI overlay props live in the data dir, not in post-fs-data.sh. Overlay
+# installs replace the module script from the zip, so copy any leftover
+# resetprop lines out of the currently installed script before extracting.
+# Magisk may extract into modules_update while the live script is still
+# under modules/; KernelSU updates in place. Check every candidate.
+DATA_DIR=/data/misc/keystore/ommega
+WEBUI_PROPS="$DATA_DIR/webui-props.sh"
+mkdir -p "$DATA_DIR"
+if [ ! -f "$WEBUI_PROPS" ]; then
+  for _pfs in "$MODPATH/post-fs-data.sh" \
+              /data/adb/modules/ommega/post-fs-data.sh \
+              /data/adb/modules/.ommega/post-fs-data.sh; do
+    [ -f "$_pfs" ] || continue
+    grep -E '^resetprop (ro\.build\.version\.security_patch|ro\.system\.build\.security_patch|ro\.boot\.image\.build\.security_patch|ro\.vendor\.build\.security_patch|ro\.boot\.vbmeta\.digest|ro\.boot\.vbmeta\.public_key_digest) ' \
+      "$_pfs" > "$WEBUI_PROPS.tmp" 2>/dev/null || true
+    if [ -s "$WEBUI_PROPS.tmp" ]; then
+      ui_print "- Migrating WebUI overlay props"
+      {
+        echo "# ommega WebUI overlay props (survives module overlay installs)"
+        cat "$WEBUI_PROPS.tmp"
+      } > "$WEBUI_PROPS"
+      chmod 0644 "$WEBUI_PROPS"
+      chown 1017:1017 "$WEBUI_PROPS" 2>/dev/null || true
+      rm -f "$WEBUI_PROPS.tmp"
+      break
+    fi
+    rm -f "$WEBUI_PROPS.tmp"
+  done
+fi
+
 ui_print "- Extracting module files"
 extract "$ZIPFILE" 'module.prop'     "$MODPATH"
 extract "$ZIPFILE" 'post-fs-data.sh' "$MODPATH"
@@ -70,8 +100,10 @@ extract "$ZIPFILE" 'daemon-injector' "$MODPATH"
 extract "$ZIPFILE" 'injector.toml'   "$MODPATH"
 extract "$ZIPFILE" 'keybox.xml'      "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'    "$MODPATH"
+extract "$ZIPFILE" 'webui-trust.sh'  "$MODPATH"
 chmod 755 "$MODPATH/daemon" "$MODPATH/daemon-injector" \
-  "$MODPATH/post-fs-data.sh" "$MODPATH/service.sh" "$MODPATH/uninstall.sh"
+  "$MODPATH/post-fs-data.sh" "$MODPATH/service.sh" "$MODPATH/uninstall.sh" \
+  "$MODPATH/webui-trust.sh"
 
 
 if [ "$ARCH" = "x64" ] || [ "$ARCH" = "x86_64" ]; then

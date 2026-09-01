@@ -31,11 +31,101 @@ use kmr_wire::{
     *,
 };
 use log::{error, warn};
-use std::{collections::btree_map::Entry, string::String, vec::Vec};
+use std::{
+    collections::btree_map::Entry,
+    string::String,
+    sync::Mutex,
+    time::{Duration, Instant},
+    vec::Vec,
+};
 use x509_cert::ext::pkix::KeyUsages;
 
 /// Maximum size of an attestation challenge value.
 const MAX_ATTESTATION_CHALLENGE_LEN: usize = 128;
+
+/// EWMA of remote (B-side TEE) attested generateKey wall time, in nanoseconds.
+/// Duck Detector's Keystore2PostProcessingProbe pairs a challenge-only
+/// generateKey (RKP / batch-key arm, which we send remote) against a
+/// challenge+ATTEST_KEY generateKey (UserGenerated arm, which we keep local).
+/// It flags TIMING_DETECTED when the remote arm is >= 120ms slower and
+/// >= 3x the paired-diff MAD. Track the slow arm so the local arm can wait.
+static REMOTE_ATTEST_EWMA_NS: Mutex<u64> = Mutex::new(0);
+
+const REMOTE_ATTEST_EWMA_MAX_NS: u64 = 2_000_000_000;
+const REMOTE_ATTEST_EQUALIZE_MIN_NS: u64 = 50_000_000;
+
+fn record_remote_attest_duration(elapsed: Duration) {
+    let sample = elapsed.as_nanos().min(u128::from(REMOTE_ATTEST_EWMA_MAX_NS)) as u64;
+    let Ok(mut ewma) = REMOTE_ATTEST_EWMA_NS.lock() else {
+        return;
+    };
+    *ewma = if *ewma == 0 {
+        sample
+    } else {
+        // alpha = 1/4: follow RTT/TEE jitter without snapping to one outlier.
+        ewma.saturating_mul(3) / 4 + sample / 4
+    };
+}
+
+fn equalize_to_remote_attest_duration(started: Instant) {
+    let Ok(ewma) = REMOTE_ATTEST_EWMA_NS.lock() else {
+        return;
+    };
+    let target = *ewma;
+    drop(ewma);
+    if target < REMOTE_ATTEST_EQUALIZE_MIN_NS {
+        return;
+    }
+    let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+    if elapsed < target {
+        std::thread::sleep(Duration::from_nanos(target - elapsed));
+    }
+}
+
+/// Replace (or insert) OS/vendor/boot version tags on `chars` so a child leaf
+/// attested by a remote B-side key carries the same patch levels as that key.
+fn overlay_remote_version_tags(
+    chars: &mut [KeyCharacteristics],
+    rot: &crypto::RemoteRootOfTrust,
+    security_level: SecurityLevel,
+) {
+    fn upsert(auths: &mut Vec<KeyParam>, replacement: KeyParam, insert_if_missing: bool) {
+        let matches = |p: &KeyParam| {
+            matches!(
+                (p, &replacement),
+                (KeyParam::OsVersion(_), KeyParam::OsVersion(_))
+                    | (KeyParam::OsPatchlevel(_), KeyParam::OsPatchlevel(_))
+                    | (KeyParam::VendorPatchlevel(_), KeyParam::VendorPatchlevel(_))
+                    | (KeyParam::BootPatchlevel(_), KeyParam::BootPatchlevel(_))
+            )
+        };
+        if let Some(slot) = auths.iter_mut().find(|p| matches(p)) {
+            *slot = replacement;
+        } else if insert_if_missing {
+            let _ = auths.try_push(replacement);
+        }
+    }
+
+    for kc in chars.iter_mut() {
+        let insert = kc.security_level == security_level;
+        if let Some(v) = rot.os_version {
+            upsert(&mut kc.authorizations, KeyParam::OsVersion(v), insert);
+        }
+        if let Some(v) = rot.os_patchlevel {
+            upsert(&mut kc.authorizations, KeyParam::OsPatchlevel(v), insert);
+        }
+        if let Some(v) = rot.vendor_patchlevel {
+            upsert(
+                &mut kc.authorizations,
+                KeyParam::VendorPatchlevel(v),
+                insert,
+            );
+        }
+        if let Some(v) = rot.boot_patchlevel {
+            upsert(&mut kc.authorizations, KeyParam::BootPatchlevel(v), insert);
+        }
+    }
+}
 
 /// Contents of wrapping key data
 ///
@@ -223,26 +313,36 @@ impl crate::KeyMintTa {
             // Otherwise sign_key and attest_key disagree on verified_boot_key /
             // hash within one chain and detectors flag the attestation key as
             // tampered.
-            let remote_boot: Option<keymint::BootInfo>;
-            let boot_info_ref: &keymint::BootInfo = match &info {
+            let remote_rot = match &info {
                 Some(SigningInfo {
                     signing_key: KeyMaterial::Remote(remote),
                     ..
-                }) if remote.root_of_trust.is_some() => {
-                    let rot = remote.root_of_trust.as_ref().unwrap();
-                    remote_boot = Some(keymint::BootInfo {
-                        verified_boot_key: rot.verified_boot_key.clone(),
-                        device_boot_locked: rot.device_locked,
-                        verified_boot_state: keymint::VerifiedBootState::try_from(
-                            rot.verified_boot_state,
-                        )
-                        .unwrap_or(keymint::VerifiedBootState::Unverified),
-                        verified_boot_hash: rot.verified_boot_hash.clone(),
-                        boot_patchlevel: hashed_boot.boot_patchlevel,
-                    });
-                    remote_boot.as_ref().unwrap()
-                }
-                _ => &hashed_boot,
+                }) => remote.root_of_trust.as_ref(),
+                _ => None,
+            };
+            let remote_boot: Option<keymint::BootInfo>;
+            let boot_info_ref: &keymint::BootInfo = if let Some(rot) = remote_rot {
+                remote_boot = Some(keymint::BootInfo {
+                    verified_boot_key: rot.verified_boot_key.clone(),
+                    device_boot_locked: rot.device_locked,
+                    verified_boot_state: keymint::VerifiedBootState::try_from(
+                        rot.verified_boot_state,
+                    )
+                    .unwrap_or(keymint::VerifiedBootState::Unverified),
+                    verified_boot_hash: rot.verified_boot_hash.clone(),
+                    boot_patchlevel: rot.boot_patchlevel.unwrap_or(hashed_boot.boot_patchlevel),
+                });
+                remote_boot.as_ref().unwrap()
+            } else {
+                &hashed_boot
+            };
+            let mut overlaid_chars;
+            let chars_for_ext: &[KeyCharacteristics] = if let Some(rot) = remote_rot {
+                overlaid_chars = chars.to_vec();
+                overlay_remote_version_tags(&mut overlaid_chars, rot, self.hw_info.security_level);
+                &overlaid_chars
+            } else {
+                chars
             };
             // The attestation version must follow the attestation key's when a
             // remote (B-side TEE) attestation key signs this leaf: relay-minted
@@ -256,7 +356,11 @@ impl crate::KeyMintTa {
                 Some(SigningInfo {
                     signing_key: KeyMaterial::Remote(remote),
                     ..
-                }) if remote.root_of_trust.as_ref().is_some_and(|r| r.attestation_version > 0) => {
+                }) if remote
+                    .root_of_trust
+                    .as_ref()
+                    .is_some_and(|r| r.attestation_version > 0) =>
+                {
                     remote.root_of_trust.as_ref().unwrap().attestation_version
                 }
                 _ => self.aidl_version as i32,
@@ -268,7 +372,7 @@ impl crate::KeyMintTa {
                 self.hw_info.security_level,
                 id_info.as_ref().map(|v| v.borrow()),
                 params,
-                chars,
+                chars_for_ext,
                 &unique_id,
                 boot_info_ref,
                 &self.additional_attestation_info,
@@ -351,12 +455,7 @@ impl crate::KeyMintTa {
                 };
                 backend
                     .sign(&remote.alias, tbs_data, algorithm)?
-                    .ok_or_else(|| {
-                        km_err!(
-                            UnknownError,
-                            "remote attestation-key sign unavailable"
-                        )
-                    })
+                    .ok_or_else(|| km_err!(UnknownError, "remote attestation-key sign unavailable"))
             }
             _ => Err(km_err!(
                 IncompatibleAlgorithm,
@@ -416,13 +515,16 @@ impl crate::KeyMintTa {
         // `/strongbox` HAL here was tried but failed on devices where that HAL
         // is declared but not servable from the keystore context (Unknown error
         // -1000), so it is not wired in.
-        let remote_attest = get_opt_tag_value!(params, AttestationChallenge)?.is_some()
-            && attestation_key.is_none()
-            && self.dev.remote.as_ref().is_some_and(|r| r.enabled());
+        let has_challenge = get_opt_tag_value!(params, AttestationChallenge)?.is_some();
+        let remote_enabled = self.dev.remote.as_ref().is_some_and(|r| r.enabled());
+        let remote_attest = has_challenge && attestation_key.is_none() && remote_enabled;
+        let pad_local_attest_key = has_challenge && attestation_key.is_some() && remote_enabled;
+        let started = Instant::now();
         if remote_attest {
             // `Ok(None)` from the remote backend means it was unavailable; fall
             // back to the local software keybox when `fallback_local` allows.
             if let Some(result) = self.generate_key_remote(params, attestation_key.clone())? {
+                record_remote_attest_duration(started.elapsed());
                 return Ok(result);
             }
             if !self.dev.remote.as_ref().is_some_and(|r| r.fallback_local()) {
@@ -433,13 +535,19 @@ impl crate::KeyMintTa {
             }
         }
         let (key_material, chars) = self.generate_key_material(params)?;
-        self.finish_keyblob_creation(
+        let result = self.finish_keyblob_creation(
             params,
             attestation_key,
             chars,
             key_material,
             keyblob::SlotPurpose::KeyGeneration,
-        )
+        )?;
+        // Local challenge+ATTEST_KEY mint is the probe's fast arm. Hold it to
+        // the remote EWMA so the paired delta stays under 120ms / 3xMAD.
+        if pad_local_attest_key {
+            equalize_to_remote_attest_duration(started);
+        }
+        Ok(result)
     }
 
     /// Remote-mode key generation: the B-side TEE mints the attestation chain.
@@ -498,8 +606,7 @@ impl crate::KeyMintTa {
         // with negligible collision probability. 32 bits was enough to collide
         // when a caller minted two keys within the same millisecond.
         let alias_seed = u64::from_be_bytes([
-            digest[0], digest[1], digest[2], digest[3],
-            digest[4], digest[5], digest[6], digest[7],
+            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
         ]);
         let alias = format!("ommega-remote-{:016x}", alias_seed);
         // Mirror client-a's `effectiveCertificateSerial`: forward the caller's
@@ -555,6 +662,9 @@ impl crate::KeyMintTa {
         self.add_keymint_tags(&mut chars, KeyOrigin::Generated)?;
         let _ = keygen_info;
         let root_of_trust = crate::cert::parse_remote_root_of_trust(leaf_der)?;
+        if let Some(rot) = root_of_trust.as_ref() {
+            overlay_remote_version_tags(&mut chars, rot, self.hw_info.security_level);
+        }
         let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
             alias,
             public_key,

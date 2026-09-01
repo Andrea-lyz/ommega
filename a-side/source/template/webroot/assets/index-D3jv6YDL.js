@@ -422,10 +422,10 @@
         ${s}
       </div>
     `}renderPrefix(){return this.renderAffix(this.prefixText,!1)}renderSuffix(){return this.renderAffix(this.suffixText,!0)}renderAffix(e,t){return e?x`<span class="${J({suffix:t,prefix:!t})}">${e}</span>`:f}getErrorText(){return this.error?this.errorText:this.nativeErrorText}handleFocusChange(){this.focused=this.inputOrTextarea?.matches(":focus")??!1}handleInput(e){this.dirty=!0,this.value=e.target.value}redispatchEvent(e){lo(this,e)}getInputOrTextarea(){return this.inputOrTextarea||(this.connectedCallback(),this.scheduleUpdate()),this.isUpdatePending&&this.scheduleUpdate(),this.inputOrTextarea}getInput(){return this.type==="textarea"?null:this.getInputOrTextarea()}handleIconChange(){this.hasLeadingIcon=this.leadingIcons.length>0,this.hasTrailingIcon=this.trailingIcons.length>0}[ze](){return this.value}formResetCallback(){this.reset()}formStateRestoreCallback(e){this.value=e}focus(){this.getInputOrTextarea().focus()}[rt](){return new ms(()=>({state:this,renderedControl:this.inputOrTextarea}))}[ot](){return this.inputOrTextarea}[Hr](e){e?.preventDefault();const t=this.getErrorText();this.nativeError=!!e,this.nativeErrorText=this.validationMessage,t===this.getErrorText()&&this.field?.reannounceError()}}w.shadowRootOptions={...S.shadowRootOptions,delegatesFocus:!0};c([h({type:Boolean,reflect:!0})],w.prototype,"error",void 0);c([h({attribute:"error-text"})],w.prototype,"errorText",void 0);c([h()],w.prototype,"label",void 0);c([h({type:Boolean,attribute:"no-asterisk"})],w.prototype,"noAsterisk",void 0);c([h({type:Boolean,reflect:!0})],w.prototype,"required",void 0);c([h()],w.prototype,"value",void 0);c([h({attribute:"prefix-text"})],w.prototype,"prefixText",void 0);c([h({attribute:"suffix-text"})],w.prototype,"suffixText",void 0);c([h({type:Boolean,attribute:"has-leading-icon"})],w.prototype,"hasLeadingIcon",void 0);c([h({type:Boolean,attribute:"has-trailing-icon"})],w.prototype,"hasTrailingIcon",void 0);c([h({attribute:"supporting-text"})],w.prototype,"supportingText",void 0);c([h({attribute:"text-direction"})],w.prototype,"textDirection",void 0);c([h({type:Number})],w.prototype,"rows",void 0);c([h({type:Number})],w.prototype,"cols",void 0);c([h({reflect:!0})],w.prototype,"inputMode",void 0);c([h()],w.prototype,"max",void 0);c([h({type:Number})],w.prototype,"maxLength",void 0);c([h()],w.prototype,"min",void 0);c([h({type:Number})],w.prototype,"minLength",void 0);c([h({type:Boolean,attribute:"no-spinner"})],w.prototype,"noSpinner",void 0);c([h()],w.prototype,"pattern",void 0);c([h({reflect:!0,converter:cs})],w.prototype,"placeholder",void 0);c([h({type:Boolean,reflect:!0})],w.prototype,"readOnly",void 0);c([h({type:Boolean,reflect:!0})],w.prototype,"multiple",void 0);c([h()],w.prototype,"step",void 0);c([h({reflect:!0})],w.prototype,"type",void 0);c([h({reflect:!0})],w.prototype,"autocomplete",void 0);c([F()],w.prototype,"dirty",void 0);c([F()],w.prototype,"focused",void 0);c([F()],w.prototype,"nativeError",void 0);c([F()],w.prototype,"nativeErrorText",void 0);c([L(".input")],w.prototype,"inputOrTextarea",void 0);c([L(".field")],w.prototype,"field",void 0);c([fe({slot:"leading-icon"})],w.prototype,"leadingIcons",void 0);c([fe({slot:"trailing-icon"})],w.prototype,"trailingIcons",void 0);class vs extends w{constructor(){super(...arguments),this.fieldTag=ke`md-outlined-field`}}const gs=C`:host{display:inline-flex;outline:none;resize:both;text-align:start;-webkit-tap-highlight-color:rgba(0,0,0,0)}.text-field,.field{width:100%}.text-field{display:inline-flex}.field{cursor:text}.disabled .field{cursor:default}.text-field,.textarea .field{resize:inherit}slot[name=container]{border-radius:inherit}.icon{color:currentColor;display:flex;align-items:center;justify-content:center;fill:currentColor;position:relative}.icon ::slotted(*){display:flex;position:absolute}[has-start] .icon.leading{font-size:var(--_leading-icon-size);height:var(--_leading-icon-size);width:var(--_leading-icon-size)}[has-end] .icon.trailing{font-size:var(--_trailing-icon-size);height:var(--_trailing-icon-size);width:var(--_trailing-icon-size)}.input-wrapper{display:flex}.input-wrapper>*{all:inherit;padding:0}.input{caret-color:var(--_caret-color);overflow-x:hidden;text-align:inherit}.input::placeholder{color:currentColor;opacity:1}.input::-webkit-calendar-picker-indicator{display:none}.input::-webkit-search-decoration,.input::-webkit-search-cancel-button{display:none}@media(forced-colors: active){.input{background:none}}.no-spinner .input::-webkit-inner-spin-button,.no-spinner .input::-webkit-outer-spin-button{display:none}.no-spinner .input[type=number]{-moz-appearance:textfield}:focus-within .input{caret-color:var(--_focus-caret-color)}.error:focus-within .input{caret-color:var(--_error-focus-caret-color)}.text-field:not(.disabled) .prefix{color:var(--_input-text-prefix-color)}.text-field:not(.disabled) .suffix{color:var(--_input-text-suffix-color)}.text-field:not(.disabled) .input::placeholder{color:var(--_input-text-placeholder-color)}.prefix,.suffix{text-wrap:nowrap;width:min-content}.prefix{padding-inline-end:var(--_input-text-prefix-trailing-space)}.suffix{padding-inline-start:var(--_input-text-suffix-leading-space)}
-`;let Ur=class extends vs{constructor(){super(...arguments),this.fieldTag=ke`md-outlined-field`}};Ur.styles=[gs,ns];Ur=c([B("md-outlined-text-field")],Ur);let bs=0;function zi(o){return`${o}_callback_${Date.now()}_${bs++}`}function _(o,e={}){return new Promise((t,r)=>{const i=zi("exec");window[i]=(a,s,l)=>{t({errno:a,stdout:s,stderr:l}),n(i)};function n(a){delete window[a]}try{typeof ksu<"u"?ksu.exec(o,JSON.stringify(e),i):t({errno:1,stdout:"",stderr:"ksu is not defined"})}catch(a){r(a),n(i)}})}class cr{constructor(){this.listeners={}}on(e,t){this.listeners[e]||(this.listeners[e]=[]),this.listeners[e].push(t)}emit(e,...t){this.listeners[e]&&this.listeners[e].forEach(r=>r(...t))}}function Y(o,e=[],t={}){const r={listeners:{},stdout:new cr,stderr:new cr,stdin:new cr,on(n,a){this.listeners[n]||(this.listeners[n]=[]),this.listeners[n].push(a)},emit(n,...a){this.listeners[n]&&this.listeners[n].forEach(s=>s(...a))}},i=zi("spawn");window[i]=r,r.on("exit",()=>delete window[i]);try{typeof ksu<"u"?ksu.spawn(o,JSON.stringify(e),JSON.stringify(t),i):setTimeout(()=>{r.stderr.emit("data","ksu is not defined"),r.emit("exit",1)},0)}catch(n){r.emit("error",n),delete window[i]}return r}function Me(o){typeof ksu<"u"?ksu.toast(o):console.log(o)}async function Zo(o){if(typeof globalThis.ksu?.listPackages=="function")try{return JSON.parse(ksu.listPackages(o))}catch{}return new Promise((e,t)=>{const r={all:[],user:["-3"],system:["-s"]};if(!(o in r))return t(new Error(`Unknown listPackages type: ${o}`));let i=[],n="";const a=Y("pm",["list","packages",...r[o]]);a.stdout.on("data",s=>{s.trim()!==""&&i.push(s.trim().replace(/^package:/,""))}),a.stderr.on("data",s=>n+=s),a.on("exit",s=>{if(s!==0)return t(new Error(`pm process exited with code ${s}: ${n.trim()}`));e(i)}),a.on("error",s=>{t(s)})})}function ys(o){return new Promise((e,t)=>{if(!o)return e([]);if(typeof globalThis.ksu?.getPackagesInfo!="function")return t(new Error("ksu.getPackagesInfo is not available."));const r=Array.isArray(o)?o:[o];if(r.length===0)return e([]);try{const i=ksu.getPackagesInfo(JSON.stringify(r)),n=JSON.parse(i);!Array.isArray(o)&&n.length===1?e(n[0]):e(n)}catch(i){t(new Error(`Failed to get package info: ${i.message}`))}})}class Qo extends Event{_wxOrigin;_wxData;get wxOrigin(){return this._wxOrigin}set wxOrigin(e){this._wxOrigin=e}get wx(){return this._wxData}set wx(e){this._wxData=e}constructor(e){super(e,{bubbles:!0,cancelable:!0,composed:!0})}}var xs={cordova:!1};class vo{_initialized=!1;_handlers=new WeakMap;_eventTypes;get eventTypes(){return this._eventTypes}constructor(e=xs){this._initialized||(this._initialized=!0,this._eventTypes={WX_ON_BACK:e.cordova?"backbutton":"back",WX_ON_RESUME:"resume",WX_ON_REFRESH:"refresh",WX_ON_PAUSE:"pause",WX_ON_KEYBOARD:"keyboard",WX_ON_INSETS:"insets"},window.addEventListener("message",t=>{try{if(typeof t.data!="string")return;let r=JSON.parse(t.data);if(!r?.type)return;let i=this._eventTypes[r.type]??r.type;this._dispatch(window,i,r)}catch(r){console.error("[WXEvent] Message error:",r)}}))}_dispatch(e,t,r){let i=new Qo(t);i.wx=r.data,i.wxOrigin="system",e.dispatchEvent(i)}on(e,t,r){this._initialized||new vo;let i=a=>{if(!(a instanceof Qo)){console.warn("[WXEvent] Event is not a WXEvent:",a);return}a.wxOrigin==="system"&&(typeof r=="function"?r(a):r&&typeof r.handleEvent=="function"&&r.handleEvent(a))};this._handlers.has(e)||this._handlers.set(e,new Map);let n=this._handlers.get(e);return n.has(t)||n.set(t,new Set),n.get(t).add({handler:r,wrapper:i}),e.addEventListener(t,i),()=>this.off(e,t,r)}off(e,t,r){let i=this._handlers.get(e);if(i?.has(t)){for(let n of i.get(t))if(n.handler===r){e.removeEventListener(t,n.wrapper),i.get(t).delete(n);break}}}}var Bi={chunkSize:1048576,headers:{"Content-Type":"application/octet-stream"}};async function _s(o,e={}){let t={...Bi,...e};return new Promise((r,i)=>{let n;try{if(n=o,!n)throw new Error("Failed to open file input stream")}catch(u){i(u);return}let a=()=>{try{n?.close()}catch(u){console.error("Error during abort cleanup:",u)}i(new DOMException("The operation was aborted.","AbortError"))};if(t.signal){if(t.signal.aborted){a();return}t.signal.addEventListener("abort",a)}let s=new ReadableStream({async pull(u){try{let d=ws(n,t.chunkSize);if(!d){u.close(),l();return}u.enqueue(d)}catch(d){l(),u.error(d),i(new Error(`Error reading file chunk: ${d}`))}},cancel(u){console.warn("Stream canceled:",u),l()}});function l(){try{t.signal&&t.signal.removeEventListener("abort",a),n?.close()}catch(u){console.error(`Error during cleanup: ${u}`)}}r(s)})}function ws(o,e){try{let t=e?o.readChunk(e):o.read();if(typeof t=="number")return new Uint8Array([t]);if(typeof t=="string"){let r=JSON.parse(t);return r&&Array.isArray(r)&&r.length>0?new Uint8Array(r):null}return null}catch(t){throw new Error("Error reading chunk data: "+t)}}async function ks(o,e={}){let t={...Bi,...e};try{let r=await _s(o,t);return new Response(r,t)}catch(r){throw new Error(`wrapInputStream failed: ${r}`)}}const Es=document.getElementById("app-template").content,se=document.getElementById("apps-list"),it=document.getElementById("update-card");let Qe=[];async function Mi(){await _("cat /data/adb/ommega/ommegadata/target.txt").then(({errno:a,stdout:s})=>{a===0?Qe=Jo(s):typeof ksu>"u"?Qe=Jo(`com.example.one
+`;let Ur=class extends vs{constructor(){super(...arguments),this.fieldTag=ke`md-outlined-field`}};Ur.styles=[gs,ns];Ur=c([B("md-outlined-text-field")],Ur);let bs=0;function zi(o){return`${o}_callback_${Date.now()}_${bs++}`}function _(o,e={}){return new Promise((t,r)=>{const i=zi("exec");window[i]=(a,s,l)=>{t({errno:a,stdout:s,stderr:l}),n(i)};function n(a){delete window[a]}try{typeof ksu<"u"?ksu.exec(o,JSON.stringify(e),i):t({errno:1,stdout:"",stderr:"ksu is not defined"})}catch(a){r(a),n(i)}})}class cr{constructor(){this.listeners={}}on(e,t){this.listeners[e]||(this.listeners[e]=[]),this.listeners[e].push(t)}emit(e,...t){this.listeners[e]&&this.listeners[e].forEach(r=>r(...t))}}function Y(o,e=[],t={}){const r={listeners:{},stdout:new cr,stderr:new cr,stdin:new cr,on(n,a){this.listeners[n]||(this.listeners[n]=[]),this.listeners[n].push(a)},emit(n,...a){this.listeners[n]&&this.listeners[n].forEach(s=>s(...a))}},i=zi("spawn");window[i]=r,r.on("exit",()=>delete window[i]);try{typeof ksu<"u"?ksu.spawn(o,JSON.stringify(e),JSON.stringify(t),i):setTimeout(()=>{r.stderr.emit("data","ksu is not defined"),r.emit("exit",1)},0)}catch(n){r.emit("error",n),delete window[i]}return r}function Me(o){typeof ksu<"u"?ksu.toast(o):console.log(o)}async function Zo(o){if(typeof globalThis.ksu?.listPackages=="function")try{return JSON.parse(ksu.listPackages(o))}catch{}return new Promise((e,t)=>{const r={all:[],user:["-3"],system:["-s"]};if(!(o in r))return t(new Error(`Unknown listPackages type: ${o}`));let i=[],n="";const a=Y("pm",["list","packages",...r[o]]);a.stdout.on("data",s=>{s.trim()!==""&&i.push(s.trim().replace(/^package:/,""))}),a.stderr.on("data",s=>n+=s),a.on("exit",s=>{if(s!==0)return t(new Error(`pm process exited with code ${s}: ${n.trim()}`));e(i)}),a.on("error",s=>{t(s)})})}function ys(o){return new Promise((e,t)=>{if(!o)return e([]);if(typeof globalThis.ksu?.getPackagesInfo!="function")return t(new Error("ksu.getPackagesInfo is not available."));const r=Array.isArray(o)?o:[o];if(r.length===0)return e([]);try{const i=ksu.getPackagesInfo(JSON.stringify(r)),n=JSON.parse(i);!Array.isArray(o)&&n.length===1?e(n[0]):e(n)}catch(i){t(new Error(`Failed to get package info: ${i.message}`))}})}class Qo extends Event{_wxOrigin;_wxData;get wxOrigin(){return this._wxOrigin}set wxOrigin(e){this._wxOrigin=e}get wx(){return this._wxData}set wx(e){this._wxData=e}constructor(e){super(e,{bubbles:!0,cancelable:!0,composed:!0})}}var xs={cordova:!1};class vo{_initialized=!1;_handlers=new WeakMap;_eventTypes;get eventTypes(){return this._eventTypes}constructor(e=xs){this._initialized||(this._initialized=!0,this._eventTypes={WX_ON_BACK:e.cordova?"backbutton":"back",WX_ON_RESUME:"resume",WX_ON_REFRESH:"refresh",WX_ON_PAUSE:"pause",WX_ON_KEYBOARD:"keyboard",WX_ON_INSETS:"insets"},window.addEventListener("message",t=>{try{if(typeof t.data!="string")return;let r=JSON.parse(t.data);if(!r?.type)return;let i=this._eventTypes[r.type]??r.type;this._dispatch(window,i,r)}catch(r){console.error("[WXEvent] Message error:",r)}}))}_dispatch(e,t,r){let i=new Qo(t);i.wx=r.data,i.wxOrigin="system",e.dispatchEvent(i)}on(e,t,r){this._initialized||new vo;let i=a=>{if(!(a instanceof Qo)){console.warn("[WXEvent] Event is not a WXEvent:",a);return}a.wxOrigin==="system"&&(typeof r=="function"?r(a):r&&typeof r.handleEvent=="function"&&r.handleEvent(a))};this._handlers.has(e)||this._handlers.set(e,new Map);let n=this._handlers.get(e);return n.has(t)||n.set(t,new Set),n.get(t).add({handler:r,wrapper:i}),e.addEventListener(t,i),()=>this.off(e,t,r)}off(e,t,r){let i=this._handlers.get(e);if(i?.has(t)){for(let n of i.get(t))if(n.handler===r){e.removeEventListener(t,n.wrapper),i.get(t).delete(n);break}}}}var Bi={chunkSize:1048576,headers:{"Content-Type":"application/octet-stream"}};async function _s(o,e={}){let t={...Bi,...e};return new Promise((r,i)=>{let n;try{if(n=o,!n)throw new Error("Failed to open file input stream")}catch(u){i(u);return}let a=()=>{try{n?.close()}catch(u){console.error("Error during abort cleanup:",u)}i(new DOMException("The operation was aborted.","AbortError"))};if(t.signal){if(t.signal.aborted){a();return}t.signal.addEventListener("abort",a)}let s=new ReadableStream({async pull(u){try{let d=ws(n,t.chunkSize);if(!d){u.close(),l();return}u.enqueue(d)}catch(d){l(),u.error(d),i(new Error(`Error reading file chunk: ${d}`))}},cancel(u){console.warn("Stream canceled:",u),l()}});function l(){try{t.signal&&t.signal.removeEventListener("abort",a),n?.close()}catch(u){console.error(`Error during cleanup: ${u}`)}}r(s)})}function ws(o,e){try{let t=e?o.readChunk(e):o.read();if(typeof t=="number")return new Uint8Array([t]);if(typeof t=="string"){let r=JSON.parse(t);return r&&Array.isArray(r)&&r.length>0?new Uint8Array(r):null}return null}catch(t){throw new Error("Error reading chunk data: "+t)}}async function ks(o,e={}){let t={...Bi,...e};try{let r=await _s(o,t);return new Response(r,t)}catch(r){throw new Error(`wrapInputStream failed: ${r}`)}}const Es=document.getElementById("app-template").content,se=document.getElementById("apps-list"),it=document.getElementById("update-card");let Qe=[];var Mi=async function(){await _("cat /data/adb/ommega/ommegadata/target.txt").then(({errno:a,stdout:s})=>{a===0?Qe=Jo(s):typeof ksu>"u"?Qe=Jo(`com.example.one
 com.example.two!
 com.example.three?`):Me("Failed to read target.txt!")});let o={};try{o=(await(await fetch("applist.json")).json()).reduce((l,u)=>(l[u.package_name]=u.app_name,l),{})}catch(a){console.warn("Failed to fetch applist.json:",a),o={}}let e=[],t=[];const r=await _('cat "/data/adb/ommega/ommegadata/system_app" || true'),[i,n]=await Promise.all([Zo("user").catch(()=>[]),Zo("system").catch(()=>[])]);t.push(...i),r.stdout.split(`
-`).forEach(a=>{a&&n.includes(a)&&t.push(a)}),t=Array.from(new Set(t)),e=await Promise.all(t.map(async a=>{try{if(typeof globalThis.ksu?.getPackagesInfo!="function")return{appName:(await ys(a)).appLabel,packageName:a};if(typeof $packageManager<"u")return{appName:$packageManager.getApplicationInfo(a,0,0).getLabel(),packageName:a};throw new Error("No pm api found, fallback to old method")}catch{return o[a]&&o[a].trim()!==""?{appName:o[a].trim(),packageName:a}:new Promise(l=>{const u=Y("sh",[`${I}/common/get_extra.sh`,"--appname",a],{env:{PATH:`$PATH:${I}/common/bin:/data/data/com.termux/files/usr/bin`}});u.stdout.on("data",d=>{l({appName:d.trim()===""?a:d.trim(),packageName:a})}),u.on("exit",d=>{d!==0&&l({appName:a,packageName:a})})})}})),$s(e)}function $s(o){const e=o.sort((i,n)=>{const a=Qe.includes(i.packageName),s=Qe.includes(n.packageName);return a!==s?a?-1:1:(i.appName||"").localeCompare(n.appName||"")});se.innerHTML="",an.style.display="none",document.querySelector(".floating-btn").classList.remove("hide"),it&&se.appendChild(it);let t=!1;(typeof $packageManager<"u"||typeof globalThis.ksu?.listPackages=="function")&&(t=!0);const r=i=>{if(i>=e.length){document.querySelector(".uninstall-container").style.display="flex",Is(),Ss(),Di(),Ul(),t&&As();return}const{appName:n,packageName:a}=e[i],s=document.importNode(Es,!0);s.querySelector(".content").setAttribute("data-package",a);const u=s.querySelector(".name");u.setAttribute("for",`checkbox-${a}`),u.innerHTML=`
+`).forEach(a=>{a&&n.includes(a)&&t.push(a)}),t=Array.from(new Set(t)),e=await Promise.all(t.map(async a=>{try{if(typeof globalThis.ksu?.getPackagesInfo!="function")return{appName:(await ys(a)).appLabel,packageName:a};if(typeof $packageManager<"u")return{appName:$packageManager.getApplicationInfo(a,0,0).getLabel(),packageName:a};throw new Error("No pm api found, fallback to old method")}catch{return o[a]&&o[a].trim()!==""?{appName:o[a].trim(),packageName:a}:new Promise(l=>{const u=Y("sh",[`${I}/common/get_extra.sh`,"--appname",a],{env:{PATH:`$PATH:${I}/common/bin:/data/data/com.termux/files/usr/bin`}});u.stdout.on("data",d=>{l({appName:d.trim()===""?a:d.trim(),packageName:a})}),u.on("exit",d=>{d!==0&&l({appName:a,packageName:a})})})}})),$s(e)};var $s=function(o){const e=o.sort((i,n)=>{const a=Qe.includes(i.packageName),s=Qe.includes(n.packageName);return a!==s?a?-1:1:(i.appName||"").localeCompare(n.appName||"")});se.innerHTML="",an.style.display="none",document.querySelector(".floating-btn").classList.remove("hide"),it&&se.appendChild(it);let t=!1;(typeof $packageManager<"u"||typeof globalThis.ksu?.listPackages=="function")&&(t=!0);const r=i=>{if(i>=e.length){document.querySelector(".uninstall-container").style.display="flex",Is(),Ss(),Di(),Ul(),t&&As();return}const{appName:n,packageName:a}=e[i],s=document.importNode(Es,!0);s.querySelector(".content").setAttribute("data-package",a);const u=s.querySelector(".name");u.setAttribute("for",`checkbox-${a}`),u.innerHTML=`
             <div class="app-icon-container" style="display:${t?"flex":"none"};">
                 <div class="loader" data-package="${a}"></div>
                 <img class="app-icon" data-package="${a}" />
@@ -434,7 +434,7 @@ com.example.three?`):Me("Failed to read target.txt!")});let o={};try{o=(await(aw
                 <div class="app-name">${n}</div>
                 <div class="package-name">${a}</div>
             </div>
-        `;const d=s.querySelector("md-checkbox");d.id=`checkbox-${a}`,Qe.includes(a)&&(d.checked=!0,s.querySelector(".card").classList.add("selected")),se.appendChild(s),r(i+1)};r(0)}function As(){const o=new IntersectionObserver(t=>{t.forEach(r=>{if(r.isIntersecting){const i=r.target,n=i.querySelector(".app-icon").getAttribute("data-package");n&&(Cs(n),o.unobserve(i))}})},{rootMargin:"100px",threshold:.1});document.querySelectorAll(".app-icon-container").forEach(t=>{o.observe(t)})}const dr=new Map;function Cs(o){const e=document.querySelector(`.app-icon[data-package="${o}"]`),t=document.querySelector(`.loader[data-package="${o}"]`);if(typeof globalThis.ksu?.getPackagesInfo=="function")e.onload=()=>{t.style.display="none",e.style.opacity="1"},e.onerror=()=>{},e.src="ksu://icon/"+o;else if(dr.has(o))e.src=dr.get(o),t.style.display="none",e.style.opacity="1";else if(typeof $packageManager<"u"){const r=$packageManager.getApplicationIcon(o,0,0);ks(r).then(i=>i.arrayBuffer()).then(i=>{const n="data:image/png;base64,"+Ts(i);dr.set(o,n),e.src=n,t.style.display="none",e.style.opacity="1"})}}function Ts(o){const e=new Uint8Array(o);let t="";return e.forEach(r=>t+=String.fromCharCode(r)),btoa(t)}function Jo(o){return pe.length=0,me.length=0,o.split(`
+        `;const d=s.querySelector("md-checkbox");d.id=`checkbox-${a}`,Qe.includes(a)&&(d.checked=!0,s.querySelector(".card").classList.add("selected")),se.appendChild(s),r(i+1)};r(0)};function As(){const o=new IntersectionObserver(t=>{t.forEach(r=>{if(r.isIntersecting){const i=r.target,n=i.querySelector(".app-icon").getAttribute("data-package");n&&(Cs(n),o.unobserve(i))}})},{rootMargin:"100px",threshold:.1});document.querySelectorAll(".app-icon-container").forEach(t=>{o.observe(t)})}const dr=new Map;function Cs(o){const e=document.querySelector(`.app-icon[data-package="${o}"]`),t=document.querySelector(`.loader[data-package="${o}"]`);if(typeof globalThis.ksu?.getPackagesInfo=="function")e.onload=()=>{t.style.display="none",e.style.opacity="1"},e.onerror=()=>{},e.src="ksu://icon/"+o;else if(dr.has(o))e.src=dr.get(o),t.style.display="none",e.style.opacity="1";else if(typeof $packageManager<"u"){const r=$packageManager.getApplicationIcon(o,0,0);ks(r).then(i=>i.arrayBuffer()).then(i=>{const n="data:image/png;base64,"+Ts(i);dr.set(o,n),e.src=n,t.style.display="none",e.style.opacity="1"})}}function Ts(o){const e=new Uint8Array(o);let t="";return e.forEach(r=>t+=String.fromCharCode(r)),btoa(t)}function Jo(o){return pe.length=0,me.length=0,o.split(`
 `).map(t=>{const r=t.trim();return r.endsWith("!")?pe.push(r.slice(0,-1)):r.endsWith("?")&&me.push(r.slice(0,-1)),r.replace(/[!?]/g,"")}).filter(t=>t.trim()!=="")}let ur=!1;function Is(){se.querySelectorAll(".card").forEach(e=>{const t=e.querySelector(".checkbox");e.onclick=()=>{ur||(t.checked=!t.checked,e.classList.toggle("selected"))}}),document.querySelectorAll("md-menu").forEach(e=>{e.dataset.closeListener||(e.addEventListener("closing",()=>ur=!0),e.addEventListener("closed",()=>ur=!1),e.dataset.closeListener="true")})}function Ss(){const o=document.getElementById("mode-dialog"),e=document.getElementById("mode-dialog-appname");let t,r=null;function i(d){r=d;const p=d.getAttribute("data-package"),m=d.querySelector(".app-name"),v=m?m.textContent:p;e.innerHTML=`${v}<br>${p}`;const g=pe.includes(p),b=me.includes(p);document.getElementById("mode-default").checked=!g&&!b,document.getElementById("mode-generate").checked=g,document.getElementById("mode-hack").checked=b,o.show()}function n(d){if(!r||!d){o.close(),r=null;return}const p=r.getAttribute("data-package"),m=pe.indexOf(p);m>-1&&pe.splice(m,1);const v=me.indexOf(p);v>-1&&me.splice(v,1),d==="generate"?pe.push(p):d==="hack"&&me.push(p),Di(),r=null,setTimeout(()=>o.close(),200)}const a=document.getElementById("mode-default"),s=document.getElementById("mode-generate"),l=document.getElementById("mode-hack");a.addEventListener("click",()=>n("normal")),s.addEventListener("click",()=>n("generate")),l.addEventListener("click",()=>n("hack")),document.getElementById("mode-cancel").addEventListener("click",()=>n()),se.querySelectorAll(".card").forEach(d=>{d.addEventListener("pointerdown",p=>{const m=d.querySelector("md-checkbox");m&&m.checked&&(t=setTimeout(()=>i(d),500))}),d.addEventListener("pointerup",()=>clearTimeout(t)),d.addEventListener("pointercancel",()=>clearTimeout(t))})}function Di(){se.querySelectorAll(".card").forEach(e=>{const t=e.getAttribute("data-package"),r=e.querySelector("md-checkbox");r.classList.remove("checkbox-checked-generate","checkbox-checked-hack"),pe.includes(t)?r.classList.add("checkbox-checked-generate"):me.includes(t)?r.classList.add("checkbox-checked-hack"):r.checked&&r.classList.remove("checkbox-checked-generate","checkbox-checked-hack")})}const Et=document.getElementById("language-menu"),Rs=["ar","fa","he","ur","ps","sd","ku","yi","dv"];let Ee={},$t={},At=["en"],Ni={};function ei(o){const r=new DOMParser().parseFromString(o,"text/xml").getElementsByTagName("string"),i={};for(let n=0;n<r.length;n++){const a=r[n],s=a.getAttribute("name"),l=a.textContent;i[s]=l}return i}async function Ls(){const o=navigator.language||navigator.userLanguage,e=o.split("-")[0];try{const r=await(await fetch("locales/languages.json")).json();At=Object.keys(r),Ni=r;const i=localStorage.getItem("trickyAddonLanguage");return i!=="default"&&At.includes(i)?i:At.includes(o)?o:At.includes(e)?e:(localStorage.removeItem("trickyAddonLanguage"),"en")}catch(t){return console.error("Error detecting user language:",t),"en"}}async function Os(){try{const e=await(await fetch("./locales/strings/en.xml")).text();$t=ei(e);const t=await Ls();if(t!=="en"){const n=await(await fetch(`./locales/strings/${t}.xml`)).text(),a=ei(n);Ee={...$t,...a}}else Ee=$t;const r=Rs.includes(t.split("-")[0]);document.documentElement.setAttribute("dir",r?"rtl":"ltr"),await zs()}catch(o){console.error("Error loading translations:",o),Ee=$t}Ps()}function Ps(){document.querySelectorAll("[data-i18n]").forEach(o=>{const e=o.getAttribute("data-i18n"),t=Ee[e];t&&(o.hasAttribute("placeholder")?o.setAttribute("placeholder",t):o.hasAttribute("label")?o.setAttribute("label",t):o.textContent=t)})}function ti(o){localStorage.setItem("trickyAddonLanguage",o),window.location.reload()}async function zs(){Et.innerHTML="";const o=document.createElement("md-menu-item");o.className="top-inset",o.setAttribute("data-i18n","system_default"),o.onclick=()=>ti("default"),Et.appendChild(o),Object.entries(Ni).map(([r,i])=>({lang:r,name:i})).sort((r,i)=>r.name.localeCompare(i.name)).forEach(({lang:r,name:i})=>{const n=document.createElement("md-menu-item");n.textContent=i,n.onclick=()=>ti(r),Et.appendChild(n)});const t=document.createElement("md-menu-item");t.className="bottom-inset",Et.appendChild(t)}let zt;const Q=document.getElementById("file-selector-dialog");let D="/storage/emulated/0/Download";function Fi(){const o=Q.querySelector(".current-path"),e=D.split("/").filter(Boolean),t=e.map((r,i)=>`<span class="path-segment" data-path="${"/"+e.slice(0,i+1).join("/")}">${r}</span>`).join('<span class="separator">�?/span>');o.innerHTML=t,o.scrollTo({left:o.scrollWidth,behavior:"smooth"})}async function Yt(o,e=!1){const t=Q.querySelector(".file-list");e||(t.classList.add("switching"),await new Promise(i=>setTimeout(i,150)));const r=await _(`
         cd "${o}"
         find . -maxdepth 1 -type f -name "*.${zt}" -o -type d ! -name ".*" -o -type l | sort
@@ -447,7 +447,7 @@ com.example.three?`):Me("Failed to read target.txt!")});let o={};try{o=(await(aw
                 <md-ripple></md-ripple>
                 <md-icon>${n.isDirectory?"folder":"description"}</md-icon>
                 <span>${n.name}</span>
-            `,a.addEventListener("click",async()=>{if(n.isDirectory){D=n.path;const s=document.querySelector(".current-path");s.innerHTML=D.split("/").filter(Boolean).join('<span class="separator">�?/span>'),s.scrollTo({left:s.scrollWidth,behavior:"smooth"}),await Yt(n.path)}}),t.appendChild(a)}),e||t.classList.remove("switching")}else console.error("Error listing files:",r.stderr),e||t.classList.remove("switching");Fi()}Q.querySelector(".current-path").addEventListener("click",async o=>{const e=o.target.closest(".path-segment");if(!e)return;const t=e.dataset.path;if(!t||t===D)return;const r=e.textContent;(r==="storage"||r==="emulated")&&D==="/storage/emulated/0"||(t.split("/").length<=3?D="/storage/emulated/0":D=t,Fi(),await Yt(D))});Q.querySelector(".back-button").addEventListener("click",async()=>{if(D==="/storage/emulated/0")return;D=D.split("/").slice(0,-1).join("/"),D===""&&(D="/storage/emulated/0");const o=Q.querySelector(".current-path");o.innerHTML=D.split("/").filter(Boolean).join('<span class="separator">�?/span>'),o.scrollTo({left:o.scrollWidth,behavior:"smooth"}),await Yt(D)});Q.querySelector(".close-selector").addEventListener("click",()=>Q.close());async function Bs(o){zt=o,D="/storage/emulated/0/Download",Q.show();const e=Q.querySelector(".current-path");return e.innerHTML=D.split("/").filter(Boolean).join('<span class="separator">�?/span>'),e.scrollTo({left:e.scrollWidth,behavior:"smooth"}),await Yt(D,!0),new Promise((t,r)=>{Q.querySelector(".file-list").addEventListener("click",n=>{const a=n.target.closest(".file-item");a&&a.querySelector("span").textContent.endsWith("."+zt)&&_(`cat "${D}/${a.querySelector("span").textContent}"`).then(({errno:s,stdout:l,stderr:u})=>{s===0?t(l):r(u),Q.close()})})})}function qi(o){document.querySelectorAll("md-checkbox").forEach(e=>{const t=e.closest(".card");t&&t.style.display!=="none"&&(e.checked=o,t.classList.toggle("selected",o))})}document.querySelector(".menu-item-button-container").addEventListener("click",o=>{document.getElementById("menu-options").close()});document.getElementById("select-all").onclick=()=>qi(!0);document.getElementById("deselect-all").onclick=()=>qi(!1);document.getElementById("select-denylist").onclick=()=>{_(`magisk --denylist ls 2>/dev/null | awk -F'|' '{print $1}' | grep -v "isolated" | sort -u`).then(({errno:o,stdout:e})=>{if(o===0){const t=e.split(`
+            `,a.addEventListener("click",async()=>{if(n.isDirectory){D=n.path;const s=document.querySelector(".current-path");s.innerHTML=D.split("/").filter(Boolean).join('<span class="separator">�?/span>'),s.scrollTo({left:s.scrollWidth,behavior:"smooth"}),await Yt(n.path)}}),t.appendChild(a)}),e||t.classList.remove("switching")}else console.error("Error listing files:",r.stderr),e||t.classList.remove("switching");Fi()}Q.querySelector(".current-path").addEventListener("click",async o=>{const e=o.target.closest(".path-segment");if(!e)return;const t=e.dataset.path;if(!t||t===D)return;const r=e.textContent;(r==="storage"||r==="emulated")&&D==="/storage/emulated/0"||(t.split("/").length<=3?D="/storage/emulated/0":D=t,Fi(),await Yt(D))});Q.querySelector(".back-button").addEventListener("click",async()=>{if(D==="/storage/emulated/0")return;D=D.split("/").slice(0,-1).join("/"),D===""&&(D="/storage/emulated/0");const o=Q.querySelector(".current-path");o.innerHTML=D.split("/").filter(Boolean).join('<span class="separator">�?/span>'),o.scrollTo({left:o.scrollWidth,behavior:"smooth"}),await Yt(D)});Q.querySelector(".close-selector").addEventListener("click",()=>Q.close());async function Bs(o){zt=o,D="/storage/emulated/0/Download",Q.show();const e=Q.querySelector(".current-path");return e.innerHTML=D.split("/").filter(Boolean).join('<span class="separator">�?/span>'),e.scrollTo({left:e.scrollWidth,behavior:"smooth"}),await Yt(D,!0),new Promise((t,r)=>{Q.querySelector(".file-list").addEventListener("click",n=>{const a=n.target.closest(".file-item");a&&a.querySelector("span").textContent.endsWith("."+zt)&&_(`cat "${D}/${a.querySelector("span").textContent}"`).then(({errno:s,stdout:l,stderr:u})=>{s===0?t(l):r(u),Q.close()})})})}var qi=function(o){document.querySelectorAll("md-checkbox").forEach(e=>{const t=e.closest(".card");t&&t.style.display!=="none"&&(e.checked=o,t.classList.toggle("selected",o))})};document.querySelector(".menu-item-button-container").addEventListener("click",o=>{document.getElementById("menu-options").close()});document.getElementById("select-all").onclick=()=>qi(!0);document.getElementById("deselect-all").onclick=()=>qi(!1);document.getElementById("select-denylist").onclick=()=>{_(`magisk --denylist ls 2>/dev/null | awk -F'|' '{print $1}' | grep -v "isolated" | sort -u`).then(({errno:o,stdout:e})=>{if(o===0){const t=e.split(`
 `).map(r=>r.trim()).filter(Boolean);document.querySelectorAll(".card").forEach(r=>{const i=r.getAttribute("data-package");t.includes(i)&&(r.querySelector("md-checkbox").checked=!0,r.classList.add("selected"))}),_('touch "/data/adb/ommega/ommegadata/target_from_denylist"')}else Me("Failed to read DenyList!")})};document.getElementById("deselect-unnecessary").onclick=async()=>{try{const o=await fetch("https://raw.githubusercontent.com/KOWX712/Tricky-Addon-Update-Target-List/main/more-exclude.json").then(e=>{if(!e.ok)throw new Error(`HTTP error! status: ${e.status}`);return e.json()}).catch(async()=>fetch("https://hub.gitmirror.com/raw.githubusercontent.com/KOWX712/Tricky-Addon-Update-Target-List/main/more-exclude.json").then(e=>{if(!e.ok)throw new Error(`HTTP error! status: ${e.status}`);return e.json()})).then(e=>e.data.flatMap(t=>t.apps).map(t=>t["package-name"]).join(`
 `)).catch(e=>{throw Me("Failed to download unnecessary apps!"),e});_(`sh ${I}/common/get_extra.sh --xposed`).then(({stdout:e})=>{const t=o.split(`
 `).map(r=>r.trim()).filter(Boolean).concat(e.split(`
@@ -652,26 +652,33 @@ marked.`,o){let r="<p>An error occurred:</p><pre>"+ne(t.message+"",!0)+"</pre>";
             [ -f ${I}/common/tmp/module.zip ] || echo "noModule"
             [ -f ${I}/common/tmp/changelog.md ] || echo "noChangelog"
             [ ! -f /data/adb/modules/ommega/update ] || echo "updated"
-        `);if(o.trim().includes("updated"))Ue.style.display="none",hr.style.display="flex",Tt.show();else if(o.trim().includes("noChangelog"))y("prompt_downloading"),await Cl(rn,"changelog.md"),di(),Tt.show(),setTimeout(()=>{it.click()},200);else if(o.trim().includes("noModule")){if(pr)return;pr=!0,Y("sh",[`${I}/common/get_extra.sh`,"--get-update",`${tn}`],{env:{PATH:"$PATH:/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk:/data/data/com.termux/files/usr/bin"}}).on("exit",t=>{pr=!1,t===0?(y("prompt_downloaded"),Ue.style.display="flex"):y("prompt_download_fail",!1)})}else Ue.style.display="flex",di(),Tt.show()}),$l.addEventListener("click",()=>Tt.close()),Ue.addEventListener("click",async()=>{y("prompt_installing");const o=Y("sh",[`${I}/common/get_extra.sh`,"--install-update"],{env:{PATH:"$PATH:/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk"}});o.stderr.on("data",e=>{console.error("Error during installation:",e)}),o.on("exit",e=>{e===0?(y("prompt_installed"),Ue.style.display="none",hr.style.display="flex"):y("prompt_install_fail",!1)})}),hr.addEventListener("click",async()=>{try{y("prompt_rebooting"),await new Promise(o=>setTimeout(o,1e3)),await _("svc power reboot")}catch(o){y("prompt_reboot_fail",!1),console.error("Fail to reboot:",o)}})}let De=!1;const Le=document.getElementById("security-patch-dialog"),Il=document.querySelector(".advanced-toggle"),Nt=document.getElementById("advanced-mode"),Ft=document.getElementById("normal-mode-inputs"),Yr=document.getElementById("advanced-mode-inputs"),Sl=document.getElementById("devconfig-mode-inputs"),We=document.getElementById("all-patch"),je=document.getElementById("boot-patch"),Ke=document.getElementById("system-patch"),Ye=document.getElementById("vendor-patch"),Rl=document.getElementById("devconfig-securityPatch"),Ll=document.getElementById("get-patch"),Ol=document.getElementById("auto-config"),Pl=document.getElementById("save-patch"),nn=["securityPatch","osVersion","brand","device","product","manufacturer","model","serial","meid","imei","imei2"];function Oe(o,e=null){const P=`${I||"/data/adb/modules/ommega"}/post-fs-data.sh`,S0="resetprop ro.boot.vbmeta.digest",S1="resetprop ro.build.version.security_patch",S2="resetprop ro.system.build.security_patch",S3="resetprop ro.boot.image.build.security_patch",S4="resetprop ro.vendor.build.security_patch";if(o==="disable")_(`
+        `);if(o.trim().includes("updated"))Ue.style.display="none",hr.style.display="flex",Tt.show();else if(o.trim().includes("noChangelog"))y("prompt_downloading"),await Cl(rn,"changelog.md"),di(),Tt.show(),setTimeout(()=>{it.click()},200);else if(o.trim().includes("noModule")){if(pr)return;pr=!0,Y("sh",[`${I}/common/get_extra.sh`,"--get-update",`${tn}`],{env:{PATH:"$PATH:/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk:/data/data/com.termux/files/usr/bin"}}).on("exit",t=>{pr=!1,t===0?(y("prompt_downloaded"),Ue.style.display="flex"):y("prompt_download_fail",!1)})}else Ue.style.display="flex",di(),Tt.show()}),$l.addEventListener("click",()=>Tt.close()),Ue.addEventListener("click",async()=>{y("prompt_installing");const o=Y("sh",[`${I}/common/get_extra.sh`,"--install-update"],{env:{PATH:"$PATH:/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk"}});o.stderr.on("data",e=>{console.error("Error during installation:",e)}),o.on("exit",e=>{e===0?(y("prompt_installed"),Ue.style.display="none",hr.style.display="flex"):y("prompt_install_fail",!1)})}),hr.addEventListener("click",async()=>{try{y("prompt_rebooting"),await new Promise(o=>setTimeout(o,1e3)),await _("svc power reboot")}catch(o){y("prompt_reboot_fail",!1),console.error("Fail to reboot:",o)}})}let De=!1;const Le=document.getElementById("security-patch-dialog"),Il=document.querySelector(".advanced-toggle"),Nt=document.getElementById("advanced-mode"),Ft=document.getElementById("normal-mode-inputs"),Yr=document.getElementById("advanced-mode-inputs"),Sl=document.getElementById("devconfig-mode-inputs"),We=document.getElementById("all-patch"),je=document.getElementById("boot-patch"),Ke=document.getElementById("system-patch"),Ye=document.getElementById("vendor-patch"),Rl=document.getElementById("devconfig-securityPatch"),Ll=document.getElementById("get-patch"),Ol=document.getElementById("auto-config"),Pl=document.getElementById("save-patch"),nn=["securityPatch","osVersion","brand","device","product","manufacturer","model","serial","meid","imei","imei2"];function Oe(o,e=null){const P=`/data/adb/ommega/ommegadata/webui-props.sh`,S0="resetprop ro.boot.vbmeta.digest",S1="resetprop ro.build.version.security_patch",S2="resetprop ro.system.build.security_patch",S3="resetprop ro.boot.image.build.security_patch",S4="resetprop ro.vendor.build.security_patch";if(o==="disable")_(`
+            mkdir -p /data/adb/ommega/ommegadata
+            touch "${P}"
             sed -i '/^resetprop ro.build.version.security_patch/d' "${P}"
             sed -i '/^resetprop ro.system.build.security_patch/d' "${P}"
             sed -i '/^resetprop ro.boot.image.build.security_patch/d' "${P}"
             sed -i '/^resetprop ro.vendor.build.security_patch/d' "${P}"
-        `).then(({errno:t})=>(y("security_patch_value_empty"),t===0));else if(o==="manual"){const P=`${I||"/data/adb/modules/ommega"}/post-fs-data.sh`;let c=`
+        `).then(({errno:t})=>(y("security_patch_value_empty"),t===0));else if(o==="manual"){const P=`/data/adb/ommega/ommegadata/webui-props.sh`;let c=`
+            mkdir -p /data/adb/ommega/ommegadata
+            touch "${P}"
             sed -i '/^resetprop ro.build.version.security_patch/d' "${P}"
             sed -i '/^resetprop ro.system.build.security_patch/d' "${P}"
             sed -i '/^resetprop ro.boot.image.build.security_patch/d' "${P}"
             sed -i '/^resetprop ro.vendor.build.security_patch/d' "${P}"
-        `;if(e&&e.includes("system=")){let v=e.split("system=")[1].split("\n")[0];if(v!=="prop")c+=`echo 'resetprop ro.build.version.security_patch ${v}' >> "${P}"
+        `;if(e&&e.includes("all=")){let v=e.split("all=")[1].split("\n")[0];if(/^\d{8}$/.test(v))v=v.slice(0,4)+"-"+v.slice(4,6)+"-"+v.slice(6,8);if(v)c+=`echo 'resetprop ro.build.version.security_patch ${v}' >> "${P}"
+echo 'resetprop ro.boot.image.build.security_patch ${v}' >> "${P}"
+echo 'resetprop ro.vendor.build.security_patch ${v}' >> "${P}"
+        `}if(e&&e.includes("system=")){let v=e.split("system=")[1].split("\n")[0];if(v!=="prop")c+=`echo 'resetprop ro.build.version.security_patch ${v}' >> "${P}"
         `}if(e&&e.includes("boot=")){const v=e.split("boot=")[1].split("\n")[0];c+=`echo 'resetprop ro.boot.image.build.security_patch ${v}' >> "${P}"
         `}if(e&&e.includes("vendor=")){const v=e.split("vendor=")[1].split("\n")[0];c+=`echo 'resetprop ro.vendor.build.security_patch ${v}' >> "${P}"
         `}if(e&&e.includes("vbmeta=")){const v=e.split("vbmeta=")[1].split("\n")[0];if(v!=="")c+=`echo 'resetprop ro.boot.vbmeta.digest ${v}' >> "${P}"
-        `};_(`${c}`).then(({errno:r,stderr:u})=>{const i=r===0;if(!i)console.error("save failed stderr:",u);return y(i?"security_patch_save_success":"security_patch_save_failed",i),i})}}async function mr(){let o,e,t,r;try{const{stdout:n}=await _(`grep -E '^resetprop (ro.build.version.security_patch|ro.boot.image.build.security_patch|ro.vendor.build.security_patch)' ${I||"/data/adb/modules/ommega"}/post-fs-data.sh 2>/dev/null`);if(n.trim()!==""){const a=n.split(`\n`);for(const s of a){const m=s.match(/resetprop\s+(\S+)\s+(\S+)/);if(m){if(m[1]==="ro.build.version.security_patch"){e=m[2];Ke.value=e}else if(m[1]==="ro.boot.image.build.security_patch"){t=m[2];je.value=t}else if(m[1]==="ro.vendor.build.security_patch"){r=m[2];Ye.value=r}}}if(e||t||r)Gr(!0)}}catch(i){console.error("Failed to load security patch config:",i)}}function Gr(o){De||(o?(Nt.checked=!0,Ft.classList.add("hidden"),Yr.classList.remove("hidden")):(Nt.checked=!1,Ft.classList.remove("hidden"),Yr.classList.add("hidden")))}window.formatDate=function(o){let e=o.value.replace(/-/g,""),t=e.slice(0,4);if(e==="no")return o.value="no",o.setSelectionRange(2,2),"no";if(e.startsWith("n")){if(e.length>1&&e[1]!=="o"&&(e="n"),t=e.slice(0,2),e.length>2)return o.value=t,o.setSelectionRange(2,2),t}else{const s=e.replace(/\D/g,"");s!==e&&(o.value=s,e=s,t=s.slice(0,4)),e.length>=4&&(t+="-"+e.slice(4,6)),e.length>=6&&(t+="-"+e.slice(6,8))}const r=e.slice(-1);(r==="-"||isNaN(r)&&!["n"].includes(r))&&(t=t.slice(0,-1));const i=o.selectionStart;o.value=t;const n=t.length,a=(e.length===4||e.length===6)&&n>i;return o.setSelectionRange(a?n:i,a?n:i),t};function ui(o){return o==="no"?!0:/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/.test(o)}function zl(o){return o==="prop"?!0:/^\d{4}-\d{2}-\d{2}$/.test(o)}function Bl(o){return/^\d{8}$/.test(o)}function Ml(){document.getElementById("security-patch").addEventListener("click",()=>{Le.show(),mr()}),Nt.addEventListener("change",()=>{Ft.classList.toggle("hidden"),Yr.classList.toggle("hidden")}),Ol.addEventListener("click",()=>{const o=Y("sh",[`${I}/common/get_extra.sh`,"--security-patch"]);o.stdout.on("data",e=>{e.includes("not set")&&y("security_patch_auto_failed",!1)}),o.on("exit",e=>{e===0?(We.value="",Ke.value="",je.value="",Ye.value="",Gr(!1),y("security_patch_auto_success")):y("security_patch_auto_failed",!1),Le.close(),mr()})}),Pl.addEventListener("click",async()=>{if(De){const o=new Map;for(const n of nn){const a=document.getElementById(`devconfig-${n}`);a.value.trim()!==""&&o.set(n,a.value.trim())}if(o.size===0){Oe("disable"),Le.close();return}const e=["securityPatch","osVersion"],t=[],r=[];for(const[n,a]of o.entries())e.includes(n)?n==="osVersion"?t.push(`${n} = ${a}`):t.push(`${n} = "${a}"`):r.push(`${n} = "${a}"`);let i=t.join(`
+        `};_(`${c}`).then(({errno:r,stderr:u})=>{const i=r===0;if(!i)console.error("save failed stderr:",u);return y(i?"security_patch_save_success":"security_patch_save_failed",i),i})}}async function mr(){let o,e,t,r;try{const{stdout:n}=await _(`grep -E '^resetprop (ro.build.version.security_patch|ro.boot.image.build.security_patch|ro.vendor.build.security_patch)' /data/adb/ommega/ommegadata/webui-props.sh 2>/dev/null`);if(n.trim()!==""){const a=n.split(`\n`);for(const s of a){const m=s.match(/resetprop\s+(\S+)\s+(\S+)/);if(m){if(m[1]==="ro.build.version.security_patch"){e=m[2];Ke.value=e}else if(m[1]==="ro.boot.image.build.security_patch"){t=m[2];je.value=t}else if(m[1]==="ro.vendor.build.security_patch"){r=m[2];Ye.value=r}}}if(e||t||r)Gr(!0)}}catch(i){console.error("Failed to load security patch config:",i)}}function Gr(o){De||(o?(Nt.checked=!0,Ft.classList.add("hidden"),Yr.classList.remove("hidden")):(Nt.checked=!1,Ft.classList.remove("hidden"),Yr.classList.add("hidden")))}window.formatDate=function(o){let e=o.value.replace(/-/g,""),t=e.slice(0,4);if(e==="no")return o.value="no",o.setSelectionRange(2,2),"no";if(e.startsWith("n")){if(e.length>1&&e[1]!=="o"&&(e="n"),t=e.slice(0,2),e.length>2)return o.value=t,o.setSelectionRange(2,2),t}else{const s=e.replace(/\D/g,"");s!==e&&(o.value=s,e=s,t=s.slice(0,4)),e.length>=4&&(t+="-"+e.slice(4,6)),e.length>=6&&(t+="-"+e.slice(6,8))}const r=e.slice(-1);(r==="-"||isNaN(r)&&!["n"].includes(r))&&(t=t.slice(0,-1));const i=o.selectionStart;o.value=t;const n=t.length,a=(e.length===4||e.length===6)&&n>i;return o.setSelectionRange(a?n:i,a?n:i),t};function ui(o){return o==="no"?!0:/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/.test(o)}function zl(o){return o==="prop"?!0:/^\d{4}-\d{2}-\d{2}$/.test(o)}function Bl(o){return/^\d{8}$/.test(o)}function Ml(){document.getElementById("security-patch").addEventListener("click",()=>{Le.show(),mr()}),Nt.addEventListener("change",()=>{Ft.classList.toggle("hidden"),Yr.classList.toggle("hidden")}),Ol.addEventListener("click",()=>{const o=Y("sh",[`${I}/common/get_extra.sh`,"--security-patch"]);o.stdout.on("data",e=>{e.includes("not set")&&y("security_patch_auto_failed",!1)}),o.on("exit",e=>{e===0?(We.value="",Ke.value="",je.value="",Ye.value="",Gr(!1),y("security_patch_auto_success")):y("security_patch_auto_failed",!1),Le.close(),mr()})}),Pl.addEventListener("click",async()=>{if(De){const o=new Map;for(const n of nn){const a=document.getElementById(`devconfig-${n}`);a.value.trim()!==""&&o.set(n,a.value.trim())}if(o.size===0){Oe("disable"),Le.close();return}const e=["securityPatch","osVersion"],t=[],r=[];for(const[n,a]of o.entries())e.includes(n)?n==="osVersion"?t.push(`${n} = ${a}`):t.push(`${n} = "${a}"`):r.push(`${n} = "${a}"`);let i=t.join(`
 `);r.length>0&&(i+=`
 [deviceProps]
 `+r.join(`
 `)),Oe("manual",i)}else if(Nt.checked){const o=formatDate(je,"boot"),e=Ke.value.trim(),t=Ye.value.trim();if(!o&&!e&&!t){Oe("disable"),Le.close();return}if(e&&!zl(e)){y("security_patch_invalid_system",!1);return}if(o&&!ui(o)){y("security_patch_invalid_boot",!1);return}if(t&&!ui(t)){y("security_patch_invalid_vendor",!1);return}const r=[e?`system=${e}`:"",o?`boot=${o}`:"",t?`vendor=${t}`:""].filter(Boolean).join(`
-`);Oe("manual",r)&&(We.value="")}else{const o=We.value.trim();if(!o){Oe("disable"),Le.close();return}if(!Bl(o)){y("security_patch_invalid_all",!1);return}const e=`all=${o}`;Oe("manual",e)&&(Ke.value="",je.value="",Ye.value="")}y("prompt_security_patch_saved_restart"),Le.close(),mr()}),Ll.addEventListener("click",async()=>{y("security_patch_fetching");try{const e=await Promise.race([new Promise((o,t)=>setTimeout(()=>t(new Error("timeout")),15e3)),_("{ curl --connect-timeout 8 -sL 'https://source.android.com/docs/security/bulletin/pixel' 2>/dev/null || busybox wget -T 8 --no-check-certificate -qO- 'https://source.android.com/docs/security/bulletin/pixel' 2>/dev/null; } | sed -n 's/.*<td>\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)<\\/td>.*/\\1/p' | head -n 1")]);if(e.errno!==0||!e.stdout.trim())throw new Error("fetch failed");const t=e.stdout.trim();y("security_patch_fetched",!0,1e3),Gr(!0),We.value=t.replace(/-/g,""),Ke.value="prop",je.value=t,Ye.value=t,Rl.value=t}catch(o){console.error("Fetch security patch failed:",o),y("security_patch_unable_to_connect",!1)}})}document.body.removeAttribute("unresolved");const an=document.querySelector(".loading"),It=document.getElementById("prompt"),sn=document.querySelector(".floating-btn");let I;const pe=[],me=[],Dl=[];let Xr=!1;window.wx=new vo;async function Nl(){try{const{errno:o}=await _("[ -d /data/adb/modules/.ommega ]");I=o===0?"/data/adb/modules/.ommega":"/data/adb/modules/ommega"}catch(o){console.error("Error getting base path:",o)}}function Fl(){_(`grep '^version=' ${I}/common/update/module.prop | cut -d'=' -f2`).then(({stdout:o})=>{document.getElementById("module-version").textContent=o})}async function qt(){Xr=!0,sn.classList.add("hide"),le.value="",se.innerHTML="",an.style.display="flex",document.querySelector(".uninstall-container").style.display="none",window.scrollTo(0,0),Kr===!1&&(on(),_(`rm -f "${I}/common/tmp/exclude-list"`)),Mi(),Xr=!1}function ql(){const o=document.getElementById("security-patch");_(`
+`);Oe("manual",r)&&(We.value="")}else{const o=We.value.trim();if(!o){Oe("disable"),Le.close();return}if(!Bl(o)){y("security_patch_invalid_all",!1);return}const e=`all=${o}`;Oe("manual",e)&&(Ke.value="",je.value="",Ye.value="")}y("prompt_security_patch_saved_restart"),Le.close(),mr()}),Ll.addEventListener("click",async()=>{y("security_patch_fetching");try{const e=await Promise.race([new Promise((o,t)=>setTimeout(()=>t(new Error("timeout")),15e3)),_("{ curl --connect-timeout 8 -sL 'https://source.android.com/docs/security/bulletin/pixel' 2>/dev/null || busybox wget -T 8 --no-check-certificate -qO- 'https://source.android.com/docs/security/bulletin/pixel' 2>/dev/null; } | sed -n 's/.*<td>\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)<\\/td>.*/\\1/p' | head -n 1")]);if(e.errno!==0||!e.stdout.trim())throw new Error("fetch failed");const t=e.stdout.trim();y("security_patch_fetched",!0,1e3),Gr(!0),We.value=t.replace(/-/g,""),Ke.value="prop",je.value=t,Ye.value=t,Rl.value=t}catch(o){console.error("Fetch security patch failed:",o),y("security_patch_unable_to_connect",!1)}})}document.body.removeAttribute("unresolved");const an=document.querySelector(".loading"),It=document.getElementById("prompt"),sn=document.querySelector(".floating-btn");let I;const pe=[],me=[],Dl=[];let Xr=!1;window.wx=new vo;async function Nl(){try{const{errno:o}=await _("[ -d /data/adb/modules/.ommega ]");I=o===0?"/data/adb/modules/.ommega":"/data/adb/modules/ommega"}catch(o){console.error("Error getting base path:",o)}}function Fl(){_(`grep '^version=' ${I}/module.prop | cut -d'=' -f2`).then(({stdout:o})=>{document.getElementById("module-version").textContent=o})}async function qt(){Xr=!0,sn.classList.add("hide"),le.value="",se.innerHTML="",an.style.display="flex",document.querySelector(".uninstall-container").style.display="none",window.scrollTo(0,0),Kr===!1&&(on(),_(`rm -f "${I}/common/tmp/exclude-list"`)),Mi(),Xr=!1}function ql(){const o=document.getElementById("security-patch");_(`
         TS_version=$(grep "versionCode=" "/data/adb/modules/ommega/module.prop" | cut -d'=' -f2)
         if [ -f "/data/adb/modules/ommega/module.prop" ]; then
             echo 0
@@ -679,7 +686,7 @@ marked.`,o){let r="<p>An error occurred:</p><pre>"+ne(t.message+"",!0)+"</pre>";
             echo $TS_version
         fi
     `).then(({stdout:e})=>{e.trim()==="0"?o.style.display="flex":console.log("Ommega version:",e.trim())}).catch(e=>{console.error("Error checking Ommega version:",e),o.style.display="flex"})}function Hl(){const o=document.getElementById("select-denylist");_("command -v magisk").then(({errno:e})=>{e===0&&(o.style.display="flex")})}function Ul(){_("echo $TMPDIR").then(o=>{o.errno===0&&o.stdout.includes("com.sukisu.ultra")&&_("cat /data/data/com.sukisu.ultra/shared_prefs/card_settings.xml").then(e=>{if(e.errno===0)try{const r=new DOMParser().parseFromString(e.stdout,"text/xml"),i=r.querySelector('float[name="card_alpha"]'),n=r.querySelector('float[name="card_dim"]');if(i&&i.getAttribute("value")&&n&&n.getAttribute("value")){const a=parseFloat(i.getAttribute("value")),s=parseFloat(n.getAttribute("value"));if(!isNaN(a)&&!isNaN(s)){const l=Math.round(a*100)/100,u=Math.round(s*100)/100;document.querySelectorAll(".card-alpha").forEach(d=>{let m=window.getComputedStyle(d).backgroundColor||d.style.backgroundColor||"";const v=Vl(m,l,u);v&&(d.style.backgroundColor=v)})}}}catch{}})})}function Vl(o,e,t){if(!o)return null;o=o.trim();let r,i,n;const a=o.match(/rgba?\(([^)]+)\)/i);if(a)[r,i,n]=a[1].split(",").map(g=>parseInt(g.trim())||0);else{const v=o.replace("#",""),g=v.length;if(g===3||g===6||g===8){const b=g===3?v.replace(/./g,"$&$&"):v;r=parseInt(b.slice(0,2),16)||0,i=parseInt(b.slice(2,4),16)||0,n=parseInt(b.slice(4,6),16)||0}else return null}r/=255,i/=255,n/=255;const s=Math.max(r,i,n),l=Math.min(r,i,n);let u,d,p=(s+l)/2;if(s===l)u=d=0;else{const v=s-l;switch(d=p>.5?v/(2-s-l):v/(s+l),s){case r:u=(i-n)/v+(i<n?6:0);break;case i:u=(n-r)/v+2;break;case n:u=(r-i)/v+4;break}u/=6}const m=t/100;return p=p*(1-m),u=Math.round(u*360),d=Math.round(d*100),p=Math.round(p*100),`hsla(${u}, ${d}%, ${p}%, ${e})`}function y(o,e=!0,t=3e3){It.textContent=Ee[o],It.classList.toggle("error",!e),It.classList.add("show");const r=document.querySelector(".prompt-container");try{r&&!r.matches(":popover-open")&&r.showPopover()}catch{}window.promptTimeout&&clearTimeout(window.promptTimeout),window.promptTimeout=setTimeout(()=>{It.classList.remove("show");try{r&&r.matches(":popover-open")&&r.hidePopover()}catch{}},t)}function Zt(o){Me("Redirecting to "+o),setTimeout(()=>{_(`am start -a android.intent.action.VIEW -d ${o}`).then(({errno:e})=>{e!==0&&Me("Failed to open link")})},100)}document.getElementById("save").onclick=()=>{const o=Array.from(se.querySelectorAll("md-checkbox")).filter(i=>i.checked).map(i=>i.closest(".card").getAttribute("data-package"));let e=new Set(o);Dl.forEach(i=>{e.add(i)}),e=Array.from(e);const r=e.map(i=>pe.includes(i)?`${i}!`:me.includes(i)?`${i}?`:i).join(`
-`);_(`echo "${r}" | sort -u > /data/adb/ommega/ommegadata/target.txt`).then(({errno:i})=>{if(i===0){for(const n of pe)_(`sed -i 's/^${n}$/${n}!/' /data/adb/ommega/ommegadata/target.txt`);for(const n of me)_(`sed -i 's/^${n}$/${n}?/' /data/adb/ommega/ommegadata/target.txt`);y("prompt_saved_target"),qt()}else y("prompt_save_error",!1)})};document.querySelector(".uninstall-container").onclick=()=>{const o=document.getElementById("uninstall-confirmation-dialog");o.show(),document.getElementById("cancel-uninstall").onclick=()=>{o.close()},document.getElementById("confirm-uninstall").onclick=()=>{_(`sh ${I}/common/get_extra.sh --uninstall`).then(({errno:e})=>{e===0?y("prompt_uninstall_prompt"):y("prompt_uninstall_failed",!1)}),o.close()}};function Wl(){window.$ommega&&Object.keys($ommega).length>0&&$ommega.setLightStatusBars(!window.matchMedia("(prefers-color-scheme: dark)").matches)}function jl(){const o=r=>{document.documentElement.classList.toggle("dialog-open",r),document.body.style.overflow=r?"hidden":"",document.documentElement.style.touchAction=r?"none":""},e=r=>{o(!!r.open),new MutationObserver(n=>{for(const a of n)a.type==="attributes"&&a.attributeName==="open"&&o(!!r.open)}).observe(r,{attributes:!0,attributeFilter:["open"]})};document.querySelectorAll("md-dialog").forEach(e),new MutationObserver(r=>{for(const i of r){for(const n of i.addedNodes){if(n.nodeType!==Node.ELEMENT_NODE)continue;const a=n;a.tagName&&a.tagName.toLowerCase()==="md-dialog"?e(a):a.querySelectorAll&&a.querySelectorAll("md-dialog").forEach(e)}i.removedNodes&&i.removedNodes.length&&(document.querySelectorAll("md-dialog[open]").length>0||o(!1))}}).observe(document.body,{childList:!0,subtree:!0})}let hi=window.scrollY;window.addEventListener("scroll",()=>{if(document.querySelectorAll("md-menu").forEach(e=>e.close()),Xr)return;const o=window.scrollY>hi&&window.scrollY>40;sn.classList.toggle("hide",o),document.querySelectorAll(".header-bg").forEach(e=>{e.classList.toggle("scroll",window.scrollY>10)}),hi=window.scrollY});wx.on(window,"back",()=>{for(const o of document.querySelectorAll("md-dialog"))if(o.open){o.close();return}webui.exit()});document.querySelectorAll("md-dialog").forEach(o=>{const e=o.getOpenAnimation,t=o.getCloseAnimation;o.getOpenAnimation=()=>{const r=e.call(o),i={};return Object.keys(r).forEach(n=>i[n]=r[n]),i.dialog=[[[{opacity:0,transform:"translateY(50px)"},{opacity:1,transform:"translateY(0)"}],{duration:300,easing:"ease"}]],i.scrim=[[[{opacity:0},{opacity:.32}],{duration:300,easing:"linear"}]],i.container=[],i},o.getCloseAnimation=()=>{const r=t.call(o),i={};return Object.keys(r).forEach(n=>i[n]=r[n]),i.dialog=[[[{opacity:1,transform:"translateY(0)"},{opacity:0,transform:"translateY(-50px)"}],{duration:300,easing:"ease"}]],i.scrim=[[[{opacity:.32},{opacity:0}],{duration:300,easing:"linear"}]],i.container=[],i}});document.addEventListener("DOMContentLoaded",async()=>{await Os(),await Nl(),Wl(),Fl(),Ms(),Mi(),ql(),Hl(),Ml(),jl(),document.getElementById("refresh").onclick=qt});const Qt=document.getElementById("about-dialog"),Kl=document.getElementById("close-about");let oe=!1;document.getElementById("about").addEventListener("click",()=>{Qt.show()});Kl.onclick=()=>Qt.close();function Yl(o){y("prompt_downloading",!0,2e4),Y("sh",[`${I}/common/get_extra.sh`,"--get-update",`${o}`],{env:{PATH:"$PATH:/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk:/data/data/com.termux/files/usr/bin"}}).on("exit",t=>{t===0?Gl():(y("prompt_download_fail",!1),oe=!1)})}function Gl(){y("prompt_installing");const o=Y("sh",[`${I}/common/get_extra.sh`,"--install-update"],{env:{PATH:"$PATH:/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk"}});o.stderr.on("data",e=>{console.error("Error during installation:",e)}),o.on("exit",e=>{e===0?y("prompt_installed"):y("prompt_install_fail",!1),oe=!1})}const To=document.getElementById("boot-hash-dialog"),Ht=document.getElementById("boot-hash-input"),ln=document.getElementById("boot-hash-save-button"),Xl=document.getElementById("cancel-boot-hash");window.trimInput=o=>{o.value=o.value.replace(/\s+/g,"").toLowerCase()};document.getElementById("boot-hash").addEventListener("click",async()=>{To.show(),_(`grep '^resetprop ro.boot.vbmeta.digest' ${I||"/data/adb/modules/ommega"}/post-fs-data.sh 2>/dev/null | tail -1 | sed 's/.*resetprop ro.boot.vbmeta.digest //; s/"$//'`).then(({errno:o,stdout:e})=>{if(o!==0||!e.trim())Ht.value="";else{const t=e.trim().replace(/\"/g,"");Ht.value=t||""}})});ln.addEventListener("click",async()=>{const o=Ht.value.trim(),POST_FS_DATA=`${I||"/data/adb/modules/ommega"}/post-fs-data.sh`;if(o!==""&&!/^[0-9a-f]{64}$/.test(o)){y("security_patch_invalid_all",!1);return}if(o===""){_(`sed -i '/^resetprop ro.boot.vbmeta.digest/d' "${POST_FS_DATA}"`).then(({errno:e,stderr:u})=>{e!==0&&console.error("boot-hash clear stderr:",u);y("prompt_boot_hash_cleared"),To.close()})}else{_(`sed -i '/^resetprop ro.boot.vbmeta.digest/d' "${POST_FS_DATA}"; echo 'resetprop ro.boot.vbmeta.digest ${o}' >> "${POST_FS_DATA}"`).then(({errno:e,stderr:u})=>{e!==0&&console.error("boot-hash set stderr:",u);y("prompt_boot_hash_set"),To.close()})}});Xl.addEventListener("click",()=>{To.close()});Ht.addEventListener("keydown",o=>{o.key==="Enter"&&ln.click()});const BkDlg=document.getElementById("boot-key-dialog"),BkInp=document.getElementById("boot-key-input"),BkSave=document.getElementById("boot-key-save-button"),BkCancel=document.getElementById("cancel-boot-key");window.trimInput=o=>{o.value=o.value.replace(/\s+/g,"").toLowerCase()};document.getElementById("boot-key").addEventListener("click",async()=>{BkDlg.show(),_(`grep '^resetprop ro.boot.vbmeta.public_key_digest' ${I||"/data/adb/modules/ommega"}/post-fs-data.sh 2>/dev/null | tail -1 | sed 's/.*resetprop ro.boot.vbmeta.public_key_digest //; s/"$//'`).then(({errno:o,stdout:e})=>{if(o!==0||!e.trim())BkInp.value="";else{const t=e.trim().replace(/\"/g,"");BkInp.value=t||""}})});BkSave.addEventListener("click",async()=>{const o=BkInp.value.trim(),POST_FS_DATA=`${I||"/data/adb/modules/ommega"}/post-fs-data.sh`;if(o!==""&&!/^[0-9a-f]{64}$/.test(o)){y("security_patch_invalid_all",!1);return}if(o===""){_(`sed -i '/^resetprop ro.boot.vbmeta.public_key_digest/d' "${POST_FS_DATA}"`).then(({errno:e,stderr:u})=>{e!==0&&console.error("boot-key clear stderr:",u);y("prompt_boot_key_cleared"),BkDlg.close()})}else{_(`sed -i '/^resetprop ro.boot.vbmeta.public_key_digest/d' "${POST_FS_DATA}"; echo 'resetprop ro.boot.vbmeta.public_key_digest ${o}' >> "${POST_FS_DATA}"`).then(({errno:e,stderr:u})=>{e!==0&&console.error("boot-key set stderr:",u);y("prompt_boot_key_set"),BkDlg.close()})}});BkCancel.addEventListener("click",()=>{BkDlg.close()});BkInp.addEventListener("keydown",o=>{o.key==="Enter"&&BkSave.click()});const RemoteConfigDialog=document.getElementById("remote-config-dialog"),RemoteConfigUrl=document.getElementById("remote-config-url"),RemoteConfigDeviceId=document.getElementById("remote-config-device-id"),RemoteConfigToken=document.getElementById("remote-config-token"),RemoteConfigRemote=document.getElementById("remote-config-remote"),RemoteConfigTlsInsecure=document.getElementById("remote-config-tls-insecure"),RemoteConfigDebugLogging=document.getElementById("remote-config-debug-logging"),RemoteConfigCancel=document.getElementById("cancel-remote-config"),RemoteConfigSave=document.getElementById("save-remote-config");const CONFIG_PATH="/data/adb/ommega/ommegadata/config";async function loadRemoteConfig(){try{const{errno:err,stdout:content}=await _(`cat ${CONFIG_PATH} 2>/dev/null`);if(err!==0){RemoteConfigUrl.value="";RemoteConfigDeviceId.value="";RemoteConfigToken.value="";RemoteConfigRemote.checked=false;RemoteConfigTlsInsecure.checked=true;RemoteConfigDebugLogging.checked=false;return}const lines=content.split("\n");for(const line of lines){if(line.startsWith("url:"))RemoteConfigUrl.value=line.substring(4).trim();else if(line.startsWith("device_id:"))RemoteConfigDeviceId.value=line.substring(10).trim();else if(line.startsWith("token:"))RemoteConfigToken.value=line.substring(6).trim();else if(line.startsWith("remote:"))RemoteConfigRemote.checked=line.substring(7).trim().toLowerCase()==="true"||line.substring(7).trim()==="1";else if(line.startsWith("tls_insecure:"))RemoteConfigTlsInsecure.checked=line.substring(line.indexOf(":")+1).trim().toLowerCase()==="true"||line.substring(line.indexOf(":")+1).trim()==="1";else if(line.startsWith("debug_logging:")||line.startsWith("debug:")||line.startsWith("verbose:"))RemoteConfigDebugLogging.checked=line.substring(line.indexOf(":")+1).trim().toLowerCase()==="true"||line.substring(line.indexOf(":")+1).trim()==="1"}}catch(err){console.error("Failed to load remote config:",err)}}document.getElementById("remote-config").addEventListener("click",async()=>{RemoteConfigDialog.show(),await loadRemoteConfig()});RemoteConfigCancel.addEventListener("click",()=>{RemoteConfigDialog.close()});RemoteConfigSave.addEventListener("click",async()=>{const url=RemoteConfigUrl.value.trim(),deviceId=RemoteConfigDeviceId.value.trim(),token=RemoteConfigToken.value.trim(),remote=RemoteConfigRemote.checked,tlsInsecure=RemoteConfigTlsInsecure.checked,debugLogging=RemoteConfigDebugLogging.checked;let config="";url&&(config+=`url: ${url}\n`);deviceId&&(config+=`device_id: ${deviceId}\n`);token&&(config+=`token: ${token}\n`);config+=`remote: ${remote}\n`;config+=`tls_insecure: ${tlsInsecure}\n`;config+=`debug_logging: ${debugLogging}\n`;_(`mkdir -p /data/adb/ommega && echo "${config.trim()}" > ${CONFIG_PATH} && chmod 644 ${CONFIG_PATH}`).then(({errno:err})=>{err===0?(y("remote_config_save_success"),RemoteConfigDialog.close()):y("remote_config_save_failed",!1)})});
+`);_(`echo "${r}" | sort -u > /data/adb/ommega/ommegadata/target.txt`).then(({errno:i})=>{if(i===0){for(const n of pe)_(`sed -i 's/^${n}$/${n}!/' /data/adb/ommega/ommegadata/target.txt`);for(const n of me)_(`sed -i 's/^${n}$/${n}?/' /data/adb/ommega/ommegadata/target.txt`);y("prompt_saved_target"),qt()}else y("prompt_save_error",!1)})};document.querySelector(".uninstall-container").onclick=()=>{const o=document.getElementById("uninstall-confirmation-dialog");o.show(),document.getElementById("cancel-uninstall").onclick=()=>{o.close()},document.getElementById("confirm-uninstall").onclick=()=>{_(`sh ${I}/common/get_extra.sh --uninstall`).then(({errno:e})=>{e===0?y("prompt_uninstall_prompt"):y("prompt_uninstall_failed",!1)}),o.close()}};function Wl(){window.$ommega&&Object.keys($ommega).length>0&&$ommega.setLightStatusBars(!window.matchMedia("(prefers-color-scheme: dark)").matches)}function jl(){const o=r=>{document.documentElement.classList.toggle("dialog-open",r),document.body.style.overflow=r?"hidden":"",document.documentElement.style.touchAction=r?"none":""},e=r=>{o(!!r.open),new MutationObserver(n=>{for(const a of n)a.type==="attributes"&&a.attributeName==="open"&&o(!!r.open)}).observe(r,{attributes:!0,attributeFilter:["open"]})};document.querySelectorAll("md-dialog").forEach(e),new MutationObserver(r=>{for(const i of r){for(const n of i.addedNodes){if(n.nodeType!==Node.ELEMENT_NODE)continue;const a=n;a.tagName&&a.tagName.toLowerCase()==="md-dialog"?e(a):a.querySelectorAll&&a.querySelectorAll("md-dialog").forEach(e)}i.removedNodes&&i.removedNodes.length&&(document.querySelectorAll("md-dialog[open]").length>0||o(!1))}}).observe(document.body,{childList:!0,subtree:!0})}let hi=window.scrollY;window.addEventListener("scroll",()=>{if(document.querySelectorAll("md-menu").forEach(e=>e.close()),Xr)return;const o=window.scrollY>hi&&window.scrollY>40;sn.classList.toggle("hide",o),document.querySelectorAll(".header-bg").forEach(e=>{e.classList.toggle("scroll",window.scrollY>10)}),hi=window.scrollY});wx.on(window,"back",()=>{for(const o of document.querySelectorAll("md-dialog"))if(o.open){o.close();return}webui.exit()});document.querySelectorAll("md-dialog").forEach(o=>{const e=o.getOpenAnimation,t=o.getCloseAnimation;o.getOpenAnimation=()=>{const r=e.call(o),i={};return Object.keys(r).forEach(n=>i[n]=r[n]),i.dialog=[[[{opacity:0,transform:"translateY(50px)"},{opacity:1,transform:"translateY(0)"}],{duration:300,easing:"ease"}]],i.scrim=[[[{opacity:0},{opacity:.32}],{duration:300,easing:"linear"}]],i.container=[],i},o.getCloseAnimation=()=>{const r=t.call(o),i={};return Object.keys(r).forEach(n=>i[n]=r[n]),i.dialog=[[[{opacity:1,transform:"translateY(0)"},{opacity:0,transform:"translateY(-50px)"}],{duration:300,easing:"ease"}]],i.scrim=[[[{opacity:.32},{opacity:0}],{duration:300,easing:"linear"}]],i.container=[],i}});document.addEventListener("DOMContentLoaded",async()=>{await Os(),await Nl(),Wl(),Fl(),Ms(),Mi(),ql(),Hl(),Ml(),jl(),document.getElementById("refresh").onclick=qt});const Qt=document.getElementById("about-dialog"),Kl=document.getElementById("close-about");let oe=!1;document.getElementById("about").addEventListener("click",()=>{Qt.show()});Kl.onclick=()=>Qt.close();function Yl(o){y("prompt_downloading",!0,2e4),Y("sh",[`${I}/common/get_extra.sh`,"--get-update",`${o}`],{env:{PATH:"$PATH:/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk:/data/data/com.termux/files/usr/bin"}}).on("exit",t=>{t===0?Gl():(y("prompt_download_fail",!1),oe=!1)})}function Gl(){y("prompt_installing");const o=Y("sh",[`${I}/common/get_extra.sh`,"--install-update"],{env:{PATH:"$PATH:/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk"}});o.stderr.on("data",e=>{console.error("Error during installation:",e)}),o.on("exit",e=>{e===0?y("prompt_installed"):y("prompt_install_fail",!1),oe=!1})}const To=document.getElementById("boot-hash-dialog"),Ht=document.getElementById("boot-hash-input"),ln=document.getElementById("boot-hash-save-button"),Xl=document.getElementById("cancel-boot-hash");window.trimInput=o=>{o.value=o.value.replace(/\s+/g,"").toLowerCase()};document.getElementById("boot-hash").addEventListener("click",async()=>{To.show(),_(`grep '^resetprop ro.boot.vbmeta.digest' /data/adb/ommega/ommegadata/webui-props.sh 2>/dev/null | tail -1 | sed 's/.*resetprop ro.boot.vbmeta.digest //; s/"$//'`).then(({errno:o,stdout:e})=>{if(o!==0||!e.trim())Ht.value="";else{const t=e.trim().replace(/\"/g,"");Ht.value=t||""}})});ln.addEventListener("click",async()=>{const o=Ht.value.trim(),POST_FS_DATA=`/data/adb/ommega/ommegadata/webui-props.sh`;if(o!==""&&!/^[0-9a-f]{64}$/.test(o)){y("security_patch_invalid_all",!1);return}if(o===""){_(`mkdir -p /data/adb/ommega/ommegadata; touch "${POST_FS_DATA}"; sed -i '/^resetprop ro.boot.vbmeta.digest/d' "${POST_FS_DATA}"`).then(({errno:e,stderr:u})=>{e!==0&&console.error("boot-hash clear stderr:",u);y("prompt_boot_hash_cleared"),To.close()})}else{_(`mkdir -p /data/adb/ommega/ommegadata; touch "${POST_FS_DATA}"; sed -i '/^resetprop ro.boot.vbmeta.digest/d' "${POST_FS_DATA}"; echo 'resetprop ro.boot.vbmeta.digest ${o}' >> "${POST_FS_DATA}"`).then(({errno:e,stderr:u})=>{e!==0&&console.error("boot-hash set stderr:",u);y("prompt_boot_hash_set"),To.close()})}});Xl.addEventListener("click",()=>{To.close()});Ht.addEventListener("keydown",o=>{o.key==="Enter"&&ln.click()});const BkDlg=document.getElementById("boot-key-dialog"),BkInp=document.getElementById("boot-key-input"),BkSave=document.getElementById("boot-key-save-button"),BkCancel=document.getElementById("cancel-boot-key");window.trimInput=o=>{o.value=o.value.replace(/\s+/g,"").toLowerCase()};document.getElementById("boot-key").addEventListener("click",async()=>{BkDlg.show(),_(`grep '^resetprop ro.boot.vbmeta.public_key_digest' /data/adb/ommega/ommegadata/webui-props.sh 2>/dev/null | tail -1 | sed 's/.*resetprop ro.boot.vbmeta.public_key_digest //; s/"$//'`).then(({errno:o,stdout:e})=>{if(o!==0||!e.trim())BkInp.value="";else{const t=e.trim().replace(/\"/g,"");BkInp.value=t||""}})});BkSave.addEventListener("click",async()=>{const o=BkInp.value.trim(),POST_FS_DATA=`/data/adb/ommega/ommegadata/webui-props.sh`;if(o!==""&&!/^[0-9a-f]{64}$/.test(o)){y("security_patch_invalid_all",!1);return}if(o===""){_(`mkdir -p /data/adb/ommega/ommegadata; touch "${POST_FS_DATA}"; sed -i '/^resetprop ro.boot.vbmeta.public_key_digest/d' "${POST_FS_DATA}"`).then(({errno:e,stderr:u})=>{e!==0&&console.error("boot-key clear stderr:",u);y("prompt_boot_key_cleared"),BkDlg.close()})}else{_(`mkdir -p /data/adb/ommega/ommegadata; touch "${POST_FS_DATA}"; sed -i '/^resetprop ro.boot.vbmeta.public_key_digest/d' "${POST_FS_DATA}"; echo 'resetprop ro.boot.vbmeta.public_key_digest ${o}' >> "${POST_FS_DATA}"`).then(({errno:e,stderr:u})=>{e!==0&&console.error("boot-key set stderr:",u);y("prompt_boot_key_set"),BkDlg.close()})}});BkCancel.addEventListener("click",()=>{BkDlg.close()});BkInp.addEventListener("keydown",o=>{o.key==="Enter"&&BkSave.click()});const RemoteConfigDialog=document.getElementById("remote-config-dialog"),RemoteConfigUrl=document.getElementById("remote-config-url"),RemoteConfigDeviceId=document.getElementById("remote-config-device-id"),RemoteConfigToken=document.getElementById("remote-config-token"),RemoteConfigRemote=document.getElementById("remote-config-remote"),RemoteConfigTlsInsecure=document.getElementById("remote-config-tls-insecure"),RemoteConfigDebugLogging=document.getElementById("remote-config-debug-logging"),RemoteConfigCancel=document.getElementById("cancel-remote-config"),RemoteConfigSave=document.getElementById("save-remote-config");const CONFIG_PATH="/data/adb/ommega/ommegadata/config";async function loadRemoteConfig(){try{const{errno:err,stdout:content}=await _(`cat ${CONFIG_PATH} 2>/dev/null`);if(err!==0){RemoteConfigUrl.value="";RemoteConfigDeviceId.value="";RemoteConfigToken.value="";RemoteConfigRemote.checked=false;RemoteConfigTlsInsecure.checked=true;RemoteConfigDebugLogging.checked=false;return}const lines=content.split("\n");for(const line of lines){if(line.startsWith("url:"))RemoteConfigUrl.value=line.substring(4).trim();else if(line.startsWith("device_id:"))RemoteConfigDeviceId.value=line.substring(10).trim();else if(line.startsWith("token:"))RemoteConfigToken.value=line.substring(6).trim();else if(line.startsWith("remote:"))RemoteConfigRemote.checked=line.substring(7).trim().toLowerCase()==="true"||line.substring(7).trim()==="1";else if(line.startsWith("tls_insecure:"))RemoteConfigTlsInsecure.checked=line.substring(line.indexOf(":")+1).trim().toLowerCase()==="true"||line.substring(line.indexOf(":")+1).trim()==="1";else if(line.startsWith("debug_logging:")||line.startsWith("debug:")||line.startsWith("verbose:"))RemoteConfigDebugLogging.checked=line.substring(line.indexOf(":")+1).trim().toLowerCase()==="true"||line.substring(line.indexOf(":")+1).trim()==="1"}}catch(err){console.error("Failed to load remote config:",err)}}document.getElementById("remote-config").addEventListener("click",async()=>{RemoteConfigDialog.show(),await loadRemoteConfig()});RemoteConfigCancel.addEventListener("click",()=>{RemoteConfigDialog.close()});RemoteConfigSave.addEventListener("click",async()=>{const url=RemoteConfigUrl.value.trim(),deviceId=RemoteConfigDeviceId.value.trim(),token=RemoteConfigToken.value.trim(),remote=RemoteConfigRemote.checked,tlsInsecure=RemoteConfigTlsInsecure.checked,debugLogging=RemoteConfigDebugLogging.checked;let config="";url&&(config+=`url: ${url}\n`);deviceId&&(config+=`device_id: ${deviceId}\n`);token&&(config+=`token: ${token}\n`);config+=`remote: ${remote}\n`;config+=`tls_insecure: ${tlsInsecure}\n`;config+=`debug_logging: ${debugLogging}\n`;_(`mkdir -p /data/adb/ommega && echo "${config.trim()}" > ${CONFIG_PATH} && chmod 644 ${CONFIG_PATH}`).then(({errno:err})=>{err===0?(y("remote_config_save_success"),RemoteConfigDialog.close()):y("remote_config_save_failed",!1)})});
 
 const AutomationDialog = document.getElementById('automation-settings-dialog');
 const AutomationMenu = document.getElementById('automation-settings');
@@ -917,9 +924,9 @@ SetPatchNow.addEventListener('click', async () => {
     }
     const match = output.match(/^\d{8}/);
     if (match) {
-      const pf = `${I||"/data/adb/modules/ommega"}/post-fs-data.sh`;
+      const pf = `/data/adb/ommega/ommegadata/webui-props.sh`;
       const d = `${match[0].slice(0,4)}-${match[0].slice(4,6)}-${match[0].slice(6,8)}`;
-      await _(`sed -i '/^resetprop ro.build.version.security_patch/d' "${pf}"; sed -i '/^resetprop ro.boot.image.build.security_patch/d' "${pf}"; sed -i '/^resetprop ro.vendor.build.security_patch/d' "${pf}"; echo 'resetprop ro.build.version.security_patch ${d}' >> "${pf}"; echo 'resetprop ro.boot.image.build.security_patch ${d}' >> "${pf}"; echo 'resetprop ro.vendor.build.security_patch ${d}' >> "${pf}"; resetprop -n ro.build.version.security_patch "${d}"`);
+      await _(`mkdir -p /data/adb/ommega/ommegadata; touch "${pf}"; sed -i '/^resetprop ro.build.version.security_patch/d' "${pf}"; sed -i '/^resetprop ro.boot.image.build.security_patch/d' "${pf}"; sed -i '/^resetprop ro.vendor.build.security_patch/d' "${pf}"; echo 'resetprop ro.build.version.security_patch ${d}' >> "${pf}"; echo 'resetprop ro.boot.image.build.security_patch ${d}' >> "${pf}"; echo 'resetprop ro.vendor.build.security_patch ${d}' >> "${pf}"; resetprop -n ro.build.version.security_patch "${d}"`);
       y('prompt_patch_set');
     } else {
       y('prompt_no_valid', false);
@@ -928,4 +935,341 @@ SetPatchNow.addEventListener('click', async () => {
     y('prompt_no_internet', false);
   }
 });
+
+const OMMEGA_TARGET = "/data/adb/ommega/ommegadata/target.txt";
+const OMMEGA_SYSTEM_APP = "/data/adb/ommega/ommegadata/system_app";
+const OMMEGA_APP_CHUNK = 24;
+
+function ommegaEsc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }[c]));
+}
+
+async function ommegaNames(pkgs, applist) {
+  const out = new Map();
+  for (const pkg of pkgs) {
+    const cached = applist[pkg];
+    out.set(pkg, cached && String(cached).trim() ? String(cached).trim() : pkg);
+  }
+  if (typeof globalThis.ksu?.getPackagesInfo === "function" && pkgs.length) {
+    const chunk = 80;
+    for (let i = 0; i < pkgs.length; i += chunk) {
+      try {
+        const infos = JSON.parse(ksu.getPackagesInfo(JSON.stringify(pkgs.slice(i, i + chunk))));
+        for (const info of infos || []) {
+          const pkg = info.packageName || info.package;
+          const name = info.appLabel || info.appName || info.label;
+          if (pkg && name && String(name).trim()) out.set(pkg, String(name).trim());
+        }
+      } catch {}
+    }
+  } else if (typeof $packageManager !== "undefined") {
+    for (const pkg of pkgs) {
+      try {
+        const label = $packageManager.getApplicationInfo(pkg, 0, 0).getLabel();
+        if (label && String(label).trim()) out.set(pkg, String(label).trim());
+      } catch {}
+    }
+  }
+  return pkgs.map(pkg => ({appName: out.get(pkg) || pkg, packageName: pkg}));
+}
+
+Mi = async function () {
+  await _("cat " + OMMEGA_TARGET).then(({errno: a, stdout: s}) => {
+    a === 0 ? Qe = Jo(s) : typeof ksu > "u" ? Qe = Jo("com.example.one\ncom.example.two!\ncom.example.three?") : Me("Failed to read target.txt!");
+  });
+  let applist = {};
+  try {
+    applist = (await (await fetch("applist.json")).json()).reduce((acc, item) => {
+      acc[item.package_name] = item.app_name;
+      return acc;
+    }, {});
+  } catch (err) {
+    console.warn("Failed to fetch applist.json:", err);
+  }
+  const sysFile = await _('cat "' + OMMEGA_SYSTEM_APP + '" || true');
+  const user = await Zo("user").catch(() => []);
+  const extra = sysFile.stdout.split("\n").map(line => line.trim()).filter(line => line && !line.startsWith("#"));
+  const pkgs = Array.from(new Set([...user, ...Qe, ...extra].filter(Boolean)));
+  $s(await ommegaNames(pkgs, applist));
+};
+
+$s = function (apps) {
+  const sorted = apps.sort((a, b) => {
+    const aSel = Qe.includes(a.packageName);
+    const bSel = Qe.includes(b.packageName);
+    return aSel !== bSel ? (aSel ? -1 : 1) : (a.appName || "").localeCompare(b.appName || "");
+  });
+  se.innerHTML = "";
+  an.style.display = "none";
+  document.querySelector(".floating-btn").classList.remove("hide");
+  if (it) se.appendChild(it);
+  const showIcon = typeof $packageManager !== "undefined" || typeof globalThis.ksu?.listPackages === "function";
+  const render = start => {
+    if (start >= sorted.length) {
+      document.querySelector(".uninstall-container").style.display = "none";
+      Is();
+      Ss();
+      Di();
+      Ul();
+      if (showIcon) As();
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    const end = Math.min(start + OMMEGA_APP_CHUNK, sorted.length);
+    for (let i = start; i < end; i++) {
+      const {appName, packageName} = sorted[i];
+      const node = document.importNode(Es, true);
+      node.querySelector(".content").setAttribute("data-package", packageName);
+      const nameEl = node.querySelector(".name");
+      nameEl.setAttribute("for", "checkbox-" + packageName);
+      nameEl.innerHTML = `
+            <div class="app-icon-container" style="display:${showIcon ? "flex" : "none"};">
+                <div class="loader" data-package="${ommegaEsc(packageName)}"></div>
+                <img class="app-icon" data-package="${ommegaEsc(packageName)}" />
+            </div>
+            <div class="app-info">
+                <div class="app-name">${ommegaEsc(appName)}</div>
+                <div class="package-name">${ommegaEsc(packageName)}</div>
+            </div>
+        `;
+      const box = node.querySelector("md-checkbox");
+      box.id = "checkbox-" + packageName;
+      if (Qe.includes(packageName)) {
+        box.checked = true;
+        node.querySelector(".card").classList.add("selected");
+      }
+      frag.appendChild(node);
+    }
+    se.appendChild(frag);
+    requestAnimationFrame(() => render(end));
+  };
+  requestAnimationFrame(() => render(0));
+};
+
+qi = function (checked) {
+  const boxes = se.querySelectorAll("md-checkbox");
+  let i = 0;
+  const step = () => {
+    const end = Math.min(i + 40, boxes.length);
+    for (; i < end; i++) {
+      const box = boxes[i];
+      const card = box.closest(".card");
+      if (card && card.style.display !== "none") {
+        box.checked = checked;
+        card.classList.toggle("selected", checked);
+      }
+    }
+    if (i < boxes.length) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+};
+
+document.getElementById("save").onclick = () => {
+  const selected = Array.from(se.querySelectorAll("md-checkbox"))
+    .filter(box => box.checked)
+    .map(box => box.closest(".card").getAttribute("data-package"));
+  const pkgs = new Set(selected);
+  Dl.forEach(pkg => pkgs.add(pkg));
+  const lines = Array.from(pkgs).filter(Boolean).map(pkg =>
+    pe.includes(pkg) ? pkg + "!" : me.includes(pkg) ? pkg + "?" : pkg
+  ).sort();
+  const body = lines.join("\n");
+  _(`cat > ${OMMEGA_TARGET} << 'OMMEGA_TARGET_EOF'\n${body}\nOMMEGA_TARGET_EOF`).then(({errno: err}) => {
+    if (err === 0) {
+      y("prompt_saved_target");
+      qt();
+    } else {
+      y("prompt_save_error", false);
+    }
+  });
+};
+
+document.getElementById("deselect-unnecessary").onclick = async () => {
+  try {
+    const json = await (await fetch("more-exclude.json")).json();
+    const skip = new Set((json.data || []).flatMap(group => group.apps || []).map(app => app["package-name"]).filter(Boolean));
+    se.querySelectorAll(".card").forEach(card => {
+      const pkg = card.getAttribute("data-package");
+      if (!skip.has(pkg)) return;
+      const box = card.querySelector("md-checkbox");
+      if (!box) return;
+      box.checked = false;
+      card.classList.remove("selected");
+    });
+  } catch (err) {
+    Me("Failed to get unnecessary apps!");
+    console.error("Failed to get unnecessary apps:", err);
+  }
+};
+
+function ommegaTrustSh() {
+  return `${I || "/data/adb/modules/ommega"}/webui-trust.sh`;
+}
+
+async function ommegaTrust(...args) {
+  const cmd = args.map(a => `'${String(a).replace(/'/g, "")}'`).join(" ");
+  return _(`sh "${ommegaTrustSh()}" ${cmd}`);
+}
+
+function ommegaRebind(id, handler) {
+  const el = document.getElementById(id);
+  if (!el || !el.parentNode) return;
+  const neu = el.cloneNode(true);
+  el.parentNode.replaceChild(neu, el);
+  neu.addEventListener("click", handler);
+}
+
+const uninstallBtn = document.querySelector(".uninstall-container");
+if (uninstallBtn) {
+  uninstallBtn.style.display = "none";
+  uninstallBtn.onclick = null;
+}
+["update-dialog", "update-card"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.style.display = "none";
+});
+
+ommegaRebind("boot-hash-save-button", async () => {
+  const value = document.getElementById("boot-hash-input").value.trim();
+  const dialog = document.getElementById("boot-hash-dialog");
+  if (value !== "" && !/^[0-9a-f]{64}$/.test(value)) {
+    y("security_patch_invalid_all", false);
+    return;
+  }
+  const {errno} = await ommegaTrust("hash", value === "" ? "clear" : value);
+  if (errno === 0) {
+    y(value === "" ? "prompt_boot_hash_cleared" : "prompt_boot_hash_set");
+    dialog.close();
+  } else {
+    y("security_patch_save_failed", false);
+  }
+});
+
+ommegaRebind("boot-key-save-button", async () => {
+  const value = document.getElementById("boot-key-input").value.trim();
+  const dialog = document.getElementById("boot-key-dialog");
+  if (value !== "" && !/^[0-9a-f]{64}$/.test(value)) {
+    y("security_patch_invalid_all", false);
+    return;
+  }
+  const {errno} = await ommegaTrust("key", value === "" ? "clear" : value);
+  if (errno === 0) {
+    y(value === "" ? "prompt_boot_key_cleared" : "prompt_boot_key_set");
+    dialog.close();
+  } else {
+    y("security_patch_save_failed", false);
+  }
+});
+
+ommegaRebind("auto-config", async () => {
+  const {errno} = await ommegaTrust("patch", "auto");
+  We.value = "";
+  Ke.value = "";
+  je.value = "";
+  Ye.value = "";
+  Gr(false);
+  if (errno === 0) y("security_patch_auto_success");
+  else y("security_patch_auto_failed", false);
+  Le.close();
+  mr();
+});
+
+ommegaRebind("save-patch", async () => {
+  if (Nt.checked) {
+    const boot = formatDate(je);
+    const sys = Ke.value.trim();
+    const vendor = Ye.value.trim();
+    if (!boot && !sys && !vendor) {
+      await ommegaTrust("patch", "auto");
+      y("prompt_security_patch_saved_restart");
+      Le.close();
+      mr();
+      return;
+    }
+    if (sys && sys !== "prop" && !zl(sys)) {
+      y("security_patch_invalid_system", false);
+      return;
+    }
+    if (boot && !ui(boot)) {
+      y("security_patch_invalid_boot", false);
+      return;
+    }
+    if (vendor && !ui(vendor)) {
+      y("security_patch_invalid_vendor", false);
+      return;
+    }
+    const args = ["patch", "set"];
+    if (sys) args.push("system=" + sys);
+    if (boot) args.push("boot=" + boot);
+    if (vendor) args.push("vendor=" + vendor);
+    const {errno} = await ommegaTrust(...args);
+    if (errno !== 0) {
+      y("security_patch_save_failed", false);
+      return;
+    }
+    We.value = "";
+  } else {
+    const all = We.value.trim();
+    if (!all) {
+      await ommegaTrust("patch", "auto");
+      y("prompt_security_patch_saved_restart");
+      Le.close();
+      mr();
+      return;
+    }
+    if (!Bl(all)) {
+      y("security_patch_invalid_all", false);
+      return;
+    }
+    const date = `${all.slice(0, 4)}-${all.slice(4, 6)}-${all.slice(6, 8)}`;
+    const {errno} = await ommegaTrust("patch", "all", date);
+    if (errno !== 0) {
+      y("security_patch_save_failed", false);
+      return;
+    }
+    Ke.value = "";
+    je.value = "";
+    Ye.value = "";
+  }
+  y("prompt_security_patch_saved_restart");
+  Le.close();
+  mr();
+});
+
+ommegaRebind("set-patch-now", async () => {
+  y("prompt_setting_patch", true, 10000);
+  try {
+    const {errno: err, stdout: output} = await _(`curl --connect-timeout 10 -sL 'https://raw.githubusercontent.com/KOWX712/Tricky-Addon-Update-Target-List/main/.patch' 2>/dev/null || busybox wget -T 10 --no-check-certificate -qO- 'https://raw.githubusercontent.com/KOWX712/Tricky-Addon-Update-Target-List/main/.patch' 2>/dev/null`);
+    if (err !== 0 || !output.trim()) {
+      y("prompt_no_valid", false);
+      return;
+    }
+    const match = output.match(/^\d{8}/);
+    if (!match) {
+      y("prompt_no_valid", false);
+      return;
+    }
+    const date = `${match[0].slice(0, 4)}-${match[0].slice(4, 6)}-${match[0].slice(6, 8)}`;
+    const {errno} = await ommegaTrust("patch", "all", date);
+    if (errno === 0) y("prompt_patch_set");
+    else y("security_patch_save_failed", false);
+  } catch {
+    y("prompt_no_internet", false);
+  }
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  const path = `${I || "/data/adb/modules/ommega"}/module.prop`;
+  _(`grep '^version=' "${path}" | cut -d'=' -f2`).then(({stdout}) => {
+    const el = document.getElementById("module-version");
+    if (el && stdout.trim()) el.textContent = stdout.trim();
+  });
+});
+
 

@@ -41,6 +41,13 @@ relay_server.
 4. Replace the template `keybox.xml` if you want local-mode attestation with
    your own keys.
 
+WebUI overlay values (verified boot hash, verified boot key, security patch)
+are written to `/data/misc/keystore/ommega/webui-props.sh` and mirrored into
+`config.toml` `[trust]` (`vb_hash`, `vb_key`, `security_patch`,
+`vendor_patchlevel`, `boot_patchlevel`). `post-fs-data.sh` applies the
+properties at boot; keymint uses the same `[trust]` values in the attestation
+chain. Overlay-installing the module zip does not wipe them.
+
 > **Path note**: `/data/adb/` is root-only, so the keystore process (uid 1017)
 > cannot read `/data/adb/ommega/*` directly. `post-fs-data.sh` and the
 > `daemon-injector` sync `config` and `target.txt` to

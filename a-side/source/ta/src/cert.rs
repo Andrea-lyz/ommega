@@ -302,16 +302,36 @@ pub(crate) fn parse_remote_root_of_trust(
             return Ok(None);
         }
     };
-    let Some(rot_der) = att.hw_enforced.rot_info else {
+    let Some(rot_der) = att.hw_enforced.rot_info.as_ref() else {
         return Ok(None);
     };
-    let rot = match RootOfTrust::from_der(&rot_der) {
+    let rot = match RootOfTrust::from_der(rot_der) {
         Ok(rot) => rot,
         Err(e) => {
             log::warn!("remote root-of-trust unparsable, ignoring ROT: {e:?}");
             return Ok(None);
         }
     };
+    let mut os_version = None;
+    let mut os_patchlevel = None;
+    let mut vendor_patchlevel = None;
+    let mut boot_patchlevel = None;
+    // Hardware-enforced tags win; software-enforced fills any gaps.
+    for list in [&att.hw_enforced, &att.sw_enforced] {
+        for param in list.auths.as_ref() {
+            match param {
+                KeyParam::OsVersion(v) if os_version.is_none() => os_version = Some(*v),
+                KeyParam::OsPatchlevel(v) if os_patchlevel.is_none() => os_patchlevel = Some(*v),
+                KeyParam::VendorPatchlevel(v) if vendor_patchlevel.is_none() => {
+                    vendor_patchlevel = Some(*v)
+                }
+                KeyParam::BootPatchlevel(v) if boot_patchlevel.is_none() => {
+                    boot_patchlevel = Some(*v)
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(Some(RemoteRootOfTrust {
         verified_boot_key: rot.verified_boot_key.to_vec(),
         device_locked: rot.device_locked,
@@ -319,6 +339,10 @@ pub(crate) fn parse_remote_root_of_trust(
         verified_boot_hash: rot.verified_boot_hash.to_vec(),
         attestation_version: att.attestation_version,
         keymaster_version: att.keymint_version,
+        os_version,
+        os_patchlevel,
+        vendor_patchlevel,
+        boot_patchlevel,
     }))
 }
 

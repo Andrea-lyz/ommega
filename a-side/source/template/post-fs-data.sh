@@ -20,7 +20,10 @@ resetprop ro.boot.vbmeta.device_state locked
 resetprop ro.secure 1
 resetprop ro.adb.secure 1
 resetprop ro.debuggable 0
-resetprop sys.oem_unlock_allowed 0
+# Android 16+ Duck Detector treats any observed sys.oem_unlock_allowed as a
+# tell (dangerousValues="*"). Forcing 0 still leaves the property visible.
+# Delete it instead of publishing a "safe" value.
+resetprop --delete sys.oem_unlock_allowed 2>/dev/null || true
 mkdir -p "$TARGET_DIR"
 chmod 0770 "$TARGET_DIR"
 chown 1017:1017 "$TARGET_DIR"
@@ -68,4 +71,20 @@ fi
 if [ -f "$TARGET_INJECTOR_CONFIG" ]; then
   chmod 0600 "$TARGET_INJECTOR_CONFIG"
   chown 1017:1017 "$TARGET_INJECTOR_CONFIG"
+fi
+
+# WebUI overlay props (security patch, vbmeta digest, vbmeta public key).
+# Stored in the data dir so Magisk/KSU overlay installs do not wipe them.
+WEBUI_PROPS=$TARGET_DIR/webui-props.sh
+if [ -f "$WEBUI_PROPS" ]; then
+  chmod 0644 "$WEBUI_PROPS" 2>/dev/null || true
+  chown 1017:1017 "$WEBUI_PROPS" 2>/dev/null || true
+  . "$WEBUI_PROPS"
+fi
+
+# Mirror overlay props into config.toml [trust] so attestation tags match
+# the system properties the WebUI set. Skip when keymint has not created
+# the file yet (service.sh retries after the daemon starts).
+if [ -f "$MODDIR/webui-trust.sh" ] && [ -f "$TARGET_DIR/config.toml" ]; then
+  sh "$MODDIR/webui-trust.sh" sync
 fi

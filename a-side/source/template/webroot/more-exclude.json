@@ -1,0 +1,49 @@
+{
+  "description": "Unnecessary app list",
+  "data": [
+    {
+      "info": "Root manager",
+      "apps": [
+        { "name": "Magisk", "package-name": "com.topjohnwu.magisk" },
+        { "name": "Magisk Alpha", "package-name": "io.github.vvb2060.magisk" },
+        { "name": "Kitsune Mask", "package-name": "io.github.huskydg.magisk" },
+        { "name": "KernelSU", "package-name": "me.weishu.kernelsu" },
+        { "name": "KernelSU Next", "package-name": "com.rifsxd.ksunext" },
+        { "name": "SukiSU Ultra", "package-name": "com.sukisu.ultra" },
+        { "name": "Apatch", "package-name": "me.bmax.apatch" },
+        { "name": "Apatch Next", "package-name": "me.garfieldhan.apatch.next" }
+      ]
+    },
+    {
+      "info": "Root related app that won't detect bootloader",
+      "apps": [
+        { "name": "LSPosed Manager", "package-name": "org.lsposed.manager" },
+        { "name": "Termux", "package-name": "com.termux" },
+        { "name": "MT Manager", "package-name": "bin.mt.plus" },
+        { "name": "MT Manager clone", "package-name": "bin.mt.plus.canary" },
+        { "name": "KonaBess", "package-name": "xzr.konabess" },
+        { "name": "KSUWebUI", "package-name": "io.github.a13e300.ksuwebui" },
+        { "name": "Shizuku", "package-name": "moe.shizuku.privileged.api" },
+        { "name": "MMRL", "package-name": "com.dergoogler.mmrl" },
+        { "name": "WebUI X", "package-name": "com.dergoogler.mmrl.wx" }
+      ]
+    },
+    {
+      "info": "General app that won't detect bootloader",
+      "apps": [
+        { "name": "Swift Backup", "package-name": "org.swiftapps.swiftbackup" },
+        { "name": "Google Docs", "package-name": "com.google.android.apps.docs.editors.docs" },
+        { "name": "Google Sheets", "package-name": "com.google.android.apps.docs.editors.sheets" },
+        { "name": "Google Slides", "package-name": "com.google.android.apps.docs.editors.slides" },
+        { "name": "Keep Notes", "package-name": "com.google.android.keep" },
+        { "name": "Google Maps", "package-name": "com.google.android.apps.maps" },
+        { "name": "Google Earth", "package-name": "com.google.earth" },
+        { "name": "Google Translate", "package-name": "com.google.android.apps.translate" },
+        { "name": "Chrome", "package-name": "com.android.chrome" },
+        { "name": "YouTube", "package-name": "com.google.android.youtube" },
+        { "name": "YouTube Music", "package-name": "com.google.android.apps.youtube.music" },
+        { "name": "Speedtest", "package-name": "org.zwanoo.android.speedtest" }
+      ]
+    }
+  ]
+}

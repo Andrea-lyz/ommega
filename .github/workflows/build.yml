@@ -1,0 +1,166 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: nightly
+  ANDROID_PLATFORM: "26"
+
+jobs:
+  build:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          version=$(python3 .github/scripts/bump_version.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          git add \
+            a-side/source/Cargo.toml \
+            a-side/source/ommega-injector/Cargo.toml \
+            b-side/source/Cargo.toml \
+            server/source/Cargo.toml \
+            b-app/source/app/build.gradle.kts
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: bump version to ${version} [skip ci]"
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            libclang-dev \
+            llvm-dev \
+            musl-tools \
+            unzip
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-linux-android,x86_64-unknown-linux-musl
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            a-side/source
+            b-side/source
+            server/source
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r28c
+          link-to-sdk: false
+
+      - name: Configure Android cargo
+        run: |
+          ndk="${{ steps.ndk.outputs.ndk-path }}"
+          llvm="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
+          sysroot="$llvm/sysroot"
+          resource_dir="$(find "$llvm/lib/clang" -mindepth 1 -maxdepth 1 -type d | sort | tail -n1)"
+          if [ -z "$resource_dir" ]; then
+            echo "NDK clang resource dir not found under $llvm/lib/clang" >&2
+            exit 1
+          fi
+          bindgen="--target=aarch64-linux-android${ANDROID_PLATFORM} --sysroot=$sysroot -resource-dir=$resource_dir -isystem $resource_dir/include -isystem $sysroot/usr/include -isystem $sysroot/usr/include/aarch64-linux-android"
+          libclang_path="$(llvm-config --libdir 2>/dev/null || llvm-config-18 --libdir 2>/dev/null || true)"
+          if [ -z "$libclang_path" ]; then
+            libclang_path="$(dirname "$(find /usr/lib -name 'libclang.so*' 2>/dev/null | head -n1)")"
+          fi
+          {
+            echo "ANDROID_NDK_HOME=$ndk"
+            echo "ANDROID_NDK_ROOT=$ndk"
+            echo "ANDROID_NDK=$ndk"
+            echo "LIBCLANG_PATH=$libclang_path"
+            echo "BINDGEN_EXTRA_CLANG_ARGS=$bindgen"
+            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=$bindgen"
+          } >> "$GITHUB_ENV"
+          python3 a-side/source/scripts/setup_cargo_config.py --ndk-root "$ndk" --api-level "$ANDROID_PLATFORM" --force
+          python3 b-side/source/scripts/setup_cargo_config.py --ndk-root "$ndk" --api-level "$ANDROID_PLATFORM" --force
+
+      - name: Build A-side module
+        working-directory: a-side/source
+        run: |
+          unset CARGO_TARGET_DIR
+          python3 build.py --release --abi arm64-v8a
+
+      - name: Build B-side module
+        working-directory: b-side/source
+        run: |
+          unset CARGO_TARGET_DIR
+          python3 build.py --release --abi arm64-v8a
+
+      - name: Build server (linux musl)
+        working-directory: server/source
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          unset CARGO_TARGET_DIR
+          cargo build --release --target x86_64-unknown-linux-musl --bin relay_rs
+          mkdir -p dist
+          cp -a target/x86_64-unknown-linux-musl/release/relay_rs dist/relay_rs-linux-x86_64-musl
+          chmod +x dist/relay_rs-linux-x86_64-musl
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;35.0.0"
+
+      - name: Build B-app APK
+        working-directory: b-app/source
+        run: |
+          chmod +x gradlew
+          keytool -genkeypair -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          ./gradlew :app:assembleRelease --no-daemon
+          mkdir -p dist
+          cp -a app/build/outputs/apk/release/*.apk dist/
+
+      - name: Push version bump
+        run: git push origin "HEAD:${{ github.ref_name }}"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ommega-${{ steps.bump.outputs.version }}
+          if-no-files-found: error
+          path: |
+            a-side/source/target/ommega-a-release-arm64-v8a-*.zip
+            b-side/source/target/ommegaclient-b-release-arm64-v8a-*.zip
+            server/source/dist/relay_rs-linux-x86_64-musl
+            b-app/source/dist/*.apk
