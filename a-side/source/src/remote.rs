@@ -73,8 +73,6 @@ fn build_client(insecure: bool) -> Client {
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS))
         .timeout(Duration::from_millis(READ_TIMEOUT_MS))
-        .tcp_nodelay(true)
-        .pool_max_idle_per_host(8)
         .user_agent("ommegaclient-a/1.3");
 
     if insecure {

@@ -160,7 +160,10 @@ impl TaskStore {
     /// Record a device event (must be called while holding `inner`).
     fn record_event_locked(inner: &mut Inner, device_id: &str, weight: u64) {
         let now = Self::now_ms();
-        let q = inner.device_events.entry(device_id.to_string()).or_default();
+        let q = inner
+            .device_events
+            .entry(device_id.to_string())
+            .or_default();
         q.push_back((now, weight));
         while let Some((ts, _)) = q.front() {
             if now.saturating_sub(*ts) > 60_000 {
@@ -179,51 +182,72 @@ impl TaskStore {
         machine_id: &str,
         timeout: Duration,
     ) -> Option<Task> {
+        let assignment_timeout = self.assignment_timeout;
+        let pending_ttl = self.pending_ttl;
+        let completed_ttl = self.completed_ttl;
+        let completed_max = self.completed_max;
+        self.wait_until(timeout, |inner| {
+            inner.devices.insert(
+                device_id.to_string(),
+                DeviceEntry {
+                    device_id: device_id.to_string(),
+                    machine_id: machine_id.to_string(),
+                    last_seen_ms: Self::now_ms(),
+                    connected: true,
+                },
+            );
+            if !machine_id.is_empty() {
+                inner.active_machine.insert(
+                    device_id.to_string(),
+                    (machine_id.to_string(), Self::now_ms()),
+                );
+            }
+            Self::reclaim_locked(inner, assignment_timeout);
+            Self::expire_locked(inner, pending_ttl, completed_max, completed_ttl);
+            Self::dequeue_locked(inner, device_id).map(|task| {
+                Self::record_event_locked(inner, device_id, 1);
+                task
+            })
+        })
+        .await
+    }
+
+    /// Enable-then-check-then-await on `notify`. Timeout still runs `check`
+    /// once more so a completion that races the deadline is not dropped.
+    async fn wait_until<T>(
+        &self,
+        timeout: Duration,
+        mut check: impl FnMut(&mut Inner) -> Option<T>,
+    ) -> Option<T> {
         let deadline = Instant::now() + timeout;
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
-            // Register before the empty-queue check so create_task cannot land
-            // in the gap between "queue empty" and "await notified".
             notified.as_mut().enable();
             {
                 let mut inner = self.inner.lock().await;
-                // Register the device as connected.
-                inner.devices.insert(
-                    device_id.to_string(),
-                    DeviceEntry {
-                        device_id: device_id.to_string(),
-                        machine_id: machine_id.to_string(),
-                        last_seen_ms: Self::now_ms(),
-                        connected: true,
-                    },
-                );
-                if !machine_id.is_empty() {
-                    inner.active_machine.insert(
-                        device_id.to_string(),
-                        (machine_id.to_string(), Self::now_ms()),
-                    );
-                }
-                // Reclaim timed-out assignments first.
-                self.reclaim_locked(&mut inner);
-                // Expire stale pending tasks and prune old completed/failed.
-                self.expire_locked(&mut inner);
-
-                if let Some(task) = self.dequeue_locked(&mut inner, device_id) {
-                    Self::record_event_locked(&mut inner, device_id, 1);
-                    return Some(task);
+                if let Some(v) = check(&mut inner) {
+                    return Some(v);
                 }
             }
-
-            if !Self::await_notified(notified, deadline).await {
-                return None;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let mut inner = self.inner.lock().await;
+                return check(&mut inner);
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(remaining) => {
+                    let mut inner = self.inner.lock().await;
+                    return check(&mut inner);
+                }
             }
         }
     }
 
     /// Try to dequeue a task matching this device from the FIFO.
     /// O(1): checks per-device queue first, then the wildcard queue.
-    fn dequeue_locked(&self, inner: &mut Inner, device_id: &str) -> Option<Task> {
+    fn dequeue_locked(inner: &mut Inner, device_id: &str) -> Option<Task> {
         // 1) Try device-specific queue first.
         if let Some(q) = inner.pending_by_device.get_mut(device_id) {
             while let Some(candidate_id) = q.pop_front() {
@@ -255,10 +279,15 @@ impl TaskStore {
 
     /// Expire stale pending tasks and prune old completed/failed tasks.
     /// Must be called while holding `inner` lock.
-    fn expire_locked(&self, inner: &mut Inner) {
+    fn expire_locked(
+        inner: &mut Inner,
+        pending_ttl: Duration,
+        completed_max: usize,
+        completed_ttl: Duration,
+    ) {
         let now = Self::now_ms();
-        let pending_ttl_ms = self.pending_ttl.as_millis() as u64;
-        let completed_ttl_ms = self.completed_ttl.as_millis() as u64;
+        let pending_ttl_ms = pending_ttl.as_millis() as u64;
+        let completed_ttl_ms = completed_ttl.as_millis() as u64;
 
         // 1) Expire pending tasks older than pending_ttl → mark as Failed.
         let expired_pending: Vec<String> = inner
@@ -314,14 +343,14 @@ impl TaskStore {
         }
 
         // 4) Prune completed tasks by max count.
-        while inner.completed_queue.len() > self.completed_max {
+        while inner.completed_queue.len() > completed_max {
             if let Some((_, id)) = inner.completed_queue.pop_front() {
                 inner.tasks.remove(&id);
             }
         }
 
         // 5) Prune failed tasks by max count.
-        while inner.failed_queue.len() > self.completed_max {
+        while inner.failed_queue.len() > completed_max {
             if let Some((_, id)) = inner.failed_queue.pop_front() {
                 inner.tasks.remove(&id);
             }
@@ -329,14 +358,19 @@ impl TaskStore {
     }
 
     /// Reclaim tasks assigned to devices that never returned a result in time.
-    fn reclaim_locked(&self, inner: &mut Inner) {
+    /// Skip assignees that are still long-polling: their generateKey is in
+    /// flight, and putting the task back would let another worker dequeue the
+    /// same id.
+    fn reclaim_locked(inner: &mut Inner, assignment_timeout: Duration) {
         let now = Self::now_ms();
-        let timeout_ms = self.assignment_timeout.as_millis() as u64;
+        let timeout_ms = assignment_timeout.as_millis() as u64;
         let stale: Vec<String> = inner
             .tasks
             .iter()
             .filter(|(_, t)| {
-                t.status == TaskStatus::Assigned && now.saturating_sub(t.assigned_at_ms) > timeout_ms
+                t.status == TaskStatus::Assigned
+                    && now.saturating_sub(t.assigned_at_ms) > timeout_ms
+                    && !Self::assignee_still_connected(inner, t.assigned_device_id.as_deref(), now)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -358,6 +392,16 @@ impl TaskStore {
         }
     }
 
+    fn assignee_still_connected(inner: &Inner, device_id: Option<&str>, now: u64) -> bool {
+        let Some(id) = device_id else {
+            return false;
+        };
+        inner
+            .devices
+            .get(id)
+            .is_some_and(|d| now.saturating_sub(d.last_seen_ms) < 120_000)
+    }
+
     /// Complete a task with a result reported by the B-side.
     /// Returns Ok(()) if the task existed, Err(msg) otherwise.
     pub async fn complete_task(
@@ -373,7 +417,11 @@ impl TaskStore {
         let now = Self::now_ms();
         let is_err = result.get("error").is_some();
         task.result = Some(result);
-        task.status = if is_err { TaskStatus::Failed } else { TaskStatus::Completed };
+        task.status = if is_err {
+            TaskStatus::Failed
+        } else {
+            TaskStatus::Completed
+        };
         task.assigned_device_id = Some(device_id.to_string());
         task.completed_at_ms = now;
         // Track in the appropriate ordered queue for later TTL / capacity pruning.
@@ -384,51 +432,29 @@ impl TaskStore {
         }
         Self::record_event_locked(&mut inner, device_id, 1);
         // Prune completed/failed tasks to stay within capacity/TTL limits.
-        self.expire_locked(&mut inner);
+        Self::expire_locked(
+            &mut inner,
+            self.pending_ttl,
+            self.completed_max,
+            self.completed_ttl,
+        );
         drop(inner);
         self.notify.notify_waiters();
         Ok(())
     }
 
-    /// Wait for a task result, polling internally. Returns the result or None on timeout.
-    pub async fn wait_for_result(
-        &self,
-        task_id: &str,
-        timeout: Duration,
-    ) -> Option<Value> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            // Register before reading the task so `notify_waiters` cannot land
-            // in the gap between "not complete" and "await notified".
-            notified.as_mut().enable();
-            {
-                let inner = self.inner.lock().await;
-                if let Some(t) = inner.tasks.get(task_id) {
-                    if t.status == TaskStatus::Completed || t.status == TaskStatus::Failed {
-                        return t.result.clone();
-                    }
+    /// Wait until the task is completed or failed. Returns None on timeout.
+    pub async fn wait_for_result(&self, task_id: &str, timeout: Duration) -> Option<Value> {
+        self.wait_until(timeout, |inner| {
+            inner.tasks.get(task_id).and_then(|t| {
+                if t.status == TaskStatus::Completed || t.status == TaskStatus::Failed {
+                    t.result.clone()
+                } else {
+                    None
                 }
-            }
-            if !Self::await_notified(notified, deadline).await {
-                return None;
-            }
-        }
-    }
-
-    async fn await_notified(
-        notified: std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>,
-        deadline: Instant,
-    ) -> bool {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return false;
-        }
-        tokio::select! {
-            _ = notified => true,
-            _ = tokio::time::sleep(remaining) => false,
-        }
+            })
+        })
+        .await
     }
 
     pub async fn list_tasks(&self, limit: usize) -> Vec<Task> {
@@ -546,8 +572,7 @@ impl TaskStore {
                     .tasks
                     .values()
                     .filter(|t| {
-                        t.assigned_device_id.as_deref() == Some(id)
-                            || t.target_device_id == *id
+                        t.assigned_device_id.as_deref() == Some(id) || t.target_device_id == *id
                     })
                     .filter(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::Assigned))
                     .count();
@@ -558,10 +583,8 @@ impl TaskStore {
         candidates.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
 
         let min = (candidates[0].1, candidates[0].2);
-        let tied: Vec<&(String, u64, usize)> = candidates
-            .iter()
-            .filter(|c| (c.1, c.2) == min)
-            .collect();
+        let tied: Vec<&(String, u64, usize)> =
+            candidates.iter().filter(|c| (c.1, c.2) == min).collect();
         if tied.len() > 1 {
             let i = inner.load_balance_index % tied.len();
             inner.load_balance_index = inner.load_balance_index.wrapping_add(1);
@@ -580,21 +603,28 @@ mod tests {
         TaskStore::new(60, 60, 100, 60)
     }
 
+    fn assert_woke_fast(started: Instant) {
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "notify wake took {elapsed:?} (250ms fallback would still pass 400ms)"
+        );
+    }
+
     #[tokio::test]
     async fn pop_wakes_immediately_when_task_arrives() {
         let store = store();
         let waiter = store.clone();
         let started = Instant::now();
-        let join = tokio::spawn(async move { waiter.pop_for_b("dev", "m1", Duration::from_secs(2)).await });
+        let join =
+            tokio::spawn(
+                async move { waiter.pop_for_b("dev", "m1", Duration::from_secs(2)).await },
+            );
         tokio::time::sleep(Duration::from_millis(20)).await;
         let task_id = store.create_task("attest", json!({}), "dev").await;
         let task = join.await.expect("join").expect("task");
         assert_eq!(task.task_id, task_id);
-        assert!(
-            started.elapsed() < Duration::from_millis(400),
-            "long-poll wake took {:?}",
-            started.elapsed()
-        );
+        assert_woke_fast(started);
     }
 
     #[tokio::test]
@@ -604,7 +634,8 @@ mod tests {
         let waiter = store.clone();
         let id = task_id.clone();
         let started = Instant::now();
-        let join = tokio::spawn(async move { waiter.wait_for_result(&id, Duration::from_secs(2)).await });
+        let join =
+            tokio::spawn(async move { waiter.wait_for_result(&id, Duration::from_secs(2)).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         store
             .complete_task(&task_id, json!({"ok": true}), "dev")
@@ -612,10 +643,80 @@ mod tests {
             .expect("complete");
         let result = join.await.expect("join").expect("result");
         assert_eq!(result.get("ok"), Some(&json!(true)));
+        assert_woke_fast(started);
+    }
+
+    #[tokio::test]
+    async fn wait_for_result_sees_already_completed_task() {
+        let store = store();
+        let task_id = store.create_task("attest", json!({}), "dev").await;
+        store
+            .complete_task(&task_id, json!({"ok": true}), "dev")
+            .await
+            .expect("complete");
+        let result = store
+            .wait_for_result(&task_id, Duration::from_millis(50))
+            .await
+            .expect("result");
+        assert_eq!(result.get("ok"), Some(&json!(true)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_result_complete_before_waiter_is_registered() {
+        let store = store();
+        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let waiter = store.clone();
+        let id = task_id.clone();
+        let join =
+            tokio::spawn(async move { waiter.wait_for_result(&id, Duration::from_secs(2)).await });
+        store
+            .complete_task(&task_id, json!({"ok": true}), "dev")
+            .await
+            .expect("complete");
+        let result = join.await.expect("join").expect("result");
+        assert_eq!(result.get("ok"), Some(&json!(true)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_result_timeout_rechecks_completed_task() {
+        let store = store();
+        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let waiter = store.clone();
+        let id = task_id.clone();
+        let join =
+            tokio::spawn(
+                async move { waiter.wait_for_result(&id, Duration::from_millis(80)).await },
+            );
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        store
+            .complete_task(&task_id, json!({"ok": true}), "dev")
+            .await
+            .expect("complete");
+        let result = join.await.expect("join").expect("result");
+        assert_eq!(result.get("ok"), Some(&json!(true)));
+    }
+
+    #[tokio::test]
+    async fn live_assignee_is_not_reclaimed_for_a_second_pop() {
+        let store = TaskStore::new(0, 60, 100, 60);
+        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let taken = store
+            .pop_for_b("dev", "m1", Duration::from_millis(40))
+            .await
+            .expect("assigned");
+        assert_eq!(taken.task_id, task_id);
+        {
+            let mut inner = store.inner.lock().await;
+            if let Some(t) = inner.tasks.get_mut(&task_id) {
+                t.assigned_at_ms = 1;
+            }
+        }
+        let stolen = store
+            .pop_for_b("dev", "m1", Duration::from_millis(40))
+            .await;
         assert!(
-            started.elapsed() < Duration::from_millis(400),
-            "result wait took {:?}",
-            started.elapsed()
+            stolen.is_none(),
+            "live B poller must not reclaim its in-flight task"
         );
     }
 }

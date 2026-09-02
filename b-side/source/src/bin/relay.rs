@@ -42,7 +42,7 @@
 //! Both `http://` and `https://` are supported. The relay_server runs over
 //! HTTPS with a self-signed certificate, so any server certificate is accepted.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 use x509_cert::der::Decode as _;
@@ -60,7 +60,7 @@ use ommegaclient_b::keymaster::attest_proxy::{check_app_id_der, SYSTEM_KEYMINT_S
 use ommegaclient_b::keymaster::tee_ops::{self, KeyAlgorithm, KeySpec};
 
 const POLL_TIMEOUT_SEC: u32 = 20;
-const POLL_WORKERS: usize = 3;
+const TEE_WORKERS: usize = 3;
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
 const CONF_PATH: &str = "/data/adb/ommega/relay.conf";
@@ -286,8 +286,6 @@ fn build_http_client() -> Result<Client> {
         .danger_accept_invalid_certs(true)
         .connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS))
         .timeout(Duration::from_millis(READ_TIMEOUT_MS))
-        .tcp_nodelay(true)
-        .pool_max_idle_per_host(8)
         .build()
         .context("build reqwest client")
 }
@@ -791,28 +789,73 @@ fn spawn_config_watcher(shared: Arc<RwLock<RelayConfig>>, last_mtime: u64) {
     });
 }
 
-fn run_loop(shared: Arc<RwLock<RelayConfig>>) {
+struct TeeWork {
+    cfg: RelayConfig,
+    task_id: String,
+    task_type: String,
+    payload: Value,
+}
+
+fn spawn_tee_workers() -> mpsc::SyncSender<TeeWork> {
+    let (tx, rx) = mpsc::sync_channel::<TeeWork>(0);
+    let rx = Arc::new(Mutex::new(rx));
+    for i in 0..TEE_WORKERS {
+        let rx = rx.clone();
+        thread::Builder::new()
+            .name(format!("tee-{i}"))
+            .spawn(move || loop {
+                let work = {
+                    let guard = match rx.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    guard.recv()
+                };
+                match work {
+                    Ok(work) => {
+                        if let Err(e) =
+                            handle_task(&work.cfg, &work.task_id, &work.task_type, &work.payload)
+                        {
+                            log::error!("handle_task failed: {e:#}");
+                        }
+                    }
+                    Err(_) => return,
+                }
+            })
+            .unwrap_or_else(|e| panic!("spawn TEE worker {i}: {e}"));
+    }
+    tx
+}
+
+fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>) {
     loop {
-        // Read the latest live config (may be updated by the watcher).
         let cfg = match shared.read() {
             Ok(g) => g.clone(),
             Err(_) => {
                 log::error!("config lock poisoned");
-                std::thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_millis(1000));
                 continue;
             }
         };
         match poll_tasks(&cfg) {
             Ok(Some((task_id, task_type, payload))) => {
                 log::info!("poll received task {task_id} type={task_type}");
-                if let Err(e) = handle_task(&cfg, &task_id, &task_type, &payload) {
-                    log::error!("handle_task failed: {e:#}");
+                if tx
+                    .send(TeeWork {
+                        cfg,
+                        task_id,
+                        task_type,
+                        payload,
+                    })
+                    .is_err()
+                {
+                    return;
                 }
             }
             Ok(None) => { /* long poll timed out, loop again */ }
             Err(e) => {
                 log::warn!("poll failed: {e:#}; retrying");
-                std::thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_millis(1000));
             }
         }
     }
@@ -835,6 +878,7 @@ fn main() {
     // We drive the real hardware keymint (a binder HAL) directly, so a binder
     // process state must be up before we start serving tasks.
     let _ = rsbinder::ProcessState::init_default();
+    rsbinder::ProcessState::start_thread_pool();
     {
         let g = shared.read().map(|g| g.clone()).unwrap_or(RelayConfig {
             server: String::new(),
@@ -853,21 +897,9 @@ fn main() {
     // Reload persisted TEE sessions so aliases from before a relay restart stay
     // usable (key blobs are self-contained and still valid for begin/finish).
     ommegaclient_b::keymaster::tee_ops::load_all_sessions();
-    rsbinder::ProcessState::start_thread_pool();
-    // Several poll workers keep a long-poll open while another worker is in
+    // One poll thread (this one) keeps a long-poll open while TEE_WORKERS run
     // generateKey, so Duck's parallel attested generateKey calls do not queue
     // behind a single HTTP round-trip after each TEE op.
-    let mut joins = Vec::with_capacity(POLL_WORKERS);
-    for i in 0..POLL_WORKERS {
-        let shared = shared.clone();
-        joins.push(
-            thread::Builder::new()
-                .name(format!("poll-{i}"))
-                .spawn(move || run_loop(shared))
-                .unwrap_or_else(|e| panic!("spawn poll worker {i}: {e}")),
-        );
-    }
-    for join in joins {
-        let _ = join.join();
-    }
+    let tx = spawn_tee_workers();
+    run_poll_loop(shared, tx);
 }
