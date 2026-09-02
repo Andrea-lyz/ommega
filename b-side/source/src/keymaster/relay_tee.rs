@@ -17,7 +17,12 @@
 //! so this module can survive on its own if the software keystore modules are
 //! removed.
 
-use std::{cell::RefCell, collections::HashMap, sync::Arc, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use kmr_wire::keymint::KeyParam;
@@ -26,9 +31,9 @@ use rsbinder::{hub, DeathRecipient, FromIBinder, StatusCode, Strong, WIBinder};
 
 use crate::android::hardware::security::keymint::{
     Algorithm::Algorithm, EcCurve::EcCurve, HardwareAuthenticatorType::HardwareAuthenticatorType,
-    IKeyMintDevice::IKeyMintDevice, KeyOrigin::KeyOrigin, KeyParameter::KeyParameter as KmKeyParameter,
-    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, MlDsaVariant::MlDsaVariant as AidlMlDsaVariant,
-    Tag::Tag,
+    IKeyMintDevice::IKeyMintDevice, KeyOrigin::KeyOrigin,
+    KeyParameter::KeyParameter as KmKeyParameter, KeyParameterValue::KeyParameterValue,
+    KeyPurpose::KeyPurpose, MlDsaVariant::MlDsaVariant as AidlMlDsaVariant, Tag::Tag,
 };
 
 // ---------------------------------------------------------------------------
@@ -185,20 +190,44 @@ pub fn extract_km_error_code(status: &rsbinder::Status) -> Option<i32> {
 pub fn probe_keymint_version(keymint: &Strong<dyn IKeyMintDevice>) -> i32 {
     match keymint.getHardwareInfo() {
         Ok(info) => {
+            let normalized = normalize_keymint_version(info.versionNumber);
             log::info!(
-                "KeyMint HAL: versionNumber={} securityLevel={:?} name={}",
+                "KeyMint HAL: versionNumber={} normalized={} securityLevel={:?} name={}",
                 info.versionNumber,
+                normalized,
                 info.securityLevel,
                 info.keyMintName
             );
-            info.versionNumber
+            normalized
         }
         Err(status) => {
-            log::warn!(
-                "getHardwareInfo failed: {status:?}; falling back to KEY_MINT_V5"
-            );
+            log::warn!("getHardwareInfo failed: {status:?}; falling back to KEY_MINT_V5");
             KEY_MINT_V5
         }
+    }
+}
+
+pub fn normalize_keymint_version(version: i32) -> i32 {
+    match version {
+        1..=5 => version * 100,
+        100 | 200 | KEY_MINT_V3 | KEY_MINT_V4 | KEY_MINT_V5 => version,
+        _ => {
+            log::warn!("unknown KeyMint version {version}; using v5 parameter encoding");
+            KEY_MINT_V5
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_keymint_version;
+
+    #[test]
+    fn keymint_version_is_normalized_to_canonical_units() {
+        assert_eq!(normalize_keymint_version(1), 100);
+        assert_eq!(normalize_keymint_version(4), 400);
+        assert_eq!(normalize_keymint_version(400), 400);
+        assert_eq!(normalize_keymint_version(999), 500);
     }
 }
 
@@ -239,9 +268,7 @@ pub fn key_param_to_aidl(kp: KeyParam, km_dev_version: i32) -> Result<KmKeyParam
             KeyParameterValue::Integer(v as i32)
         }
         KP::MlDsaVariant(v) => KeyParameterValue::MlDsaVariant(AidlMlDsaVariant(v as i32)),
-        KP::RsaPublicExponent(kmr_wire::RsaExponent(v)) => {
-            KeyParameterValue::LongInteger(v as i64)
-        }
+        KP::RsaPublicExponent(kmr_wire::RsaExponent(v)) => KeyParameterValue::LongInteger(v as i64),
         KP::IncludeUniqueId => KeyParameterValue::BoolValue(true),
         KP::RsaOaepMgfDigest(v) => KeyParameterValue::Digest(
             crate::android::hardware::security::keymint::Digest::Digest(v as i32),

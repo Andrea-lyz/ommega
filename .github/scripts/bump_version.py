@@ -17,6 +17,7 @@ CARGO_FILES = (
 )
 
 APP_GRADLE = ROOT / "b-app" / "source" / "app" / "build.gradle.kts"
+SERVER_LOCK = ROOT / "server" / "source" / "Cargo.lock"
 VERSION_RE = re.compile(r'^version = "(\d+)\.(\d+)\.(\d+)"', re.MULTILINE)
 
 
@@ -52,6 +53,15 @@ def bump_app_gradle(new_version: str) -> None:
     APP_GRADLE.write_text(text, encoding="utf-8")
 
 
+def update_server_lock(new_version: str) -> None:
+    text = SERVER_LOCK.read_text(encoding="utf-8")
+    pattern = re.compile(r'(\[\[package\]\]\r?\nname = "relay_rs"\r?\nversion = ")[^"]+("\r?\n)')
+    updated, count = pattern.subn(rf"\g<1>{new_version}\g<2>", text, count=1)
+    if count != 1:
+        raise SystemExit(f"expected relay_rs package entry in {SERVER_LOCK}, found {count}")
+    SERVER_LOCK.write_text(updated, encoding="utf-8")
+
+
 def main() -> int:
     root_toml = CARGO_FILES[0].read_text(encoding="utf-8")
     match = VERSION_RE.search(root_toml)
@@ -61,6 +71,7 @@ def main() -> int:
     for path in CARGO_FILES:
         replace_first_version(path, new_version)
     bump_app_gradle(new_version)
+    update_server_lock(new_version)
     print(new_version)
     return 0
 

@@ -31,14 +31,16 @@
 //! connection pool bottleneck.  reqwest also natively supports chunked transfer
 //! encoding and HTTP keep-alive, both of which the hand-written client did not.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use reqwest::blocking::Client;
 use reqwest::Method;
 use serde_json::{json, Value};
+use x509_cert::der::Decode as _;
 
 use crate::config;
 
@@ -47,6 +49,17 @@ const READ_TIMEOUT_MS: u64 = 30_000;
 
 /// A relay-server client.  All configuration is read from `config().remote`.
 pub struct RemoteRelay;
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn new_request_id(kind: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{kind}-{:x}-{now:x}-{counter:x}", std::process::id())
+}
 
 // ── reqwest client management ──────────────────────────────────────────
 
@@ -159,8 +172,10 @@ impl RemoteRelay {
         Ok(r.device_id)
     }
 
-    /// POST a JSON body to a relay endpoint.  Returns `Ok(Some(json))` on 2xx
-    /// with a JSON body, `Ok(None)` if the remote is unreachable/non-2xx.
+    /// POST a JSON body to a relay endpoint. Returns `Ok(None)` only when both
+    /// transport attempts fail. HTTP/protocol errors are hard failures and must
+    /// not be confused with an unavailable relay, because doing so silently
+    /// changes the attestation backend.
     fn post_json(path: &str, body: &Value) -> Result<Option<Value>> {
         let url = format!("{}{}", Self::base_url()?, path);
         let body_str = serde_json::to_string(body)?;
@@ -177,16 +192,24 @@ impl RemoteRelay {
             Ok(v) => v,
             Err(first) => {
                 log::warn!("remote {path} transport error, retrying once: {first:#}");
-                http_request("POST", &url, &headers, Some(body_str.as_bytes()))
-                    .map_err(|second| anyhow!("{first:#}; retry also failed: {second:#}"))?
+                match http_request("POST", &url, &headers, Some(body_str.as_bytes())) {
+                    Ok(value) => value,
+                    Err(second) => {
+                        log::warn!("remote {path} unavailable after retry: {second:#}");
+                        return Ok(None);
+                    }
+                }
             }
         };
         if !(200..300).contains(&status) {
-            log::warn!("remote {path} HTTP {status}");
-            return Ok(None);
+            let message = String::from_utf8_lossy(&resp);
+            return Err(anyhow!(
+                "remote {path} HTTP {status}: {}",
+                message.chars().take(256).collect::<String>()
+            ));
         }
         if resp.is_empty() {
-            return Ok(None);
+            return Err(anyhow!("remote {path} returned an empty success response"));
         }
         // A 2xx response that is not JSON is a server/protocol error, not
         // "remote unavailable" — surface it loudly instead of silently falling
@@ -355,6 +378,7 @@ impl RemoteRelay {
         // The B-side reads `device_attest_context` (nested form) for the
         // appid and optional serial; the full key params are passed through.
         let body = json!({
+            "request_id": new_request_id("attest"),
             "challenge": base64_encode(challenge),
             "alias": alias,
             "device_id": Self::device_id()?,
@@ -383,6 +407,7 @@ impl RemoteRelay {
     /// Forward a sign request for a remote key.
     pub fn sign(alias: &str, data: &[u8], algorithm: &str) -> Result<Option<Value>> {
         let body = json!({
+            "request_id": new_request_id("sign"),
             "alias": alias,
             "data": base64_encode(data),
             "algorithm": algorithm,
@@ -394,6 +419,7 @@ impl RemoteRelay {
     /// Forward a decrypt request for a remote key.
     pub fn decrypt(alias: &str, data: &[u8], algorithm: &str) -> Result<Option<Value>> {
         let body = json!({
+            "request_id": new_request_id("decrypt"),
             "alias": alias,
             "data": base64_encode(data),
             "algorithm": algorithm,
@@ -445,33 +471,53 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         cert_serial: Option<&[u8]>,
         params: &kmr_ta::device::RemoteAttestParams,
     ) -> Result<Option<Vec<Vec<u8>>>, kmr_common::Error> {
-        // Transport-level failure (connect timeout / network unreachable / TLS
-        // handshake) means the relay is unavailable — report `Ok(None)` so the
-        // TA falls back to the local software keybox (matching client-a, which
-        // treats an unreachable remote as "do it locally").
-        let resp = match RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial) {
-            Ok(resp) => resp,
-            Err(e) => {
-                log::warn!("remote relay unavailable, falling back to local: {e:#}");
-                return Ok(None);
-            }
-        };
+        let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial).map_err(
+            |e| kmr_common::km_err!(UnknownError, "remote attest protocol error: {e:#}"),
+        )?;
         let Some(resp) = resp else {
+            log::warn!("remote relay unavailable after transport retry");
             return Ok(None);
         };
         // The relay wraps the result as `{ result: { cert_chain: [...] } }`.
         let result = resp.get("result").cloned().unwrap_or(resp);
-        let chain = match result.get("cert_chain") {
-            Some(Value::Array(certs)) => certs
-                .iter()
-                .filter_map(|c| c.as_str())
-                .filter_map(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-                .collect::<Vec<Vec<u8>>>(),
-            _ => Vec::new(),
-        };
-        if chain.is_empty() {
-            log::warn!("remote attest returned empty cert chain");
-            return Ok(None);
+        if let Some(error) = result.get("error").and_then(Value::as_str) {
+            return Err(kmr_common::km_err!(
+                UnknownError,
+                "remote attest failed: {error}"
+            ));
+        }
+        let certs = result
+            .get("cert_chain")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                kmr_common::km_err!(UnknownError, "remote attest response missing cert_chain")
+            })?;
+        if certs.is_empty() {
+            return Err(kmr_common::km_err!(
+                UnknownError,
+                "remote attest returned empty cert chain"
+            ));
+        }
+        let mut chain = Vec::with_capacity(certs.len());
+        for (index, cert) in certs.iter().enumerate() {
+            let encoded = cert.as_str().ok_or_else(|| {
+                kmr_common::km_err!(UnknownError, "remote cert_chain[{index}] is not a string")
+            })?;
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|e| {
+                    kmr_common::km_err!(
+                        UnknownError,
+                        "remote cert_chain[{index}] has invalid base64: {e}"
+                    )
+                })?;
+            x509_cert::Certificate::from_der(&der).map_err(|e| {
+                kmr_common::km_err!(
+                    UnknownError,
+                    "remote cert_chain[{index}] is not a DER certificate: {e:?}"
+                )
+            })?;
+            chain.push(der);
         }
         Ok(Some(chain))
     }

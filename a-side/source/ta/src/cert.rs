@@ -346,6 +346,59 @@ pub(crate) fn parse_remote_root_of_trust(
     }))
 }
 
+pub(crate) fn validate_remote_attestation(
+    cert_der: &[u8],
+    expected_challenge: &[u8],
+    expected_app_id: &[u8],
+    expected_security_level: keymint::SecurityLevel,
+) -> Result<(), Error> {
+    let cert = <x509_cert::Certificate as Decode>::from_der(cert_der)
+        .map_err(|e| km_err!(UnknownError, "parse remote attestation certificate: {e:?}"))?;
+    let extensions = cert
+        .tbs_certificate()
+        .extensions()
+        .ok_or_else(|| km_err!(UnknownError, "remote certificate has no extensions"))?;
+    let extension = extensions
+        .iter()
+        .find(|extension| extension.extn_id == X509_ATTESTATION_EXTENSION_OID)
+        .ok_or_else(|| km_err!(UnknownError, "remote certificate has no attestation extension"))?;
+    let attestation = AttestationExtension::from_der(extension.extn_value.as_bytes())
+        .map_err(|e| km_err!(UnknownError, "parse remote attestation extension: {e:?}"))?;
+
+    if attestation.attestation_challenge != expected_challenge {
+        return Err(km_err!(
+            VerificationFailed,
+            "remote attestation challenge mismatch"
+        ));
+    }
+    let app_id = attestation
+        .sw_enforced
+        .app_id
+        .as_deref()
+        .or(attestation.hw_enforced.app_id.as_deref());
+    if app_id != Some(expected_app_id) {
+        return Err(km_err!(
+            VerificationFailed,
+            "remote attestation application id mismatch"
+        ));
+    }
+    let expected = SecurityLevel::try_from(expected_security_level as u32).map_err(|_| {
+        km_err!(
+            InvalidArgument,
+            "invalid expected remote security level {expected_security_level:?}"
+        )
+    })?;
+    if attestation.attestation_security_level != expected
+        || attestation.keymint_security_level != expected
+    {
+        return Err(km_err!(
+            VerificationFailed,
+            "remote attestation security level mismatch"
+        ));
+    }
+    Ok(())
+}
+
 fn x509_oid(oid: ObjectIdentifier) -> Result<X509ObjectIdentifier, Error> {
     X509ObjectIdentifier::from_bytes(oid.as_bytes())
         .map_err(|_| Error::from(CommonErrorKind::Der(ErrorKind::OidMalformed)))

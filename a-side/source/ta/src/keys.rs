@@ -646,6 +646,12 @@ impl crate::KeyMintTa {
         let leaf_der = &chain[0];
         let leaf = x509_cert::Certificate::from_der(leaf_der)
             .map_err(|e| km_err!(UnknownError, "parse remote leaf cert: {e:?}"))?;
+        crate::cert::validate_remote_attestation(
+            leaf_der,
+            challenge,
+            app_id,
+            self.hw_info.security_level,
+        )?;
         let public_key = leaf
             .tbs_certificate()
             .subject_public_key_info()

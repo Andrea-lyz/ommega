@@ -1061,6 +1061,7 @@ mod bench {
     }
 
     #[test]
+    #[ignore = "manual performance benchmark"]
     fn bench_sign_verify() {
         println!("\n===== 签名/验签延迟基准测试 ({} 次迭代) =====\n", ITERATIONS);
 

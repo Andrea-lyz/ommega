@@ -654,6 +654,12 @@ fn load_clienta_remote_override() -> Option<RemoteConfig> {
             .as_deref(),
         Some("1" | "true" | "yes" | "on")
     );
+    let fallback_local = matches!(
+        get(&["local_hw", "fallback_local"])
+            .map(|v| v.to_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    );
 
     Some(RemoteConfig {
         enabled: prefer_remote,
@@ -661,9 +667,7 @@ fn load_clienta_remote_override() -> Option<RemoteConfig> {
         token,
         device_id,
         tls_insecure,
-        // Legacy client-a always fell back to local processing when the remote
-        // was unreachable; keep that behaviour.
-        fallback_local: true,
+        fallback_local,
         debug_logging,
     })
 }
@@ -733,7 +737,7 @@ impl Default for RemoteConfig {
             // WebUI default and this fallback both accept any server cert;
             // operators who pin a proper CA set `tls_insecure = false`.
             tls_insecure: true,
-            fallback_local: true,
+            fallback_local: false,
             debug_logging: false,
         }
     }

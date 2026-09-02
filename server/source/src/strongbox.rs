@@ -6,9 +6,8 @@
 //! behaviour. The downgraded chain is tagged TRUSTED_ENVIRONMENT by the B side,
 //! so this is an honest degradation, never a mislabelled StrongBox.
 //!
-//! When disabled (default), StrongBox errors propagate to the next fulfilment
-//! layer exactly as before (strict native semantics: server three-layer
-//! fallback → A-side local keybox).
+//! When disabled (default), StrongBox errors are returned to the A-side. The
+//! server never substitutes a keybox or self-signed identity in physical mode.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

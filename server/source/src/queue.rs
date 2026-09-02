@@ -22,6 +22,7 @@ pub enum TaskStatus {
 pub struct Task {
     pub task_id: String,
     pub task_type: String,
+    pub request_id: Option<String>,
     pub payload: Value,
     pub target_device_id: String,
     pub assigned_device_id: Option<String>,
@@ -62,6 +63,8 @@ pub struct TaskCounts {
 #[derive(Default)]
 struct Inner {
     tasks: HashMap<String, Task>,
+    /// A-side idempotency key (`task_type:request_id`) -> task id.
+    request_index: HashMap<String, String>,
     /// Per-device pending queues: device_id -> FIFO of task_ids targeting it.
     pending_by_device: HashMap<String, VecDeque<String>>,
     /// Pending tasks with no target device (any device can claim them).
@@ -75,9 +78,6 @@ struct Inner {
     active_machine: HashMap<String, (String, u64)>,
     /// per-device recent activity for load estimation: (timestamp_ms, weight).
     device_events: HashMap<String, VecDeque<(u64, u64)>>,
-    /// Rotating index used to break load ties round-robin so the balancer
-    /// doesn't always pick the same (first) device when several are idle.
-    load_balance_index: usize,
 }
 
 pub struct TaskStore {
@@ -123,15 +123,32 @@ impl TaskStore {
         task_type: &str,
         payload: Value,
         target_device_id: &str,
+        request_id: Option<&str>,
     ) -> String {
-        let task_id = uuid::Uuid::new_v4().to_string();
         let now = Self::now_ms();
         let mut inner = self.inner.lock().await;
+        let request_id = request_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let request_key = request_id
+            .as_ref()
+            .map(|value| format!("{task_type}:{target_device_id}:{value}"));
+        if let Some(key) = request_key.as_ref() {
+            if let Some(existing) = inner.request_index.get(key).cloned() {
+                if inner.tasks.contains_key(&existing) {
+                    return existing;
+                }
+                inner.request_index.remove(key);
+            }
+        }
+        let task_id = uuid::Uuid::new_v4().to_string();
         inner.tasks.insert(
             task_id.clone(),
             Task {
                 task_id: task_id.clone(),
                 task_type: task_type.to_string(),
+                request_id,
                 payload,
                 target_device_id: target_device_id.to_string(),
                 assigned_device_id: None,
@@ -142,6 +159,9 @@ impl TaskStore {
                 status: TaskStatus::Pending,
             },
         );
+        if let Some(key) = request_key {
+            inner.request_index.insert(key, task_id.clone());
+        }
         // Enqueue into the per-device bucket or the wildcard queue.
         if target_device_id.is_empty() {
             inner.pending_any.push_back(task_id.clone());
@@ -155,6 +175,17 @@ impl TaskStore {
         drop(inner);
         self.notify.notify_waiters();
         task_id
+    }
+
+    fn remove_task_locked(inner: &mut Inner, task_id: &str) -> Option<Task> {
+        let task = inner.tasks.remove(task_id)?;
+        if let Some(request_id) = task.request_id.as_ref() {
+            inner.request_index.remove(&format!(
+                "{}:{}:{request_id}",
+                task.task_type, task.target_device_id
+            ));
+        }
+        Some(task)
     }
 
     /// Record a device event (must be called while holding `inner`).
@@ -324,7 +355,7 @@ impl TaskStore {
         while let Some(&(ts, _)) = inner.completed_queue.front() {
             if now.saturating_sub(ts) > completed_ttl_ms {
                 if let Some((_, id)) = inner.completed_queue.pop_front() {
-                    inner.tasks.remove(&id);
+                    Self::remove_task_locked(inner, &id);
                 }
             } else {
                 break;
@@ -335,7 +366,7 @@ impl TaskStore {
         while let Some(&(ts, _)) = inner.failed_queue.front() {
             if now.saturating_sub(ts) > completed_ttl_ms {
                 if let Some((_, id)) = inner.failed_queue.pop_front() {
-                    inner.tasks.remove(&id);
+                    Self::remove_task_locked(inner, &id);
                 }
             } else {
                 break;
@@ -345,14 +376,14 @@ impl TaskStore {
         // 4) Prune completed tasks by max count.
         while inner.completed_queue.len() > completed_max {
             if let Some((_, id)) = inner.completed_queue.pop_front() {
-                inner.tasks.remove(&id);
+                Self::remove_task_locked(inner, &id);
             }
         }
 
         // 5) Prune failed tasks by max count.
         while inner.failed_queue.len() > completed_max {
             if let Some((_, id)) = inner.failed_queue.pop_front() {
-                inner.tasks.remove(&id);
+                Self::remove_task_locked(inner, &id);
             }
         }
     }
@@ -414,6 +445,15 @@ impl TaskStore {
         let Some(task) = inner.tasks.get_mut(task_id) else {
             return Err("task not found".to_string());
         };
+        if task.status != TaskStatus::Assigned {
+            return Err(format!(
+                "task is not assigned (status={})",
+                task.status_str()
+            ));
+        }
+        if device_id.is_empty() || task.assigned_device_id.as_deref() != Some(device_id) {
+            return Err("task result came from the wrong device".to_string());
+        }
         let now = Self::now_ms();
         let is_err = result.get("error").is_some();
         task.result = Some(result);
@@ -422,7 +462,6 @@ impl TaskStore {
         } else {
             TaskStatus::Completed
         };
-        task.assigned_device_id = Some(device_id.to_string());
         task.completed_at_ms = now;
         // Track in the appropriate ordered queue for later TTL / capacity pruning.
         if is_err {
@@ -481,7 +520,7 @@ impl TaskStore {
 
     pub async fn cancel_task(&self, task_id: &str) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
-        if inner.tasks.remove(task_id).is_some() {
+        if Self::remove_task_locked(&mut inner, task_id).is_some() {
             // Remove from all pending queues.
             for queue in inner.pending_by_device.values_mut() {
                 queue.retain(|id| id != task_id);
@@ -517,6 +556,15 @@ impl TaskStore {
             .collect()
     }
 
+    pub async fn is_device_online(&self, device_id: &str) -> bool {
+        let inner = self.inner.lock().await;
+        let now = Self::now_ms();
+        inner
+            .devices
+            .get(device_id)
+            .is_some_and(|device| now.saturating_sub(device.last_seen_ms) < 120_000)
+    }
+
     pub async fn get_device_load(&self, device_id: &str) -> u64 {
         let inner = self.inner.lock().await;
         inner
@@ -524,73 +572,6 @@ impl TaskStore {
             .get(device_id)
             .map(|q| q.iter().map(|(_, w)| *w).sum())
             .unwrap_or(0)
-    }
-
-    /// Resolve the target device_id for a new task, with load-balancing
-    /// fallback when the requested device is not online.
-    ///
-    /// - If `requested_did` is non-empty and online → return it directly.
-    /// - If `requested_did` is not online but other devices are → return the
-    ///   device with the fewest active (pending/assigned) tasks.
-    /// - If no devices are online → return `requested_did` unchanged.
-    ///
-    /// Mirrors `relay_server/apps/relay_core/store.py::resolve_online_target`.
-    pub async fn resolve_online_target(&self, requested_did: &str) -> String {
-        let mut inner = self.inner.lock().await;
-        let now = Self::now_ms();
-
-        // Collect online device IDs (seen within the last 120 s).
-        let online_ids: Vec<String> = inner
-            .devices
-            .values()
-            .filter(|d| now.saturating_sub(d.last_seen_ms) < 120_000)
-            .map(|d| d.device_id.clone())
-            .collect();
-
-        if online_ids.is_empty() {
-            return requested_did.to_string();
-        }
-
-        if !requested_did.is_empty() && online_ids.iter().any(|id| id == requested_did) {
-            return requested_did.to_string();
-        }
-
-        // Load-balance: primary load = recent task activity within the last
-        // 60 s (`device_events`), the SAME metric the admin UI displays via
-        // `get_device_load`. Secondary = currently active (pending/assigned)
-        // tasks targeting or claimed by the device. Exact ties are broken
-        // round-robin so one device isn't always picked when several are idle.
-        let mut candidates: Vec<(String, u64, usize)> = online_ids
-            .iter()
-            .map(|id| {
-                let events: u64 = inner
-                    .device_events
-                    .get(id)
-                    .map(|q| q.iter().map(|(_, w)| *w).sum())
-                    .unwrap_or(0);
-                let active = inner
-                    .tasks
-                    .values()
-                    .filter(|t| {
-                        t.assigned_device_id.as_deref() == Some(id) || t.target_device_id == *id
-                    })
-                    .filter(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::Assigned))
-                    .count();
-                (id.clone(), events, active)
-            })
-            .collect();
-
-        candidates.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
-
-        let min = (candidates[0].1, candidates[0].2);
-        let tied: Vec<&(String, u64, usize)> =
-            candidates.iter().filter(|c| (c.1, c.2) == min).collect();
-        if tied.len() > 1 {
-            let i = inner.load_balance_index % tied.len();
-            inner.load_balance_index = inner.load_balance_index.wrapping_add(1);
-            return tied[i].0.clone();
-        }
-        candidates[0].0.clone()
     }
 }
 
@@ -611,6 +592,15 @@ mod tests {
         );
     }
 
+    async fn create_assigned(store: &Arc<TaskStore>) -> String {
+        let task_id = store.create_task("attest", json!({}), "dev", None).await;
+        store
+            .pop_for_b("dev", "m1", Duration::from_millis(1))
+            .await
+            .expect("assign task");
+        task_id
+    }
+
     #[tokio::test]
     async fn pop_wakes_immediately_when_task_arrives() {
         let store = store();
@@ -621,7 +611,7 @@ mod tests {
                 async move { waiter.pop_for_b("dev", "m1", Duration::from_secs(2)).await },
             );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let task_id = store.create_task("attest", json!({}), "dev", None).await;
         let task = join.await.expect("join").expect("task");
         assert_eq!(task.task_id, task_id);
         assert_woke_fast(started);
@@ -630,7 +620,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_result_wakes_immediately_on_complete() {
         let store = store();
-        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let task_id = create_assigned(&store).await;
         let waiter = store.clone();
         let id = task_id.clone();
         let started = Instant::now();
@@ -649,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_result_sees_already_completed_task() {
         let store = store();
-        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let task_id = create_assigned(&store).await;
         store
             .complete_task(&task_id, json!({"ok": true}), "dev")
             .await
@@ -664,7 +654,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_result_complete_before_waiter_is_registered() {
         let store = store();
-        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let task_id = create_assigned(&store).await;
         let waiter = store.clone();
         let id = task_id.clone();
         let join =
@@ -680,7 +670,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_result_timeout_rechecks_completed_task() {
         let store = store();
-        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let task_id = create_assigned(&store).await;
         let waiter = store.clone();
         let id = task_id.clone();
         let join =
@@ -699,7 +689,7 @@ mod tests {
     #[tokio::test]
     async fn live_assignee_is_not_reclaimed_for_a_second_pop() {
         let store = TaskStore::new(0, 60, 100, 60);
-        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let task_id = store.create_task("attest", json!({}), "dev", None).await;
         let taken = store
             .pop_for_b("dev", "m1", Duration::from_millis(40))
             .await
@@ -718,5 +708,43 @@ mod tests {
             stolen.is_none(),
             "live B poller must not reclaim its in-flight task"
         );
+    }
+
+    #[tokio::test]
+    async fn request_id_reuses_the_existing_task() {
+        let store = store();
+        let first = store
+            .create_task("attest", json!({"n": 1}), "dev", Some("request-1"))
+            .await;
+        let second = store
+            .create_task("attest", json!({"n": 1}), "dev", Some("request-1"))
+            .await;
+        assert_eq!(first, second);
+        assert_eq!(store.counts().await.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn result_must_match_the_active_assignment() {
+        let store = store();
+        let task_id = store
+            .create_task("attest", json!({}), "dev", Some("request-2"))
+            .await;
+        store
+            .pop_for_b("dev", "machine", Duration::from_millis(1))
+            .await
+            .expect("assign task");
+
+        assert!(store
+            .complete_task(&task_id, json!({"ok": true}), "other")
+            .await
+            .is_err());
+        store
+            .complete_task(&task_id, json!({"ok": true}), "dev")
+            .await
+            .expect("correct device completes");
+        assert!(store
+            .complete_task(&task_id, json!({"ok": true}), "dev")
+            .await
+            .is_err());
     }
 }

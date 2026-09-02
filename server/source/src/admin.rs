@@ -936,8 +936,7 @@ pub struct StrongboxToggleBody {
 ///
 /// Enabled: a B-side StrongBox capability error (not supported / no provisioned
 /// attestation keys) is transparently retried as a TEE request on the same B
-/// device — the Android-standard silent fallback. Disabled: strict native
-/// semantics, StrongBox errors propagate to the next fulfilment layer.
+/// device. Disabled: strict semantics, StrongBox errors are returned to A.
 pub async fn admin_strongbox_toggle(
     State(state): State<AppState>,
     headers: HeaderMap,

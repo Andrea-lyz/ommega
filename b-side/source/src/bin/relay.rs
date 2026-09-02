@@ -42,6 +42,10 @@
 //! Both `http://` and `https://` are supported. The relay_server runs over
 //! HTTPS with a self-signed certificate, so any server certificate is accepted.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
@@ -64,9 +68,32 @@ const TEE_WORKERS: usize = 3;
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
 const CONF_PATH: &str = "/data/adb/ommega/relay.conf";
+const STATE_DIR: &str = "/data/adb/ommega";
+const INSTANCE_LOCK_PATH: &str = "/data/adb/ommega/relay.lock";
 const RESTART_MARKER: &str = "/data/adb/ommega/restart.all";
 const RELOAD_POLL_MS: u64 = 1000;
 const MODULE_PROP: &str = "/data/adb/modules/ommegaclient_b/module.prop";
+
+fn acquire_instance_lock() -> Result<File> {
+    std::fs::create_dir_all(STATE_DIR).context("create relay state directory")?;
+    std::fs::set_permissions(STATE_DIR, std::fs::Permissions::from_mode(0o700))
+        .context("chmod relay state directory")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(INSTANCE_LOCK_PATH)
+        .context("open relay instance lock")?;
+    std::fs::set_permissions(INSTANCE_LOCK_PATH, std::fs::Permissions::from_mode(0o600))
+        .context("chmod relay instance lock")?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("another relay instance is running");
+    }
+    file.set_len(0).context("truncate relay instance lock")?;
+    writeln!(file, "{}", std::process::id()).context("write relay instance pid")?;
+    Ok(file)
+}
 
 /// Keep the KernelSU/Magisk module status (module.prop description) in sync
 /// with the relay's real state. Best effort: failures are silently ignored
@@ -131,8 +158,7 @@ fn file_mtime(path: &str) -> Option<u64> {
 
 /// Load config from `/data/adb/ommega/relay.conf` (KEY=VALUE lines).
 fn load_config_from_file() -> Result<RelayConfig> {
-    let raw = std::fs::read_to_string(CONF_PATH)
-        .with_context(|| format!("read {CONF_PATH}"))?;
+    let raw = std::fs::read_to_string(CONF_PATH).with_context(|| format!("read {CONF_PATH}"))?;
     let mut m: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
     for line in raw.lines() {
         let line = line.trim();
@@ -159,7 +185,10 @@ fn load_config_from_file() -> Result<RelayConfig> {
         .get("OMMEGA_RELAY_TOKEN")
         .cloned()
         .context("OMMEGA_RELAY_TOKEN missing in relay.conf")?;
-    let machine_id = m.get("OMMEGA_RELAY_MACHINE_ID").cloned().unwrap_or_default();
+    let machine_id = m
+        .get("OMMEGA_RELAY_MACHINE_ID")
+        .cloned()
+        .unwrap_or_default();
     let server = server.trim_end_matches('/').to_string();
     Ok(RelayConfig {
         server,
@@ -299,7 +328,9 @@ fn get_http_client() -> Result<Arc<Client>> {
         }
     }
     // Slow path: write lock, build if still absent.
-    let mut guard = HTTP_CLIENT.write().map_err(|_| anyhow!("HTTP client lock poisoned"))?;
+    let mut guard = HTTP_CLIENT
+        .write()
+        .map_err(|_| anyhow!("HTTP client lock poisoned"))?;
     if let Some(client) = guard.as_ref() {
         return Ok(client.clone());
     }
@@ -350,7 +381,7 @@ fn http_request(
         .bytes()
         .with_context(|| format!("http {method} {url} read body failed"))?;
     let read_ms = t0.elapsed().as_millis();
-    log::info!(
+    log::debug!(
         "http {} {} -> status={} {} bytes in {}ms, body_head: {:?}",
         method,
         url,
@@ -371,18 +402,14 @@ fn poll_tasks(cfg: &RelayConfig) -> Result<Option<(String, String, Value)>> {
         "{}/api/b/poll/?device_id={}&machine_id={}&timeout={}",
         cfg.server, cfg.device_id, cfg.machine_id, POLL_TIMEOUT_SEC
     );
-    let headers = vec![(
-        "X-Relay-Token".to_string(),
-        cfg.token.clone(),
-    )];
-    let (status, body) = http_request("GET", &url, &headers, None)
-        .with_context(|| "b/poll failed")?;
-    log::info!("b/poll status={status} body_len={}", body.len());
+    let headers = vec![("X-Relay-Token".to_string(), cfg.token.clone())];
+    let (status, body) =
+        http_request("GET", &url, &headers, None).with_context(|| "b/poll failed")?;
+    log::debug!("b/poll status={status} body_len={}", body.len());
     match status {
         204 => Ok(None),
         200 => {
-            let v: Value =
-                serde_json::from_slice(&body).with_context(|| "b/poll bad json")?;
+            let v: Value = serde_json::from_slice(&body).with_context(|| "b/poll bad json")?;
             let task_id = v
                 .get("task_id")
                 .and_then(Value::as_str)
@@ -476,8 +503,7 @@ fn extract_attestation_context(payload: &Value) -> Result<AttestationContext> {
         .get("challenge")
         .ok_or_else(|| anyhow!("payload missing challenge"))?;
 
-    let app_id_der = b64_decode(app_id)
-        .with_context(|| "decode attestation_application_id")?;
+    let app_id_der = b64_decode(app_id).with_context(|| "decode attestation_application_id")?;
     let challenge = b64_decode(challenge).with_context(|| "decode challenge")?;
     Ok((app_id_der, challenge))
 }
@@ -488,12 +514,16 @@ fn extract_attestation_context(payload: &Value) -> Result<AttestationContext> {
 /// SHA-256, etc.).
 fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
     let nested = payload.get("device_attest_context");
-    let get = |k: &str| -> Option<&Value> {
-        payload.get(k).or_else(|| nested.and_then(|n| n.get(k)))
-    };
+    let get =
+        |k: &str| -> Option<&Value> { payload.get(k).or_else(|| nested.and_then(|n| n.get(k))) };
     let get_i64 = |k: &str| get(k).and_then(Value::as_i64);
     let get_arr = |k: &str| -> Vec<&Value> {
-        get(k).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]).iter().collect()
+        get(k)
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .collect()
     };
 
     // Algorithm family: prefer the explicit KeyMint `key_algorithm` int (raw
@@ -510,7 +540,10 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
     };
 
     let collect_enum = |vals: Vec<&Value>| -> Vec<i32> {
-        vals.iter().filter_map(|v| v.as_i64()).map(|n| n as i32).collect()
+        vals.iter()
+            .filter_map(|v| v.as_i64())
+            .map(|n| n as i32)
+            .collect()
     };
 
     Ok(KeySpec {
@@ -574,7 +607,11 @@ fn log_cert_chain(tag: &str, chain: &[Vec<u8>]) {
             None => lines.push(format!("#{i} {}B (unparsable)", der.len())),
         }
     }
-    log::info!("cert_chain[{tag}]: {} certs :: {}", chain.len(), lines.join(" | "));
+    log::debug!(
+        "cert_chain[{tag}]: {} certs :: {}",
+        chain.len(),
+        lines.join(" | ")
+    );
 }
 
 /// Picks a signing key algorithm from the payload (defaults to EC P-256).
@@ -601,8 +638,9 @@ fn alias_of(payload: &Value, default: &str) -> String {
 
 fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
     let (app_id_der, challenge) = extract_attestation_context(payload)?;
-    check_app_id_der(&app_id_der)
-        .with_context(|| "attestation_application_id is not a valid AttestationApplicationId DER")?;
+    check_app_id_der(&app_id_der).with_context(|| {
+        "attestation_application_id is not a valid AttestationApplicationId DER"
+    })?;
     let alias = alias_of(payload, "attest");
     let spec = parse_key_spec(payload)?;
     // The requested purposes are forwarded unchanged (see
@@ -656,9 +694,7 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
                 } else {
                     "strongbox generateKey failed"
                 };
-                log::warn!(
-                    "B-side StrongBox unavailable ({reason}): {err_str}"
-                );
+                log::warn!("B-side StrongBox unavailable ({reason}): {err_str}");
                 return Ok(json!({ "error": format!("strongbox not supported: {reason}") }));
             }
         }
@@ -721,7 +757,11 @@ fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Valu
         "decrypt" => handle_decrypt,
         other => {
             log::warn!("task {task_id} type={other} not supported, reporting failure");
-            post_result(cfg, task_id, &json!({ "error": format!("unsupported task type: {other}") }))?;
+            post_result(
+                cfg,
+                task_id,
+                &json!({ "error": format!("unsupported task type: {other}") }),
+            )?;
             return Ok(());
         }
     };
@@ -735,7 +775,11 @@ fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Valu
             json!({ "error": format!("{e:#}") })
         }
     };
-    let outcome = if result.get("error").is_some() { "failed" } else { "ok" };
+    let outcome = if result.get("error").is_some() {
+        "failed"
+    } else {
+        "ok"
+    };
     log::info!(
         "task {task_id} type={task_type} {outcome} in {:?}",
         start.elapsed()
@@ -864,6 +908,13 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
 fn main() {
     let (log_enabled, log_level, logcat_enabled, logcat_level) = preload_log_config();
     ommegaclient_b::logging::init_logger(log_enabled, log_level, logcat_enabled, logcat_level);
+    let _instance_lock = match acquire_instance_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            log::error!("relay refused duplicate startup: {error:#}");
+            std::process::exit(1);
+        }
+    };
     let (cfg, source) = match load_config() {
         Ok(c) => c,
         Err(e) => {
@@ -878,7 +929,6 @@ fn main() {
     // We drive the real hardware keymint (a binder HAL) directly, so a binder
     // process state must be up before we start serving tasks.
     let _ = rsbinder::ProcessState::init_default();
-    rsbinder::ProcessState::start_thread_pool();
     {
         let g = shared.read().map(|g| g.clone()).unwrap_or(RelayConfig {
             server: String::new(),
@@ -894,6 +944,7 @@ fn main() {
         );
     }
     update_module_status("Ommega Attestation Relay Module ✅ 运行中");
+    rsbinder::ProcessState::start_thread_pool();
     // Reload persisted TEE sessions so aliases from before a relay restart stay
     // usable (key blobs are self-contained and still valid for begin/finish).
     ommegaclient_b::keymaster::tee_ops::load_all_sessions();

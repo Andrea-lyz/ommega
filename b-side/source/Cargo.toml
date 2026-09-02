@@ -26,6 +26,7 @@ serde_json = "1.0.151"
 x509-cert = "0.3.0"
 der = "0.8.1"
 base64 = "0.23.0"
+libc = "0.2.189"
 android_logger = "0.15.1"
 multi_log = "0.1.2"
 rustls = "0.23"
@@ -60,7 +61,6 @@ prost-build = "0.14.4"
 rsbinder-aidl = "0.10.0"
 
 [dev-dependencies]
-cargo-husky = { version = "1.5.0", default-features = false, features = ["user-hooks"] }
 ciborium = "0.2.2"
 rcgen = "0.14.8"
 tempfile = "3.25.0"

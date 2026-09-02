@@ -21,7 +21,10 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,7 +47,9 @@ fn now_date_time() -> DateTime {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    DateTime { ms_since_epoch: now }
+    DateTime {
+        ms_since_epoch: now,
+    }
 }
 
 /// Certificate validity bound (now + ~10 years).
@@ -55,14 +60,12 @@ fn after_date_time() -> DateTime {
     }
 }
 
-use crate::android::hardware::security::keymint::{
-    KeyPurpose::KeyPurpose,
-};
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter as KmKeyParameter;
+use crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose;
 use crate::err as ks_err;
 use crate::keymaster::relay_tee::{
-    clear_system_keymint, extract_km_error_code, get_system_keymint,
-    key_params_to_aidl, probe_keymint_version, KEY_MINT_V5,
+    clear_system_keymint, extract_km_error_code, get_system_keymint, key_params_to_aidl,
+    normalize_keymint_version, probe_keymint_version, KEY_MINT_V5,
 };
 
 use super::attest_proxy::{SYSTEM_KEYMINT_DEFAULT, SYSTEM_KEYMINT_STRONGBOX};
@@ -122,6 +125,8 @@ pub struct TeeSession {
     /// `INVALID_KEY_BLOB` — StrongBox blobs are not usable in the TEE and
     /// vice versa.
     pub hal_service: &'static str,
+    /// Canonical KeyMint version (100..500) used for parameter encoding.
+    pub km_version: i32,
 }
 
 /// Session persistence directory.  Key blobs minted by the real TEE are
@@ -130,6 +135,15 @@ pub struct TeeSession {
 /// the A-side `isRemote` keys usable across relay restarts.
 fn sessions_dir() -> PathBuf {
     PathBuf::from("/data/adb/ommega/sessions")
+}
+
+fn ensure_sessions_dir() -> Result<PathBuf> {
+    let path = sessions_dir();
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("create session directory {}", path.display()))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod session directory {}", path.display()))?;
+    Ok(path)
 }
 
 /// Alias -> safe file stem.  Aliases can contain arbitrary UTF-8, so we keep
@@ -179,19 +193,23 @@ fn load_session_from_disk(alias: &str) -> Option<TeeSession> {
         Some("strongbox") => SYSTEM_KEYMINT_STRONGBOX,
         _ => SYSTEM_KEYMINT_DEFAULT,
     };
+    let km_version = value
+        .get("km_version")
+        .and_then(|value| value.as_i64())
+        .map(|value| normalize_keymint_version(value as i32))
+        .unwrap_or(KEY_MINT_V5);
     Some(TeeSession {
         key_blob,
         cert_chain,
         algorithm,
         hal_service,
+        km_version,
     })
 }
 
-fn save_session_to_disk(alias: &str, session: &TeeSession) {
+fn save_session_to_disk(alias: &str, session: &TeeSession) -> Result<()> {
     let path = session_path(alias);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    ensure_sessions_dir()?;
     let algorithm = match session.algorithm {
         KeyAlgorithm::EcP256 => "EcP256",
         KeyAlgorithm::Rsa2048 => "Rsa2048",
@@ -207,8 +225,34 @@ fn save_session_to_disk(alias: &str, session: &TeeSession) {
         "cert_chain": session.cert_chain.iter().map(|c| B64.encode(c)).collect::<Vec<_>>(),
         "algorithm": algorithm,
         "hal_service": hal_service_label,
+        "km_version": session.km_version,
     });
-    let _ = std::fs::write(&path, serde_json::to_string(&value).unwrap_or_default());
+    static SAVE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = SAVE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp = path.with_extension(format!("tmp-{}-{counter}", std::process::id()));
+    let encoded = serde_json::to_vec(&value).context("serialize TEE session")?;
+    let write_result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .with_context(|| format!("create temporary session {}", temp.display()))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod temporary session {}", temp.display()))?;
+        file.write_all(&encoded)
+            .with_context(|| format!("write temporary session {}", temp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync temporary session {}", temp.display()))?;
+        std::fs::rename(&temp, &path)
+            .with_context(|| format!("replace session {}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod session {}", path.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    write_result
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, TeeSession>> {
@@ -216,9 +260,13 @@ fn sessions() -> &'static Mutex<HashMap<String, TeeSession>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn session_put(alias: &str, session: TeeSession) {
-    save_session_to_disk(alias, &session);
-    sessions().lock().unwrap().insert(alias.to_string(), session);
+fn session_put(alias: &str, session: TeeSession) -> Result<()> {
+    save_session_to_disk(alias, &session)?;
+    sessions()
+        .lock()
+        .unwrap()
+        .insert(alias.to_string(), session);
+    Ok(())
 }
 
 fn session_get(alias: &str) -> Result<TeeSession> {
@@ -244,7 +292,10 @@ fn session_get(alias: &str) -> Result<TeeSession> {
 /// Loads every persisted session into memory.  Called once at startup so that
 /// an alias generated before a relay restart is immediately usable.
 pub fn load_all_sessions() {
-    let Some(entries) = std::fs::read_dir(sessions_dir()).ok() else {
+    let Ok(directory) = ensure_sessions_dir() else {
+        return;
+    };
+    let Some(entries) = std::fs::read_dir(directory).ok() else {
         return;
     };
     let mut loaded = 0usize;
@@ -285,6 +336,12 @@ pub fn load_all_sessions() {
             Some("strongbox") => SYSTEM_KEYMINT_STRONGBOX,
             _ => SYSTEM_KEYMINT_DEFAULT,
         };
+        let km_version = value
+            .get("km_version")
+            .and_then(|value| value.as_i64())
+            .map(|value| normalize_keymint_version(value as i32))
+            .unwrap_or(KEY_MINT_V5);
+        let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o600));
         sessions().lock().unwrap().insert(
             alias.to_string(),
             TeeSession {
@@ -292,6 +349,7 @@ pub fn load_all_sessions() {
                 cert_chain,
                 algorithm,
                 hal_service,
+                km_version,
             },
         );
         loaded += 1;
@@ -362,8 +420,9 @@ pub fn generate_attest_key_on(
         cert_chain,
         algorithm: spec.algorithm,
         hal_service: service,
+        km_version,
     };
-    session_put(alias, session.clone());
+    session_put(alias, session.clone())?;
     Ok(session)
 }
 
@@ -385,35 +444,25 @@ fn build_attestation_params(
         KeyParam::AttestationApplicationId(app_id_der.to_vec()),
     ];
 
-    // Purpose set: forward the app's requested purposes, but never ask the
-    // real TEE to mint a key whose purpose is ATTEST_KEY — this qti TEE
-    // rejects ATTEST_KEY-purpose key generation with ServiceSpecific(-3).
-    // The A-side's "use attestation key" flow (Approach 2) only forwards the
-    // child-cert TBS for a plain begin(SIGN), so an attestation key is minted
-    // as a plain SIGNING key. The A-side's Remote keyblob carries the app's
-    // requested ATTEST_KEY purpose, so keystore-side purpose checks still
-    // pass. For business keys we add the purposes the relay itself needs for
-    // its begin()/sign()/decrypt() calls (real keymint supports multiple
-    // purposes on one key).
+    // Forward business-key purposes exactly. The only unavoidable translation
+    // is ATTEST_KEY -> SIGN: this qti TEE rejects direct ATTEST_KEY generation,
+    // while the A-side later asks this key to sign a child certificate TBS.
     let mut purposes = spec.purposes.clone();
     let is_attest_key = purposes.contains(&KmKeyPurpose::AttestKey);
     if is_attest_key {
         purposes.retain(|p| *p != KmKeyPurpose::AttestKey);
-    }
-    if !purposes.contains(&KmKeyPurpose::Sign) {
-        purposes.push(KmKeyPurpose::Sign);
-    }
-    if algo == KmAlgorithm::Rsa && !purposes.contains(&KmKeyPurpose::Decrypt) {
-        purposes.push(KmKeyPurpose::Decrypt);
+        if !purposes.contains(&KmKeyPurpose::Sign) {
+            purposes.push(KmKeyPurpose::Sign);
+        }
     }
     for p in purposes {
         params.push(KeyParam::Purpose(p));
     }
 
-    // Digest set: the app's requested digests plus SHA-256 (the relay always
-    // signs with it). begin() later requests one of these.
+    // Forward business-key digests exactly. A translated ATTEST_KEY needs
+    // SHA-256 because child certificates are signed with SHA256withRSA/ECDSA.
     let mut digests = spec.digests.clone();
-    if !digests.contains(&KmDigest::Sha256) {
+    if is_attest_key && !digests.contains(&KmDigest::Sha256) {
         digests.push(KmDigest::Sha256);
     }
     for d in digests {
@@ -466,9 +515,7 @@ fn build_attestation_params(
         KmAlgorithm::Ec => {
             // The real TEE requires an explicit curve for EC keys; without it
             // generateKey fails with UNSUPPORTED_KEY_SIZE (ErrorCode -6).
-            params.push(KeyParam::EcCurve(
-                spec.ec_curve.unwrap_or(KmEcCurve::P256),
-            ));
+            params.push(KeyParam::EcCurve(spec.ec_curve.unwrap_or(KmEcCurve::P256)));
         }
         _ => {}
     }
@@ -522,17 +569,29 @@ pub fn get_public_key(alias: &str) -> Result<Vec<u8>> {
 /// Signs `data` with the TEE key for `alias`.
 pub fn sign(alias: &str, data: &[u8], algorithm: &str) -> Result<Vec<u8>> {
     let session = session_get(alias)?;
-    let op_params = sign_begin_params(algorithm, session.algorithm)
+    let op_params = sign_begin_params(algorithm, session.algorithm, session.km_version)
         .with_context(|| ks_err!("unsupported sign algorithm {algorithm}"))?;
-    run_single_input_op(&session.key_blob, session.hal_service, KeyPurpose::SIGN, &op_params, data)
+    run_single_input_op(
+        &session.key_blob,
+        session.hal_service,
+        KeyPurpose::SIGN,
+        &op_params,
+        data,
+    )
 }
 
 /// Decrypts `data` with the TEE key for `alias`.
 pub fn decrypt(alias: &str, data: &[u8], algorithm: &str) -> Result<Vec<u8>> {
     let session = session_get(alias)?;
-    let op_params = decrypt_begin_params(algorithm, session.algorithm)
+    let op_params = decrypt_begin_params(algorithm, session.algorithm, session.km_version)
         .with_context(|| ks_err!("unsupported decrypt algorithm {algorithm}"))?;
-    run_single_input_op(&session.key_blob, session.hal_service, KeyPurpose::DECRYPT, &op_params, data)
+    run_single_input_op(
+        &session.key_blob,
+        session.hal_service,
+        KeyPurpose::DECRYPT,
+        &op_params,
+        data,
+    )
 }
 
 /// Formats a KeyMint service-specific error code as a `[km_error=CODE]`
@@ -562,12 +621,16 @@ fn run_single_input_op(
                 clear_system_keymint(hal_service);
             }
             let km_code = km_error_suffix(&status);
-            return Err(anyhow!("real keymint {hal_service} begin failed {km_code}: {status}"));
+            return Err(anyhow!(
+                "real keymint {hal_service} begin failed {km_code}: {status}"
+            ));
         }
     };
 
     let Some(operation) = begin.operation else {
-        return Err(anyhow!("real keymint {hal_service} begin returned no operation"));
+        return Err(anyhow!(
+            "real keymint {hal_service} begin returned no operation"
+        ));
     };
 
     // Feed the whole payload in a single update, then finish. update() may
@@ -575,20 +638,16 @@ fn run_single_input_op(
     // plaintext from update); finish() then returns whatever is left, so both
     // outputs must be concatenated or the operation's result is silently lost.
     let result = (|| -> Result<Vec<u8>> {
-        let mut out = operation
-            .update(input, None, None)
-            .map_err(|status| {
+        let mut out = operation.update(input, None, None).map_err(|status| {
+            let km_code = km_error_suffix(&status);
+            anyhow!("real keymint {hal_service} update failed {km_code}: {status}")
+        })?;
+        out.extend_from_slice(&operation.finish(None, None, None, None, None).map_err(
+            |status| {
                 let km_code = km_error_suffix(&status);
-                anyhow!("real keymint {hal_service} update failed {km_code}: {status}")
-            })?;
-        out.extend_from_slice(
-            &operation
-                .finish(None, None, None, None, None)
-                .map_err(|status| {
-                    let km_code = km_error_suffix(&status);
-                    anyhow!("real keymint {hal_service} finish failed {km_code}: {status}")
-                })?,
-        );
+                anyhow!("real keymint {hal_service} finish failed {km_code}: {status}")
+            },
+        )?);
         Ok(out)
     })();
 
@@ -602,7 +661,11 @@ fn run_single_input_op(
 // Begin-parameter builders.
 // ---------------------------------------------------------------------------
 
-fn sign_begin_params(algorithm: &str, key_algorithm: KeyAlgorithm) -> Result<Vec<KmKeyParameter>> {
+fn sign_begin_params(
+    algorithm: &str,
+    key_algorithm: KeyAlgorithm,
+    km_version: i32,
+) -> Result<Vec<KmKeyParameter>> {
     let digest = digest_for_algorithm(algorithm)?;
     let params = match key_algorithm {
         KeyAlgorithm::EcP256 => vec![KeyParam::Digest(digest)],
@@ -622,13 +685,13 @@ fn sign_begin_params(algorithm: &str, key_algorithm: KeyAlgorithm) -> Result<Vec
             p
         }
     };
-    key_params_to_aidl(&params, KEY_MINT_V5)
-        .with_context(|| ks_err!("encode sign begin parameters"))
+    key_params_to_aidl(&params, km_version).with_context(|| ks_err!("encode sign begin parameters"))
 }
 
 fn decrypt_begin_params(
     algorithm: &str,
     key_algorithm: KeyAlgorithm,
+    km_version: i32,
 ) -> Result<Vec<KmKeyParameter>> {
     let params = match key_algorithm {
         KeyAlgorithm::EcP256 => {
@@ -652,7 +715,7 @@ fn decrypt_begin_params(
             }
         }
     };
-    key_params_to_aidl(&params, KEY_MINT_V5)
+    key_params_to_aidl(&params, km_version)
         .with_context(|| ks_err!("encode decrypt begin parameters"))
 }
 
@@ -703,8 +766,7 @@ fn digest_for_algorithm(algorithm: &str) -> Result<KmDigest> {
 
 fn spki_from_cert_der(der: &[u8]) -> Result<Vec<u8>> {
     use x509_cert::{der::Decode as _, der::Encode as _, Certificate};
-    let cert = Certificate::from_der(der)
-        .with_context(|| ks_err!("parse leaf certificate"))?;
+    let cert = Certificate::from_der(der).with_context(|| ks_err!("parse leaf certificate"))?;
     cert.tbs_certificate()
         .subject_public_key_info()
         .to_der()

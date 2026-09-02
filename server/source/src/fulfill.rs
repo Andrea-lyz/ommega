@@ -96,10 +96,6 @@ struct Inner {
 pub struct Fulfill {
     inner: Mutex<Inner>,
     enabled: AtomicBool,
-    /// Cache of generated self-signed identities per (device_id, algorithm) so
-    /// a device without a stored identity doesn't regenerate a fresh key (RSA
-    /// keygen is slow) on every attestation.
-    self_signed_cache: Mutex<HashMap<(String, String), DeviceIdentity>>,
     pub db: Option<Arc<Db>>,
 }
 
@@ -108,15 +104,14 @@ impl Fulfill {
         let f = Arc::new(Self {
             inner: Mutex::new(Inner::default()),
             enabled: AtomicBool::new(enabled),
-            self_signed_cache: Mutex::new(HashMap::new()),
             db,
         });
         f.load_sessions();
         f
     }
 
-    /// Runtime switch: whether `server_keybox` local fulfilment is active.
-    /// A-side requests fall back to the physical (A/B queue) path when off.
+    /// Runtime switch selecting the strict `server_keybox` backend. When off,
+    /// requests use only the physical B-device path.
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
@@ -502,29 +497,6 @@ impl Fulfill {
             .collect()
     }
 
-    /// Generate (and cache per device+algorithm) a server self-signed identity.
-    /// Used as the extreme-case layer-3 fallback when neither a B device nor a
-    /// stored identity can fulfil a request.
-    fn self_signed_for(&self, device_id: &str, algorithm: &str) -> Option<DeviceIdentity> {
-        let key = (device_id.to_string(), algorithm.to_string());
-        let mut cache = crate::util::mu(&self.self_signed_cache);
-        if let Some(id) = cache.get(&key) {
-            return Some(id.clone());
-        }
-        let generated = crate::cert::generate_self_signed(algorithm).ok()?;
-        let id = DeviceIdentity {
-            device_id: device_id.to_string(),
-            algorithm: generated.algorithm,
-            certificate_chain_pem: generated.certificate_chain_pem,
-            private_key_pem_cipher: generated.private_key_pem,
-            active: true,
-            machine_id: "self-signed".to_string(),
-            created_at: String::new(),
-        };
-        cache.insert(key, id.clone());
-        Some(id)
-    }
-
     // ---- Interceptors ----
 
     /// Shared attest chain-building given an already-resolved identity. Returns
@@ -589,27 +561,6 @@ impl Fulfill {
                 return Some(json!({
                     "error": format!(
                         "server_keybox: no stored server identity for device {device_id} (algorithm {algorithm})"
-                    )
-                }));
-            }
-        };
-        self.attest_from_identity(body, &identity)
-    }
-
-    /// Layer-3 (self-signed): extreme-case fallback that fulfils attestation
-    /// with a freshly generated (and cached) server self-signed identity.
-    pub fn try_handle_attest_self_signed(&self, device_id: &str, body: &Value) -> Option<Value> {
-        let ctx = body
-            .get("device_attest_context")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let algorithm = Self::ctx_algorithm_str(&ctx);
-        let identity = match self.self_signed_for(device_id, &algorithm) {
-            Some(id) => id,
-            None => {
-                return Some(json!({
-                    "error": format!(
-                        "server_keybox: self-signed identity generation failed for device {device_id} (algorithm {algorithm})"
                     )
                 }));
             }

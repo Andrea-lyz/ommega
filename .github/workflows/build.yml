@@ -38,6 +38,7 @@ jobs:
             a-side/source/ommega-injector/Cargo.toml \
             b-side/source/Cargo.toml \
             server/source/Cargo.toml \
+            server/source/Cargo.lock \
             b-app/source/app/build.gradle.kts
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -63,6 +64,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: aarch64-linux-android,x86_64-unknown-linux-musl
+          components: rustfmt,clippy
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -104,6 +106,24 @@ jobs:
           } >> "$GITHUB_ENV"
           python3 a-side/source/scripts/setup_cargo_config.py --ndk-root "$ndk" --api-level "$ANDROID_PLATFORM" --force
           python3 b-side/source/scripts/setup_cargo_config.py --ndk-root "$ndk" --api-level "$ANDROID_PLATFORM" --force
+
+      - name: Check A-side Android workspace
+        working-directory: a-side/source
+        run: |
+          cargo clippy --target aarch64-linux-android --workspace --all-targets --no-deps
+          cargo test --target aarch64-linux-android --workspace --no-run
+
+      - name: Check B-side Android workspace
+        working-directory: b-side/source
+        run: |
+          cargo clippy --target aarch64-linux-android --workspace --all-targets --no-deps
+          cargo test --target aarch64-linux-android --workspace --no-run
+
+      - name: Test server
+        working-directory: server/source
+        run: |
+          cargo clippy --workspace --all-targets --no-deps
+          cargo test --workspace
 
       - name: Build A-side module
         working-directory: a-side/source

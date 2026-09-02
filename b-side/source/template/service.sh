@@ -12,6 +12,8 @@ CONF_FILE=$STATE_DIR/relay.conf
 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/vendor/lib64/:/system/lib64/:/apex/com.android.runtime/lib64/bionic/"
 
 mkdir -p "$STATE_DIR" "$STATE_DIR/logs"
+chmod 0700 "$STATE_DIR" "$STATE_DIR/logs" 2>/dev/null || true
+chmod 0600 "$CONF_FILE" 2>/dev/null || true
 
 # Reflect the module state in module.prop (shown by KernelSU/Magisk).
 # service.sh writes ⏳ before starting; the relay binary itself then
