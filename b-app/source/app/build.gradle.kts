@@ -11,8 +11,8 @@ android {
         applicationId = "org.ommega.deviceb"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.3.2-ommega"
+        versionCode = 6
+        versionName = "1.3.3-ommega"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
