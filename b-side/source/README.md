@@ -69,7 +69,9 @@ touch /data/adb/ommega/restart.all
 The module ships one daemon, `relay`. It is started directly by
 `service.sh` (which kills stale instances first, then spawns a fresh one). The
 `relay` process itself monitors `/data/adb/ommega/relay.conf` and reloads on
-change; the wrapper never kills it, so the two never conflict.
+change; the wrapper never kills it, so the two never conflict. Three poll
+workers share the same process so a new task can be claimed while another
+worker is still in the hardware TEE.
 
 Logs go to logcat (tag `ommegaclient-b`) and `/data/adb/ommega/logs/relay.log`.
 Each poll, config reload, task receipt, task outcome (with duration), and

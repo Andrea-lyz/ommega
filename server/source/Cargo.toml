@@ -15,7 +15,7 @@ axum = { version = "0.7", features = ["json", "query"] }
 # `tls-rustls` would force rustls/aws-lc-rs; use the provider-agnostic variant
 # so the ring-only rustls config above is honored.
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.28", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tracing = "0.1"

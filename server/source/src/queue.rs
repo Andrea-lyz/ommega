@@ -181,6 +181,11 @@ impl TaskStore {
     ) -> Option<Task> {
         let deadline = Instant::now() + timeout;
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Register before the empty-queue check so create_task cannot land
+            // in the gap between "queue empty" and "await notified".
+            notified.as_mut().enable();
             {
                 let mut inner = self.inner.lock().await;
                 // Register the device as connected.
@@ -210,16 +215,8 @@ impl TaskStore {
                 }
             }
 
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if !Self::await_notified(notified, deadline).await {
                 return None;
-            }
-            // Wait for a new task or the timeout (short fallback poll prevents
-            // a lost `notify_waiters` from stalling until the full timeout).
-            let poll_interval = remaining.min(Duration::from_millis(250));
-            tokio::select! {
-                _ = self.notify.notified() => {},
-                _ = tokio::time::sleep(poll_interval) => {},
             }
         }
     }
@@ -401,6 +398,11 @@ impl TaskStore {
     ) -> Option<Value> {
         let deadline = Instant::now() + timeout;
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Register before reading the task so `notify_waiters` cannot land
+            // in the gap between "not complete" and "await notified".
+            notified.as_mut().enable();
             {
                 let inner = self.inner.lock().await;
                 if let Some(t) = inner.tasks.get(task_id) {
@@ -409,18 +411,23 @@ impl TaskStore {
                     }
                 }
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if !Self::await_notified(notified, deadline).await {
                 return None;
             }
-            // Poll with a short fallback interval: `notify_waiters` only wakes
-            // waiters currently registered, so a notify that lands while this
-            // future is not registered would otherwise be lost.
-            let poll_interval = remaining.min(Duration::from_millis(250));
-            tokio::select! {
-                _ = self.notify.notified() => {},
-                _ = tokio::time::sleep(poll_interval) => {},
-            }
+        }
+    }
+
+    async fn await_notified(
+        notified: std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>,
+        deadline: Instant,
+    ) -> bool {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        tokio::select! {
+            _ = notified => true,
+            _ = tokio::time::sleep(remaining) => false,
         }
     }
 
@@ -561,5 +568,54 @@ impl TaskStore {
             return tied[i].0.clone();
         }
         candidates[0].0.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn store() -> Arc<TaskStore> {
+        TaskStore::new(60, 60, 100, 60)
+    }
+
+    #[tokio::test]
+    async fn pop_wakes_immediately_when_task_arrives() {
+        let store = store();
+        let waiter = store.clone();
+        let started = Instant::now();
+        let join = tokio::spawn(async move { waiter.pop_for_b("dev", "m1", Duration::from_secs(2)).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let task = join.await.expect("join").expect("task");
+        assert_eq!(task.task_id, task_id);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "long-poll wake took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_result_wakes_immediately_on_complete() {
+        let store = store();
+        let task_id = store.create_task("attest", json!({}), "dev").await;
+        let waiter = store.clone();
+        let id = task_id.clone();
+        let started = Instant::now();
+        let join = tokio::spawn(async move { waiter.wait_for_result(&id, Duration::from_secs(2)).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        store
+            .complete_task(&task_id, json!({"ok": true}), "dev")
+            .await
+            .expect("complete");
+        let result = join.await.expect("join").expect("result");
+        assert_eq!(result.get("ok"), Some(&json!(true)));
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "result wait took {:?}",
+            started.elapsed()
+        );
     }
 }

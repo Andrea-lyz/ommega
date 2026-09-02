@@ -60,6 +60,7 @@ use ommegaclient_b::keymaster::attest_proxy::{check_app_id_der, SYSTEM_KEYMINT_S
 use ommegaclient_b::keymaster::tee_ops::{self, KeyAlgorithm, KeySpec};
 
 const POLL_TIMEOUT_SEC: u32 = 20;
+const POLL_WORKERS: usize = 3;
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
 const CONF_PATH: &str = "/data/adb/ommega/relay.conf";
@@ -285,6 +286,8 @@ fn build_http_client() -> Result<Client> {
         .danger_accept_invalid_certs(true)
         .connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS))
         .timeout(Duration::from_millis(READ_TIMEOUT_MS))
+        .tcp_nodelay(true)
+        .pool_max_idle_per_host(8)
         .build()
         .context("build reqwest client")
 }
@@ -850,5 +853,21 @@ fn main() {
     // Reload persisted TEE sessions so aliases from before a relay restart stay
     // usable (key blobs are self-contained and still valid for begin/finish).
     ommegaclient_b::keymaster::tee_ops::load_all_sessions();
-    run_loop(shared);
+    rsbinder::ProcessState::start_thread_pool();
+    // Several poll workers keep a long-poll open while another worker is in
+    // generateKey, so Duck's parallel attested generateKey calls do not queue
+    // behind a single HTTP round-trip after each TEE op.
+    let mut joins = Vec::with_capacity(POLL_WORKERS);
+    for i in 0..POLL_WORKERS {
+        let shared = shared.clone();
+        joins.push(
+            thread::Builder::new()
+                .name(format!("poll-{i}"))
+                .spawn(move || run_loop(shared))
+                .unwrap_or_else(|e| panic!("spawn poll worker {i}: {e}")),
+        );
+    }
+    for join in joins {
+        let _ = join.join();
+    }
 }
