@@ -117,6 +117,24 @@ jobs:
           unset CARGO_TARGET_DIR
           python3 build.py --release --abi arm64-v8a
 
+      - name: Verify B-side Android ELF linkage
+        working-directory: b-side/source
+        run: |
+          relay=target/aarch64-linux-android/release/relay
+          readelf="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          dynamic="$("$readelf" --dynamic "$relay")"
+          printf '%s\n' "$dynamic"
+          for library in libc.so libdl.so libm.so liblog.so; do
+            if ! grep -Fq "Shared library: [$library]" <<<"$dynamic"; then
+              echo "Missing required Android dynamic dependency: $library" >&2
+              exit 1
+            fi
+          done
+          if "$readelf" --dyn-syms --wide "$relay" | grep -Eq '__loader_remove_thread_local_dtor|__scudo_default_options|_ZN5scudo20computeHardwareCRC32Ejm'; then
+            echo "B-side relay contains private Bionic/Scudo runtime references" >&2
+            exit 1
+          fi
+
       - name: Build server (linux musl)
         working-directory: server/source
         env:

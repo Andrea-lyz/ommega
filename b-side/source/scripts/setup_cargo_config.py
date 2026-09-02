@@ -82,10 +82,6 @@ def toml_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\") + '"'
 
 
-def toml_escape(value: str) -> str:
-    return value.replace("\\", "\\\\")
-
-
 def render_config(ndk_root: Path, host_tag: str, api_level: int) -> str:
     bin_dir = ndk_root / "toolchains" / "llvm" / "prebuilt" / host_tag / "bin"
     sysroot = ndk_root / "toolchains" / "llvm" / "prebuilt" / host_tag / "sysroot"
@@ -112,11 +108,11 @@ def render_config(ndk_root: Path, host_tag: str, api_level: int) -> str:
             "",
             "[target.aarch64-linux-android]",
             f"linker = {toml_string(str(aarch64_clang))}",
-            f'rustflags = ["-C", "link-arg=-lc++abi", "-L", "native={toml_escape(str(sysroot / "usr" / "lib" / "aarch64-linux-android"))}"]',
+            'rustflags = ["-C", "link-arg=-lc++abi"]',
             "",
             "[target.x86_64-linux-android]",
             f"linker = {toml_string(str(x86_64_clang))}",
-            f'rustflags = ["-C", "link-arg=-lc++abi", "-L", "native={toml_escape(str(sysroot / "usr" / "lib" / "x86_64-linux-android"))}"]',
+            'rustflags = ["-C", "link-arg=-lc++abi"]',
             "",
             "[env]",
             f"CC_aarch64_linux_android = {toml_string(str(aarch64_clang))}",
