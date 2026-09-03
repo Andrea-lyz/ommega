@@ -1,12 +1,97 @@
 use super::*;
 use crate::hook::rewrite::tests::*;
 use crate::{
+    android::hardware::security::keymint::ErrorCode::ErrorCode,
+    android::hardware::security::keymint::SecurityLevel::SecurityLevel,
     android::system::keystore2::Domain::Domain,
     android::system::keystore2::IKeystoreService::transactions as service_tx,
     android::system::keystore2::KeyDescriptor::KeyDescriptor,
 };
 use rsbinder::{Status, StatusCode};
 use std::mem::size_of;
+
+fn strongbox_request() -> ParsedServiceRequest {
+    ParsedServiceRequest::GetSecurityLevel {
+        security_level: SecurityLevel::STRONGBOX,
+    }
+}
+
+fn allowed_decision(packages: &[&str]) -> filter::FilterDecision {
+    filter::FilterDecision {
+        allowed: true,
+        reason: filter::FilterReason::Allowed,
+        packages: packages
+            .iter()
+            .map(|package| (*package).to_string())
+            .collect(),
+    }
+}
+
+#[test]
+fn configured_package_gets_standard_strongbox_unavailable_reply() {
+    let mut config = config::InjectorConfig::default();
+    config.compat.strongbox_unavailable_packages = vec!["net.one97.paytm".to_string()];
+    let decision = allowed_decision(&["net.one97.paytm"]);
+
+    let Some(precomputed) =
+        strongbox_unavailable_compat_reply(&strongbox_request(), &decision, &config)
+    else {
+        panic!("configured package should receive a precomputed error");
+    };
+    let PrecomputedServiceReply::Error(status) = &precomputed else {
+        panic!("configured package should receive an error status");
+    };
+    assert_eq!(
+        status.exception_code(),
+        rsbinder::ExceptionCode::ServiceSpecific
+    );
+    assert_eq!(
+        status.service_specific_error(),
+        ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0
+    );
+
+    let mut reply = build_precomputed_service_reply(&precomputed)
+        .expect("strongbox compatibility status should serialize");
+    let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+    let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+        .expect("strongbox compatibility reply should parse");
+    assert_eq!(
+        parsed.exception_code(),
+        rsbinder::ExceptionCode::ServiceSpecific
+    );
+    assert_eq!(
+        parsed.service_specific_error(),
+        ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0
+    );
+}
+
+#[test]
+fn strongbox_compatibility_override_stays_narrow() {
+    let mut config = config::InjectorConfig::default();
+    config.compat.strongbox_unavailable_packages = vec!["net.one97.paytm".to_string()];
+    let paytm = allowed_decision(&["net.one97.paytm"]);
+
+    let tee_request = ParsedServiceRequest::GetSecurityLevel {
+        security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+    };
+    assert!(strongbox_unavailable_compat_reply(&tee_request, &paytm, &config).is_none());
+    assert!(strongbox_unavailable_compat_reply(
+        &strongbox_request(),
+        &allowed_decision(&["com.example.other"]),
+        &config,
+    )
+    .is_none());
+
+    let rejected = filter::FilterDecision {
+        allowed: false,
+        reason: filter::FilterReason::RejectedNotInScope,
+        packages: vec!["net.one97.paytm".to_string()],
+    };
+    assert!(strongbox_unavailable_compat_reply(&strongbox_request(), &rejected, &config).is_none());
+
+    config.intercept.get_security_level = false;
+    assert!(strongbox_unavailable_compat_reply(&strongbox_request(), &paytm, &config).is_none());
+}
 
 #[test]
 fn ommega_grant_blocker_preserves_inbound_binder_buffer() {

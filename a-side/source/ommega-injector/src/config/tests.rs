@@ -44,6 +44,7 @@ fn config_defaults_and_log_levels_match_contract() {
     assert_eq!(config.main.log_level_filter(), LevelFilter::Debug);
     assert!(config.filter.block_android_package);
     assert!(!config.filter.allow_unknown_package);
+    assert!(config.compat.strongbox_unavailable_packages.is_empty());
     assert!(config.intercept.get_security_level);
     assert!(config.intercept.get_key_entry);
     assert!(config.intercept.update_subcomponent);
@@ -80,6 +81,9 @@ deny_packages = ["com.blocked"]
 block_android_package = false
 allow_unknown_package = true
 
+[compat]
+strongbox_unavailable_packages = [" com.example.app ", "com.example.app"]
+
 [intercept]
 get_security_level = false
 get_key_entry = true
@@ -101,6 +105,10 @@ get_supplementary_attestation_info = true
     );
     assert_eq!(parsed.main.log_level_filter(), LevelFilter::Trace);
     assert!(!parsed.main.enabled);
+    assert_eq!(
+        parsed.compat.strongbox_unavailable_packages,
+        vec!["com.example.app".to_string()]
+    );
     assert_eq!(
         parsed
             .scoop_details
@@ -159,6 +167,8 @@ fn rendered_config_uses_new_scoop_format() {
     let rendered = render_config(&config).expect("config should render");
     assert!(rendered.contains("scoop = ["));
     assert!(rendered.contains("[scoop.com.example.app]"));
+    assert!(rendered.contains("[compat]"));
+    assert!(rendered.contains("strongbox_unavailable_packages = []"));
     assert!(!rendered.contains("[[scope]]"));
     let reparsed = parse_config(&rendered).expect("rendered config should parse");
     assert_eq!(reparsed.scoop_details, config.scoop_details);

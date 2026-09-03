@@ -18,6 +18,46 @@ use kmr_wire::{keymint::KeyParam, KeySizeInBits};
 use std::vec;
 
 #[test]
+fn test_ec_generation_rejects_invalid_purposes() {
+    for purpose in [
+        KeyPurpose::Encrypt,
+        KeyPurpose::Decrypt,
+        KeyPurpose::WrapKey,
+    ] {
+        let error = check_ec_params(
+            EcCurve::P256,
+            &[KeyParam::Purpose(purpose)],
+            SecurityLevel::TrustedEnvironment,
+        )
+        .expect_err("invalid EC purpose must be rejected");
+        assert!(matches!(
+            error.kind(),
+            crate::ErrorKind::Hal(ErrorCode::IncompatiblePurpose, _)
+        ));
+    }
+}
+
+#[test]
+fn test_ec_generation_accepts_supported_purposes() {
+    for purpose in [
+        KeyPurpose::Sign,
+        KeyPurpose::Verify,
+        KeyPurpose::AgreeKey,
+        KeyPurpose::AttestKey,
+    ] {
+        assert_eq!(
+            check_ec_params(
+                EcCurve::P256,
+                &[KeyParam::Purpose(purpose)],
+                SecurityLevel::TrustedEnvironment,
+            )
+            .expect("supported EC purpose must be accepted"),
+            Some(purpose)
+        );
+    }
+}
+
+#[test]
 fn test_characteristics_invalid() {
     let tests = vec![
         (

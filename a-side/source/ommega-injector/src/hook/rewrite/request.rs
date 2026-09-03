@@ -22,6 +22,35 @@ fn route_for_service_request(
     }
 }
 
+fn strongbox_unavailable_compat_reply(
+    request: &ParsedServiceRequest,
+    decision: &filter::FilterDecision,
+    config: &config::InjectorConfig,
+) -> Option<PrecomputedServiceReply> {
+    if !decision.allowed || !config.intercept.get_security_level {
+        return None;
+    }
+    let ParsedServiceRequest::GetSecurityLevel { security_level } = request else {
+        return None;
+    };
+    if *security_level
+        != crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel::STRONGBOX
+    {
+        return None;
+    }
+    let configured = &config.compat.strongbox_unavailable_packages;
+    decision
+        .packages
+        .iter()
+        .any(|package| configured.contains(package))
+        .then(|| {
+            PrecomputedServiceReply::Error(Status::new_service_specific_error(
+                crate::android::hardware::security::keymint::ErrorCode::ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0,
+                None,
+            ))
+        })
+}
+
 pub(super) fn security_level_scoop_enabled(intercept: &config::InterceptConfig) -> bool {
     intercept.get_security_level || intercept.get_key_entry
 }
@@ -299,6 +328,30 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
 
         let method = request.method();
         let original_code = tr.code;
+        if let Some(reply) = strongbox_unavailable_compat_reply(&request, &decision, &cfg) {
+            info!(
+                "event=compat command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} action=strongbox_unavailable error_code={}",
+                command_name,
+                method,
+                original_code,
+                caller.uid,
+                caller.pid,
+                caller.sid,
+                decision.packages,
+                crate::android::hardware::security::keymint::ErrorCode::ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0,
+            );
+            block_system_request(tr);
+            if expects_reply {
+                let pending = PendingServiceCall {
+                    request,
+                    caller,
+                    packages: decision.packages,
+                    route: RouteTarget::Ommega,
+                };
+                replace_top_pending(connection, PendingCall::PrecomputedService(pending, reply));
+            }
+            return true;
+        }
         let allow_ommega_grant = match should_allow_ommega_grant_service_request_with_probe(
             &request,
             &decision,

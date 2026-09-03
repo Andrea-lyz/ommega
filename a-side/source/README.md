@@ -38,6 +38,12 @@ relay_server.
    (one package per line; `!` = force generate, `?` = force patch). The WebUI
    (`webroot/`) manages this for you under KernelSU.
 
+   To make a scoped app use its standard TEE fallback without disabling native
+   StrongBox globally, list it under `[compat].strongbox_unavailable_packages`
+   in `/data/misc/keystore/ommega/injector.toml`. For matching callers only,
+   `getSecurityLevel(STRONGBOX)` returns `HARDWARE_TYPE_UNAVAILABLE (-68)`;
+   TEE requests continue through the normal scoop route.
+
 4. Replace the template `keybox.xml` if you want local-mode attestation with
    your own keys.
 

@@ -35,6 +35,7 @@ pub struct InjectorConfig {
     pub scoop_details: BTreeMap<String, toml::Table>,
     pub main: MainConfig,
     pub filter: FilterConfig,
+    pub compat: CompatConfig,
     pub intercept: InterceptConfig,
 }
 
@@ -54,6 +55,13 @@ pub struct FilterConfig {
     pub deny_packages: Vec<String>,
     pub block_android_package: bool,
     pub allow_unknown_package: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct CompatConfig {
+    pub strongbox_unavailable_packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -80,6 +88,7 @@ impl Default for InjectorConfig {
             scoop_details: BTreeMap::new(),
             main: MainConfig::default(),
             filter: FilterConfig::default(),
+            compat: CompatConfig::default(),
             intercept: InterceptConfig::default(),
         }
     }
@@ -173,6 +182,7 @@ struct WritableConfig<'a> {
     scoop: &'a [String],
     main: &'a MainConfig,
     filter: &'a FilterConfig,
+    compat: &'a CompatConfig,
     intercept: &'a InterceptConfig,
 }
 
@@ -399,6 +409,7 @@ fn render_config(config: &InjectorConfig) -> io::Result<String> {
         scoop: &config.scoop,
         main: &config.main,
         filter: &config.filter,
+        compat: &config.compat,
         intercept: &config.intercept,
     })
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -662,6 +673,8 @@ impl InjectorConfig {
     fn normalized(mut self) -> Self {
         self.scoop = normalize_packages(self.scoop);
         self.scoop_details = normalize_scoop_details(self.scoop_details);
+        self.compat.strongbox_unavailable_packages =
+            normalize_packages(self.compat.strongbox_unavailable_packages);
         self
     }
 }
