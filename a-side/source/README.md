@@ -76,6 +76,10 @@ touch /data/adb/ommega/restart.injector
 touch /data/adb/ommega/restart.all
 ```
 
+On each keymint start, its watchdog removes the previous RPC socket inode.
+The injector waits up to 30 seconds for the current keymint process to create
+the socket before loading its payload into keystore2.
+
 ## License
 
 `AGPL-3.0-or-later`

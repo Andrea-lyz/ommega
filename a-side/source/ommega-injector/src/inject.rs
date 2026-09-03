@@ -21,7 +21,7 @@ use crate::{sys, utils};
 
 const ANDROID_DLEXT_USE_LIBRARY_FD: u64 = 0x10;
 const REMOTE_PAYLOAD_STATE_PATH: &str = "/data/adb/ommega/injector.payload";
-const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 #[repr(C)]
@@ -94,6 +94,8 @@ fn wait_for_rpc_socket() -> Result<()> {
 }
 
 pub fn inject_library(pid: Pid) -> Result<()> {
+    // The keymint watchdog removes stale socket inodes before every server
+    // start, so existence here means the current process reached RPC setup.
     wait_for_rpc_socket()?;
 
     let self_path = utils::current_exe_path()?;
