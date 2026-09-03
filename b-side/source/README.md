@@ -18,6 +18,11 @@ attestation. The server pushes the request as a task to this device; the `relay`
 daemon executes it against the real TEE and returns the certificate chain so the
 A-side device can pass Google Play Integrity.
 
+The relay also serves a `profile` task. It reads the real default KeyMint HAL's
+stable-AIDL version/hash and `getHardwareInfo()` values, reports StrongBox
+availability, and freezes that identity for the relay process. Attestation
+results carry the same profile so A can reject mixed A/B identities.
+
 ## Install and configure
 
 **Android 12 or above required.**

@@ -203,6 +203,32 @@ fn attest_chain_empty(task_type: &str, v: &Value) -> bool {
 
 fn result_shape_valid(task_type: &str, value: &Value) -> bool {
     match task_type {
+        "profile" => {
+            value
+                .get("interface_version")
+                .and_then(Value::as_i64)
+                .is_some()
+                && value
+                    .get("interface_hash")
+                    .and_then(Value::as_str)
+                    .is_some()
+                && value
+                    .get("profile_version")
+                    .and_then(Value::as_i64)
+                    .is_some()
+                && value
+                    .get("hardware_version")
+                    .and_then(Value::as_i64)
+                    .is_some()
+                && value
+                    .get("security_level")
+                    .and_then(Value::as_i64)
+                    .is_some()
+                && value
+                    .get("has_strongbox")
+                    .and_then(Value::as_bool)
+                    .is_some()
+        }
         "attest" => !attest_chain_empty(task_type, value),
         "sign" => value
             .get("signature")
@@ -287,7 +313,15 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
     // StrongBox follows the selected strict backend. In physical mode the B
     // device must provide it, unless the separately controlled robustness mode
     // explicitly requests an honest retry as TEE.
-    let order: &[&str] = if serverbox { &["keybox"] } else { &["b"] };
+    let order: &[&str] = if task_type == "profile" {
+        // The remote identity must describe the physical B-side HAL even when
+        // the server-keybox fulfilment mode is enabled for attestation.
+        &["b"]
+    } else if serverbox {
+        &["keybox"]
+    } else {
+        &["b"]
+    };
 
     let mut last_error: Option<String> = None;
     for &layer in order {
@@ -467,6 +501,17 @@ pub async fn attest(
         return r;
     }
     run_a_side_task(&state, "attest", &body).await
+}
+
+pub async fn profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(r) = check_auth(&state, &headers, Some("a")) {
+        return r;
+    }
+    run_a_side_task(&state, "profile", &body).await
 }
 
 pub async fn sign(
@@ -739,6 +784,25 @@ pub async fn admin_cancel_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_remote_profile_result_shape() {
+        assert!(result_shape_valid(
+            "profile",
+            &json!({
+                "interface_version": 2,
+                "interface_hash": "207c9f218b9b9e4e74ff5232eb16511eca9d7d2e",
+                "profile_version": 200,
+                "hardware_version": 400,
+                "security_level": 1,
+                "has_strongbox": false,
+            })
+        ));
+        assert!(!result_shape_valid(
+            "profile",
+            &json!({ "hardware_version": 200 })
+        ));
+    }
 
     #[test]
     fn strongbox_demotion_marks_effective_tee_level() {

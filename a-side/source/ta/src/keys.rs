@@ -640,6 +640,21 @@ impl crate::KeyMintTa {
         else {
             return Ok(None);
         };
+        let remote_profile = remote_attestation.profile;
+        if remote_profile.profile_version != self.aidl_version as i32 {
+            return Err(km_err!(
+                VerificationFailed,
+                "remote/local KeyMint identity mismatch: remote={} local={}",
+                remote_profile.profile_version,
+                self.aidl_version as i32
+            ));
+        }
+        if remote_profile.interface_version * 100 != remote_profile.profile_version {
+            return Err(km_err!(
+                VerificationFailed,
+                "remote KeyMint interface/profile version mismatch"
+            ));
+        }
         let chain = remote_attestation.cert_chain;
         let effective_security_level = remote_attestation
             .effective_security_level
@@ -690,7 +705,32 @@ impl crate::KeyMintTa {
         let _ = keygen_info;
         let root_of_trust = crate::cert::parse_remote_root_of_trust(leaf_der)?;
         if let Some(rot) = root_of_trust.as_ref() {
+            if rot.attestation_version != remote_profile.profile_version
+                || rot.keymaster_version != remote_profile.profile_version
+            {
+                return Err(km_err!(
+                    VerificationFailed,
+                    "remote attestation record version mismatch: profile={} attest={} keymaster={}",
+                    remote_profile.profile_version,
+                    rot.attestation_version,
+                    rot.keymaster_version
+                ));
+            }
             overlay_remote_version_tags(&mut chars, rot, effective_security_level);
+            log::info!(
+                "event=remote_attest_identity interface={} hash={} profile={} hardware={} level={:?} strongbox={}",
+                remote_profile.interface_version,
+                remote_profile.interface_hash,
+                remote_profile.profile_version,
+                remote_profile.hardware_version,
+                remote_profile.security_level,
+                remote_profile.has_strongbox
+            );
+        } else {
+            return Err(km_err!(
+                VerificationFailed,
+                "remote attestation is missing an Android attestation record"
+            ));
         }
         let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
             alias,

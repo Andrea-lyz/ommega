@@ -242,7 +242,7 @@ impl Fulfill {
     }
 
     /// Parse the A-side `device_attest_context` object into AttestationParams.
-    fn parse_ctx(&self, ctx: &Value, challenge: &[u8]) -> AttestationParams {
+    fn parse_ctx(&self, ctx: &Value, challenge: &[u8]) -> anyhow::Result<AttestationParams> {
         let mut p = AttestationParams::default();
         p.challenge = challenge.to_vec();
         let b64 = |k: &str| {
@@ -404,33 +404,25 @@ impl Fulfill {
             .and_then(Value::as_i64)
             .unwrap_or(1);
         p.security_level = att_sl;
-        // Use device-provided versions if available; otherwise infer from the
-        // A-side's `os_version` (Android major * 10000). A chain whose
-        // attest_key (minted here) and sign_key (minted by the A-side software
-        // KeyMint) disagree on attestationVersion is flagged as a tampered
-        // attestation key, so the minted attest_key must carry the SAME KeyMint
-        // version the A-side reports for its local HAL. The old Django heuristic
-        // (200 for att_sl < 2) triggers VINTF mismatch on KeyMint 3.0+ devices.
-        let inferred_version = ctx
-            .get("os_version")
-            .and_then(Value::as_i64)
-            .map(|osv| match osv / 10000 {
-                v if v >= 17 => 500,
-                16 => 400,
-                14 | 15 => 300,
-                13 => 300,
-                12 => 200,
-                _ => 100,
-            });
+        // Remote identity versions are supplied by the B-side capability
+        // profile. Android release numbers are not KeyMint interface versions
+        // and must never be used to infer attestation record identity.
         p.attestation_version = ctx
             .get("attest_record_version")
             .and_then(Value::as_i64)
-            .or(inferred_version)
-            .unwrap_or(300);
+            .ok_or_else(|| anyhow::anyhow!("attest_record_version required"))?;
         p.keymaster_version = ctx
             .get("keymint_record_version")
             .and_then(Value::as_i64)
-            .unwrap_or(p.attestation_version);
+            .ok_or_else(|| anyhow::anyhow!("keymint_record_version required"))?;
+        for (name, version) in [
+            ("attest_record_version", p.attestation_version),
+            ("keymint_record_version", p.keymaster_version),
+        ] {
+            if !matches!(version, 100 | 200 | 300 | 400 | 500) {
+                anyhow::bail!("invalid {name}: {version}");
+            }
+        }
 
         let vb_key = b64("verified_boot_key");
         let vb_hash = b64("verified_boot_hash");
@@ -455,7 +447,7 @@ impl Fulfill {
                 .unwrap_or(0),
             verified_boot_hash: vb_hash,
         });
-        p
+        Ok(p)
     }
 
     /// Generate the leaf + attested chain, cache it in the session.
@@ -466,7 +458,7 @@ impl Fulfill {
         ctx: &Value,
         challenge: &[u8],
     ) -> anyhow::Result<(String, String)> {
-        let params = self.parse_ctx(ctx, challenge);
+        let params = self.parse_ctx(ctx, challenge)?;
         let (chain_pem, new_leaf_key_pem) = cert::build_attested_chain(identity, &params)?;
 
         let key_fp = base64::engine::general_purpose::STANDARD

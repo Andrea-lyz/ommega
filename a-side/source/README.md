@@ -13,8 +13,11 @@ relay_server.
   attestation chains, like a regular keystore spoofer.
 - **Remote mode** (`remote: true`): attestation (tag 709) is minted by the
   B-side real hardware TEE via the relay_server. Sign/decrypt for remote keys
-  are forwarded too. Falls back to local when the relay is unreachable
-  (`fallback_local`).
+  are forwarded too. Before the software TA starts, A obtains and freezes the
+  B-side stable-AIDL version/hash, canonical profile version, vendor hardware
+  version, security level, and StrongBox availability. Every attestation result
+  must match that profile. Profile or certificate mismatches fail closed unless
+  explicit local fallback is enabled.
 
 ## Install and configure
 
