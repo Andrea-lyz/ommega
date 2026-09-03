@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{sync::OnceLock, thread, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use kmr_common::crypto::Sha256;
@@ -20,6 +20,7 @@ const KEYMINT_V5: i32 = 500;
 const KEYMINT_HAL_NAME: &str = "android.hardware.security.keymint";
 const KEYMINT_DEVICE_INTERFACE: &str = "IKeyMintDevice";
 const AOSP_AUTHOR_NAME: &str = "The Android Open Source Project";
+const REMOTE_PROFILE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KeyMintHardwareProfile {
@@ -39,36 +40,54 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
         .unwrap_or_else(fallback_keymint_version_from_android);
 
     if security_level == SecurityLevel::TRUSTED_ENVIRONMENT && crate::remote::remote_enabled() {
-        match crate::remote::remote_identity_profile() {
-            Ok(remote) => {
-                let unique_id = derive_unique_id(
-                    &remote.keymint_author,
-                    &remote.keymint_name,
-                    security_level,
-                    remote.profile_version,
-                )
-                .unwrap_or_else(|| format!("remote-tee-keymint-{}", remote.interface_version));
-                log::info!(
-                    "event=identity_profile local_keymint={} remote_profile={} remote_hardware={} remote_aidl={} remote_hash={} remote_strongbox={}",
-                    version_number,
-                    remote.profile_version,
-                    remote.hardware_version,
-                    remote.interface_version,
-                    remote.interface_hash,
-                    remote.has_strongbox
-                );
-                return KeyMintHardwareProfile {
-                    version_number: remote.profile_version,
-                    impl_name: remote.keymint_name,
-                    author_name: remote.keymint_author,
-                    unique_id,
-                };
-            }
-            Err(error) => {
-                log::error!(
-                    "event=identity_profile remote profile unavailable: {error:#}; retaining local profile {} so KeyMint can start",
-                    version_number
-                );
+        // The TA freezes its allowed AIDL version when this profile is returned.
+        // Falling back to the local version after a transient boot-time network
+        // failure would therefore make every later remote result fail identity
+        // validation until the process is restarted.
+        let mut attempts = 0_u64;
+        loop {
+            match crate::remote::remote_identity_profile() {
+                Ok(remote) => {
+                    let unique_id = derive_unique_id(
+                        &remote.keymint_author,
+                        &remote.keymint_name,
+                        security_level,
+                        remote.profile_version,
+                    )
+                    .unwrap_or_else(|| format!("remote-tee-keymint-{}", remote.interface_version));
+                    log::info!(
+                        "event=identity_profile local_keymint={} remote_profile={} remote_hardware={} remote_aidl={} remote_hash={} remote_strongbox={}",
+                        version_number,
+                        remote.profile_version,
+                        remote.hardware_version,
+                        remote.interface_version,
+                        remote.interface_hash,
+                        remote.has_strongbox
+                    );
+                    return KeyMintHardwareProfile {
+                        version_number: remote.profile_version,
+                        impl_name: remote.keymint_name,
+                        author_name: remote.keymint_author,
+                        unique_id,
+                    };
+                }
+                Err(error) => {
+                    attempts = attempts.saturating_add(1);
+                    if !crate::remote::remote_enabled() {
+                        log::warn!(
+                            "event=identity_profile remote mode disabled while waiting for profile; using local profile {}",
+                            version_number
+                        );
+                        break;
+                    }
+                    if attempts == 1 || attempts.is_multiple_of(10) {
+                        log::warn!(
+                            "event=identity_profile remote profile unavailable on attempt {attempts}: {error:#}; retrying in {} ms to avoid freezing a mismatched local profile",
+                            REMOTE_PROFILE_RETRY_INTERVAL.as_millis()
+                        );
+                    }
+                    thread::sleep(REMOTE_PROFILE_RETRY_INTERVAL);
+                }
             }
         }
     }

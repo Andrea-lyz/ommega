@@ -16,7 +16,9 @@ relay_server.
   are forwarded too. Before the software TA starts, A obtains and freezes the
   B-side stable-AIDL version/hash, canonical profile version, vendor hardware
   version, security level, and StrongBox availability. Every attestation result
-  must match that profile. Profile or certificate mismatches fail closed unless
+  must match that profile. If the relay is temporarily unavailable during boot,
+  startup retries until the remote profile is available instead of freezing a
+  mismatched local profile. Profile or certificate mismatches fail closed unless
   explicit local fallback is enabled.
 
 ## Install and configure
