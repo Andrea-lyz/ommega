@@ -34,6 +34,7 @@ fn main() {
         .include_dir(PathBuf::from("aidl/android/hardware/security/secureclock"))
         .include_dir(PathBuf::from("aidl/android/security/authorization"))
         .include_dir(PathBuf::from("aidl/android/security/maintenance"))
+        .include_dir(PathBuf::from("aidl/android/security/rkp"))
         .include_dir(PathBuf::from("aidl/android/content/pm"))
         .include_dir(PathBuf::from("aidl/android/os"))
         .output(PathBuf::from("aidl.rs"));
@@ -46,6 +47,7 @@ fn main() {
         "aidl/android/security/maintenance",
         "aidl/android/security/metrics",
         "aidl/android/security/keystore",
+        "aidl/android/security/rkp",
         "aidl/android/apex",
         "aidl/android/content/pm",
         "aidl/android/os",

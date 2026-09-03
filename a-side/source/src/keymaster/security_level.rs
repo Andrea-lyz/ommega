@@ -15,7 +15,7 @@
 //! This crate implements the IKeystoreSecurityLevel interface.
 
 use crate::android::hardware::security::keymint::{
-    Algorithm::Algorithm, AttestationKey::AttestationKey,
+    Algorithm::Algorithm, AttestationKey::AttestationKey, Certificate::Certificate,
     HardwareAuthenticatorType::HardwareAuthenticatorType, IKeyMintDevice::IKeyMintDevice,
     KeyCreationResult::KeyCreationResult, KeyFormat::KeyFormat,
     KeyMintHardwareInfo::KeyMintHardwareInfo, KeyOrigin::KeyOrigin, KeyParameter::KeyParameter,
@@ -85,10 +85,32 @@ const API_37_PER_UID_KEY_LIMIT: i32 = 50_000;
 /// Implementation of the IKeystoreSecurityLevel Interface.
 pub struct KeystoreSecurityLevel {
     security_level: SecurityLevel,
-    keymint: KeyMintWrapper,
+    keymint: KeyMintBackend,
     hw_info: KeyMintHardwareInfo,
     operation_db: OperationDb,
     id_rotation_state: IdRotationState,
+}
+
+enum KeyMintBackend {
+    Ommega(KeyMintWrapper),
+    System(Strong<dyn IKeyMintDevice>),
+}
+
+impl KeyMintBackend {
+    fn is_system(&self) -> bool {
+        matches!(self, Self::System(_))
+    }
+}
+
+impl Deref for KeyMintBackend {
+    type Target = dyn IKeyMintDevice;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Ommega(keymint) => keymint,
+            Self::System(keymint) => &**keymint,
+        }
+    }
 }
 
 struct AospSecurityLevelWrapper {
@@ -120,10 +142,33 @@ static ZERO_BLOB_32: &[u8] = &[0; 32];
 
 impl KeystoreSecurityLevel {
     fn new(security_level: SecurityLevel, id_rotation_state: IdRotationState) -> Result<Self> {
-        let dev =
-            get_keymint_wrapper(security_level).context(ks_err!("KeystoreSecurityLevel::new."))?;
+        let use_native_strongbox = security_level == SecurityLevel::STRONGBOX
+            && crate::config::config()
+                .read()
+                .map_err(|_| anyhow::anyhow!("config lock poisoned"))?
+                .main
+                .use_native_strongbox;
+        let dev = if use_native_strongbox {
+            let keymint = crate::plat::keymint_profile::connect_system_keymint_device(
+                SecurityLevel::STRONGBOX,
+            )
+            .context(ks_err!("connecting A-side native StrongBox KeyMint."))?;
+            log::info!("using A-side native StrongBox KeyMint backend");
+            KeyMintBackend::System(keymint)
+        } else {
+            KeyMintBackend::Ommega(
+                get_keymint_wrapper(security_level)
+                    .context(ks_err!("KeystoreSecurityLevel::new."))?,
+            )
+        };
         let hw_info = map_km_error(dev.getHardwareInfo())
             .context(ks_err!("KeystoreSecurityLevel::new: getHardwareInfo."))?;
+        if use_native_strongbox && hw_info.securityLevel != SecurityLevel::STRONGBOX {
+            return Err(anyhow::anyhow!(
+                "native StrongBox backend reported unexpected security level {:?}",
+                hw_info.securityLevel
+            ));
+        }
         Ok(Self {
             security_level,
             keymint: dev,
@@ -756,6 +801,26 @@ impl KeystoreSecurityLevel {
         })
     }
 
+    fn should_use_android_rkp(&self, key: &KeyDescriptor, params: &[KeyParameter]) -> bool {
+        self.keymint.is_system()
+            && key.domain == Domain::APP
+            && params
+                .iter()
+                .any(|parameter| parameter.tag == Tag::ATTESTATION_CHALLENGE)
+            && !params
+                .iter()
+                .any(|parameter| parameter.tag == Tag::DEVICE_UNIQUE_ATTESTATION)
+            && params.iter().any(|parameter| {
+                matches!(
+                    parameter,
+                    KeyParameter {
+                        tag: Tag::ALGORITHM,
+                        value: KeyParameterValue::Algorithm(Algorithm::RSA | Algorithm::EC),
+                    }
+                )
+            })
+    }
+
     fn generate_key(
         &self,
         ctx: Option<&CallerInfo>,
@@ -800,12 +865,64 @@ impl KeystoreSecurityLevel {
                 })
                 .context(ks_err!("Trying to get an attestation key"))?,
         };
+        let attestation_key_info =
+            if attestation_key_info.is_none() && self.should_use_android_rkp(&key, params) {
+                Some(AttestationKeyInfo::RkpdProvisioned {
+                    key: crate::remote_provisioning::get_attestation_key(
+                        self.security_level,
+                        caller_uid.0 as u32,
+                    )
+                    .context(ks_err!(
+                        "Trying to get native attestation key from Android RKP"
+                    ))?,
+                })
+            } else {
+                attestation_key_info
+            };
         let params = self
             .add_required_parameters(ctx, caller_uid, params, &key)
             .context(ks_err!("Trying to get aaid."))?;
 
         let keybox_attestation_allowed = attestation_key_info.is_none();
         let creation_result = match attestation_key_info {
+            Some(AttestationKeyInfo::RkpdProvisioned { key: rkp_key }) => {
+                let original_blob = &rkp_key.attestation_key.keyBlob;
+                let issuer_subject = &rkp_key.attestation_key.issuerSubjectName;
+                upgrade_keyblob_if_required_with(
+                    &*self.keymint,
+                    self.hw_info.versionNumber,
+                    original_blob,
+                    &[],
+                    |blob| {
+                        let attestation_key = AttestationKey {
+                            keyBlob: blob.to_vec(),
+                            attestKeyParams: vec![],
+                            issuerSubjectName: issuer_subject.clone(),
+                        };
+                        self.generate_key_and_retry_on_att_id_mismatch(
+                            &params,
+                            Some(&attestation_key),
+                        )
+                    },
+                    |upgraded_blob| {
+                        crate::remote_provisioning::store_upgraded_attestation_key(
+                            &rkp_key,
+                            original_blob,
+                            upgraded_blob,
+                        )
+                    },
+                )
+                .context(ks_err!(
+                    "While generating with an Android RKP attestation key, params: {:?}.",
+                    log_security_safe_params(&params)
+                ))
+                .map(|(mut result, _)| {
+                    result.certificateChain.push(Certificate {
+                        encodedCertificate: rkp_key.certificate_chain,
+                    });
+                    result
+                })
+            }
             Some(AttestationKeyInfo::UserGenerated {
                 key_id_guard,
                 blob,
@@ -1103,7 +1220,7 @@ impl KeystoreSecurityLevel {
         F: Fn(&[u8]) -> Result<T, Error>,
     {
         let (v, upgraded_blob) = upgrade_keyblob_if_required_with(
-            &self.keymint,
+            &*self.keymint,
             self.hw_info.versionNumber,
             key_blob,
             params,
@@ -1477,10 +1594,7 @@ impl ISecurityLevel for OmmegaSecurityLevelWrapper {
         params: &[KeyParameter],
         authenticators: &[AuthenticatorSpec],
     ) -> Result<KeyMetadata, Status> {
-        let ctx = Some(require_ommega_ctx(
-            ctx,
-            "ISecurityLevel::importWrappedKey",
-        )?);
+        let ctx = Some(require_ommega_ctx(ctx, "ISecurityLevel::importWrappedKey")?);
         let _wp = self.watch("ISecurityLevel::importWrappedKey");
         security_level_manager::notify_operation_performed(self.security_level);
         let (latency, result) = crate::timed_call!(self.import_wrapped_key(

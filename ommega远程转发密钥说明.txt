@@ -270,6 +270,12 @@ keysttestation 等开源项目源码，主要基于 OhMyKeymint
    使用 root 文件管理器编辑 scoop 列表（包名格式），
    修改后重启设备生效。
 
+   若 B 端没有 StrongBox、但 A 端自身有原生 StrongBox HAL，可编辑：
+   /data/adb/ommega/ommegadata/config.toml
+   在 [main] 中设置 use_native_strongbox = true，然后重启 Ommega。
+   StrongBox 密钥将由 A 端原生 HAL 生成并保存在 Ommega 数据库中；
+   TEE 认证和远程密钥仍按 [remote] 配置转发到 B 端。
+
 5.7 日志与卸载
 
    - 日志:
@@ -409,7 +415,9 @@ keysttestation 等开源项目源码，主要基于 OhMyKeymint
    5. Keybox     上传/查看/删除服务器 keybox（server_keybox 模式）
    6. 自动Keybox 定时拉取上游 keybox，可开关、手动刷新
    7. StrongBox强健模式
-                 开: B 端 StrongBox 失败自动降级 TEE 重试
+                 开: B 端 StrongBox 失败自动降级 TEE 重试，并向兼容 A 端
+                     返回显式降级标记；证书链与 KeyCharacteristics 如实
+                     标记 TRUSTED_ENVIRONMENT
                  关: 失败直接回退下一层（默认）
    8. IP过滤     限制访问来源 IP
    9. 客户端报告 A 端诊断信息，用于认证失败排查
@@ -421,7 +429,9 @@ keysttestation 等开源项目源码，主要基于 OhMyKeymint
      多为 StrongBox 兼容性问题。解决:
      1. 更换原生支持 StrongBox、可返回完整证书链的 B 端机型
      2. 或在后台开启「StrongBox强健模式」降级为 TEE
-     验证: 查看密钥认证页面安全模块选项是否全部正常
+     验证: 服务端日志应出现 strongbox-robust demoted to TEE ok，A 端
+           不应出现 remote attestation security level mismatch；仍强制
+           要求 StrongBox 证书级别的应用必须使用真实 StrongBox B 端
 
   Q: A端 WebUI 无法打开？
      1. 确认模块已安装并重启设备

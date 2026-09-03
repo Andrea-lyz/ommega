@@ -470,7 +470,7 @@ h3.sec-title { font-size: 13px; color: var(--muted); text-transform: uppercase; 
       </div>
       <span class="hint" id="sbrStatus" style="flex:1;">加载中…</span>
     </div>
-    <p class="hint" style="margin:0;line-height:1.6;">开启后：B 端设备返回 StrongBox 不支持 / 未预制密钥时，服务端自动把该请求降级为 TEE 级别重新发给 B 端，降级链如实标记 TRUSTED_ENVIRONMENT（不冒充 StrongBox）；关闭后保持严格原生语义，StrongBox 失败按 server 三层回退处理。</p>
+    <p class="hint" style="margin:0;line-height:1.6;">开启后：B 端设备返回 StrongBox 不支持 / 未预制密钥时，服务端自动把该请求降级为 TEE 级别重新发给 B 端，并向兼容 A 端显式返回降级标记；证书链和 KeyCharacteristics 均如实标记 TRUSTED_ENVIRONMENT（不冒充 StrongBox）。关闭后保持严格原生语义，StrongBox 失败按 server 三层回退处理。</p>
   </div>
 </div>
 

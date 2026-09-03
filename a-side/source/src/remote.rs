@@ -451,6 +451,49 @@ fn patch_level_to_yyyymm(value: &str) -> Option<u32> {
     None
 }
 
+/// Accept only the relay's explicit, narrowly scoped StrongBox-to-TEE
+/// robustness marker.  Legacy responses keep strict requested-level checks.
+fn parse_strongbox_demotion(
+    result: &Value,
+    requested_security_level: Option<i32>,
+) -> Result<Option<kmr_wire::keymint::SecurityLevel>, kmr_common::Error> {
+    let demoted = match result.get("strongbox_demoted") {
+        None => return Ok(None),
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(kmr_common::km_err!(
+                VerificationFailed,
+                "remote strongbox_demoted marker is not a boolean"
+            ));
+        }
+    };
+    if !demoted {
+        return Ok(None);
+    }
+    if requested_security_level != Some(kmr_wire::keymint::SecurityLevel::Strongbox as i32) {
+        return Err(kmr_common::km_err!(
+            VerificationFailed,
+            "remote StrongBox demotion marked for a non-StrongBox request"
+        ));
+    }
+    let effective = result
+        .get("effective_security_level")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            kmr_common::km_err!(
+                VerificationFailed,
+                "remote StrongBox demotion missing effective security level"
+            )
+        })?;
+    if effective != i64::from(kmr_wire::keymint::SecurityLevel::TrustedEnvironment as i32) {
+        return Err(kmr_common::km_err!(
+            VerificationFailed,
+            "remote StrongBox demotion did not report TEE as the effective level"
+        ));
+    }
+    Ok(Some(kmr_wire::keymint::SecurityLevel::TrustedEnvironment))
+}
+
 /// Convenience: `true` if remote relay is enabled in config.
 pub fn remote_enabled() -> bool {
     match config::config().read() {
@@ -470,7 +513,7 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         alias: &str,
         cert_serial: Option<&[u8]>,
         params: &kmr_ta::device::RemoteAttestParams,
-    ) -> Result<Option<Vec<Vec<u8>>>, kmr_common::Error> {
+    ) -> Result<Option<kmr_ta::device::RemoteAttestation>, kmr_common::Error> {
         let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial).map_err(
             |e| kmr_common::km_err!(UnknownError, "remote attest protocol error: {e:#}"),
         )?;
@@ -486,6 +529,7 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
                 "remote attest failed: {error}"
             ));
         }
+        let effective_security_level = parse_strongbox_demotion(&result, params.security_level)?;
         let certs = result
             .get("cert_chain")
             .and_then(Value::as_array)
@@ -519,7 +563,10 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
             })?;
             chain.push(der);
         }
-        Ok(Some(chain))
+        Ok(Some(kmr_ta::device::RemoteAttestation {
+            cert_chain: chain,
+            effective_security_level,
+        }))
     }
 
     fn sign(
@@ -577,5 +624,55 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
             Ok(g) => g.remote.fallback_local,
             Err(_) => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kmr_wire::keymint::SecurityLevel;
+
+    #[test]
+    fn accepts_explicit_strongbox_to_tee_demotion() {
+        let result = json!({
+            "strongbox_demoted": true,
+            "effective_security_level": 1,
+        });
+
+        assert_eq!(
+            parse_strongbox_demotion(&result, Some(SecurityLevel::Strongbox as i32)).unwrap(),
+            Some(SecurityLevel::TrustedEnvironment)
+        );
+    }
+
+    #[test]
+    fn legacy_response_keeps_strict_requested_level() {
+        assert_eq!(
+            parse_strongbox_demotion(&json!({}), Some(SecurityLevel::Strongbox as i32)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_demotion_for_non_strongbox_request() {
+        let result = json!({
+            "strongbox_demoted": true,
+            "effective_security_level": 1,
+        });
+
+        assert!(
+            parse_strongbox_demotion(&result, Some(SecurityLevel::TrustedEnvironment as i32))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_demotion_without_effective_tee_level() {
+        let result = json!({
+            "strongbox_demoted": true,
+            "effective_security_level": 2,
+        });
+
+        assert!(parse_strongbox_demotion(&result, Some(SecurityLevel::Strongbox as i32)).is_err());
     }
 }

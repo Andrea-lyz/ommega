@@ -29,6 +29,9 @@ use anyhow::{Context, Result};
 
 /// KeyMint user generated attestation key information.
 pub enum AttestationKeyInfo {
+    RkpdProvisioned {
+        key: crate::remote_provisioning::RkpAttestationKey,
+    },
     UserGenerated {
         key_id_guard: KeyIdGuard,
         blob: Vec<u8>,

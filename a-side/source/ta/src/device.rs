@@ -208,6 +208,16 @@ pub struct RemoteAttestParams {
     pub security_level: Option<i32>,
 }
 
+/// Successful remote attestation result.
+#[derive(Debug)]
+pub struct RemoteAttestation {
+    /// DER certificate chain, leaf first.
+    pub cert_chain: Vec<Vec<u8>>,
+    /// Effective level explicitly reported for a relay-approved downgrade.
+    /// `None` preserves strict legacy behavior and uses the requesting level.
+    pub effective_security_level: Option<keymint::SecurityLevel>,
+}
+
 /// there.  Each method returns `Ok(None)` when the remote is unavailable or not
 /// configured, letting the TA fall back to the local software keybox.
 pub trait RemoteBackend: Send {
@@ -220,7 +230,7 @@ pub trait RemoteBackend: Send {
         alias: &str,
         cert_serial: Option<&[u8]>,
         params: &RemoteAttestParams,
-    ) -> Result<Option<Vec<Vec<u8>>>, Error>;
+    ) -> Result<Option<RemoteAttestation>, Error>;
 
     /// Forward a sign request for a remote key.  Returns the signature bytes,
     /// or `None` if the remote is unavailable.

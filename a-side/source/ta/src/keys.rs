@@ -55,7 +55,9 @@ const REMOTE_ATTEST_EWMA_MAX_NS: u64 = 2_000_000_000;
 const REMOTE_ATTEST_EQUALIZE_MIN_NS: u64 = 50_000_000;
 
 fn record_remote_attest_duration(elapsed: Duration) {
-    let sample = elapsed.as_nanos().min(u128::from(REMOTE_ATTEST_EWMA_MAX_NS)) as u64;
+    let sample = elapsed
+        .as_nanos()
+        .min(u128::from(REMOTE_ATTEST_EWMA_MAX_NS)) as u64;
     let Ok(mut ewma) = REMOTE_ATTEST_EWMA_NS.lock() else {
         return;
     };
@@ -628,7 +630,7 @@ impl crate::KeyMintTa {
             .remote
             .as_ref()
             .ok_or_else(|| km_err!(UnknownError, "remote backend not configured"))?;
-        let Some(chain) = remote.attest(
+        let Some(remote_attestation) = remote.attest(
             challenge,
             app_id,
             &alias,
@@ -638,6 +640,25 @@ impl crate::KeyMintTa {
         else {
             return Ok(None);
         };
+        let chain = remote_attestation.cert_chain;
+        let effective_security_level = remote_attestation
+            .effective_security_level
+            .unwrap_or(self.hw_info.security_level);
+        if effective_security_level != self.hw_info.security_level
+            && !(self.hw_info.security_level == SecurityLevel::Strongbox
+                && effective_security_level == SecurityLevel::TrustedEnvironment)
+        {
+            return Err(km_err!(
+                VerificationFailed,
+                "unsupported remote attestation security-level downgrade"
+            ));
+        }
+        if effective_security_level != self.hw_info.security_level {
+            warn!(
+                "remote StrongBox attestation explicitly demoted to {:?}",
+                effective_security_level
+            );
+        }
         if chain.is_empty() {
             return Ok(None);
         }
@@ -650,7 +671,7 @@ impl crate::KeyMintTa {
             leaf_der,
             challenge,
             app_id,
-            self.hw_info.security_level,
+            effective_security_level,
         )?;
         let public_key = leaf
             .tbs_certificate()
@@ -663,13 +684,13 @@ impl crate::KeyMintTa {
         let (mut chars, keygen_info) = tag::extract_key_gen_characteristics(
             self.secure_storage_available(),
             params,
-            self.hw_info.security_level,
+            effective_security_level,
         )?;
-        self.add_keymint_tags(&mut chars, KeyOrigin::Generated)?;
+        self.add_keymint_tags(&mut chars, KeyOrigin::Generated, effective_security_level)?;
         let _ = keygen_info;
         let root_of_trust = crate::cert::parse_remote_root_of_trust(leaf_der)?;
         if let Some(rot) = root_of_trust.as_ref() {
-            overlay_remote_version_tags(&mut chars, rot, self.hw_info.security_level);
+            overlay_remote_version_tags(&mut chars, rot, effective_security_level);
         }
         let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
             alias,
@@ -729,7 +750,11 @@ impl crate::KeyMintTa {
             params,
             self.hw_info.security_level,
         )?;
-        self.add_keymint_tags(&mut chars, KeyOrigin::Generated)?;
+        self.add_keymint_tags(
+            &mut chars,
+            KeyOrigin::Generated,
+            self.hw_info.security_level,
+        )?;
         let key_material = match keygen_info {
             crypto::KeyGenInfo::Aes(variant) => {
                 self.imp
@@ -796,10 +821,18 @@ impl crate::KeyMintTa {
         )?;
         match import_type {
             KeyImport::NonWrapped => {
-                self.add_keymint_tags(&mut chars, KeyOrigin::Imported)?;
+                self.add_keymint_tags(
+                    &mut chars,
+                    KeyOrigin::Imported,
+                    self.hw_info.security_level,
+                )?;
             }
             KeyImport::Wrapped => {
-                self.add_keymint_tags(&mut chars, KeyOrigin::SecurelyImported)?;
+                self.add_keymint_tags(
+                    &mut chars,
+                    KeyOrigin::SecurelyImported,
+                    self.hw_info.security_level,
+                )?;
             }
         }
 

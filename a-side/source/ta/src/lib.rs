@@ -1392,9 +1392,10 @@ impl KeyMintTa {
         &self,
         chars: &mut Vec<KeyCharacteristics>,
         origin: KeyOrigin,
+        security_level: SecurityLevel,
     ) -> Result<(), Error> {
         for kc in chars {
-            if kc.security_level == self.hw_info.security_level {
+            if kc.security_level == security_level {
                 kc.authorizations.try_push(KeyParam::Origin(origin))?;
                 if let Some(hal_info) = &self.hal_info {
                     kc.authorizations.try_extend_from_slice(&[
@@ -1413,7 +1414,7 @@ impl KeyMintTa {
         Err(km_err!(
             InvalidArgument,
             "no characteristics at our security level {:?}",
-            self.hw_info.security_level
+            security_level
         ))
     }
 }

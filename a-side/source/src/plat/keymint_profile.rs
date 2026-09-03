@@ -166,6 +166,16 @@ fn build_impl_name(
 fn probe_system_keymint_hardware_info(
     security_level: SecurityLevel,
 ) -> Result<KeyMintHardwareInfo> {
+    let keymint = connect_system_keymint_device(security_level)?;
+    let info = keymint
+        .getHardwareInfo()
+        .map_err(|status| anyhow!("getHardwareInfo from system KeyMint failed: {status}"))?;
+    Ok(info)
+}
+
+pub(crate) fn connect_system_keymint_device(
+    security_level: SecurityLevel,
+) -> Result<Strong<dyn IKeyMintDevice>> {
     let service = system_keymint_service_name(security_level)
         .ok_or_else(|| anyhow!("unsupported security level for system KeyMint probe"))?;
     let keymint: Strong<dyn IKeyMintDevice> =
@@ -173,11 +183,7 @@ fn probe_system_keymint_hardware_info(
     if keymint.as_binder().as_proxy().is_none() {
         bail!("system KeyMint service {service} resolved to a local binder");
     }
-
-    let info = keymint
-        .getHardwareInfo()
-        .map_err(|status| anyhow!("getHardwareInfo from {service} failed: {status}"))?;
-    Ok(info)
+    Ok(keymint)
 }
 
 fn profile_from_system_hardware_info(

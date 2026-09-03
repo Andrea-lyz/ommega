@@ -328,8 +328,25 @@ pub struct PlaintextKeyBlob {
 }
 
 impl PlaintextKeyBlob {
-    /// Return the set of key parameters at the provided security level.
+    /// Return the set of key parameters at the provided security level.  A
+    /// remote key explicitly downgraded from StrongBox to TEE carries honest
+    /// TEE characteristics even though the request entered through the
+    /// StrongBox service, so use those characteristics when no StrongBox entry
+    /// exists.  Local and normal StrongBox keys remain strict.
     pub fn characteristics_at(&self, sec_level: SecurityLevel) -> Result<&[KeyParam], Error> {
+        let has_requested_level = self
+            .characteristics
+            .iter()
+            .any(|chars| chars.security_level == sec_level);
+        if !has_requested_level
+            && sec_level == SecurityLevel::Strongbox
+            && matches!(self.key_material, crypto::KeyMaterial::Remote(_))
+        {
+            return tag::characteristics_at(
+                &self.characteristics,
+                SecurityLevel::TrustedEnvironment,
+            );
+        }
         tag::characteristics_at(&self.characteristics, sec_level)
     }
 

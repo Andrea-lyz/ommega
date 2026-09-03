@@ -495,7 +495,16 @@ fn reload_runtime_config(trigger: WatchTrigger) {
         applied_crypto = runtime_snapshot.crypto.clone();
     }
 
+    let mut applied_main = new_config_file.main.clone();
+    if runtime_snapshot.main.use_native_strongbox != new_config_file.main.use_native_strongbox {
+        log::warn!(
+            "main.use_native_strongbox changed on disk; restart keymint to switch StrongBox backend"
+        );
+        applied_main.use_native_strongbox = runtime_snapshot.main.use_native_strongbox;
+    }
+
     let mut updated = Config::from_file(&new_config_file, applied_trust);
+    updated.main = applied_main;
     updated.trust_intent = applied_trust_intent;
     updated.crypto = applied_crypto;
     match crate::keymaster::keymint_device::apply_runtime_config_update(
@@ -795,6 +804,10 @@ pub struct MainConfig {
     /// Only the injector backend is currently enabled.
     pub backend: Backend,
     pub log_level: String,
+    /// Use the A-side device's native StrongBox KeyMint HAL for Ommega's
+    /// StrongBox security level. A keymint restart is required after changing it.
+    #[serde(default)]
+    pub use_native_strongbox: bool,
     /// Insecure fallback for devices whose system TEE cannot verify HATs.
     /// When enabled, ommega accepts shape-valid HATs without system KeyMint MAC verification.
     #[serde(default)]
@@ -806,6 +819,7 @@ impl Default for MainConfig {
         Self {
             backend: Backend::Injector,
             log_level: "debug".to_string(),
+            use_native_strongbox: false,
             force_skip_system_biometric_hat_verification: false,
         }
     }
@@ -1248,6 +1262,17 @@ force_skip_system_biometric_hat_verification = true"#,
         .unwrap();
         assert!(parsed.force_skip_system_biometric_hat_verification);
         assert!(!MainConfig::default().force_skip_system_biometric_hat_verification);
+    }
+
+    #[test]
+    fn main_config_parses_native_strongbox_selection() {
+        let parsed: MainConfig = toml::from_str(
+            r#"backend = "injector"
+use_native_strongbox = true"#,
+        )
+        .unwrap();
+        assert!(parsed.use_native_strongbox);
+        assert!(!MainConfig::default().use_native_strongbox);
     }
 
     #[test]

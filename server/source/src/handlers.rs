@@ -175,6 +175,18 @@ fn demote_to_tee(body: &Value) -> Value {
     b
 }
 
+/// Mark a successful StrongBox robustness retry with the security level that
+/// actually minted the certificate chain.  A-side clients use both fields to
+/// distinguish this explicit downgrade from an arbitrary level mismatch.
+fn mark_strongbox_demotion(result: &mut Value) -> bool {
+    let Some(obj) = result.as_object_mut() else {
+        return false;
+    };
+    obj.insert("strongbox_demoted".to_string(), json!(true));
+    obj.insert("effective_security_level".to_string(), json!(1));
+    true
+}
+
 /// An attest result without a usable cert chain is treated as a failure so the
 /// robustness demotion (or the next layer) gets a chance instead of forwarding
 /// an empty chain to the A-side (which would silently fall back locally).
@@ -330,10 +342,16 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
                     && is_strongbox_request(body)
                 {
                     let demoted = demote_to_tee(body);
-                    if let Some(dv) =
+                    if let Some(mut dv) =
                         try_b_device_layer(state, task_type, &demoted, &device_id).await
                     {
                         if dv.get("error").is_none() && result_shape_valid(task_type, &dv) {
+                            if !mark_strongbox_demotion(&mut dv) {
+                                last_error = Some(
+                                    "strongbox demotion returned a non-object result".to_string(),
+                                );
+                                continue;
+                            }
                             tracing::info!(
                                 "run_a_side_task: type={task_type} layer=b strongbox-robust demoted to TEE ok"
                             );
@@ -715,5 +733,26 @@ pub async fn admin_cancel_task(
     match state.store.cancel_task(&task_id).await {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
         Err(_) => json_err(StatusCode::NOT_FOUND, "task not found"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strongbox_demotion_marks_effective_tee_level() {
+        let mut result = json!({ "cert_chain": ["leaf"] });
+
+        assert!(mark_strongbox_demotion(&mut result));
+        assert_eq!(result["strongbox_demoted"], json!(true));
+        assert_eq!(result["effective_security_level"], json!(1));
+    }
+
+    #[test]
+    fn strongbox_demotion_rejects_non_object_result() {
+        let mut result = json!(["leaf"]);
+
+        assert!(!mark_strongbox_demotion(&mut result));
     }
 }

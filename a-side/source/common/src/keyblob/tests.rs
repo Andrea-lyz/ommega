@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use super::{
-    sdd_mem::InMemorySlotManager, SecureDeletionSecretManager, SecureDeletionSlot, SlotHolder,
-    SlotPurpose,
+    sdd_mem::InMemorySlotManager, PlaintextKeyBlob, SecureDeletionSecretManager,
+    SecureDeletionSlot, SlotHolder, SlotPurpose,
 };
+use crate::crypto::{KeyMaterial, RemoteRef};
+use kmr_wire::keymint::{KeyCharacteristics, KeyParam, KeyPurpose, SecurityLevel};
 
 #[derive(Default)]
 struct FakeRng(u8);
@@ -99,4 +101,50 @@ fn test_sdd_exhaustion() {
         .unwrap();
     assert_eq!(slot1a, slot1b);
     assert!(sdd1a != sdd1b);
+}
+
+#[test]
+fn remote_strongbox_demotion_uses_tee_characteristics() {
+    let blob = PlaintextKeyBlob {
+        characteristics: vec![KeyCharacteristics {
+            security_level: SecurityLevel::TrustedEnvironment,
+            authorizations: vec![KeyParam::Purpose(KeyPurpose::Sign)],
+        }],
+        key_material: KeyMaterial::Remote(RemoteRef {
+            alias: "remote-test".to_string(),
+            public_key: vec![1, 2, 3],
+            root_of_trust: None,
+        }),
+    };
+
+    assert_eq!(
+        blob.characteristics_at(SecurityLevel::Strongbox).unwrap(),
+        &[KeyParam::Purpose(KeyPurpose::Sign)]
+    );
+}
+
+#[test]
+fn remote_key_prefers_real_strongbox_characteristics() {
+    let blob = PlaintextKeyBlob {
+        characteristics: vec![
+            KeyCharacteristics {
+                security_level: SecurityLevel::Strongbox,
+                authorizations: vec![KeyParam::Purpose(KeyPurpose::Verify)],
+            },
+            KeyCharacteristics {
+                security_level: SecurityLevel::TrustedEnvironment,
+                authorizations: vec![KeyParam::Purpose(KeyPurpose::Sign)],
+            },
+        ],
+        key_material: KeyMaterial::Remote(RemoteRef {
+            alias: "remote-test".to_string(),
+            public_key: vec![1, 2, 3],
+            root_of_trust: None,
+        }),
+    };
+
+    assert_eq!(
+        blob.characteristics_at(SecurityLevel::Strongbox).unwrap(),
+        &[KeyParam::Purpose(KeyPurpose::Verify)]
+    );
 }
