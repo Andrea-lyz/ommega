@@ -113,10 +113,23 @@ pub extern "C" fn entry(handle: *const c_void) -> bool {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string()),
     );
-    if let Err(error) = ipc::install_direct_rpc_session() {
-        error!("failed to initialize ommega RPC session: {error:#}");
+    if let Err(error) = hook::init_hook() {
+        error!("failed to initialize binder ioctl hook: {error:#}");
         return false;
     }
-    hook::init_hook().expect("failed to initialize binder ioctl hook");
+    if let Err(error) = std::thread::Builder::new()
+        .name("ommega-rpc-warmup".to_string())
+        .spawn(|| {
+            if let Err(error) = ipc::install_direct_rpc_session() {
+                warn!(
+                    "initial ommega RPC session unavailable; hooks remain active and will reconnect lazily: {error:#}"
+                );
+            }
+        })
+    {
+        warn!(
+            "failed to start ommega RPC warmup thread; hooks remain active and will reconnect lazily: {error}"
+        );
+    }
     true
 }

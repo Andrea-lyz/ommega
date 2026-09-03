@@ -76,9 +76,11 @@ touch /data/adb/ommega/restart.injector
 touch /data/adb/ommega/restart.all
 ```
 
-On each keymint start, its watchdog removes the previous RPC socket inode.
-The injector waits up to 30 seconds for the current keymint process to create
-the socket before loading its payload into keystore2.
+On each keymint start, its watchdog removes the previous RPC socket inode. The
+injector installs its Binder hooks immediately so boot-time authorization and
+maintenance events are captured even while remote identity and RPC startup are
+still pending. RPC warm-up runs in the keystore2 process, and the in-memory
+mirror queue replays captured state changes after the service becomes ready.
 
 ## License
 
