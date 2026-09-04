@@ -13,7 +13,22 @@ export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/vendor/lib64/:/system/lib64/:/apex/com
 
 mkdir -p "$STATE_DIR" "$STATE_DIR/logs"
 chmod 0700 "$STATE_DIR" "$STATE_DIR/logs" 2>/dev/null || true
+rm -f "$STATE_DIR/restart.all"
+
+# service.sh is the only B-side lifecycle entry point. This also works in
+# KernelSU late-load and emulated soft-reboot flows where post-fs-data is not a
+# safe dependency for a jailbroken device.
+if [ ! -f "$CONF_FILE" ] && [ -f "$MODDIR/relay.conf" ]; then
+  cp "$MODDIR/relay.conf" "$CONF_FILE"
+fi
 chmod 0600 "$CONF_FILE" 2>/dev/null || true
+chmod 0755 "$MODDIR/spl-control.sh" 2>/dev/null || true
+
+if [ -x "$MODDIR/spl-control.sh" ]; then
+  if ! sh "$MODDIR/spl-control.sh" apply; then
+    echo "[service] failed to apply persisted SPL configuration" >&2
+  fi
+fi
 
 # Reflect the module state in module.prop (shown by KernelSU/Magisk).
 # service.sh writes ⏳ before starting; the relay binary itself then

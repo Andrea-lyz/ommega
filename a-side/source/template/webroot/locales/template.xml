@@ -75,7 +75,7 @@
     <string name="prompt_unknown_key_set">Unknown keybox set successfully</string>
     <string name="prompt_valid_key_set">Valid keybox set successfully</string>
     <string name="prompt_no_valid">No valid keybox found.</string>
-    <string name="prompt_boot_hash_set">Verified Boot Hash saved successfully</string>
+    <string name="prompt_boot_hash_set">Verified Boot Hash applied</string>
     <string name="prompt_boot_hash_set_error">Failed to update Verified Boot Hash</string>
     <string name="prompt_saved_target">Config saved to target.txt</string>
     <string name="prompt_save_error">Failed to save config</string>
@@ -110,7 +110,7 @@
     <string name="security_patch_unable_to_connect">Unable to connect to source.android.com</string>
     <string name="security_patch_auto_success">Auto config enabled successfully</string>
     <string name="security_patch_auto_failed">Failed to enable auto config</string>
-    <string name="security_patch_save_success">Security patch saved successfully</string>
+    <string name="security_patch_save_success">Security patch applied</string>
     <string name="security_patch_save_failed">Failed to save security patch</string>
     <string name="security_patch_value_empty">Security patch configuration is disabled</string>
     <string name="security_patch_invalid_all">Invalid format</string>
@@ -126,7 +126,7 @@
     <string name="confirmation_uninstall_message">Are you sure you want to uninstall Tricky Addon</string>
     <!-- Mode dialog -->
     <string name="mode_dialog_title">Mode</string>
-    <string name="mode_auto">Auto</string>
-    <string name="mode_certificate_generating">Cert Generating (!)</string>
-    <string name="mode_leaf_hack">Leaf Hack (?)</string>
+    <string name="mode_auto">Global default</string>
+    <string name="mode_certificate_generating">StrongBox</string>
+    <string name="mode_leaf_hack">TEE</string>
 </resources>

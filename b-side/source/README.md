@@ -47,9 +47,9 @@ OMMEGA_RELAY_LOGCAT_LEVEL=info
   relay_server (required).
 - `OMMEGA_RELAY_MACHINE_ID` — machine id used in the `b/poll` query (optional).
 - `OMMEGA_RELAY_TOKEN` — B-side token sent as `X-Relay-Token` (required).
-- All four logging keys are managed in one place (`relay.conf`), read at relay
-  startup, **not** hot-reloaded; `touch /data/adb/ommega/restart.all` (or
-  reboot) applies a change:
+- All four logging keys are managed in one place (`relay.conf`) and read at
+  relay startup. Run `sh /data/adb/modules/ommegaclient_b/service.sh` after
+  changing them; this restarts only relay and never reboots the device:
   - `OMMEGA_RELAY_LOG_ENABLED` — `true` writes `/data/adb/ommega/logs/relay.log`
     (default), `false` disables the file log.
   - `OMMEGA_RELAY_LOG_LEVEL` — file log level when enabled:
@@ -59,7 +59,7 @@ OMMEGA_RELAY_LOGCAT_LEVEL=info
   - `OMMEGA_RELAY_LOGCAT_LEVEL` — logcat level:
     `off|error|warn|info|debug|trace` (default `info`).
 
-3. The relay **hot-reloads config at runtime**: a background thread inside the
+3. The relay **hot-reloads connection config at runtime**: a background thread inside the
    `relay` process watches `relay.conf` for changes and the `restart.all`
    marker, and updates the live config in place — **no process restart needed**.
    To force an immediate reload
@@ -68,6 +68,20 @@ OMMEGA_RELAY_LOGCAT_LEVEL=info
 ```sh
 touch /data/adb/ommega/restart.all
 ```
+
+## SPL WebUI
+
+KernelSU/APatch exposes the bundled `webroot/` UI. It stores optional system,
+boot and vendor SPL overrides in `/data/adb/ommega/spl.conf`. Saving invokes
+`spl-control.sh` immediately; changed properties recycle the native KeyMint
+service and `keystore2`, then wait for the default KeyMint Binder to return.
+
+The B-side module intentionally uses `service.sh` as its only lifecycle entry
+point. It does not ship `post-fs-data.sh` and never requests a hard reboot.
+`service.sh` reapplies the persisted SPL configuration before starting relay.
+Whether a boot SPL override is accepted must be verified in a newly generated
+hardware attestation certificate; a changed Android property alone is not
+proof that the TEE accepted it.
 
 ## Relay daemon
 

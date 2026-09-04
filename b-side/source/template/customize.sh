@@ -12,7 +12,7 @@ ui_print "- Installing ommegaclient-b B-side relay agent"
 
 # Ensure the relay binary and the uninstall hook are executable.
 chmod 0755 "$MODPATH/libs/arm64-v8a/relay" "$MODPATH/libs/x86_64/relay" \
-  "$MODPATH/uninstall.sh" 2>/dev/null || true
+  "$MODPATH/spl-control.sh" "$MODPATH/service.sh" "$MODPATH/uninstall.sh" 2>/dev/null || true
 
 # Verify the expected binary exists for this ABI.
 case "$ARCH" in

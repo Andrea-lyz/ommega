@@ -1272,4 +1272,188 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
+// Ommega 1.4 target security policy. target.txt contains package names only;
+// explicit per-package security levels live in target-security.toml.
+const OMMEGA_TARGET_SECURITY = "/data/adb/ommega/ommegadata/target-security.toml";
+let ommegaTargetModes = new Map();
+
+function ommegaParseTargetSecurity(contents) {
+  const modes = new Map();
+  for (const line of String(contents || "").split("\n")) {
+    const match = line.match(/^\s*"([^"\\]+)"\s*=\s*"(strongbox|tee)"\s*$/);
+    if (match) modes.set(match[1], match[2]);
+  }
+  return modes;
+}
+
+function ommegaTargetSecurityToml(selected) {
+  const lines = ["version = 1", "", "[packages]"];
+  for (const pkg of [...selected].sort()) {
+    const mode = ommegaTargetModes.get(pkg);
+    if (mode === "strongbox" || mode === "tee") {
+      lines.push(`"${pkg}" = "${mode}"`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+const ommegaBaseAppLoad = Mi;
+Mi = async function () {
+  const {stdout} = await _(`cat "${OMMEGA_TARGET_SECURITY}" 2>/dev/null || true`);
+  ommegaTargetModes = ommegaParseTargetSecurity(stdout);
+  return ommegaBaseAppLoad();
+};
+
+// Legacy suffixes are accepted once as plain package names, then disappear on save.
+Jo = function (contents) {
+  return String(contents || "")
+    .split("\n")
+    .map(line => line.trim().replace(/[!?]+$/, ""))
+    .filter(line => line && !line.startsWith("#") && !line.startsWith("["));
+};
+
+Ss = function () {
+  const dialog = document.getElementById("mode-dialog");
+  const appName = document.getElementById("mode-dialog-appname");
+  let timer;
+  let selectedCard = null;
+
+  const open = card => {
+    selectedCard = card;
+    const pkg = card.getAttribute("data-package");
+    const label = card.querySelector(".app-name")?.textContent || pkg;
+    appName.innerHTML = `${ommegaEsc(label)}<br>${ommegaEsc(pkg)}`;
+    const mode = ommegaTargetModes.get(pkg) || "global_default";
+    document.getElementById("mode-default").checked = mode === "global_default";
+    document.getElementById("mode-generate").checked = mode === "strongbox";
+    document.getElementById("mode-hack").checked = mode === "tee";
+    dialog.show();
+  };
+
+  const choose = mode => {
+    if (!selectedCard || !mode) {
+      dialog.close();
+      selectedCard = null;
+      return;
+    }
+    const pkg = selectedCard.getAttribute("data-package");
+    if (mode === "global_default") ommegaTargetModes.delete(pkg);
+    else ommegaTargetModes.set(pkg, mode);
+    Di();
+    selectedCard = null;
+    setTimeout(() => dialog.close(), 200);
+  };
+
+  document.getElementById("mode-default").onclick = () => choose("global_default");
+  document.getElementById("mode-generate").onclick = () => choose("strongbox");
+  document.getElementById("mode-hack").onclick = () => choose("tee");
+  document.getElementById("mode-cancel").onclick = () => choose();
+  se.querySelectorAll(".card").forEach(card => {
+    card.addEventListener("pointerdown", () => {
+      if (card.querySelector("md-checkbox")?.checked) timer = setTimeout(() => open(card), 500);
+    });
+    card.addEventListener("pointerup", () => clearTimeout(timer));
+    card.addEventListener("pointercancel", () => clearTimeout(timer));
+  });
+};
+
+Di = function () {
+  se.querySelectorAll(".card").forEach(card => {
+    const pkg = card.getAttribute("data-package");
+    const checkbox = card.querySelector("md-checkbox");
+    checkbox.classList.remove("checkbox-checked-generate", "checkbox-checked-hack");
+    if (!checkbox.checked) return;
+    if (ommegaTargetModes.get(pkg) === "strongbox") {
+      checkbox.classList.add("checkbox-checked-generate");
+    } else if (ommegaTargetModes.get(pkg) === "tee") {
+      checkbox.classList.add("checkbox-checked-hack");
+    }
+  });
+};
+
+document.getElementById("save").onclick = async () => {
+  const selected = new Set(
+    Array.from(se.querySelectorAll("md-checkbox"))
+      .filter(box => box.checked)
+      .map(box => box.closest(".card").getAttribute("data-package"))
+      .filter(pkg => /^[A-Za-z0-9_.]+$/.test(pkg))
+  );
+  Dl.forEach(pkg => selected.add(pkg));
+  for (const pkg of [...ommegaTargetModes.keys()]) {
+    if (!selected.has(pkg)) ommegaTargetModes.delete(pkg);
+  }
+  const targetBody = [...selected].sort().join("\n") + "\n";
+  const policyBody = ommegaTargetSecurityToml(selected);
+  const command = `
+    set -e
+    dir=/data/adb/ommega/ommegadata
+    mkdir -p "$dir"
+    cat > "$dir/target.txt.tmp" << 'OMMEGA_TARGET_EOF'
+${targetBody}OMMEGA_TARGET_EOF
+    cat > "$dir/target-security.toml.tmp" << 'OMMEGA_POLICY_EOF'
+${policyBody}OMMEGA_POLICY_EOF
+    chmod 0644 "$dir/target.txt.tmp" "$dir/target-security.toml.tmp"
+    chown 1017:1017 "$dir/target.txt.tmp" "$dir/target-security.toml.tmp" 2>/dev/null || true
+    mv "$dir/target-security.toml.tmp" "$dir/target-security.toml"
+    mv "$dir/target.txt.tmp" "$dir/target.txt"
+  `;
+  const {errno, stderr} = await _(command);
+  if (errno === 0) {
+    y("prompt_saved_target");
+    qt();
+  } else {
+    console.error("target policy save failed:", stderr);
+    y("prompt_save_error", false);
+  }
+};
+
+const ommegaRemoteOptions = document.querySelector(".remote-config-options");
+const ommegaDisableLabel = document.createElement("label");
+ommegaDisableLabel.className = "config-option";
+ommegaDisableLabel.style.cssText = "display:flex;align-items:center;gap:4px";
+ommegaDisableLabel.innerHTML = '<md-checkbox id="remote-config-disable-native-strongbox"></md-checkbox><span data-i18n="remote_config_disable_native_strongbox"></span>';
+ommegaRemoteOptions?.appendChild(ommegaDisableLabel);
+const ommegaDisableNativeStrongbox = document.getElementById("remote-config-disable-native-strongbox");
+const ommegaBaseLoadRemoteConfig = loadRemoteConfig;
+loadRemoteConfig = async function () {
+  await ommegaBaseLoadRemoteConfig();
+  const {stdout} = await _(`cat ${CONFIG_PATH} 2>/dev/null || true`);
+  const match = stdout.match(/^disable_native_strongbox:\s*(.+)$/mi);
+  ommegaDisableNativeStrongbox.checked = !!match && /^(1|true|yes|on)$/i.test(match[1].trim());
+};
+
+ommegaRebind("save-remote-config", async () => {
+  const current = await _(`cat ${CONFIG_PATH} 2>/dev/null || true`);
+  const localHw = current.stdout.match(/^local_hw:\s*(.+)$/mi)?.[1]?.trim() || "false";
+  const lines = [];
+  const url = RemoteConfigUrl.value.trim();
+  const deviceId = RemoteConfigDeviceId.value.trim();
+  const token = RemoteConfigToken.value.trim();
+  if (url) lines.push(`url: ${url}`);
+  if (deviceId) lines.push(`device_id: ${deviceId}`);
+  if (token) lines.push(`token: ${token}`);
+  lines.push(`remote: ${RemoteConfigRemote.checked}`);
+  lines.push(`local_hw: ${localHw}`);
+  lines.push(`tls_insecure: ${RemoteConfigTlsInsecure.checked}`);
+  lines.push(`debug_logging: ${RemoteConfigDebugLogging.checked}`);
+  lines.push(`disable_native_strongbox: ${ommegaDisableNativeStrongbox.checked}`);
+  const body = lines.join("\n") + "\n";
+  const {errno, stderr} = await _(`
+    set -e
+    dir=/data/adb/ommega/ommegadata
+    mkdir -p "$dir"
+    cat > "$dir/config.tmp" << 'OMMEGA_CONFIG_EOF'
+${body}OMMEGA_CONFIG_EOF
+    chmod 0644 "$dir/config.tmp"
+    chown 1017:1017 "$dir/config.tmp" 2>/dev/null || true
+    mv "$dir/config.tmp" "$dir/config"
+  `);
+  if (errno === 0) {
+    y("remote_config_save_success");
+    RemoteConfigDialog.close();
+  } else {
+    console.error("remote config save failed:", stderr);
+    y("remote_config_save_failed", false);
+  }
+});
 

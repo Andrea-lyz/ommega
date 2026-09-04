@@ -22,11 +22,6 @@ deny_packages = []
 block_android_package = true
 allow_unknown_package = false
 
-[compat]
-# For a scoped caller whose resolved UID contains any listed package,
-# getSecurityLevel(STRONGBOX) returns HARDWARE_TYPE_UNAVAILABLE (-68).
-strongbox_unavailable_packages = []
-
 [intercept]
 get_security_level = true
 get_key_entry = true

@@ -147,10 +147,11 @@
     <string name="remote_config_tls_insecure">禁用 TLS 验证</string>
 
     <string name="remote_config_debug_logging">启用调试日志</string>
+    <string name="remote_config_disable_native_strongbox">对全局默认应用禁用原生 StrongBox</string>
 
     <string name="remote_config_debug_logging_description">启用详细调试日志，记录所有操作、调用链和数据。日志将写入配置目录。</string>
 
-    <string name="remote_config_save_success">配置保存成功</string>
+    <string name="remote_config_save_success">配置已应用</string>
 
     <string name="remote_config_save_failed">配置保存失败</string>
 
@@ -168,14 +169,14 @@
 
     <string name="prompt_no_valid">未找到有效密钥箱。</string>
 
-    <string name="prompt_boot_hash_set">哈希值保存成功，重启后生效</string>
+    <string name="prompt_boot_hash_set">哈希值已应用</string>
     <string name="menu_set_verified_boot_key">设置密钥值</string>
     <string name="boot_key_title">密钥值</string>
     <string name="boot_key_input_placeholder">在此粘贴密钥值</string>
-    <string name="prompt_boot_key_set">密钥值保存成功，重启后生效</string>
-    <string name="prompt_boot_key_cleared">密钥值已清除，重启后生效</string>
+    <string name="prompt_boot_key_set">密钥值已应用</string>
+    <string name="prompt_boot_key_cleared">密钥值覆盖已清除</string>
 
-    <string name="prompt_boot_hash_cleared">哈希值已清除，重启后生效</string>
+    <string name="prompt_boot_hash_cleared">哈希值覆盖已清除</string>
 
     <string name="prompt_boot_hash_set_error">哈希值保存失败</string>
 
@@ -245,7 +246,7 @@
 
     <string name="security_patch_auto_failed">启用自动配置失败</string>
 
-    <string name="security_patch_save_success">安全补丁保存成功</string>
+    <string name="security_patch_save_success">安全补丁已应用</string>
 
     <string name="security_patch_save_failed">保存安全补丁失败</string>
 
@@ -277,11 +278,11 @@
 
     <string name="mode_dialog_title">模式</string>
 
-    <string name="mode_auto">自动</string>
+    <string name="mode_auto">全局默认</string>
 
-    <string name="mode_certificate_generating">证书生成 (!)</string>
+    <string name="mode_certificate_generating">StrongBox</string>
 
-    <string name="mode_leaf_hack">叶子破解 (?)</string>
+    <string name="mode_leaf_hack">TEE</string>
 
     <!-- Keybox Automation -->
 
@@ -343,6 +344,5 @@
 
     <string name="prompt_setting_patch">正在设置安全补丁...</string>
 
-    <string name="prompt_security_patch_saved_restart">安全补丁已保存，重启后生效</string>
+    <string name="prompt_security_patch_saved_restart">安全补丁已应用</string>
 </resources>
-

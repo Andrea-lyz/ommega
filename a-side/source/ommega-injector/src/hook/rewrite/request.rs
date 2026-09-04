@@ -22,8 +22,8 @@ fn route_for_service_request(
     }
 }
 
-fn strongbox_unavailable_compat_reply(
-    request: &ParsedServiceRequest,
+fn apply_target_security_policy(
+    request: &mut ParsedServiceRequest,
     decision: &filter::FilterDecision,
     config: &config::InjectorConfig,
 ) -> Option<PrecomputedServiceReply> {
@@ -33,22 +33,30 @@ fn strongbox_unavailable_compat_reply(
     let ParsedServiceRequest::GetSecurityLevel { security_level } = request else {
         return None;
     };
-    if *security_level
-        != crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel::STRONGBOX
-    {
-        return None;
-    }
-    let configured = &config.compat.strongbox_unavailable_packages;
-    decision
-        .packages
-        .iter()
-        .any(|package| configured.contains(package))
-        .then(|| {
+    let mode = config.target_security_mode_for(&decision.packages)?;
+    use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+    match mode {
+        config::TargetSecurityMode::Strongbox => {
+            *security_level = SecurityLevel::STRONGBOX;
+            None
+        }
+        config::TargetSecurityMode::Tee => {
+            *security_level = SecurityLevel::TRUSTED_ENVIRONMENT;
+            None
+        }
+        config::TargetSecurityMode::GlobalDefault
+            if config.disable_native_strongbox
+                && *security_level == SecurityLevel::STRONGBOX =>
+        {
+            Some(
             PrecomputedServiceReply::Error(Status::new_service_specific_error(
                 crate::android::hardware::security::keymint::ErrorCode::ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0,
                 None,
-            ))
-        })
+            )),
+            )
+        }
+        config::TargetSecurityMode::GlobalDefault => None,
+    }
 }
 
 pub(super) fn security_level_scoop_enabled(intercept: &config::InterceptConfig) -> bool {
@@ -314,7 +322,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
 
     if request_interface == identify::KEYSTORE_SERVICE_INTERFACE {
         let decision = evaluate_caller(&caller, &cfg);
-        let request =
+        let mut request =
             match parcel::parse_service_request(data, data_size, offsets, offsets_size, tr.code) {
                 Ok(request) => request,
                 Err(error) => {
@@ -328,7 +336,11 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
 
         let method = request.method();
         let original_code = tr.code;
-        if let Some(reply) = strongbox_unavailable_compat_reply(&request, &decision, &cfg) {
+        let requested_security_level = match &request {
+            ParsedServiceRequest::GetSecurityLevel { security_level } => Some(*security_level),
+            _ => None,
+        };
+        if let Some(reply) = apply_target_security_policy(&mut request, &decision, &cfg) {
             info!(
                 "event=compat command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} action=strongbox_unavailable error_code={}",
                 command_name,
@@ -351,6 +363,32 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                 replace_top_pending(connection, PendingCall::PrecomputedService(pending, reply));
             }
             return true;
+        }
+        if let (
+            Some(requested),
+            ParsedServiceRequest::GetSecurityLevel {
+                security_level: effective,
+            },
+        ) = (requested_security_level, &request)
+        {
+            let mode = cfg.target_security_mode_for(&decision.packages);
+            if requested != *effective
+                || matches!(
+                    mode,
+                    Some(config::TargetSecurityMode::Strongbox | config::TargetSecurityMode::Tee)
+                )
+            {
+                info!(
+                    "event=security_level_policy uid={} pid={} packages={:?} requested={:?} effective={:?} mode={:?} global_disable={}",
+                    caller.uid,
+                    caller.pid,
+                    decision.packages,
+                    requested,
+                    effective,
+                    mode,
+                    cfg.disable_native_strongbox,
+                );
+            }
         }
         let allow_ommega_grant = match should_allow_ommega_grant_service_request_with_probe(
             &request,
@@ -527,38 +565,39 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        let allow_unknown_ommega_route = match should_allow_ommega_grant_security_level_request_with_probe(
-            &request,
-            &decision,
-            &caller,
-            probe_ommega_grant,
-        ) {
-            Ok(allow) => allow,
-            Err(error) => {
-                warn!(
+        let allow_unknown_ommega_route =
+            match should_allow_ommega_grant_security_level_request_with_probe(
+                &request,
+                &decision,
+                &caller,
+                probe_ommega_grant,
+            ) {
+                Ok(allow) => allow,
+                Err(error) => {
+                    warn!(
                     "event=decision ommega grant ownership probe failed for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
                     caller.uid, caller.pid, error
                 );
-                block_system_request(tr);
-                if expects_reply {
-                    let pending = PendingSecurityLevelCall {
-                        request,
-                        caller,
-                        packages: decision.packages,
-                        route: RouteTarget::Ommega,
-                        security_level: target_info.security_level,
-                    };
-                    replace_top_pending(
-                        connection,
-                        PendingCall::PrecomputedSecurityLevel(
-                            pending,
-                            Box::new(Some(synthetic_fallback_reply())),
-                        ),
-                    );
+                    block_system_request(tr);
+                    if expects_reply {
+                        let pending = PendingSecurityLevelCall {
+                            request,
+                            caller,
+                            packages: decision.packages,
+                            route: RouteTarget::Ommega,
+                            security_level: target_info.security_level,
+                        };
+                        replace_top_pending(
+                            connection,
+                            PendingCall::PrecomputedSecurityLevel(
+                                pending,
+                                Box::new(Some(synthetic_fallback_reply())),
+                            ),
+                        );
+                    }
+                    return true;
                 }
-                return true;
-            }
-        };
+            };
         // Keystore2 shares each security-level Binder between getSecurityLevel and getKeyEntry.
         let scoop_enabled = security_level_scoop_enabled(&cfg.intercept);
         let route = if allow_unknown_ommega_route || decision.allowed && scoop_enabled {

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Ommega B</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: max(20px, env(safe-area-inset-top)) 18px max(24px, env(safe-area-inset-bottom)); background: #111318; color: #e4e2e9; }
+    main { max-width: 720px; margin: auto; }
+    h1 { margin: 8px 0 4px; font-size: 28px; }
+    .sub { color: #c7c4ce; margin: 0 0 20px; }
+    .card { background: #1d1f25; border-radius: 20px; padding: 18px; margin: 14px 0; }
+    label { display: block; margin: 14px 0; font-weight: 600; }
+    input { display: block; box-sizing: border-box; width: 100%; margin-top: 7px; padding: 13px; border: 1px solid #8f9099; border-radius: 12px; background: #111318; color: inherit; font-size: 16px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    button { border: 0; border-radius: 18px; padding: 12px 18px; background: #d0bcff; color: #381e72; font-weight: 700; font-size: 15px; }
+    button.secondary { background: #34323b; color: #e7e0ec; }
+    button:disabled { opacity: .55; }
+    #status { white-space: pre-wrap; overflow-wrap: anywhere; color: #c7c4ce; font-family: ui-monospace, monospace; font-size: 13px; }
+    #message { min-height: 24px; margin-top: 14px; }
+    .error { color: #ffb4ab; }
+    .note { color: #cac4d0; font-size: 13px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Ommega B</h1>
+  <p class="sub">原生 TEE 安全补丁配置</p>
+  <section class="card">
+    <label>System SPL<input id="system" placeholder="2026-08-01；留空恢复自动"></label>
+    <label>Boot SPL<input id="boot" placeholder="2026-08-01；留空恢复自动"></label>
+    <label>Vendor SPL<input id="vendor" placeholder="2026-08-01；留空恢复自动"></label>
+    <div class="actions">
+      <button id="save">保存并立即应用</button>
+      <button id="same" class="secondary">三项使用 System 值</button>
+      <button id="auto" class="secondary">全部恢复自动</button>
+    </div>
+    <div id="message"></div>
+    <p class="note">不会执行设备硬重启。属性变化时只软重载 KeyMint 与 keystore2；Boot SPL 是否被硬件 TEE 接受仍以新生成的证明证书为准。</p>
+  </section>
+  <section class="card"><div id="status">正在读取…</div></section>
+</main>
+<script type="module">
+  let seq = 0;
+  function exec(command) {
+    return new Promise(resolve => {
+      const callback = `ommega_b_${Date.now()}_${seq++}`;
+      window[callback] = (errno, stdout, stderr) => {
+        delete window[callback];
+        resolve({errno, stdout, stderr});
+      };
+      try { ksu.exec(command, '{}', callback); }
+      catch (error) { delete window[callback]; resolve({errno: 1, stdout: '', stderr: String(error)}); }
+    });
+  }
+  const moduleDir = '/data/adb/modules/ommegaclient_b';
+  const fields = ['system', 'boot', 'vendor'];
+  const message = document.getElementById('message');
+  const save = document.getElementById('save');
+  const valid = value => value === '' || /^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(value);
+  async function refresh() {
+    const result = await exec(`sh "${moduleDir}/spl-control.sh" status`);
+    document.getElementById('status').textContent = result.stdout || result.stderr || '状态不可用';
+    if (result.errno === 0) {
+      const values = Object.fromEntries(result.stdout.split('\n').map(line => line.split('=', 2)));
+      fields.forEach(name => document.getElementById(name).value = values[`${name.toUpperCase()}_SPL`] || '');
+    }
+  }
+  async function apply() {
+    const values = fields.map(name => document.getElementById(name).value.trim());
+    if (!values.every(valid)) {
+      message.className = 'error';
+      message.textContent = '日期格式必须为 YYYY-MM-DD，或留空恢复自动。';
+      return;
+    }
+    save.disabled = true;
+    message.className = '';
+    message.textContent = '正在保存并软重载服务…';
+    const args = values.map(value => `'${value}'`).join(' ');
+    const result = await exec(`sh "${moduleDir}/spl-control.sh" save ${args}`);
+    message.className = result.errno === 0 ? '' : 'error';
+    message.textContent = result.errno === 0 ? '配置已应用，无需重启设备。' : `应用失败：${result.stderr || result.stdout}`;
+    save.disabled = false;
+    await refresh();
+  }
+  document.getElementById('save').onclick = apply;
+  document.getElementById('same').onclick = () => {
+    const value = document.getElementById('system').value.trim();
+    document.getElementById('boot').value = value;
+    document.getElementById('vendor').value = value;
+  };
+  document.getElementById('auto').onclick = () => fields.forEach(name => document.getElementById(name).value = '');
+  refresh();
+</script>
+</body>
+</html>

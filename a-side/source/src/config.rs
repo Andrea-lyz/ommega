@@ -452,15 +452,7 @@ fn reload_runtime_config(trigger: WatchTrigger) {
             "Trust config changed on disk beyond patch levels; restart keymint to apply it."
         );
     } else {
-        let mut trust_to_resolve = new_config_file.trust.clone();
-        if trust_to_resolve.boot_patchlevel.trim() == "auto" {
-            if previous_trust_intent.boot_patchlevel.trim() != "auto" {
-                log::warn!(
-                    "boot_patchlevel changed to auto; keeping the current runtime value until keymint restarts"
-                );
-            }
-            trust_to_resolve.boot_patchlevel = previous_trust.boot_patchlevel.clone();
-        }
+        let trust_to_resolve = new_config_file.trust.clone();
         match crate::plat::vbmeta::resolve_patch_levels(&trust_to_resolve) {
             Ok(patches) => {
                 update_patchlevels = previous_trust.os_patchlevel != patches.os_patchlevel

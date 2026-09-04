@@ -178,7 +178,8 @@ fn load_config_json() -> Result<Value> {
             "tls_insecure": cfg.remote.tls_insecure,
             "fallback_local": cfg.remote.fallback_local,
             "debug_logging": cfg.remote.debug_logging,
-        }
+        },
+        "disable_native_strongbox": cfg.disable_native_strongbox,
     }))
 }
 
@@ -206,6 +207,12 @@ fn update_config(value: Value) -> Result<()> {
         if let Some(v) = remote.get("debug_logging").and_then(Value::as_bool) {
             cfg.remote.debug_logging = v;
         }
+    }
+    if let Some(v) = value
+        .get("disable_native_strongbox")
+        .and_then(Value::as_bool)
+    {
+        cfg.disable_native_strongbox = v;
     }
     ommegaclient_config::save(&cfg)?;
     Ok(())
@@ -240,6 +247,7 @@ mod ommegaclient_config {
 
     pub struct RelayConfig {
         pub remote: RemoteConfig,
+        pub disable_native_strongbox: bool,
     }
 
     #[derive(Default)]
@@ -265,6 +273,7 @@ mod ommegaclient_config {
     pub fn load() -> Result<RelayConfig> {
         let raw = fs::read_to_string(CONFIG_PATH).with_context(|| format!("read {CONFIG_PATH}"))?;
         let mut rc = RemoteConfig::default();
+        let mut disable_native_strongbox = false;
         for line in raw.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -290,10 +299,16 @@ mod ommegaclient_config {
                 "debug_logging" | "debug" | "verbose" => {
                     rc.debug_logging = parse_bool(&value).unwrap_or(false);
                 }
+                "disable_native_strongbox" => {
+                    disable_native_strongbox = parse_bool(&value).unwrap_or(false);
+                }
                 _ => {}
             }
         }
-        Ok(RelayConfig { remote: rc })
+        Ok(RelayConfig {
+            remote: rc,
+            disable_native_strongbox,
+        })
     }
 
     pub fn save(cfg: &RelayConfig) -> Result<()> {
@@ -305,6 +320,10 @@ mod ommegaclient_config {
         contents.push_str(&format!("local_hw: {}\n", cfg.remote.fallback_local));
         contents.push_str(&format!("tls_insecure: {}\n", cfg.remote.tls_insecure));
         contents.push_str(&format!("debug_logging: {}\n", cfg.remote.debug_logging));
+        contents.push_str(&format!(
+            "disable_native_strongbox: {}\n",
+            cfg.disable_native_strongbox
+        ));
         if let Some(parent) = Path::new(CONFIG_PATH).parent() {
             fs::create_dir_all(parent).ok();
         }

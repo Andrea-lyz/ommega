@@ -147,10 +147,11 @@
     <string name="remote_config_tls_insecure">Disable TLS verification</string>
 
     <string name="remote_config_debug_logging">Enable Debug Logging</string>
+    <string name="remote_config_disable_native_strongbox">Disable native StrongBox for global-default apps</string>
 
     <string name="remote_config_debug_logging_description">Enable detailed debug logging, recording all operations, call chains and data. Logs will be written to the config directory.</string>
 
-    <string name="remote_config_save_success">Config saved successfully, reboot to take effect</string>
+    <string name="remote_config_save_success">Configuration applied</string>
 
     <string name="remote_config_save_failed">Failed to save config</string>
 
@@ -168,14 +169,14 @@
 
     <string name="prompt_no_valid">No valid keybox found.</string>
 
-    <string name="prompt_boot_hash_set">Verified Boot Hash saved successfully, reboot to take effect</string>
+    <string name="prompt_boot_hash_set">Verified Boot Hash applied</string>
     <string name="menu_set_verified_boot_key">Set Verified Boot Key</string>
     <string name="boot_key_title">Boot Key</string>
     <string name="boot_key_input_placeholder">Paste your verified Boot Key here</string>
-    <string name="prompt_boot_key_set">Verified Boot Key saved successfully, reboot to take effect</string>
-    <string name="prompt_boot_key_cleared">Verified Boot Key cleared, reboot to take effect</string>
+    <string name="prompt_boot_key_set">Verified Boot Key applied</string>
+    <string name="prompt_boot_key_cleared">Verified Boot Key override cleared</string>
 
-    <string name="prompt_boot_hash_cleared">Verified Boot Hash cleared, reboot to take effect</string>
+    <string name="prompt_boot_hash_cleared">Verified Boot Hash override cleared</string>
 
     <string name="prompt_boot_hash_set_error">Failed to update Verified Boot Hash</string>
 
@@ -245,7 +246,7 @@
 
     <string name="security_patch_auto_failed">Failed to enable auto config</string>
 
-    <string name="security_patch_save_success">Security patch saved successfully, reboot to take effect</string>
+    <string name="security_patch_save_success">Security patch applied</string>
 
     <string name="security_patch_save_failed">Failed to save security patch</string>
 
@@ -277,11 +278,11 @@
 
     <string name="mode_dialog_title">Mode</string>
 
-    <string name="mode_auto">Auto</string>
+    <string name="mode_auto">Global default</string>
 
-    <string name="mode_certificate_generating">Cert Generating (!)</string>
+    <string name="mode_certificate_generating">StrongBox</string>
 
-    <string name="mode_leaf_hack">Leaf Hack (?)</string>
+    <string name="mode_leaf_hack">TEE</string>
 
     <!-- Keybox Automation -->
 
@@ -343,6 +344,5 @@
 
     <string name="prompt_setting_patch">Setting security patch...</string>
 
-    <string name="prompt_security_patch_saved_restart">Security patch saved, reboot to take effect</string>
+    <string name="prompt_security_patch_saved_restart">Security patch applied</string>
 </resources>
-

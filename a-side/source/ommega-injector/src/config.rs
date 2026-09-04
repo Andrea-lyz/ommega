@@ -14,15 +14,16 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/data/misc/keystore/ommega/injector.toml";
-/// Legacy A-side (client-a) per-app interception list.  Each non-comment line is
-/// a package name (optionally suffixed `!`/`?`, or a `[keybox.xml]` scope
-/// header).  These packages are merged into the effective scoop so apps selected
+/// Legacy A-side (client-a) per-app interception list. Each non-comment line is
+/// a package name. These packages are merged into the effective scoop so apps selected
 /// in the webroot UI are intercepted exactly as under the old A-side module.
 ///
 /// This is the single data location: the webroot UI writes it through the
 /// `/data/adb/ommega/ommegadata` symlink (which points here), and the injected
 /// payload (keystore2, uid 1017) reads the same file.  There is no copy.
 const CLIENTA_TARGET_PATH: &str = "/data/misc/keystore/ommega/target.txt";
+const CLIENTA_TARGET_SECURITY_PATH: &str = "/data/misc/keystore/ommega/target-security.toml";
+const CLIENTA_CONFIG_PATH: &str = "/data/misc/keystore/ommega/config";
 const CURRENT_CONFIG_VERSION: u32 = 1;
 const REPLACE_SAVE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const REPLACE_SAVE_RETRY_LIMIT: usize = 10;
@@ -37,6 +38,28 @@ pub struct InjectorConfig {
     pub filter: FilterConfig,
     pub compat: CompatConfig,
     pub intercept: InterceptConfig,
+    #[serde(skip)]
+    pub target_packages: Vec<String>,
+    #[serde(skip)]
+    pub target_security_modes: BTreeMap<String, TargetSecurityMode>,
+    #[serde(skip)]
+    pub disable_native_strongbox: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetSecurityMode {
+    #[default]
+    GlobalDefault,
+    Strongbox,
+    Tee,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TargetSecurityFile {
+    version: u32,
+    packages: BTreeMap<String, TargetSecurityMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,7 +84,11 @@ pub struct FilterConfig {
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct CompatConfig {
-    pub strongbox_unavailable_packages: Vec<String>,
+    /// Migration-only compatibility for pre-1.4.0 injector.toml files. It is
+    /// used as a TEE policy only while target-security.toml does not yet exist,
+    /// and is omitted whenever injector.toml is rewritten.
+    #[serde(default, rename = "strongbox_unavailable_packages", skip_serializing)]
+    legacy_strongbox_unavailable_packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -90,6 +117,9 @@ impl Default for InjectorConfig {
             filter: FilterConfig::default(),
             compat: CompatConfig::default(),
             intercept: InterceptConfig::default(),
+            target_packages: Vec::new(),
+            target_security_modes: BTreeMap::new(),
+            disable_native_strongbox: false,
         }
     }
 }
@@ -210,7 +240,7 @@ pub fn get() -> Arc<InjectorConfig> {
             .read()
             .expect("injector config lock poisoned"),
     );
-    merge_clienta_target_scoop(base)
+    merge_clienta_target_state(base)
 }
 
 /// Merges the legacy A-side `/data/adb/ommega/target.txt` package list into the
@@ -218,31 +248,125 @@ pub fn get() -> Arc<InjectorConfig> {
 /// under the old client-a module.  Returns `base` unchanged if the file is absent
 /// or unreadable (only package names are added; deny/scope details still come from
 /// `injector.toml`).
-fn merge_clienta_target_scoop(base: Arc<InjectorConfig>) -> Arc<InjectorConfig> {
+fn merge_clienta_target_state(base: Arc<InjectorConfig>) -> Arc<InjectorConfig> {
     let Ok(contents) = fs::read_to_string(CLIENTA_TARGET_PATH) else {
         return base;
     };
-    let mut extras: Vec<String> = Vec::new();
+    let mut targets: Vec<String> = Vec::new();
     for line in contents.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
             continue;
         }
-        // Strip the legacy `!` (force GENERATE) / `?` (force PATCH) suffixes.
+        // Pre-1.4.0 WebUI files used `!` and `?` for modes that Ommega never
+        // consumed. Treat those entries as global-default during migration.
         let pkg = line.trim_end_matches(['!', '?']).trim();
         if pkg.is_empty() {
             continue;
         }
-        if !base.scoop.iter().any(|s| s == pkg) {
-            extras.push(pkg.to_string());
+        if !targets.iter().any(|target| target == pkg) {
+            targets.push(pkg.to_string());
         }
     }
-    if extras.is_empty() {
-        return base;
-    }
+
+    let target_security_modes =
+        load_target_security_modes(&targets, &base.compat.legacy_strongbox_unavailable_packages);
+    let disable_native_strongbox = load_disable_native_strongbox();
     let mut merged = (*base).clone();
-    merged.scoop.extend(extras);
+    for package in &targets {
+        if !merged.scoop.iter().any(|s| s == package) {
+            merged.scoop.push(package.clone());
+        }
+    }
+    merged.target_packages = targets;
+    merged.target_security_modes = target_security_modes;
+    merged.disable_native_strongbox = disable_native_strongbox;
     Arc::new(merged)
+}
+
+fn load_target_security_modes(
+    targets: &[String],
+    legacy_tee_packages: &[String],
+) -> BTreeMap<String, TargetSecurityMode> {
+    let Ok(contents) = fs::read_to_string(CLIENTA_TARGET_SECURITY_PATH) else {
+        return legacy_tee_packages
+            .iter()
+            .filter(|package| targets.contains(package))
+            .map(|package| (package.clone(), TargetSecurityMode::Tee))
+            .collect();
+    };
+    let parsed: TargetSecurityFile = match toml::from_str(&contents) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            log::warn!("failed to parse target security policy: {error}");
+            return BTreeMap::new();
+        }
+    };
+    if parsed.version != 1 {
+        log::warn!(
+            "unsupported target security policy version {}; using global defaults",
+            parsed.version
+        );
+        return BTreeMap::new();
+    }
+    parsed
+        .packages
+        .into_iter()
+        .filter_map(|(package, mode)| {
+            let package = package.trim().to_string();
+            targets.contains(&package).then_some((package, mode))
+        })
+        .collect()
+}
+
+fn load_disable_native_strongbox() -> bool {
+    let Ok(contents) = fs::read_to_string(CLIENTA_CONFIG_PATH) else {
+        return false;
+    };
+    contents
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            if key.trim().eq_ignore_ascii_case("disable_native_strongbox") {
+                Some(matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false)
+}
+
+impl InjectorConfig {
+    pub fn target_security_mode_for(&self, packages: &[String]) -> Option<TargetSecurityMode> {
+        let mut targeted = false;
+        let mut strongbox = false;
+        for package in packages {
+            if !self.target_packages.contains(package) {
+                continue;
+            }
+            targeted = true;
+            match self
+                .target_security_modes
+                .get(package)
+                .copied()
+                .unwrap_or_default()
+            {
+                TargetSecurityMode::Tee => return Some(TargetSecurityMode::Tee),
+                TargetSecurityMode::Strongbox => strongbox = true,
+                TargetSecurityMode::GlobalDefault => {}
+            }
+        }
+        if strongbox {
+            Some(TargetSecurityMode::Strongbox)
+        } else if targeted {
+            Some(TargetSecurityMode::GlobalDefault)
+        } else {
+            None
+        }
+    }
 }
 
 fn ensure_initialized() {
@@ -673,8 +797,8 @@ impl InjectorConfig {
     fn normalized(mut self) -> Self {
         self.scoop = normalize_packages(self.scoop);
         self.scoop_details = normalize_scoop_details(self.scoop_details);
-        self.compat.strongbox_unavailable_packages =
-            normalize_packages(self.compat.strongbox_unavailable_packages);
+        self.compat.legacy_strongbox_unavailable_packages =
+            normalize_packages(self.compat.legacy_strongbox_unavailable_packages);
         self
     }
 }

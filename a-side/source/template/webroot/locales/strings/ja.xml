@@ -92,8 +92,8 @@
     <string name="menu_set_verified_boot_key">確認付きブートキーを設定</string>
     <string name="boot_key_title">Boot Key</string>
     <string name="boot_key_input_placeholder">Paste your verified Boot Key here</string>
-    <string name="prompt_boot_key_set">Verified Boot Key saved successfully</string>
-    <string name="prompt_boot_key_cleared">Verified Boot Key cleared</string>
+    <string name="prompt_boot_key_set">Verified Boot Key applied</string>
+    <string name="prompt_boot_key_cleared">Verified Boot Key override cleared</string>
 
     <string name="menu_set_security_patch">セキュリティパッチを設定</string>
 
@@ -203,7 +203,7 @@
 
     <string name="security_patch_auto_failed">自動設定が有効化できませんでした</string>
 
-    <string name="security_patch_save_success">セキュリティパッチが正常に保存されました</string>
+    <string name="security_patch_save_success">Security patch applied</string>
 
     <string name="security_patch_save_failed">セキュリティパッチの保存に失敗しまし�?/string>
 
@@ -233,6 +233,6 @@
 
     <!-- Mode dialog -->
 
-    <string name="prompt_security_patch_saved_restart">Security patch saved, reboot to take effect</string>
+    <string name="prompt_security_patch_saved_restart">Security patch applied</string>
 </resources>
 

@@ -94,8 +94,8 @@
     <string name="menu_set_verified_boot_key">設定金鑰值</string>
     <string name="boot_key_title">金鑰值</string>
     <string name="boot_key_input_placeholder">在此貼上金鑰值</string>
-    <string name="prompt_boot_key_set">金鑰值儲存成功，重啟後生效</string>
-    <string name="prompt_boot_key_cleared">金鑰值已清除，重啟後生效</string>
+    <string name="prompt_boot_key_set">金鑰值已套用</string>
+    <string name="prompt_boot_key_cleared">金鑰值覆寫已清除</string>
 
     <string name="menu_keybox_aosp">AOSP</string>
 
@@ -225,7 +225,7 @@
 
     <string name="security_patch_auto_failed">無法啟用自動配置</string>
 
-    <string name="security_patch_save_success">安全補丁成功保存</string>
+    <string name="security_patch_save_success">安全補丁已套用</string>
 
     <string name="security_patch_save_failed">保存安全補丁失敗</string>
 
@@ -257,12 +257,11 @@
 
     <string name="mode_dialog_title">模式</string>
 
-    <string name="mode_auto">自動</string>
+    <string name="mode_auto">全域預設</string>
 
-    <string name="mode_certificate_generating">生成證書鏈（！）</string>
+    <string name="mode_certificate_generating">StrongBox</string>
 
-    <string name="mode_leaf_hack">修改證書鏈（？）</string>
+    <string name="mode_leaf_hack">TEE</string>
 
-    <string name="prompt_security_patch_saved_restart">安全補丁已儲存，重新啟動後生效</string>
+    <string name="prompt_security_patch_saved_restart">安全補丁已套用</string>
 </resources>
-
