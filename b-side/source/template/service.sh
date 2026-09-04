@@ -101,6 +101,24 @@ wait_for_relay() {
 kill_all() {
   pkill -9 -f 'daemon-relay' 2>/dev/null
   pkill -9 -x relay 2>/dev/null
+  # KernelSU's service stage can run with a BusyBox applet environment where
+  # pkill matching differs from an interactive shell. Fall back to the exact
+  # module relay command line so an executable replaced by an update never
+  # keeps relay.lock across a soft reboot.
+  for proc in /proc/[0-9]*; do
+    [ -r "$proc/cmdline" ] || continue
+    cmdline=$(tr '\000' ' ' < "$proc/cmdline" 2>/dev/null)
+    case "$cmdline" in
+      "$MODDIR/relay"*|"$MODDIR/libs/arm64-v8a/relay"*|"$MODDIR/libs/x86_64/relay"*|"$STATE_DIR/relay"*)
+        kill -9 "${proc##*/}" 2>/dev/null || true
+        ;;
+    esac
+  done
+  tries=0
+  while pgrep -x relay >/dev/null 2>&1 && [ "$tries" -lt 20 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
 }
 
 kill_all
@@ -116,7 +134,7 @@ fi
 chmod 0755 "$TARGET" 2>/dev/null || true
 load_relay_env
 
-"$TARGET" &
+"$TARGET" </dev/null >/dev/null 2>&1 &
 if wait_for_relay; then
   echo "[service] ommegaclient-b relay started"
 else
