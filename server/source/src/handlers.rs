@@ -235,7 +235,7 @@ fn result_shape_valid(task_type: &str, value: &Value) -> bool {
                 && value
                     .get("keymint_author")
                     .and_then(Value::as_str)
-                    .is_some()
+                    .is_some_and(|author| author.is_empty() || !author.trim().is_empty())
         }
         "attest" => !attest_chain_empty(task_type, value),
         "sign" => value
@@ -840,7 +840,11 @@ mod tests {
         });
         assert!(result_shape_valid("profile", &profile));
 
+        profile["keymint_author"] = json!("   ");
+        assert!(!result_shape_valid("profile", &profile));
         profile["keymint_author"] = Value::Null;
+        assert!(!result_shape_valid("profile", &profile));
+        profile["keymint_author"] = json!(42);
         assert!(!result_shape_valid("profile", &profile));
         profile["keymint_author"] = json!("");
         profile["keymint_name"] = json!("   ");
