@@ -228,6 +228,14 @@ fn result_shape_valid(task_type: &str, value: &Value) -> bool {
                     .get("has_strongbox")
                     .and_then(Value::as_bool)
                     .is_some()
+                && value
+                    .get("keymint_name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !name.trim().is_empty())
+                && value
+                    .get("keymint_author")
+                    .and_then(Value::as_str)
+                    .is_some_and(|author| !author.trim().is_empty())
         }
         "attest" => !attest_chain_empty(task_type, value),
         "sign" => value
@@ -795,6 +803,8 @@ mod tests {
                 "profile_version": 200,
                 "hardware_version": 400,
                 "security_level": 1,
+                "keymint_name": "Keymint HAL: 4",
+                "keymint_author": "Qualcomm",
                 "has_strongbox": false,
             })
         ));
@@ -802,6 +812,24 @@ mod tests {
             "profile",
             &json!({ "hardware_version": 200 })
         ));
+
+        for field in ["keymint_name", "keymint_author"] {
+            let mut profile = json!({
+                "interface_version": 2,
+                "interface_hash": "207c9f218b9b9e4e74ff5232eb16511eca9d7d2e",
+                "profile_version": 200,
+                "hardware_version": 400,
+                "security_level": 1,
+                "keymint_name": "Keymint HAL: 4",
+                "keymint_author": "Qualcomm",
+                "has_strongbox": false,
+            });
+            profile.as_object_mut().unwrap().remove(field);
+            assert!(!result_shape_valid("profile", &profile));
+
+            profile[field] = json!("   ");
+            assert!(!result_shape_valid("profile", &profile));
+        }
     }
 
     #[test]

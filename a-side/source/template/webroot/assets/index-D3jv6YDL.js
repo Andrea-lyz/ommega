@@ -1297,6 +1297,13 @@ function ommegaTargetSecurityToml(selected) {
   return lines.join("\n") + "\n";
 }
 
+function ommegaUtf8Base64(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 const ommegaBaseAppLoad = Mi;
 Mi = async function () {
   const {stdout} = await _(`cat "${OMMEGA_TARGET_SECURITY}" 2>/dev/null || true`);
@@ -1438,12 +1445,12 @@ ommegaRebind("save-remote-config", async () => {
   lines.push(`debug_logging: ${RemoteConfigDebugLogging.checked}`);
   lines.push(`disable_native_strongbox: ${ommegaDisableNativeStrongbox.checked}`);
   const body = lines.join("\n") + "\n";
+  const encodedBody = ommegaUtf8Base64(body);
   const {errno, stderr} = await _(`
     set -e
     dir=/data/adb/ommega/ommegadata
     mkdir -p "$dir"
-    cat > "$dir/config.tmp" << 'OMMEGA_CONFIG_EOF'
-${body}OMMEGA_CONFIG_EOF
+    printf '%s' '${encodedBody}' | base64 -d > "$dir/config.tmp"
     chmod 0644 "$dir/config.tmp"
     chown 1017:1017 "$dir/config.tmp" 2>/dev/null || true
     mv "$dir/config.tmp" "$dir/config"
@@ -1456,4 +1463,3 @@ ${body}OMMEGA_CONFIG_EOF
     y("remote_config_save_failed", false);
   }
 });
-
