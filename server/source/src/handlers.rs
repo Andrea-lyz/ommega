@@ -235,7 +235,7 @@ fn result_shape_valid(task_type: &str, value: &Value) -> bool {
                 && value
                     .get("keymint_author")
                     .and_then(Value::as_str)
-                    .is_some_and(|author| !author.trim().is_empty())
+                    .is_some()
         }
         "attest" => !attest_chain_empty(task_type, value),
         "sign" => value
@@ -826,10 +826,25 @@ mod tests {
             });
             profile.as_object_mut().unwrap().remove(field);
             assert!(!result_shape_valid("profile", &profile));
-
-            profile[field] = json!("   ");
-            assert!(!result_shape_valid("profile", &profile));
         }
+
+        let mut profile = json!({
+            "interface_version": 2,
+            "interface_hash": "207c9f218b9b9e4e74ff5232eb16511eca9d7d2e",
+            "profile_version": 200,
+            "hardware_version": 400,
+            "security_level": 1,
+            "keymint_name": "Keymint HAL: 4",
+            "keymint_author": "",
+            "has_strongbox": false,
+        });
+        assert!(result_shape_valid("profile", &profile));
+
+        profile["keymint_author"] = Value::Null;
+        assert!(!result_shape_valid("profile", &profile));
+        profile["keymint_author"] = json!("");
+        profile["keymint_name"] = json!("   ");
+        assert!(!result_shape_valid("profile", &profile));
     }
 
     #[test]
