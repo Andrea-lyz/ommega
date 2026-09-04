@@ -4,6 +4,11 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Explicit release version (leave empty to bump patch)"
+        required: false
+        type: string
 
 concurrency:
   group: build-${{ github.ref }}
@@ -28,10 +33,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Bump patch version
+      - name: Resolve release version
         id: bump
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
-          version=$(python3 .github/scripts/bump_version.py)
+          args=()
+          if [ -n "$RELEASE_VERSION" ]; then
+            args=(--version "$RELEASE_VERSION")
+          fi
+          version=$(python3 .github/scripts/bump_version.py "${args[@]}")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           git add \
             a-side/source/Cargo.toml \

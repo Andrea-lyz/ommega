@@ -13,8 +13,13 @@ relay_server.
   attestation chains, like a regular keystore spoofer.
 - **Remote mode** (`remote: true`): attestation (tag 709) is minted by the
   B-side real hardware TEE via the relay_server. Sign/decrypt for remote keys
-  are forwarded too. Falls back to local when the relay is unreachable
-  (`fallback_local`).
+  are forwarded too. Before the software TA starts, A obtains and freezes the
+  B-side stable-AIDL version/hash, canonical profile version, vendor hardware
+  version, security level, and StrongBox availability. Every attestation result
+  must match that profile. If the relay is temporarily unavailable during boot,
+  startup retries until the remote profile is available instead of freezing a
+  mismatched local profile. Profile or certificate mismatches fail closed unless
+  explicit local fallback is enabled.
 
 ## Install and configure
 
@@ -34,15 +39,15 @@ relay_server.
    debug_logging: false
    ```
 
-3. Add the apps you want to intercept to `/data/adb/ommega/target.txt`
-   (one package per line; `!` = force generate, `?` = force patch). The WebUI
-   (`webroot/`) manages this for you under KernelSU.
+3. Add the apps you want to intercept to `/data/adb/ommega/target.txt`, one
+   plain package name per line. The WebUI (`webroot/`) manages this and the
+   optional per-package `global_default` / `strongbox` / `tee` policy stored in
+   `/data/misc/keystore/ommega/target-security.toml`.
 
-   To make a scoped app use its standard TEE fallback without disabling native
-   StrongBox globally, list it under `[compat].strongbox_unavailable_packages`
-   in `/data/misc/keystore/ommega/injector.toml`. For matching callers only,
-   `getSecurityLevel(STRONGBOX)` returns `HARDWARE_TYPE_UNAVAILABLE (-68)`;
-   TEE requests continue through the normal scoop route.
+   The remote settings dialog also provides a global "disable native
+   StrongBox" switch. It only affects target apps whose policy is
+   `global_default`; explicit StrongBox or TEE choices take precedence. All
+   target and policy changes are read live by the injector.
 
 4. Replace the template `keybox.xml` if you want local-mode attestation with
    your own keys.
@@ -50,9 +55,10 @@ relay_server.
 WebUI overlay values (verified boot hash, verified boot key, security patch)
 are written to `/data/misc/keystore/ommega/webui-props.sh` and mirrored into
 `config.toml` `[trust]` (`vb_hash`, `vb_key`, `security_patch`,
-`vendor_patchlevel`, `boot_patchlevel`). `post-fs-data.sh` applies the
-properties at boot; keymint uses the same `[trust]` values in the attestation
-chain. Overlay-installing the module zip does not wipe them.
+`vendor_patchlevel`, `boot_patchlevel`). Patch levels update the live TA;
+verified boot hash/key changes automatically recycle only Ommega's keymint
+child and wait for RPC recovery. No device reboot is required. Overlay-installing
+the module zip does not wipe these values.
 
 > **Path note**: `/data/adb/` is root-only, so the keystore process (uid 1017)
 > cannot read `/data/adb/ommega/*` directly. `post-fs-data.sh` and the
@@ -70,6 +76,12 @@ touch /data/adb/ommega/restart.keymint
 touch /data/adb/ommega/restart.injector
 touch /data/adb/ommega/restart.all
 ```
+
+On each keymint start, its watchdog removes the previous RPC socket inode. The
+injector installs its Binder hooks immediately so boot-time authorization and
+maintenance events are captured even while remote identity and RPC startup are
+still pending. RPC warm-up runs in the keystore2 process, and the in-memory
+mirror queue replays captured state changes after the service becomes ready.
 
 ## License
 

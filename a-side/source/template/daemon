@@ -2,6 +2,7 @@
 
 MODDIR=${0%/*}
 STATE_DIR=/data/adb/ommega
+RPC_SOCKET=/data/misc/keystore/ommega/rpc.sock
 RESTART_FILE=$STATE_DIR/restart.keymint
 PEER_RESTART_FILE=$STATE_DIR/restart.injector
 RESTART_ALL_FILE=$STATE_DIR/restart.all
@@ -65,6 +66,10 @@ while true; do
   # coexist with the new instance. No other module process is matched.
   pkill -9 -f "$TARGET" 2>/dev/null
   sleep 1
+  # Unix socket inodes survive an unclean process exit and a device reboot.
+  # Remove the previous instance before starting keymint so the injector's
+  # socket readiness check cannot accept a stale, non-listening endpoint.
+  rm -f "$RPC_SOCKET"
 
   "$TARGET" "$@" &
   child_pid=$!

@@ -129,6 +129,109 @@ pub struct TeeSession {
     pub km_version: i32,
 }
 
+/// Stable identity exposed by the real B-side KeyMint HAL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyMintIdentityProfile {
+    pub interface_version: i32,
+    pub interface_hash: String,
+    pub profile_version: i32,
+    pub hardware_version: i32,
+    pub security_level: i32,
+    pub keymint_name: String,
+    pub keymint_author: String,
+    pub has_strongbox: bool,
+}
+
+fn stable_aidl_version(
+    keymint: &rsbinder::Strong<
+        dyn crate::android::hardware::security::keymint::IKeyMintDevice::IKeyMintDevice,
+    >,
+) -> Result<i32> {
+    let binder = keymint.as_binder();
+    let proxy = binder
+        .as_proxy()
+        .ok_or_else(|| anyhow!("KeyMint service resolved to a local binder"))?;
+    let data = proxy
+        .prepare_transact(true)
+        .context("prepare getInterfaceVersion transaction")?;
+    let mut reply = proxy
+        .submit_transact(
+            rsbinder::FIRST_CALL_TRANSACTION + 16_777_214,
+            &data,
+            rsbinder::FLAG_PRIVATE_LOCAL | rsbinder::FLAG_CLEAR_BUF,
+        )
+        .context("submit getInterfaceVersion transaction")?
+        .ok_or_else(|| anyhow!("getInterfaceVersion returned no parcel"))?;
+    let status: rsbinder::Status = reply.read().context("read getInterfaceVersion status")?;
+    if !status.is_ok() {
+        return Err(anyhow!("getInterfaceVersion failed: {status}"));
+    }
+    reply.read().context("read getInterfaceVersion result")
+}
+
+fn stable_aidl_hash(
+    keymint: &rsbinder::Strong<
+        dyn crate::android::hardware::security::keymint::IKeyMintDevice::IKeyMintDevice,
+    >,
+) -> Result<String> {
+    let binder = keymint.as_binder();
+    let proxy = binder
+        .as_proxy()
+        .ok_or_else(|| anyhow!("KeyMint service resolved to a local binder"))?;
+    let data = proxy
+        .prepare_transact(true)
+        .context("prepare getInterfaceHash transaction")?;
+    let mut reply = proxy
+        .submit_transact(
+            rsbinder::FIRST_CALL_TRANSACTION + 16_777_213,
+            &data,
+            rsbinder::FLAG_PRIVATE_LOCAL | rsbinder::FLAG_CLEAR_BUF,
+        )
+        .context("submit getInterfaceHash transaction")?
+        .ok_or_else(|| anyhow!("getInterfaceHash returned no parcel"))?;
+    let status: rsbinder::Status = reply.read().context("read getInterfaceHash status")?;
+    if !status.is_ok() {
+        return Err(anyhow!("getInterfaceHash failed: {status}"));
+    }
+    reply.read().context("read getInterfaceHash result")
+}
+
+/// Reads the remote identity before A constructs its software KeyMint TA.
+/// Values come from the same real HAL that later mints the attestation chain.
+pub fn identity_profile() -> Result<KeyMintIdentityProfile> {
+    static PROFILE: OnceLock<KeyMintIdentityProfile> = OnceLock::new();
+    if let Some(profile) = PROFILE.get() {
+        return Ok(profile.clone());
+    }
+    let keymint = get_system_keymint(SYSTEM_KEYMINT_DEFAULT)
+        .context("connect default KeyMint for identity profile")?;
+    let hardware = keymint
+        .getHardwareInfo()
+        .map_err(|status| anyhow!("default KeyMint getHardwareInfo failed: {status}"))?;
+    let interface_version = stable_aidl_version(&keymint)?;
+    let interface_hash = stable_aidl_hash(&keymint)?;
+    let has_strongbox = get_system_keymint(SYSTEM_KEYMINT_STRONGBOX)
+        .and_then(|strongbox| {
+            strongbox
+                .getHardwareInfo()
+                .map_err(|status| anyhow!("StrongBox getHardwareInfo failed: {status}"))
+        })
+        .is_ok();
+
+    let profile = KeyMintIdentityProfile {
+        interface_version,
+        interface_hash,
+        profile_version: interface_version * 100,
+        hardware_version: normalize_keymint_version(hardware.versionNumber),
+        security_level: hardware.securityLevel.0,
+        keymint_name: hardware.keyMintName,
+        keymint_author: hardware.keyMintAuthorName,
+        has_strongbox,
+    };
+    let _ = PROFILE.set(profile.clone());
+    Ok(PROFILE.get().cloned().unwrap_or(profile))
+}
+
 /// Session persistence directory.  Key blobs minted by the real TEE are
 /// self-contained and remain usable after a relay restart (begin/finish works
 /// on the persisted blob), so we persist every generated session here to keep
@@ -757,6 +860,31 @@ fn digest_for_algorithm(algorithm: &str) -> Result<KmDigest> {
         // Unknown algorithm: fail loudly instead of silently producing a
         // signature over the wrong digest (which the verifier would reject).
         Err(anyhow!("unsupported digest algorithm: {algorithm}"))
+    }
+}
+
+#[cfg(test)]
+mod identity_profile_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a connected Android device with a real KeyMint HAL"]
+    fn live_default_keymint_profile_is_self_consistent() {
+        rsbinder::ProcessState::init_default().expect("initialize Binder process state");
+        let profile = identity_profile().expect("read real KeyMint identity profile");
+        println!("profile={profile:?}");
+        assert_eq!(profile.security_level, 1);
+        assert_eq!(profile.profile_version, profile.interface_version * 100);
+        assert!(matches!(
+            profile.hardware_version,
+            100 | 200 | 300 | 400 | 500
+        ));
+        assert_eq!(profile.interface_hash.len(), 40);
+        assert!(profile
+            .interface_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
+        assert!(!profile.keymint_name.trim().is_empty());
     }
 }
 

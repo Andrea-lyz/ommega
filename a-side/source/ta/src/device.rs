@@ -208,6 +208,17 @@ pub struct RemoteAttestParams {
     pub security_level: Option<i32>,
 }
 
+/// Identity of the physical KeyMint HAL that minted a remote result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteKeyMintProfile {
+    pub interface_version: i32,
+    pub interface_hash: String,
+    pub profile_version: i32,
+    pub hardware_version: i32,
+    pub security_level: keymint::SecurityLevel,
+    pub has_strongbox: bool,
+}
+
 /// Successful remote attestation result.
 #[derive(Debug)]
 pub struct RemoteAttestation {
@@ -216,6 +227,8 @@ pub struct RemoteAttestation {
     /// Effective level explicitly reported for a relay-approved downgrade.
     /// `None` preserves strict legacy behavior and uses the requesting level.
     pub effective_security_level: Option<keymint::SecurityLevel>,
+    /// Frozen B-side HAL identity used to validate this result.
+    pub profile: RemoteKeyMintProfile,
 }
 
 /// there.  Each method returns `Ok(None)` when the remote is unavailable or not

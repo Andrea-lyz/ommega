@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
+import argparse
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,11 +63,19 @@ def update_server_lock(new_version: str) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", help="set an explicit release version")
+    args = parser.parse_args()
     root_toml = CARGO_FILES[0].read_text(encoding="utf-8")
     match = VERSION_RE.search(root_toml)
     if not match:
         raise SystemExit(f"no package version in {CARGO_FILES[0]}")
-    new_version = bump_patch(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    if args.version:
+        if not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
+            raise SystemExit(f"invalid explicit version: {args.version}")
+        new_version = args.version
+    else:
+        new_version = bump_patch(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     for path in CARGO_FILES:
         replace_first_version(path, new_version)
     bump_app_gradle(new_version)

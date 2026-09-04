@@ -51,6 +51,19 @@ const READ_TIMEOUT_MS: u64 = 30_000;
 pub struct RemoteRelay;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+static REMOTE_IDENTITY_PROFILE: OnceLock<RemoteIdentityProfile> = OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteIdentityProfile {
+    pub interface_version: i32,
+    pub interface_hash: String,
+    pub profile_version: i32,
+    pub hardware_version: i32,
+    pub security_level: i32,
+    pub keymint_name: String,
+    pub keymint_author: String,
+    pub has_strongbox: bool,
+}
 
 fn new_request_id(kind: &str) -> String {
     let now = SystemTime::now()
@@ -220,6 +233,20 @@ impl RemoteRelay {
             .map_err(|e| anyhow!("relay returned malformed JSON (status {status}): {e}"))
     }
 
+    fn fetch_identity_profile() -> Result<RemoteIdentityProfile> {
+        let body = json!({
+            "request_id": new_request_id("profile"),
+            "device_id": Self::device_id()?,
+        });
+        let response = Self::post_json("/api/profile/", &body)?
+            .ok_or_else(|| anyhow!("remote profile unavailable after transport retry"))?;
+        let result = response.get("result").cloned().unwrap_or(response);
+        if let Some(error) = result.get("error").and_then(Value::as_str) {
+            return Err(anyhow!("remote profile failed: {error}"));
+        }
+        parse_identity_profile(&result)
+    }
+
     /// Forward an attestation request.  `challenge` is the caller's nonce.
     pub fn attest(
         challenge: &[u8],
@@ -319,6 +346,15 @@ impl RemoteRelay {
                 Value::from(i64::from(security_level)),
             );
         }
+        let profile = remote_identity_profile()?;
+        ctx.insert(
+            "attest_record_version".to_string(),
+            Value::from(profile.profile_version),
+        );
+        ctx.insert(
+            "keymint_record_version".to_string(),
+            Value::from(profile.profile_version),
+        );
         // Forward the device's OS version + security patch level so the relay
         // can emit KM_TAG_OS_VERSION (705) / KM_TAG_OS_PATCH_LEVEL (706) in the
         // teeEnforced authorization list. Software attestations that omit these
@@ -494,6 +530,76 @@ fn parse_strongbox_demotion(
     Ok(Some(kmr_wire::keymint::SecurityLevel::TrustedEnvironment))
 }
 
+fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
+    let field_i32 = |name: &str| -> Result<i32> {
+        value
+            .get(name)
+            .and_then(Value::as_i64)
+            .and_then(|number| i32::try_from(number).ok())
+            .ok_or_else(|| anyhow!("remote profile missing or invalid {name}"))
+    };
+    let field_string = |name: &str| -> Result<String> {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("remote profile missing or invalid {name}"))
+    };
+
+    let interface_version = field_i32("interface_version")?;
+    let profile_version = field_i32("profile_version")?;
+    let hardware_version = field_i32("hardware_version")?;
+    if !(1..=5).contains(&interface_version) || profile_version != interface_version * 100 {
+        return Err(anyhow!(
+            "remote profile version mismatch: interface={interface_version} profile={profile_version}"
+        ));
+    }
+    if !matches!(hardware_version, 100 | 200 | 300 | 400 | 500) {
+        return Err(anyhow!(
+            "remote profile returned invalid hardware version {hardware_version}"
+        ));
+    }
+    let security_level = field_i32("security_level")?;
+    if security_level != kmr_wire::keymint::SecurityLevel::TrustedEnvironment as i32 {
+        return Err(anyhow!(
+            "remote default KeyMint is not TEE: security_level={security_level}"
+        ));
+    }
+    let interface_hash = field_string("interface_hash")?;
+    if interface_hash.len() != 40 || !interface_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!("remote profile returned an invalid interface hash"));
+    }
+
+    Ok(RemoteIdentityProfile {
+        interface_version,
+        interface_hash,
+        profile_version,
+        hardware_version,
+        security_level,
+        keymint_name: field_string("keymint_name")?,
+        keymint_author: value
+            .get("keymint_author")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("remote profile missing or invalid keymint_author"))?,
+        has_strongbox: value
+            .get("has_strongbox")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("remote profile missing or invalid has_strongbox"))?,
+    })
+}
+
+pub(crate) fn remote_identity_profile() -> Result<RemoteIdentityProfile> {
+    if let Some(profile) = REMOTE_IDENTITY_PROFILE.get() {
+        return Ok(profile.clone());
+    }
+    let profile = RemoteRelay::fetch_identity_profile()?;
+    let _ = REMOTE_IDENTITY_PROFILE.set(profile.clone());
+    Ok(REMOTE_IDENTITY_PROFILE.get().cloned().unwrap_or(profile))
+}
+
 /// Convenience: `true` if remote relay is enabled in config.
 pub fn remote_enabled() -> bool {
     match config::config().read() {
@@ -514,6 +620,33 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         cert_serial: Option<&[u8]>,
         params: &kmr_ta::device::RemoteAttestParams,
     ) -> Result<Option<kmr_ta::device::RemoteAttestation>, kmr_common::Error> {
+        let profile = match remote_identity_profile() {
+            Ok(profile) => profile,
+            Err(error)
+                if config::config()
+                    .read()
+                    .is_ok_and(|config| config.remote.fallback_local) =>
+            {
+                log::warn!(
+                    "remote identity profile unavailable with local fallback enabled: {error:#}"
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(kmr_common::km_err!(
+                    UnknownError,
+                    "remote identity profile unavailable: {error:#}"
+                ));
+            }
+        };
+        if params.security_level == Some(kmr_wire::keymint::SecurityLevel::Strongbox as i32)
+            && !profile.has_strongbox
+        {
+            return Err(kmr_common::km_err!(
+                HardwareTypeUnavailable,
+                "remote identity does not provide StrongBox"
+            ));
+        }
         let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial).map_err(
             |e| kmr_common::km_err!(UnknownError, "remote attest protocol error: {e:#}"),
         )?;
@@ -530,6 +663,20 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
             ));
         }
         let effective_security_level = parse_strongbox_demotion(&result, params.security_level)?;
+        if let Some(result_profile) = result.get("remote_profile") {
+            let observed = parse_identity_profile(result_profile).map_err(|error| {
+                kmr_common::km_err!(
+                    VerificationFailed,
+                    "remote attest response has an invalid identity profile: {error:#}"
+                )
+            })?;
+            if observed != profile {
+                return Err(kmr_common::km_err!(
+                    VerificationFailed,
+                    "remote identity profile changed while minting"
+                ));
+            }
+        }
         let certs = result
             .get("cert_chain")
             .and_then(Value::as_array)
@@ -566,6 +713,14 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         Ok(Some(kmr_ta::device::RemoteAttestation {
             cert_chain: chain,
             effective_security_level,
+            profile: kmr_ta::device::RemoteKeyMintProfile {
+                interface_version: profile.interface_version,
+                interface_hash: profile.interface_hash,
+                profile_version: profile.profile_version,
+                hardware_version: profile.hardware_version,
+                security_level: kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
+                has_strongbox: profile.has_strongbox,
+            },
         }))
     }
 
@@ -631,6 +786,42 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
 mod tests {
     use super::*;
     use kmr_wire::keymint::SecurityLevel;
+
+    #[test]
+    fn parses_coherent_remote_keymint_profile() {
+        let profile = parse_identity_profile(&json!({
+            "interface_version": 2,
+            "interface_hash": "207c9f218b9b9e4e74ff5232eb16511eca9d7d2e",
+            "profile_version": 200,
+            "hardware_version": 400,
+            "security_level": 1,
+            "keymint_name": "QTI KeyMint",
+            "keymint_author": "Qualcomm",
+            "has_strongbox": false,
+        }))
+        .unwrap();
+
+        assert_eq!(profile.interface_version, 2);
+        assert_eq!(profile.profile_version, 200);
+        assert_eq!(profile.hardware_version, 400);
+        assert!(!profile.has_strongbox);
+    }
+
+    #[test]
+    fn rejects_mixed_remote_keymint_profile_versions() {
+        let result = parse_identity_profile(&json!({
+            "interface_version": 2,
+            "interface_hash": "207c9f218b9b9e4e74ff5232eb16511eca9d7d2e",
+            "profile_version": 300,
+            "hardware_version": 400,
+            "security_level": 1,
+            "keymint_name": "QTI KeyMint",
+            "keymint_author": "Qualcomm",
+            "has_strongbox": false,
+        }));
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn accepts_explicit_strongbox_to_tee_demotion() {

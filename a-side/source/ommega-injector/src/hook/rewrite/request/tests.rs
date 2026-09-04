@@ -27,15 +27,27 @@ fn allowed_decision(packages: &[&str]) -> filter::FilterDecision {
     }
 }
 
-#[test]
-fn configured_package_gets_standard_strongbox_unavailable_reply() {
-    let mut config = config::InjectorConfig::default();
-    config.compat.strongbox_unavailable_packages = vec!["net.one97.paytm".to_string()];
-    let decision = allowed_decision(&["net.one97.paytm"]);
+fn policy_config(package: &str, mode: config::TargetSecurityMode) -> config::InjectorConfig {
+    let mut config = config::InjectorConfig {
+        target_packages: vec![package.to_string()],
+        ..Default::default()
+    };
+    if mode != config::TargetSecurityMode::GlobalDefault {
+        config
+            .target_security_modes
+            .insert(package.to_string(), mode);
+    }
+    config
+}
 
-    let Some(precomputed) =
-        strongbox_unavailable_compat_reply(&strongbox_request(), &decision, &config)
-    else {
+#[test]
+fn global_default_can_hide_native_strongbox() {
+    let mut config = policy_config("net.one97.paytm", config::TargetSecurityMode::GlobalDefault);
+    config.disable_native_strongbox = true;
+    let decision = allowed_decision(&["net.one97.paytm"]);
+    let mut request = strongbox_request();
+
+    let Some(precomputed) = apply_target_security_policy(&mut request, &decision, &config) else {
         panic!("configured package should receive a precomputed error");
     };
     let PrecomputedServiceReply::Error(status) = &precomputed else {
@@ -66,17 +78,49 @@ fn configured_package_gets_standard_strongbox_unavailable_reply() {
 }
 
 #[test]
-fn strongbox_compatibility_override_stays_narrow() {
-    let mut config = config::InjectorConfig::default();
-    config.compat.strongbox_unavailable_packages = vec!["net.one97.paytm".to_string()];
+fn target_security_policy_supports_explicit_modes_and_stays_narrow() {
+    let mut config = policy_config("net.one97.paytm", config::TargetSecurityMode::GlobalDefault);
     let paytm = allowed_decision(&["net.one97.paytm"]);
 
-    let tee_request = ParsedServiceRequest::GetSecurityLevel {
+    let mut tee_request = ParsedServiceRequest::GetSecurityLevel {
         security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
     };
-    assert!(strongbox_unavailable_compat_reply(&tee_request, &paytm, &config).is_none());
-    assert!(strongbox_unavailable_compat_reply(
-        &strongbox_request(),
+    assert!(apply_target_security_policy(&mut tee_request, &paytm, &config).is_none());
+    assert!(matches!(
+        &tee_request,
+        ParsedServiceRequest::GetSecurityLevel {
+            security_level: SecurityLevel::TRUSTED_ENVIRONMENT
+        }
+    ));
+
+    config.target_security_modes.insert(
+        "net.one97.paytm".to_string(),
+        config::TargetSecurityMode::Strongbox,
+    );
+    assert!(apply_target_security_policy(&mut tee_request, &paytm, &config).is_none());
+    assert!(matches!(
+        &tee_request,
+        ParsedServiceRequest::GetSecurityLevel {
+            security_level: SecurityLevel::STRONGBOX
+        }
+    ));
+
+    config.target_security_modes.insert(
+        "net.one97.paytm".to_string(),
+        config::TargetSecurityMode::Tee,
+    );
+    let mut request = strongbox_request();
+    assert!(apply_target_security_policy(&mut request, &paytm, &config).is_none());
+    assert!(matches!(
+        &request,
+        ParsedServiceRequest::GetSecurityLevel {
+            security_level: SecurityLevel::TRUSTED_ENVIRONMENT
+        }
+    ));
+
+    let mut request = strongbox_request();
+    assert!(apply_target_security_policy(
+        &mut request,
         &allowed_decision(&["com.example.other"]),
         &config,
     )
@@ -87,10 +131,28 @@ fn strongbox_compatibility_override_stays_narrow() {
         reason: filter::FilterReason::RejectedNotInScope,
         packages: vec!["net.one97.paytm".to_string()],
     };
-    assert!(strongbox_unavailable_compat_reply(&strongbox_request(), &rejected, &config).is_none());
+    let mut request = strongbox_request();
+    assert!(apply_target_security_policy(&mut request, &rejected, &config).is_none());
 
     config.intercept.get_security_level = false;
-    assert!(strongbox_unavailable_compat_reply(&strongbox_request(), &paytm, &config).is_none());
+    assert!(apply_target_security_policy(&mut request, &paytm, &config).is_none());
+}
+
+#[test]
+fn tee_wins_for_conflicting_shared_uid_modes() {
+    let mut config = policy_config("com.example.strong", config::TargetSecurityMode::Strongbox);
+    config.target_packages.push("com.example.tee".to_string());
+    config.target_security_modes.insert(
+        "com.example.tee".to_string(),
+        config::TargetSecurityMode::Tee,
+    );
+    assert_eq!(
+        config.target_security_mode_for(&[
+            "com.example.strong".to_string(),
+            "com.example.tee".to_string(),
+        ]),
+        Some(config::TargetSecurityMode::Tee)
+    );
 }
 
 #[test]
@@ -395,7 +457,9 @@ fn denylisted_grant_readback_does_not_probe_ommega() {
         &ParsedServiceRequest::GetKeyEntry { key: grant },
         &decision,
         &caller,
-        |_, _| -> anyhow::Result<bool> { panic!("denylisted callers must not probe ommega grants") },
+        |_, _| -> anyhow::Result<bool> {
+            panic!("denylisted callers must not probe ommega grants")
+        },
     )
     .expect("denylisted grant lookup should succeed"));
 }

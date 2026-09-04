@@ -132,12 +132,12 @@
 
     <string name="prompt_no_valid">Geçerli keybox bulunamadı.</string>
 
-    <string name="prompt_boot_hash_set">Doğrulanmış Boot Hash başarıyla kaydedildi</string>
+    <string name="prompt_boot_hash_set">Verified Boot Hash applied</string>
     <string name="menu_set_verified_boot_key">Doğrulanmış Boot Key Ayarla</string>
     <string name="boot_key_title">Boot Key</string>
     <string name="boot_key_input_placeholder">Doğrulanmış Boot Key&apos;inizi buraya yapıştırın</string>
-    <string name="prompt_boot_key_set">Doğrulanmış Boot Key başarıyla kaydedildi</string>
-    <string name="prompt_boot_key_cleared">Verified Boot Key cleared</string>
+    <string name="prompt_boot_key_set">Verified Boot Key applied</string>
+    <string name="prompt_boot_key_cleared">Verified Boot Key override cleared</string>
 
     <string name="prompt_boot_hash_set_error">Doğrulanmış Boot Hash güncellenemedi</string>
 
@@ -203,7 +203,7 @@
 
     <string name="security_patch_auto_failed">Otomatik yapılandırma etkinleştirilemedi</string>
 
-    <string name="security_patch_save_success">Güvenlik yaması başarıyla kaydedildi</string>
+    <string name="security_patch_save_success">Security patch applied</string>
 
     <string name="security_patch_save_failed">Güvenlik yaması kaydedilemedi</string>
 
@@ -233,6 +233,6 @@
 
     <!-- Mode dialog -->
 
-    <string name="prompt_security_patch_saved_restart">Security patch saved, reboot to take effect</string>
+    <string name="prompt_security_patch_saved_restart">Security patch applied</string>
 </resources>
 

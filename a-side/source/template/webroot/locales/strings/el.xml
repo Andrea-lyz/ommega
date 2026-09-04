@@ -126,12 +126,12 @@
 
     <string name="prompt_no_valid">Δεν βρέθηκε έγκυρο keybox.</string>
 
-    <string name="prompt_boot_hash_set">Το Verified Boot Hash αποθηκεύτηκε με επιτυχία</string>
+    <string name="prompt_boot_hash_set">Verified Boot Hash applied</string>
     <string name="menu_set_verified_boot_key">Όρισε Verified Boot Key</string>
     <string name="boot_key_title">Boot Key</string>
     <string name="boot_key_input_placeholder">Επικόλλησε εδώ το Verified Boot Key σου</string>
-    <string name="prompt_boot_key_set">Το Verified Boot Key αποθηκεύτηκε με επιτυχία</string>
-    <string name="prompt_boot_key_cleared">Verified Boot Key cleared</string>
+    <string name="prompt_boot_key_set">Verified Boot Key applied</string>
+    <string name="prompt_boot_key_cleared">Verified Boot Key override cleared</string>
 
     <string name="prompt_boot_hash_set_error">Αποτυχία ενημέρωσης Verified Boot Hash</string>
 
@@ -191,7 +191,7 @@
 
     <string name="security_patch_auto_failed">Αποτυχία ενεργοποίησης αυτόματης ρύθμισης</string>
 
-    <string name="security_patch_save_success">Το security patch αποθηκεύτηκε με επιτυχία</string>
+    <string name="security_patch_save_success">Security patch applied</string>
 
     <string name="security_patch_save_failed">Αποτυχία αποθήκευσης security patch</string>
 
@@ -221,6 +221,6 @@
 
     <!-- Mode dialog -->
 
-    <string name="prompt_security_patch_saved_restart">Security patch saved, reboot to take effect</string>
+    <string name="prompt_security_patch_saved_restart">Security patch applied</string>
 </resources>
 

@@ -1,7 +1,7 @@
 //! relay_rs — Rust port of the ommega relay_server.
 //!
 //! Endpoints (parity with relay_server):
-//!   A-side  : GET  /api/ping/ , GET /api/health/ , POST /api/attest/,
+//!   A-side  : GET  /api/ping/ , GET /api/health/ , POST /api/profile/, POST /api/attest/,
 //!             POST /api/sign/, POST /api/decrypt/, POST /api/client_report/
 //!   B-side  : GET  /api/b/poll/?device_id=..&machine_id=..&timeout=N
 //!             POST /api/b/result/
@@ -152,6 +152,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
         .route("/api/card/order/status/", post(card::card_order_status))
         .route("/api/card/query/", post(card::card_query_by_contact))
         .route("/api/cert_chain_dump/", get(handlers::cert_chain_dump))
+        .route("/api/profile/", post(handlers::profile))
         .route("/api/attest/", post(handlers::attest))
         .route("/api/sign/", post(handlers::sign))
         .route("/api/decrypt/", post(handlers::decrypt))

@@ -5,6 +5,7 @@ TARGET_KEYBOX=$TARGET_DIR/keybox.xml
 TARGET_INJECTOR_CONFIG=$TARGET_DIR/injector.toml
 TARGET_CONF=$TARGET_DIR/config
 TARGET_TARGET_LIST=$TARGET_DIR/target.txt
+TARGET_SECURITY_POLICY=$TARGET_DIR/target-security.toml
 STATE_DIR=/data/adb/ommega
 # A-side config directory (webroot UI writes here; `ommegadata` is a symlink to
 # $TARGET_DIR, so the UI and the keystore process (uid 1017) share one copy).
@@ -50,8 +51,18 @@ fi
 if [ ! -f "$TARGET_TARGET_LIST" ]; then
   : > "$TARGET_TARGET_LIST"
 fi
-chmod 0644 "$TARGET_CONF" "$TARGET_TARGET_LIST" 2>/dev/null || true
-chown 1017:1017 "$TARGET_CONF" "$TARGET_TARGET_LIST" 2>/dev/null || true
+if grep -Eq '[!?][[:space:]]*$' "$TARGET_TARGET_LIST" 2>/dev/null; then
+  tmp=$TARGET_TARGET_LIST.tmp.$$
+  awk '
+    /^[[:space:]]*($|#|\[)/ { print; next }
+    { sub(/[!?][[:space:]]*$/, ""); print }
+  ' "$TARGET_TARGET_LIST" | sort -u > "$tmp" && mv "$tmp" "$TARGET_TARGET_LIST"
+fi
+if [ ! -f "$TARGET_SECURITY_POLICY" ]; then
+  printf 'version = 1\n\n[packages]\n' > "$TARGET_SECURITY_POLICY"
+fi
+chmod 0644 "$TARGET_CONF" "$TARGET_TARGET_LIST" "$TARGET_SECURITY_POLICY" 2>/dev/null || true
+chown 1017:1017 "$TARGET_CONF" "$TARGET_TARGET_LIST" "$TARGET_SECURITY_POLICY" 2>/dev/null || true
 
 # Keybox: the webroot UI writes `/data/adb/ommega/ommegadata/keybox.xml` which IS
 # $TARGET_KEYBOX (via symlink).  Seed from the module keybox if absent.

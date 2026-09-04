@@ -44,7 +44,13 @@ fn config_defaults_and_log_levels_match_contract() {
     assert_eq!(config.main.log_level_filter(), LevelFilter::Debug);
     assert!(config.filter.block_android_package);
     assert!(!config.filter.allow_unknown_package);
-    assert!(config.compat.strongbox_unavailable_packages.is_empty());
+    assert!(config
+        .compat
+        .legacy_strongbox_unavailable_packages
+        .is_empty());
+    assert!(config.target_packages.is_empty());
+    assert!(config.target_security_modes.is_empty());
+    assert!(!config.disable_native_strongbox);
     assert!(config.intercept.get_security_level);
     assert!(config.intercept.get_key_entry);
     assert!(config.intercept.update_subcomponent);
@@ -106,7 +112,7 @@ get_supplementary_attestation_info = true
     assert_eq!(parsed.main.log_level_filter(), LevelFilter::Trace);
     assert!(!parsed.main.enabled);
     assert_eq!(
-        parsed.compat.strongbox_unavailable_packages,
+        parsed.compat.legacy_strongbox_unavailable_packages,
         vec!["com.example.app".to_string()]
     );
     assert_eq!(
@@ -168,7 +174,7 @@ fn rendered_config_uses_new_scoop_format() {
     assert!(rendered.contains("scoop = ["));
     assert!(rendered.contains("[scoop.com.example.app]"));
     assert!(rendered.contains("[compat]"));
-    assert!(rendered.contains("strongbox_unavailable_packages = []"));
+    assert!(!rendered.contains("strongbox_unavailable_packages"));
     assert!(!rendered.contains("[[scope]]"));
     let reparsed = parse_config(&rendered).expect("rendered config should parse");
     assert_eq!(reparsed.scoop_details, config.scoop_details);

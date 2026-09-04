@@ -122,12 +122,12 @@
 
     <string name="prompt_no_valid">কো�?valid keybox পাওয়া যায়নি�?/string>
 
-    <string name="prompt_boot_hash_set">Verified Boot Hash সফলভাব�?সে�?হয়েছে</string>
+    <string name="prompt_boot_hash_set">Verified Boot Hash applied</string>
     <string name="menu_set_verified_boot_key">Verified Boot Key সে�?করুন</string>
     <string name="boot_key_title">Boot Key</string>
     <string name="boot_key_input_placeholder">আপনা�?verified Boot Key এখান�?পেস্�?করুন</string>
-    <string name="prompt_boot_key_set">Verified Boot Key সফলভাব�?সে�?হয়েছে</string>
-    <string name="prompt_boot_key_cleared">Verified Boot Key cleared</string>
+    <string name="prompt_boot_key_set">Verified Boot Key applied</string>
+    <string name="prompt_boot_key_cleared">Verified Boot Key override cleared</string>
 
     <string name="prompt_boot_hash_set_error">Verified Boot Hash আপডে�?করতে ব্যর্থ</string>
 
@@ -191,7 +191,7 @@
 
     <string name="security_patch_auto_failed">Auto config সক্রিয�?করতে ব্যর্থ</string>
 
-    <string name="security_patch_save_success">Security patch সফলভাব�?সে�?হয়েছে</string>
+    <string name="security_patch_save_success">Security patch applied</string>
 
     <string name="security_patch_save_failed">Security patch সে�?করতে ব্যর্থ</string>
 
@@ -221,6 +221,6 @@
 
     <!-- Mode dialog -->
 
-    <string name="prompt_security_patch_saved_restart">Security patch saved, reboot to take effect</string>
+    <string name="prompt_security_patch_saved_restart">Security patch applied</string>
 </resources>
 

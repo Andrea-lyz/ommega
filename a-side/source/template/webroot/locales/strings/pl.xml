@@ -150,12 +150,12 @@
 
     <string name="prompt_no_valid">Nie znaleziono ważnego klucza.</string>
 
-    <string name="prompt_boot_hash_set">Zweryfikowany skrót rozruchowy zapisany pomyślnie</string>
+    <string name="prompt_boot_hash_set">Verified Boot Hash applied</string>
     <string name="menu_set_verified_boot_key">Ustaw zweryfikowany klucz rozruchowy</string>
     <string name="boot_key_title">Klucz rozruchowy</string>
     <string name="boot_key_input_placeholder">Wklej tutaj zweryfikowany klucz rozruchowy</string>
-    <string name="prompt_boot_key_set">Zweryfikowany klucz rozruchowy zapisany pomyślnie</string>
-    <string name="prompt_boot_key_cleared">Verified Boot Key cleared</string>
+    <string name="prompt_boot_key_set">Verified Boot Key applied</string>
+    <string name="prompt_boot_key_cleared">Verified Boot Key override cleared</string>
 
     <string name="prompt_boot_hash_set_error">Nie udało się zaktualizować zweryfikowanego skrótu rozruchowego</string>
 
@@ -225,7 +225,7 @@
 
     <string name="security_patch_auto_failed">Nie udało się włączyć automatycznej konfiguracji</string>
 
-    <string name="security_patch_save_success">Poprawka zabezpieczeń zapisana pomyślnie</string>
+    <string name="security_patch_save_success">Security patch applied</string>
 
     <string name="security_patch_save_failed">Nie udało się zapisać poprawki zabezpieczeń</string>
 
@@ -257,12 +257,12 @@
 
     <string name="mode_dialog_title">Tryb</string>
 
-    <string name="mode_auto">Automatyczny</string>
+    <string name="mode_auto">Global default</string>
 
-    <string name="mode_certificate_generating">Generowanie certyfikatów (!)</string>
+    <string name="mode_certificate_generating">StrongBox</string>
 
-    <string name="mode_leaf_hack">Obejście sposobem (?)</string>
+    <string name="mode_leaf_hack">TEE</string>
 
-    <string name="prompt_security_patch_saved_restart">Security patch saved, reboot to take effect</string>
+    <string name="prompt_security_patch_saved_restart">Security patch applied</string>
 </resources>
 

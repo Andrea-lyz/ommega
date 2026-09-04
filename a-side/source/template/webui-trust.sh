@@ -140,16 +140,59 @@ sync_toml() {
 }
 
 apply_live() {
-  [ -n "$SYS_PATCH" ] && resetprop -n ro.build.version.security_patch "$SYS_PATCH" 2>/dev/null
-  [ -n "$BOOT_PATCH" ] && resetprop -n ro.boot.image.build.security_patch "$BOOT_PATCH" 2>/dev/null
-  [ -n "$VENDOR_PATCH" ] && resetprop -n ro.vendor.build.security_patch "$VENDOR_PATCH" 2>/dev/null
-  [ -n "$VBMETA_HASH" ] && resetprop -n ro.boot.vbmeta.digest "$VBMETA_HASH" 2>/dev/null
-  [ -n "$VBMETA_KEY" ] && resetprop -n ro.boot.vbmeta.public_key_digest "$VBMETA_KEY" 2>/dev/null
+  scope=$1
+  stock_system=$(sed -n 's/^ro.build.version.security_patch=//p' /system/build.prop /system/system/build.prop 2>/dev/null | tail -n 1)
+  stock_vendor=$(sed -n 's/^ro.vendor.build.security_patch=//p' /vendor/build.prop 2>/dev/null | tail -n 1)
+  case "$scope" in
+    patch)
+      if [ -n "$SYS_PATCH" ]; then
+        resetprop -n ro.build.version.security_patch "$SYS_PATCH" 2>/dev/null
+      elif [ -n "$stock_system" ]; then
+        resetprop -n ro.build.version.security_patch "$stock_system" 2>/dev/null
+      fi
+      if [ -n "$BOOT_PATCH" ]; then
+        resetprop -n ro.boot.image.build.security_patch "$BOOT_PATCH" 2>/dev/null
+      else
+        resetprop --delete ro.boot.image.build.security_patch 2>/dev/null || true
+      fi
+      if [ -n "$VENDOR_PATCH" ]; then
+        resetprop -n ro.vendor.build.security_patch "$VENDOR_PATCH" 2>/dev/null
+      elif [ -n "$stock_vendor" ]; then
+        resetprop -n ro.vendor.build.security_patch "$stock_vendor" 2>/dev/null
+      fi
+      ;;
+    hash)
+      if [ -n "$VBMETA_HASH" ]; then
+        resetprop -n ro.boot.vbmeta.digest "$VBMETA_HASH" 2>/dev/null
+      else
+        resetprop --delete ro.boot.vbmeta.digest 2>/dev/null || true
+      fi
+      ;;
+    key)
+      if [ -n "$VBMETA_KEY" ]; then
+        resetprop -n ro.boot.vbmeta.public_key_digest "$VBMETA_KEY" 2>/dev/null
+      else
+        resetprop --delete ro.boot.vbmeta.public_key_digest 2>/dev/null || true
+      fi
+      ;;
+  esac
 }
 
 request_keymint_restart() {
   mkdir -p /data/adb/ommega
+  old_pid=$(pidof keymint 2>/dev/null | awk '{print $1}')
   touch "$RESTART_FLAG"
+  tries=0
+  while [ "$tries" -lt 120 ]; do
+    new_pid=$(pidof keymint 2>/dev/null | awk '{print $1}')
+    if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ] && [ -S "$TARGET_DIR/rpc.sock" ]; then
+      return 0
+    fi
+    sleep 0.5
+    tries=$((tries + 1))
+  done
+  echo "keymint did not become ready after config reload" >&2
+  return 1
 }
 
 trust_fingerprint() {
@@ -160,14 +203,13 @@ trust_fingerprint() {
 save_overlay() {
   live=$1
   restart=$2
+  scope=$3
   write_props
   before=$(trust_fingerprint)
   sync_toml
   after=$(trust_fingerprint)
-  [ "$live" = 1 ] && apply_live
+  [ "$live" = 1 ] && apply_live "$scope"
   if [ "$restart" = 1 ]; then
-    request_keymint_restart
-  elif [ "$before" != "$after" ]; then
     request_keymint_restart
   fi
 }
@@ -187,7 +229,7 @@ case "$cmd" in
       hex64 "$val" || exit 3
       VBMETA_HASH=$val
     fi
-    save_overlay 1 1
+    save_overlay 1 1 hash
     ;;
   key)
     val=$1
@@ -199,7 +241,7 @@ case "$cmd" in
       hex64 "$val" || exit 3
       VBMETA_KEY=$val
     fi
-    save_overlay 1 1
+    save_overlay 1 1 key
     ;;
   patch)
     sub=$1
@@ -238,7 +280,7 @@ case "$cmd" in
         exit 2
         ;;
     esac
-    save_overlay 1 1
+    save_overlay 1 0 patch
     ;;
   sync)
     load_props

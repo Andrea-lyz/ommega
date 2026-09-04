@@ -701,12 +701,44 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
     } else {
         tee_ops::generate_attest_key(&alias, &challenge, &app_id_der, &spec)?
     };
+    let profile = tee_ops::identity_profile()?;
+    if session.km_version != profile.hardware_version {
+        anyhow::bail!(
+            "KeyMint identity changed while minting: profile hardware={} session hardware={}",
+            profile.hardware_version,
+            session.km_version
+        );
+    }
 
     log_cert_chain("attest", &session.cert_chain);
     Ok(json!({
         "alias": alias,
         "cert_chain": cert_chain_json(&session.cert_chain),
         "public_key": b64(&tee_ops::get_public_key(&alias)?),
+        "remote_profile": {
+            "interface_version": profile.interface_version,
+            "interface_hash": profile.interface_hash,
+            "profile_version": profile.profile_version,
+            "hardware_version": session.km_version,
+            "security_level": security_level,
+            "keymint_name": profile.keymint_name,
+            "keymint_author": profile.keymint_author,
+            "has_strongbox": profile.has_strongbox,
+        },
+    }))
+}
+
+fn handle_profile(_task_type: &str, _payload: &Value) -> Result<Value> {
+    let profile = tee_ops::identity_profile()?;
+    Ok(json!({
+        "interface_version": profile.interface_version,
+        "interface_hash": profile.interface_hash,
+        "profile_version": profile.profile_version,
+        "hardware_version": profile.hardware_version,
+        "security_level": profile.security_level,
+        "keymint_name": profile.keymint_name,
+        "keymint_author": profile.keymint_author,
+        "has_strongbox": profile.has_strongbox,
     }))
 }
 
@@ -752,6 +784,7 @@ fn handle_decrypt(_task_type: &str, payload: &Value) -> Result<Value> {
 
 fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Value) -> Result<()> {
     let handler: fn(&str, &Value) -> Result<Value> = match task_type {
+        "profile" => handle_profile,
         "attest" => handle_generate_attest,
         "sign" => handle_sign,
         "decrypt" => handle_decrypt,

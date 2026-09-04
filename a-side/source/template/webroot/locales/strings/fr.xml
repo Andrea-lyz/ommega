@@ -150,12 +150,12 @@
 
     <string name="prompt_no_valid">Aucune Keybox valide trouvée.</string>
 
-    <string name="prompt_boot_hash_set">Hash Verified Boot enregistré avec succès</string>
+    <string name="prompt_boot_hash_set">Verified Boot Hash applied</string>
     <string name="menu_set_verified_boot_key">Définir le key Verified Boot</string>
     <string name="boot_key_title">Key de démarrage</string>
     <string name="boot_key_input_placeholder">Collez votre key Verified Boot ici</string>
-    <string name="prompt_boot_key_set">Key Verified Boot enregistré avec succès</string>
-    <string name="prompt_boot_key_cleared">Verified Boot Key cleared</string>
+    <string name="prompt_boot_key_set">Verified Boot Key applied</string>
+    <string name="prompt_boot_key_cleared">Verified Boot Key override cleared</string>
 
     <string name="prompt_boot_hash_set_error">Échec de la mise à jour du hash Verified Boot</string>
 
@@ -225,7 +225,7 @@
 
     <string name="security_patch_auto_failed">Échec de l&apos;activation de la configuration automatique</string>
 
-    <string name="security_patch_save_success">Patch de sécurité enregistré avec succès</string>
+    <string name="security_patch_save_success">Security patch applied</string>
 
     <string name="security_patch_save_failed">Échec de l&apos;enregistrement du patch de sécurité</string>
 
@@ -257,12 +257,12 @@
 
     <string name="mode_dialog_title">Mode</string>
 
-    <string name="mode_auto">Automatique</string>
+    <string name="mode_auto">Global default</string>
 
-    <string name="mode_certificate_generating">Génération de certificats (!)</string>
+    <string name="mode_certificate_generating">StrongBox</string>
 
-    <string name="mode_leaf_hack">Leaf Hack (?)</string>
+    <string name="mode_leaf_hack">TEE</string>
 
-    <string name="prompt_security_patch_saved_restart">Security patch saved, reboot to take effect</string>
+    <string name="prompt_security_patch_saved_restart">Security patch applied</string>
 </resources>
 
