@@ -1,5 +1,11 @@
 # StrongBox Capability Mask
 
+[中文项目说明](../README.md) · [English project documentation](../README.en.md)
+
+For the tested firmware matrix, suitability, global effects and risk disclaimer,
+read the StrongBoxCapabilityMask section in the project documentation above.
+The tested B does not advertise StrongBox and does not need this APK.
+
 Minimal libxposed API 102 module that runs only in `system_server` and removes
 `android.hardware.strongbox_keystore` from Android's global `SystemConfig`
 feature map.
@@ -42,7 +48,8 @@ This module shares the product version; its runtime feature-mask behavior stays 
 1. Install the generated APK.
 2. Enable the module in an API 102 compatible LSPosed implementation.
 3. Keep the static scope at `system` only.
-4. Reboot the device. Restarting an application is not enough because the
+4. Reboot A only where a normal reboot is permitted. Never apply this step to
+   a B device with a hard-reboot prohibition. Restarting an application is not enough because the
    feature cache is populated during system boot and process binding.
 
 ## Verify
@@ -73,11 +80,25 @@ Validated on PJZ110, Android API 36, LSPosed 2.2.0 on 2026-09-04:
 - A real instrumentation application process returned the same values, confirming
   that Android 16's process-local `SystemFeaturesCache` received the masked map.
 - No new `system_server` crash or ANR was observed after reboot.
-- After clearing Paytm 10.83.12 data, a cold start reached the normal login flow
+- In that historical window, after clearing Paytm 10.83.12 data, a cold start reached the normal login flow
   and then the main page without warning `00000`, `61007`, or `61007-ISTxx`.
   No StrongBox request, StrongBox fallback, or self-exit appeared in the aligned
   runtime log window, and the Paytm activity remained resumed.
 
+Later testing also observed intermittent Paytm `00000` warnings. The earlier pass
+does not establish a permanent fix or prove subsequent warnings are false positives.
+The current firmware and remote TEE acceptance configuration are recorded in the
+root README; native A StrongBox/RKP tests were a separate configuration.
+
+The APK's API 29 installation floor is not a compatibility guarantee. Its hook
+requires the AOSP-style method, mutable feature map and publication path; vendor
+overrides or hard-coded features may bypass it. It cannot conceal real attestation
+Bootloader state, convert existing keys or guarantee application compatibility.
+It affects all feature-map consumers, including applications outside Ommega targets.
+
 ## Rollback
 
-Disable the module in LSPosed and reboot. No system partition file is changed.
+Disable the module in LSPosed and reboot A where permitted. No system partition
+file is changed. System-process hooks may cause crashes or boot problems. Use at
+your own risk; the project and module are provided as is without warranty or
+liability for resulting losses, to the extent permitted by applicable law.

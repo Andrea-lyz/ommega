@@ -1,0 +1,304 @@
+============================================================
+Ommega 1.4.1 Remote KeyMint Guide (Andrea-lyz Fork)
+============================================================
+
+Chinese README: README.md
+English README: README.en.md
+Chinese guide: ommega远程转发密钥说明.txt
+Use the language/guide buttons at the top of either GitHub README.
+
+Upstream: https://github.com/jiyin004-jpg/ommega
+Fork: https://github.com/Andrea-lyz/ommega
+Authors: jiyin004, Andrea-lyz. Not an official upstream release or hosted service.
+No public Server, Token or private key is supplied. Deploy and generate your own.
+
+1. TEST ENVIRONMENT AND COMPATIBILITY
+
+Snapshot: 2026-09-05. Firmware is from read-only queries; app versions/results
+belong to earlier test windows, not automatic acceptance of later updates.
+A: OnePlus 13 / PJZ110, Android 16 / API 36 / arm64-v8a;
+   PJZ110_16.0.10.501(CN01), ColorOS ro.build.version.oplusrom=V16.1.0.
+B: OnePlus 11 / PHB110, Android 16 / API 36 / arm64-v8a;
+   PHB110_16.0.2.400(CN01), ColorOS ro.build.version.oplusrom=V16.0.0.
+Server: Linux x86_64, physical mode; CI 1.4.1 supplies musl.
+Historical Mask test: LSPosed 2.2.0 / libxposed API 102.
+
+A has native StrongBox, previously tested with Android RKP in a separate window.
+Remote acceptance disables that backend and enables Mask: StrongBox query false,
+app_attest_key=true. B's current query is false and historical profile reports
+strongbox=false. Default TEE via native relay is tested; B StrongBox is not.
+B app_attest_key query is true. Advertisement, HAL existence and algorithm support
+are distinct. This is not evidence of StrongBox working on both devices.
+
+Remote acceptance settings:
+  remote=true, local_hw=false, disable_native_strongbox=true,
+  use_native_strongbox=false, GlobalDefault app policies, Mask enabled on A.
+Historical apps:
+  Integrity Checker 2.2; Paytm 10.83.12; GMS 26.34.31; Play Store 52.9.21-34.
+Three green Integrity results were observed. Paytm reached and stayed at phone-number
+entry but sometimes reported 00000. Improvement after reboot does not prove a false
+positive, permanent fix or compatibility with payment/card operations.
+
+API 29 in A's installer and Mask is an installation floor, not Android 10+ support.
+Runtime needs compatible keystore2, KeyMint AIDL, root injection and firmware
+interfaces. CI modules are arm64-v8a. Other ROMs, Android versions, root managers,
+architectures, B StrongBox and algorithm combinations need independent validation.
+No universal device/app/network compatibility is guaranteed. Detector results are
+not security certification.
+
+2. ARCHITECTURE AND 1.4.1 BOUNDARIES
+
+A intercepts target.txt apps and uses B through Server.
+Native B supports profile / attest / sign / decrypt / agree.
+Server handles authentication, scheduling, status and administration.
+B-app is optional and supports only attest/sign/decrypt, lacks profile/agree and
+uses its own AndroidKeyStore identity. It cannot replace native B for this suite.
+
+Remote-only does not mean every operation runs on B. The software TA enters remote
+generation when remote is enabled, an attestation challenge exists and no caller
+attestation key is supplied. Other generation can remain local. B performs remote
+signing/decryption/agreement. A enforces app authentication and stores local state.
+B translates authentication to NO_AUTH_REQUIRED and ATTEST_KEY to SIGN; B hardware
+does not validate A's user authentication token.
+
+Main fork changes:
+  - A obtains/freezes B's real profile before TA startup, with network retries.
+  - Server accepts an empty keymint_author, rejecting missing/non-string/blank-only.
+  - A checks profile and leaf challenge, App ID, version and security level.
+    Full trusted-root, chain-signature and revocation checks are unfinished;
+    Server nonempty-chain checks are not cryptographic validation.
+  - Native A StrongBox/RKP, three app policies, live WebUI, cold-boot event replay.
+  - B SPL controls, relay connection hot reload, persistent keyblob upgradeKey,
+    and queue race fixes.
+  - Real HAL errors may carry keymint_error_code; unknown errors remain generic.
+    No parsing error strings to infer HAL codes or new implicit local fallback.
+  - Targeted NoPadding/SHA-224/NONE/OAEP MGF fixes and remote AGREE_KEY.
+  - Six batches covered P-256/P-384/P-521/X25519 agreement, signing/decryption and
+    auth-key lifecycle across A reboot. Batch six passed 516 A Android workspace tests.
+  - Wrapped import has not been accepted as supported. Unfinished work stays unfinished.
+CI success, historical device checks and final-package app acceptance are distinct.
+
+3. ARTIFACTS AND VERSIONS
+
+The ommega-1.4.1 aggregate artifact extracts to flat files:
+  ommega-a-release-arm64-v8a-1.4.1-<commit>.zip
+  ommegaclient-b-release-arm64-v8a-1.4.1-<commit>.zip
+  relay_rs-linux-x86_64-musl
+  Ommega-B-app-1.4.1-debug-signed.apk
+  StrongBoxCapabilityMask-1.4.1-debug-signed.apk
+  SHA256SUMS
+  build-info.json
+
+Extract the outer artifact; keep installer ZIPs intact. Verify hashes and commit.
+Both APKs use Android debug signing. CI caches that identity, but eviction can change
+it. This is not formal release signing and the key is not distributed. A differently
+signed installed APK cannot be overwritten; do not blindly uninstall or erase data.
+
+CI runs A/B/Server/APK builds in parallel, pins nightly-2026-09-01, tracks Cargo.lock,
+caches Rust/Gradle and retains workspace, Server, B ELF, WebUI, version and Mask checks.
+The source version is used without automatic bumps/commits; release_version only
+overrides a manual run. Only Markdown-only changes are ignored; TXT changes trigger CI.
+
+4. SERVER DEPLOYMENT
+
+Create .env in the binary working directory (environment variables take precedence):
+  RELAY_BIND=0.0.0.0
+  RELAY_HTTP_PORT=10886
+  RELAY_HTTPS_PORT=8443
+  RELAY_USE_TLS=true
+  RELAY_TLS_CERTFILE=data/tls/server.crt
+  RELAY_TLS_KEYFILE=data/tls/server.key
+  RELAY_TOKEN=<random-static-token>
+  RELAY_ADMIN_USER=admin
+  RELAY_ADMIN_PASSWORD=<strong-password>
+  RELAY_ATTEST_SOURCE=physical
+  # RELAY_MYSQL_URL=mysql://user:password@127.0.0.1:3306/ommega
+  # RELAY_SECRET_KEY=<random-secret>
+
+Start:
+  chmod 0755 relay_rs-linux-x86_64-musl
+  ./relay_rs-linux-x86_64-musl
+
+Endpoints: /api/health/, /status/, /jiyin004/ (admin), /login/.
+Missing TLS certificates fall back to HTTP; do not assume HTTPS is still active.
+Without MySQL, static Tokens support physical relay, but admin Token, database
+keybox, payment and persistence features are limited. Database mode can assign
+A/B role Tokens. .env.pay.example is not a complete Server template.
+
+Update: confirm pending/assigned=0, upload a separate temporary binary, verify SHA-256,
+back up the old executable, stop only this service, atomically replace and restore
+permissions, start, verify running image, health and B reconnection. Restore the
+verified backup on failure. Restart resets in-memory statistics; failed=0 does not
+fix historical errors. Never overwrite a running executable. Use normal A app
+requests for acceptance and avoid interrupting in-flight work.
+
+5. B MODULE, RELAY WEBUI AND SPL
+
+After installing the B ZIP, edit WebUI Relay settings or /data/adb/ommega/relay.conf:
+  OMMEGA_RELAY_SERVER=https://<server>:8443
+  OMMEGA_RELAY_DEVICE_ID=<b-device-id>
+  OMMEGA_RELAY_MACHINE_ID=
+  OMMEGA_RELAY_TOKEN=<b-token-or-static-token>
+  OMMEGA_RELAY_LOG_ENABLED=true
+  OMMEGA_RELAY_LOG_LEVEL=debug
+  OMMEGA_RELAY_LOGCAT_ENABLED=true
+  OMMEGA_RELAY_LOGCAT_LEVEL=info
+
+Match A's device ID. Use a B-role Token when roles are enabled. B currently accepts
+invalid TLS certificates: HTTPS alone does not authenticate Server identity.
+The deployer must protect transport and credentials.
+
+WebUI supports all eight fields, Token visibility, validation and conflict detection.
+It retains a .webui.bak, preserves comments/unknown fields and writes atomically.
+Connection changes hot-reload; four logging settings apply on the next relay start.
+  touch /data/adb/ommega/restart.all
+Only requests connection config rereading: no relay/device restart, logging
+reinitialization or SPL application.
+File log: /data/adb/ommega/logs/relay.log; logcat tag: ommegaclient-b.
+
+The separate collapsed SPL panel accepts System/Boot/Vendor dates as YYYY-MM-DD.
+Saving writes /data/adb/ommega/spl.conf; changed properties reload native KeyMint
+and keystore2. Empty fields choose the first spl-baseline.conf values, which are
+not necessarily safe recovery values. Higher SPL can ratchet keyblobs; lowering it
+may make keys or credential-protected data unusable. Properties do not prove hardware
+acceptance; check a fresh attestation through an allowed normal application path.
+
+Lifecycle entry:
+  sh /data/adb/modules/ommegaclient_b/service.sh
+This service operation cleans exact-path relay processes, reapplies SPL and starts
+relay. It is not a routine config-save step. Use only when unlocked, with no in-flight
+TEE calls, effective SPL checked, recovery possible without hard reboot, and explicit
+permission. Do not kill or force-timeout real TEE calls.
+Hard reboot of this project's primary B is absolutely prohibited. Generic installer
+or upgrade prompts do not override it. Soft restart requires separate assessment;
+Android stop/start or broad process kills are not substitutes for the lifecycle.
+Never combine SPL changes and reboot or delete credential/Keystore databases as repair.
+
+6. A MODULE AND ROUTING
+
+Install/load the A ZIP as required by the manager. /data/adb/ommega/config example:
+  url: https://<server>:8443
+  device_id: <b-device-id>
+  token: <a-token-or-static-token>
+  remote: true
+  local_hw: false
+  tls_insecure: true
+  debug_logging: false
+  disable_native_strongbox: false
+
+This shows syntax, not the exact acceptance configuration in section 1.
+tls_insecure=true skips A certificate verification; configure for your trusted-cert
+environment. remote and local_hw are independent. Use an A-role Token where required.
+
+Targets: /data/misc/keystore/ommega/target.txt, plain package names, no !/? suffixes.
+Policies: /data/misc/keystore/ommega/target-security.toml.
+Long-press selected apps in WebUI:
+  Global default: follows global settings/capability.
+  StrongBox: explicit selection, overriding global disable.
+  TEE: rewrites security-level requests, including explicit StrongBox.
+Unselected apps keep system routing. Legacy strongbox_unavailable_packages migrates
+only when the new policy file is absent.
+
+disable_native_strongbox defaults false and affects only GlobalDefault targets.
+When enabled, explicit StrongBox requests return HARDWARE_TYPE_UNAVAILABLE(-68);
+whether the application falls back is application-dependent, not guaranteed.
+
+/data/misc/keystore/ommega/config.toml:
+  [main]
+  use_native_strongbox = true
+Selects A native StrongBox/RKP; TEE can stay remote. After changing:
+  touch /data/adb/ommega/restart.keymint
+Recycles only Ommega keymint, not the device.
+
+Targets, policies, connections and ordinary settings are read live. WebUI synchronizes
+Hash/Boot Key/SPL into [trust]. SPL updates the live TA; Hash/Key may recycle Ommega
+keymint and wait for RPC. Logs: /data/misc/keystore/ommega/logs/keymint.log and
+injector.log. Module status and ommega-inject in keystore2 maps help inspection,
+but are not substitutes for actual app requests.
+
+7. STRONGBOXCAPABILITYMASK APK
+
+Optional A libxposed module for apps that choose paths from system feature declarations.
+Devices without the feature generally do not need it; the tested B does not.
+It is not a universal Paytm or integrity-check fix.
+
+Implementation: system_server only, startup hook of
+com.android.server.SystemConfig.getAvailableFeatures(),
+removing android.hardware.strongbox_keystore while retaining
+android.hardware.keystore.app_attest_key. Global effect, including apps not selected
+in Ommega; no package filtering and no target-app injection.
+
+Requirements: API 29 installation floor, libxposed API 102 framework, a ROM retaining
+the AOSP method, mutable Map and feature publication/cache path without vendor
+bypasses or hard-coded results. "Follows AOSP" is not certification or all-version
+support. Only the A environment in section 1 has device evidence.
+See the README AOSP source link for Android 16 process feature caching.
+
+Usage:
+  1. Install StrongBoxCapabilityMask-1.4.1-debug-signed.apk on A.
+  2. Enable in LSPosed, static scope system (System Framework) only; no app scopes.
+  3. Reboot/unlock A where normal reboot is allowed; closing apps is insufficient.
+  4. Check:
+       pm has-feature android.hardware.strongbox_keystore
+       pm has-feature android.hardware.keystore.app_attest_key
+       logcat -d -s StrongBoxCapabilityMask
+     Expect false, existing app_attest_key still true, hook_registered/feature_removed.
+     A normal test app can check its cache; shell queries do not prove all app paths.
+  5. Undo by disabling in LSPosed and rebooting A. Verify APK signatures before upgrades.
+Never apply these reboot steps to B when hard reboot is prohibited.
+
+Mask does not edit XML, stop HALs, delete/migrate keys, alter real Bootloader
+attestation state or block direct StrongBox requests. A running HAL is compatible
+with a working Mask. Native attestation may still expose unlocked state; TEE
+attestation also has corresponding fields. feature=false does not prove concealment.
+
+Consequences: apps may downgrade, refuse to run, lose StrongBox features, change store
+availability or detect declaration/interface mismatch. Existing keys are not converted;
+continued use depends on the app. System hooks may cause compatibility issues,
+crashes or boot problems.
+The project and Mask are provided as is, without guarantees of fitness, security
+or detection results. You assume the risks. The authors accept no liability for
+data loss, device problems, account restrictions, business or financial loss,
+to the extent permitted by applicable law. Do not use if you do not accept the risks.
+
+Keep five controls distinct:
+  use_native_strongbox: A backend; global disable: GlobalDefault routing;
+  per-app StrongBox/TEE: explicit routing; Mask: global feature declaration;
+  Server robust mode: capability-class B StrongBox errors retry on same B TEE,
+  off by default and reset on Server restart.
+Native A requests do not enter the B retry path; Server settings do not replace A settings.
+
+8. ACCEPTANCE, TROUBLESHOOTING AND BACKUPS
+
+Order: Server health -> B online -> normal A app profile/fresh attestation ->
+required signing/decryption/agreement.
+Three green results and Paytm staying on phone-number entry are this manual test's
+criteria, without requiring data clearing or proving subsequent business functions.
+Do not run direct HAL matrices/fault injection or interrupt real TEE calls on primary B.
+
+Common issues:
+  Network is unreachable: check whether later profile retries recover.
+  invalid profile result shape: check protocol versions; empty author is allowed,
+    missing/non-string/whitespace-only is not.
+  relay.lock: inspect exact paths read-only; use lifecycle only under section 5 conditions.
+  -74: ATTESTATION_KEYS_NOT_PROVISIONED; inspect RKP instance/rkpd/certificate pool,
+    not a conclusion of absent hardware.
+  user 0 super keys: inspect unlock replay/RPC/auth lifecycle; do not clear credentials.
+  no key for alias: check original device and persistent session; clearing counters
+    by restart is not a fix.
+  Paytm 00000: collect time-aligned logs; text alone cannot identify Mask or KeyMint
+    as the cause. Avoid Frida for routine acceptance; the app is known to react to it.
+
+Back up A /data/misc/keystore/ommega/, B configuration and persistent key sessions,
+and Server .env/database/current executable before updating. Hardware-bound keys
+are not guaranteed portable across devices. Same-protocol changes may update one
+component; protocol/profile changes require checking A/B/Server compatibility.
+Never commit Tokens, passwords, private keys, live service addresses or device secrets.
+
+9. ATTRIBUTION AND LICENSES
+
+Original author: jiyin004. Fork maintenance and 1.4.x work: Andrea-lyz.
+References: Tricky Store, Tricky Addon, OhMyKeymint, KeyAttestation, TEESimulator-RS,
+AOSP. Project links and authors are in README.
+Existing AGPL-3.0-or-later, Apache-2.0 and other component licenses apply;
+third-party ownership is unchanged.

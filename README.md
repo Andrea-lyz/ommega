@@ -1,5 +1,10 @@
 # Ommega — Andrea-lyz Fork
 
+[![中文](https://img.shields.io/badge/语言-中文-blue)](README.md)
+[![English](https://img.shields.io/badge/Language-English-lightgrey)](README.en.md)
+[![中文使用说明](https://img.shields.io/badge/使用说明-中文-blue)](ommega远程转发密钥说明.txt)
+[![English guide](https://img.shields.io/badge/Guide-English-lightgrey)](ommega-remote-key-guide.en.txt)
+
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
 > 不是上游官方发行版或官方在线服务。当前源码版本为 **1.4.1**，模块作者信息为
@@ -10,6 +15,72 @@ Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬
 返回证明、签名、解密和密钥协商结果。A 同时承担软件 TA、密钥存储和认证检查。
 本 fork 在上游架构上重点补齐了远程身份一致性、原生 StrongBox、冷启动
 生命周期、实时 WebUI 配置和 B 端软重启运维。
+
+## 测试环境与支持边界
+
+以下是 **2026-09-05** 的测试记录，不是兼容设备清单。固件版本由设备只读查询确认；
+应用版本和验收结果来自此前同日的测试窗口，后续更新不自动继承这些结果。
+
+| 项目 | A 端 | B 端 |
+|---|---|---|
+| 机型 | 一加 13，PJZ110 | 一加 11，PHB110 |
+| Android / API / ABI | Android 16 / API 36 / arm64-v8a | Android 16 / API 36 / arm64-v8a |
+| 固件构建号 | `PJZ110_16.0.10.501(CN01)` | `PHB110_16.0.2.400(CN01)` |
+| ColorOS 属性 `ro.build.version.oplusrom` | `V16.1.0` | `V16.0.0` |
+| 已验证硬件路径 | 原生 StrongBox + Android RKP 曾单独验证；当前远程验收关闭该路径 | 默认 TEE KeyMint；native relay |
+| StrongBox 状态 | 有原生实现；启用 Mask 后功能查询为 false，不代表硬件消失 | 当前固件功能查询为 false，历史 profile 为 `strongbox=false`；未验证 B StrongBox |
+| `app_attest_key` 功能查询 | true，Mask 保留此项 | true |
+
+Mask 历史验证环境为 LSPosed 2.2.0 / libxposed API 102。A/B 模块在 root 环境运行，
+上述结果不能推广为所有 root 管理器、ROM 或机型的兼容承诺。Server 为 Linux x86_64，
+使用 physical 模式；1.4.1 CI 提供 musl 构件。
+
+远程验收配置：A `remote=true`、`local_hw=false`、`disable_native_strongbox=true`、
+`use_native_strongbox=false`，目标应用使用 GlobalDefault，并启用 Mask。
+这验证的是 **A → Server → B TEE**，不是“双端 StrongBox 均通过”。
+历史测试使用 Integrity Checker 2.2、Paytm 10.83.12、GMS 26.34.31、Play 商店 52.9.21-34。
+三绿曾通过；Paytm 曾进入手机号输入页，也曾间歇出现 `00000`。重启后改善不构成
+“已证实误报”或“永久修复”的结论，更不保证支付、绑卡或所有风控场景可用。
+
+A 安装器的最低门槛是 API 29，Mask 的 `minSdk` 也是 29；这只代表安装门槛，
+不代表 Android 10 起全部可用。实际运行还依赖 keystore2、KeyMint AIDL、注入器与固件
+接口匹配。CI 发布 arm64-v8a 模块；其他系统版本、架构及 B StrongBox 均需独立验证。
+
+## StrongBoxCapabilityMask：何时使用及风险
+
+这是可选的 LSPosed/libxposed APK，不是 A/B ZIP，也无需安装到 Server。
+通常只在 **A 端确实有 StrongBox，且希望应用按“未声明 StrongBox”选择路径**时使用。
+没有该功能声明的设备通常没有必要安装；不能将它作为 Paytm 告警的通用修复。
+
+模块仅加载到 `system_server`，在启动阶段 hook
+`com.android.server.SystemConfig.getAvailableFeatures()`，从返回的功能表中删除
+`android.hardware.strongbox_keystore`，保留 `android.hardware.keystore.app_attest_key`。
+它是全局操作，影响包括未勾选 Ommega 的应用在内的所有使用该功能表的调用者；没有按包名开关。
+
+适配前提是 ROM 沿用 AOSP 的上述方法和可修改的 Map，以及功能发布/缓存路径，且没有
+绕过此表的厂商实现或硬编码结果。Android 16 的进程功能缓存也是选择该启动 hook 的原因，
+见 [AOSP ActivityManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android16-release/services/core/java/com/android/server/am/ActivityManagerService.java)。
+“遵循 AOSP”是实现前提，不是 AOSP 认证或对所有 AOSP ROM 的支持保证；目前仅上述 A 固件有实机证据。
+
+使用步骤：
+
+1. 在 A 安装 `StrongBoxCapabilityMask-1.4.1-debug-signed.apk`。
+2. 在兼容 libxposed API 102 的 LSPosed 实现中启用，保持静态作用域仅 `system`（系统框架），不要勾选应用。
+3. 在允许正常重启的 A 上重启并解锁，让系统功能表及进程缓存重新建立；仅划掉应用不能启用/撤销此 hook。
+4. 检查 `pm has-feature android.hardware.strongbox_keystore` 为 false、原有 `app_attest_key` 仍为 true，
+   并检查 Mask 日志的 `event=hook_registered` / `event=feature_removed`；必要时用正常测试 App 核对应用进程查询。
+5. 撤销时在 LSPosed 禁用模块，再重启 A。APK 使用调试签名，升级前核对签名；签名不同不能直接覆盖安装。
+
+**不要将上述重启步骤套用到禁止硬重启的 B。本测试 B 没有安装 Mask 的必要。**
+模块不修改系统 XML、不停止 StrongBox HAL、不删除或迁移已有密钥、不改变真实证明中的
+Bootloader 状态，也不阻止应用直接请求 StrongBox。显式请求仍由原系统或 Ommega 路由处理。
+原生硬件证明仍可能反映解锁状态；功能查询 false 不能证明设备已隐藏解锁或通过完整性校验。
+
+后果可能包括应用降级到 TEE/其他实现、拒绝运行、依赖 StrongBox 的功能或商店分发行为变化，
+以及声明与真实接口不一致被检测。已有密钥不会因此被转换；应用是否继续使用它们由应用决定。
+系统进程 hook 还有兼容性、崩溃或启动异常风险。**本项目及 Mask 按现状提供，不保证适用性、
+安全性或检测结果；使用者自行承担风险。对数据丢失、设备异常、账户限制、业务或财产损失概不负责
+（以适用法律允许的范围为限）。不接受这些风险请勿使用。**
 
 ## 与上游的主要区别
 
@@ -99,7 +170,7 @@ touch /data/adb/ommega/restart.keymint
 DER 会校验其与 P-521 私钥的一致性。旧 PBKDF2 兼容 KDF 保留历史 64 字节
 extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-521 写入格式不变。
 
-### 6. B 端 SPL WebUI 与纯软重启运维
+### 6. B 端 SPL WebUI 与服务级运维
 
 - B 端 WebUI 可分别设置 System、Boot、Vendor SPL，保存后立即应用。
 - 属性变化时只重载原生 KeyMint 服务和 `keystore2`，模块本身不请求硬重启。
@@ -111,6 +182,8 @@ extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-52
 
 > 修改属性不等于硬件 TEE 一定接受了新 Boot SPL。最终值必须以新生成的硬件证明
 > 证书为准。
+> SPL 涉及凭据加密和 keyblob 升级。必须先确认用户已解锁、没有在途 TEE 调用及可行的恢复路径；
+> 不要将 SPL 调整与重启组合操作。禁止硬重启的 B 必须始终遵守该限制，软重启也不是无风险恢复手段。
 
 ### 7. B 端 relay 与 Server 稳定性
 
@@ -151,18 +224,19 @@ StrongBoxCapabilityMask 单元测试。Rust 固定到已验证的 `nightly-2026-
 A/B/Server 提交 Cargo.lock，按组件缓存 Rust 构建并复用 Gradle 缓存。
 
 当前统一版本为 **1.4.1**。CI 默认使用源码版本，不自动递增或提交版本；
-手动 `release_version` 仅覆盖本次构建。文档单独修改不触发自动构建。
+手动 `release_version` 仅覆盖本次构建。当前工作流只忽略纯 `*.md` 修改；TXT 修改仍会触发构建。
 全部构建成功后生成 `ommega-<版本>` artifact，包含 A/B 模块 ZIP、Server、
 B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
 两个 APK 使用 Android 默认 debug 签名；CI 缓存该调试签名身份供后续构建复用，
 它不是正式发布签名，私钥不随源码或构建产物分发。
+缓存失效可能导致后续签名身份变化，升级前仍需核对证书。
 
 ## 系统组成
 
 | 端 | 角色 | 形态 |
 |---|---|---|
-| A 端（`a-side`） | 拦截目标应用 Keystore；远程 TEE；可选 A 端原生 StrongBox | KernelSU/APatch/Magisk 模块，arm64-v8a |
-| B 端（`b-side`） | 调用真实硬件 KeyMint，处理 profile/attest/sign/decrypt/agree | KernelSU/APatch/Magisk 模块，arm64-v8a |
+| A 端（`a-side`） | 拦截目标应用 Keystore；远程 TEE；可选 A 端原生 StrongBox | root 模块，CI 提供 arm64-v8a；安装器检查 KernelSU/Magisk 环境 |
+| B 端（`b-side`） | 调用真实硬件 KeyMint，处理 profile/attest/sign/decrypt/agree | root 模块，CI 提供 arm64-v8a；管理器兼容性需单独确认 |
 | B 端 App（`b-app`） | 可选的独立 B 端客户端与连接配置界面 | Android APK |
 | StrongBoxCapabilityMask | 全局隐藏 StrongBox capability；仅加载到 system_server | libxposed API 102 APK |
 | Server（`server`） | 鉴权、任务队列、A/B 调度、设备与后台管理 | Linux x86_64 musl 二进制 |
@@ -197,13 +271,13 @@ OMMEGA_RELAY_LOGCAT_ENABLED=true
 OMMEGA_RELAY_LOGCAT_LEVEL=info
 ```
 
-配置由 relay 热加载；需要主动触发重新读取时执行：
+连接配置由 relay 热加载，日志配置在下次启动生效；需要主动触发重新读取时执行：
 
 ```sh
 touch /data/adb/ommega/restart.all
 ```
 
-该标记不会硬重启设备。
+该标记只请求重读配置，不重启 relay 或设备，也不重新初始化日志。
 
 ### A 端
 
@@ -219,6 +293,10 @@ tls_insecure: true
 debug_logging: false
 disable_native_strongbox: false
 ```
+
+上面是配置格式示例，不是测试配置的完整复刻。`tls_insecure: true` 会跳过 A 的证书验证；
+部署可信证书后应按实际环境配置。B 当前 HTTP 客户端接受无效证书，不能仅凭 HTTPS 地址
+就宣称已认证 Server 身份；公网部署需自行保护传输与凭据。
 
 在 WebUI 勾选需要接管的应用，并按需选择“全局默认 / StrongBox / TEE”。未加入
 `target.txt` 的应用继续使用系统原始 Keystore 路径。
@@ -267,22 +345,32 @@ Linux 构件 `relay_rs-linux-x86_64-musl` 为静态链接二进制。更新时�
 
 ## 构建
 
+以下每段从仓库根目录独立执行，需先配置相应依赖：
+
 ```sh
 # A 端模块
 cd a-side/source
 python build.py
-
+```
+```sh
 # B 端模块
 cd b-side/source
 python build.py
-
+```
+```sh
 # Server
 cd server/source
-cargo build --release
-
+cargo build --locked --release
+```
+```sh
 # B 端 App
 cd b-app/source
 ./gradlew assembleRelease
+```
+```sh
+# StrongBoxCapabilityMask（从仓库根目录进入）
+cd StrongBoxCapabilityMask
+./gradlew :app:testDebugUnitTest :app:assembleRelease
 ```
 
 完整发行构建建议使用仓库的
@@ -290,17 +378,21 @@ cd b-app/source
 
 ## 验证范围与限制
 
-1.4.0 已在实际 A/B 设备上验证远程 TEE profile、证明/签名链路、原生
-StrongBox + Android RKP、用户认证绑定密钥生命周期、B 端 SPL 即时应用和 Server
-热更新。检测器结果会受到设备固件、应用版本和策略配置影响，本仓库不承诺所有应用或
-所有检测器表现一致。
+1.4.1 源码对应的前六批工作已覆盖远程 profile、证明/签名/解密、
+P-256/P-384/P-521/X25519 协商，以及 A 重启前后的认证密钥生命周期。
+NoPadding、SHA-224、NONE、OAEP MGF 修复有定向验证，不代表所有算法参数组合都支持。
+第六批 A Android workspace 测试为 516 项通过，另有正常应用远程链路验证。
+历史 B SPL 和 A 原生 StrongBox/RKP 测试与最终远程 TEE 配置是不同测试窗口。
+CI 全绿、Server 部署成功与最终安装包的应用验收是不同层次；不得互相替代。
+Wrapped import 未纳入支持验收，完整证书信任链验证及其他未完成工作仍有边界。
+不保证所有设备、固件、应用、算法或网络环境可用。
 
 ## 上游、署名与许可证
 
 - 上游仓库：[jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega)
 - 本 fork：[Andrea-lyz/ommega](https://github.com/Andrea-lyz/ommega)
 - 原作者：jiyin004
-- Fork 维护与 1.4.0 改动：Andrea-lyz
+- Fork 维护与 1.4.x 改动：Andrea-lyz
 
 继续感谢本项目所参考的开源实现：
 
