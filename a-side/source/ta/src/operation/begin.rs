@@ -328,6 +328,16 @@ impl crate::KeyMintTa {
                         algorithm: remote_decrypt_algorithm(&params)?,
                         data: Vec::new(),
                     },
+                    KeyPurpose::AgreeKey => CryptoOperation::RemoteAgree {
+                        alias: remote.alias.clone(),
+                        peer_public_key: Vec::new(),
+                        secret_size: match get_ec_curve(key_chars)? {
+                            EcCurve::P224 => 28,
+                            EcCurve::P256 | EcCurve::Curve25519 => 32,
+                            EcCurve::P384 => 48,
+                            EcCurve::P521 => 66,
+                        },
+                    },
                     _ => {
                         return Err(km_err!(
                             IncompatiblePurpose,
@@ -551,10 +561,19 @@ fn remote_sign_algorithm(params: &[KeyParam]) -> Result<String, Error> {
     match algo {
         Algorithm::Rsa => {
             let padding = get_padding_mode(params)?;
-            if padding == PaddingMode::RsaPss {
-                let digest = get_digest(params)?;
-                let name = match digest {
+            let digest = get_digest(params)?;
+            let name = match padding {
+                PaddingMode::None if digest == Digest::None => "NONEwithRSA/NoPadding",
+                PaddingMode::None => {
+                    return Err(km_err!(
+                        IncompatibleDigest,
+                        "remote RSA-NoPadding sign requires Digest::None not {digest:?}"
+                    ))
+                }
+                PaddingMode::RsaPss => match digest {
+                    Digest::Md5 => "MD5withRSA/PSS",
                     Digest::Sha1 => "SHA1withRSA/PSS",
+                    Digest::Sha224 => "SHA224withRSA/PSS",
                     Digest::Sha256 => "SHA256withRSA/PSS",
                     Digest::Sha384 => "SHA384withRSA/PSS",
                     Digest::Sha512 => "SHA512withRSA/PSS",
@@ -564,27 +583,24 @@ fn remote_sign_algorithm(params: &[KeyParam]) -> Result<String, Error> {
                             "remote RSA-PSS sign for {digest:?}"
                         ))
                     }
-                };
-                Ok(name.to_string())
-            } else {
-                // PKCS#1 v1.5: carry the app's digest so an authorized digest
-                // is used, and an unauthorized one (e.g. SHA1 on a SHA256-only
-                // key) is rejected by the real TEE.
-                let digest = get_digest(params)?;
-                let name = match digest {
+                },
+                PaddingMode::RsaPkcs115Sign => match digest {
+                    Digest::None => "NONEwithRSA",
+                    Digest::Md5 => "MD5withRSA",
                     Digest::Sha1 => "SHA1withRSA",
+                    Digest::Sha224 => "SHA224withRSA",
                     Digest::Sha256 => "SHA256withRSA",
                     Digest::Sha384 => "SHA384withRSA",
                     Digest::Sha512 => "SHA512withRSA",
-                    _ => {
-                        return Err(km_err!(
-                            UnsupportedDigest,
-                            "remote RSA-PKCS1 sign for {digest:?}"
-                        ))
-                    }
-                };
-                Ok(name.to_string())
-            }
+                },
+                _ => {
+                    return Err(km_err!(
+                        UnsupportedPaddingMode,
+                        "remote RSA sign for padding {padding:?}"
+                    ))
+                }
+            };
+            Ok(name.to_string())
         }
         Algorithm::Ec => {
             // EC digest must match what the app verifies: a SHA-384/512
@@ -593,16 +609,13 @@ fn remote_sign_algorithm(params: &[KeyParam]) -> Result<String, Error> {
             // when absent so a digest-less begin still works.
             let digest = get_opt_tag_value!(params, Digest)?.unwrap_or(&Digest::Sha256);
             let name = match digest {
+                Digest::None => "NONEwithECDSA",
                 Digest::Sha1 => "SHA1withECDSA",
+                Digest::Sha224 => "SHA224withECDSA",
                 Digest::Sha256 => "SHA256withECDSA",
                 Digest::Sha384 => "SHA384withECDSA",
                 Digest::Sha512 => "SHA512withECDSA",
-                _ => {
-                    return Err(km_err!(
-                        UnsupportedDigest,
-                        "remote EC sign for {digest:?}"
-                    ))
-                }
+                _ => return Err(km_err!(UnsupportedDigest, "remote EC sign for {digest:?}")),
             };
             Ok(name.to_string())
         }
@@ -619,11 +632,14 @@ fn remote_sign_algorithm(params: &[KeyParam]) -> Result<String, Error> {
 fn remote_decrypt_algorithm(params: &[KeyParam]) -> Result<String, Error> {
     let padding = get_padding_mode(params)?;
     match padding {
+        PaddingMode::None => Ok("RSA/ECB/NoPadding".to_string()),
         PaddingMode::RsaOaep => {
             let digest = get_digest(params)?;
             let mgf = get_mgf_digest(params)?;
             let name = match digest {
+                Digest::Md5 => "RSA/OAEP/MD5",
                 Digest::Sha1 => "RSA/OAEP/SHA-1",
+                Digest::Sha224 => "RSA/OAEP/SHA-224",
                 Digest::Sha256 => "RSA/OAEP/SHA-256",
                 Digest::Sha384 => "RSA/OAEP/SHA-384",
                 Digest::Sha512 => "RSA/OAEP/SHA-512",
@@ -635,15 +651,26 @@ fn remote_decrypt_algorithm(params: &[KeyParam]) -> Result<String, Error> {
                 }
             };
             let suffix = match mgf {
+                Digest::Md5 => "/MGF1-MD5",
                 Digest::Sha1 => "/MGF1-SHA1",
+                Digest::Sha224 => "/MGF1-SHA224",
                 Digest::Sha256 => "/MGF1-SHA256",
                 Digest::Sha384 => "/MGF1-SHA384",
                 Digest::Sha512 => "/MGF1-SHA512",
-                _ => "/MGF1-SHA1",
+                Digest::None => {
+                    return Err(km_err!(
+                        UnsupportedMgfDigest,
+                        "remote RSA-OAEP MGF digest cannot be NONE"
+                    ))
+                }
             };
             Ok(format!("{name}{suffix}"))
         }
-        _ => Ok("RSA/ECB/PKCS1Padding".to_string()),
+        PaddingMode::RsaPkcs115Encrypt => Ok("RSA/ECB/PKCS1Padding".to_string()),
+        _ => Err(km_err!(
+            UnsupportedPaddingMode,
+            "remote RSA decrypt for padding {padding:?}"
+        )),
     }
 }
 
@@ -1121,10 +1148,186 @@ fn nonce<const N: usize>(caller_nonce: Option<&[u8]>, rng: &mut dyn Rng) -> Resu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agreement_requires_ec_and_authorized_purpose_without_digest() {
+        use super::*;
+        let chars = vec![
+            KeyParam::Algorithm(Algorithm::Ec),
+            KeyParam::EcCurve(EcCurve::P256),
+            KeyParam::Purpose(KeyPurpose::AgreeKey),
+        ];
+        check_begin_params(&chars, KeyPurpose::AgreeKey, &[]).unwrap();
+        let signing = vec![
+            KeyParam::Algorithm(Algorithm::Ec),
+            KeyParam::EcCurve(EcCurve::P256),
+            KeyParam::Purpose(KeyPurpose::Sign),
+        ];
+        let error = check_begin_params(&signing, KeyPurpose::AgreeKey, &[]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            kmr_common::ErrorKind::Hal(ErrorCode::IncompatiblePurpose, _)
+        ));
+        let rsa = vec![
+            KeyParam::Algorithm(Algorithm::Rsa),
+            KeyParam::Purpose(KeyPurpose::AgreeKey),
+        ];
+        let error = check_begin_params(&rsa, KeyPurpose::AgreeKey, &[]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            kmr_common::ErrorKind::Hal(ErrorCode::UnsupportedPurpose, _)
+        ));
+    }
+
     use super::*;
-    use kmr_common::expect_err;
+    use kmr_common::{expect_err, ErrorKind};
     use kmr_wire::{keymint::KeyParam, KeySizeInBits};
     use std::vec;
+
+    fn rsa_remote_params(
+        padding: PaddingMode,
+        digest: Digest,
+        mgf_digest: Option<Digest>,
+    ) -> Vec<KeyParam> {
+        let mut params = vec![
+            KeyParam::Algorithm(Algorithm::Rsa),
+            KeyParam::Padding(padding),
+            KeyParam::Digest(digest),
+        ];
+        if let Some(mgf_digest) = mgf_digest {
+            params.push(KeyParam::RsaOaepMgfDigest(mgf_digest));
+        }
+        params
+    }
+
+    fn assert_hal_error(error: Error, expected: ErrorCode) {
+        assert!(matches!(error.kind(), ErrorKind::Hal(code, _) if *code == expected));
+    }
+
+    #[test]
+    fn remote_algorithm_names_keep_existing_sha256_paths() {
+        assert_eq!(
+            remote_sign_algorithm(&rsa_remote_params(
+                PaddingMode::RsaPss,
+                Digest::Sha256,
+                None,
+            ))
+            .unwrap(),
+            "SHA256withRSA/PSS"
+        );
+        assert_eq!(
+            remote_decrypt_algorithm(&rsa_remote_params(
+                PaddingMode::RsaOaep,
+                Digest::Sha256,
+                Some(Digest::Sha1),
+            ))
+            .unwrap(),
+            "RSA/OAEP/SHA-256/MGF1-SHA1"
+        );
+        assert_eq!(
+            remote_decrypt_algorithm(&rsa_remote_params(
+                PaddingMode::RsaOaep,
+                Digest::Sha256,
+                None,
+            ))
+            .unwrap(),
+            "RSA/OAEP/SHA-256/MGF1-SHA1"
+        );
+        assert_eq!(
+            remote_decrypt_algorithm(&rsa_remote_params(
+                PaddingMode::RsaPkcs115Encrypt,
+                Digest::None,
+                None,
+            ))
+            .unwrap(),
+            "RSA/ECB/PKCS1Padding"
+        );
+    }
+
+    #[test]
+    fn remote_algorithm_names_preserve_no_padding_sha224_and_none() {
+        assert_eq!(
+            remote_sign_algorithm(&rsa_remote_params(PaddingMode::None, Digest::None, None,))
+                .unwrap(),
+            "NONEwithRSA/NoPadding"
+        );
+        assert_eq!(
+            remote_sign_algorithm(&rsa_remote_params(
+                PaddingMode::RsaPkcs115Sign,
+                Digest::None,
+                None,
+            ))
+            .unwrap(),
+            "NONEwithRSA"
+        );
+        assert_eq!(
+            remote_decrypt_algorithm(&rsa_remote_params(PaddingMode::None, Digest::None, None,))
+                .unwrap(),
+            "RSA/ECB/NoPadding"
+        );
+        assert_eq!(
+            remote_decrypt_algorithm(&rsa_remote_params(
+                PaddingMode::RsaOaep,
+                Digest::Sha224,
+                Some(Digest::Sha224),
+            ))
+            .unwrap(),
+            "RSA/OAEP/SHA-224/MGF1-SHA224"
+        );
+        assert_eq!(
+            remote_sign_algorithm(&rsa_remote_params(PaddingMode::RsaPss, Digest::Md5, None,))
+                .unwrap(),
+            "MD5withRSA/PSS"
+        );
+        assert_eq!(
+            remote_decrypt_algorithm(&rsa_remote_params(
+                PaddingMode::RsaOaep,
+                Digest::Md5,
+                Some(Digest::Md5),
+            ))
+            .unwrap(),
+            "RSA/OAEP/MD5/MGF1-MD5"
+        );
+        assert_eq!(
+            remote_sign_algorithm(&[
+                KeyParam::Algorithm(Algorithm::Ec),
+                KeyParam::Digest(Digest::None),
+            ])
+            .unwrap(),
+            "NONEwithECDSA"
+        );
+        assert_eq!(
+            remote_sign_algorithm(&[
+                KeyParam::Algorithm(Algorithm::Ec),
+                KeyParam::Digest(Digest::Sha224),
+            ])
+            .unwrap(),
+            "SHA224withECDSA"
+        );
+    }
+
+    #[test]
+    fn remote_algorithm_mapping_rejects_instead_of_substituting() {
+        let error = remote_decrypt_algorithm(&rsa_remote_params(
+            PaddingMode::RsaOaep,
+            Digest::Sha256,
+            Some(Digest::None),
+        ))
+        .unwrap_err();
+        assert_hal_error(error, ErrorCode::UnsupportedMgfDigest);
+
+        let error = remote_decrypt_algorithm(&rsa_remote_params(
+            PaddingMode::RsaPss,
+            Digest::Sha256,
+            None,
+        ))
+        .unwrap_err();
+        assert_hal_error(error, ErrorCode::UnsupportedPaddingMode);
+
+        let error =
+            remote_sign_algorithm(&rsa_remote_params(PaddingMode::None, Digest::Sha256, None))
+                .unwrap_err();
+        assert_hal_error(error, ErrorCode::IncompatibleDigest);
+    }
 
     #[test]
     fn test_check_begin_params_fail() {

@@ -33,8 +33,8 @@ object KeystoreHelper {
     // KeyMint AIDL enum -> Android Keystore Java constant mapping
     //
     // NOTE on types: `KeyProperties.PURPOSE_*` are `int` BITMASKS
-    // (ENCRYPT=1, DECRYPT=2, SIGN=4, VERIFY=8, WRAP_KEY=16, AGREE_KEY=32,
-    //  ATTEST_KEY=64) and `KeyGenParameterSpec.Builder(alias, purpose)` takes a
+    // (ENCRYPT=1, DECRYPT=2, SIGN=4, VERIFY=8, WRAP_KEY=32, AGREE_KEY=64,
+    //  ATTEST_KEY=128) and `KeyGenParameterSpec.Builder(alias, purpose)` takes a
     // SINGLE combined int. `DIGEST_*`, `ENCRYPTION_PADDING_*` and
     // `SIGNATURE_PADDING_*` are `String` constants.
     // ---------------------------------------------------------------------
@@ -132,9 +132,9 @@ object KeystoreHelper {
             builder.setAlgorithmParameterSpec(ECGenParameterSpec(ecCurveName(curve)))
         }
 
-        // 对齐二进制 B 端：总是确保 SHA-256 在 digest 集合里（relay 用 SHA-256
-        // 签名，且生成 key 时若不显式授权 SHA-256，后续 sign 会报 Incompatible
-        // digest -13）。A 端显式指定的 digest 保留，SHA-256 缺失则补上。
+        // B-app keeps its own SHA-256 default in addition to requested digests.
+        // This does not establish parity with native B algorithm/authorization
+        // handling; AndroidKeyStore also binds requests to this B-app's UID.
         val digests = spec.digests.mapNotNull(::digestToJava).toMutableList()
         if (KeyProperties.DIGEST_SHA256 !in digests) {
             digests.add(KeyProperties.DIGEST_SHA256)
@@ -344,9 +344,9 @@ object KeystoreHelper {
      * 请求由设备的 StrongBox 安全芯片保存密钥。
      * setIsStrongBoxBacked 是 API 28+ 公共 API（项目 minSdk=26，用反射保兼容）；
      * API < 28 无法表达该要求，返回 null。
-     * 注意：官方行为是无 StrongBox 时静默回退 TEE（不抛异常），这是 Android
-     * 标准降级行为，链上会如实标记 TRUSTED_ENVIRONMENT，由
-     * [verifyStrongBoxBacked] 在生成后复核并记录（诊断用途）。
+     * 显式 StrongBox 请求在硬件不可用时可以抛出 StrongBoxUnavailableException；
+     * 平台不保证静默回退 TEE。反射失败返回 null 是本客户端的处理策略。
+     * [verifyStrongBoxBacked] 仅用于生成后的诊断，不证明请求已满足 StrongBox 要求。
      */
     private fun applyStrongBoxBacked(builder: KeyGenParameterSpec.Builder): KeyGenParameterSpec.Builder? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
@@ -363,9 +363,9 @@ object KeystoreHelper {
      * 复核 alias 对应的私钥实际受保护的安全级别（诊断用途）。
      * 仅 API 31+ 的 KeyInfo.getSecurityLevel() 能精确区分 STRONGBOX /
      * TRUSTED_ENVIRONMENT；更早版本没有任何公共 API 能证明密钥位于 StrongBox
-     * （isInsideSecureHardware 对 TEE 密钥同样返回 true），一律视为不在
-     * StrongBox 返回 false。返回 false 仅表示"原生静默降级为 TEE"，不再拒绝
-     * —— 这是 Android 标准行为，链上如实标记 TRUSTED_ENVIRONMENT。
+     * （isInsideSecureHardware 对 TEE 密钥同样返回 true），因此返回 false 表示
+     * 未确认 StrongBox，包括版本不足、查询失败或返回了其他安全级别。
+     * 此函数不执行降级，也不能把 false 当作已确认 TEE 的证明。
      */
     private fun verifyStrongBoxBacked(alias: String): Boolean {
         return try {

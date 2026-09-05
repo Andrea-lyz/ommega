@@ -54,13 +54,14 @@ use x509_cert::der::Decode as _;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use kmr_wire::keymint::{
-    DateTime, Digest as KmDigest, EcCurve as KmEcCurve, KeyPurpose as KmKeyPurpose,
-    PaddingMode as KmPadding,
+    DateTime, Digest as KmDigest, EcCurve as KmEcCurve, ErrorCode as KmErrorCode,
+    KeyPurpose as KmKeyPurpose, PaddingMode as KmPadding,
 };
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use ommegaclient_b::keymaster::attest_proxy::{check_app_id_der, SYSTEM_KEYMINT_STRONGBOX};
+use ommegaclient_b::keymaster::relay_tee::keymint_error;
 use ommegaclient_b::keymaster::tee_ops::{self, KeyAlgorithm, KeySpec};
 
 const POLL_TIMEOUT_SEC: u32 = 20;
@@ -80,6 +81,7 @@ fn acquire_instance_lock() -> Result<File> {
         .context("chmod relay state directory")?;
     let mut file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(INSTANCE_LOCK_PATH)
@@ -545,6 +547,7 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
             .map(|n| n as i32)
             .collect()
     };
+    let mgf_digest = parse_mgf_digest(get("mgf_digest"))?;
 
     Ok(KeySpec {
         algorithm,
@@ -558,7 +561,7 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
             .iter()
             .filter_map(|&n| KmDigest::try_from(n).ok())
             .collect(),
-        mgf_digest: get_i64("mgf_digest").and_then(|v| KmDigest::try_from(v as i32).ok()),
+        mgf_digest,
         paddings: collect_enum(get_arr("padding"))
             .iter()
             .filter_map(|&n| KmPadding::try_from(n).ok())
@@ -578,6 +581,34 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
             .map(|v| b64_decode(v).with_context(|| "decode certificate_serial"))
             .transpose()?,
     })
+}
+
+fn parse_mgf_digest(value: Option<&Value>) -> Result<Option<KmDigest>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let raw = value
+        .as_i64()
+        .and_then(|raw| i32::try_from(raw).ok())
+        .ok_or_else(|| {
+            keymint_error(
+                KmErrorCode::UnsupportedMgfDigest,
+                format!("invalid mgf_digest value: {value}"),
+            )
+        })?;
+    let digest = KmDigest::try_from(raw).map_err(|_| {
+        keymint_error(
+            KmErrorCode::UnsupportedMgfDigest,
+            format!("unsupported mgf_digest value: {raw}"),
+        )
+    })?;
+    if digest == KmDigest::None {
+        return Err(keymint_error(
+            KmErrorCode::UnsupportedMgfDigest,
+            "OAEP MGF digest cannot be NONE",
+        ));
+    }
+    Ok(Some(digest))
 }
 
 fn b64(v: &[u8]) -> String {
@@ -695,7 +726,9 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
                     "strongbox generateKey failed"
                 };
                 log::warn!("B-side StrongBox unavailable ({reason}): {err_str}");
-                return Ok(json!({ "error": format!("strongbox not supported: {reason}") }));
+                let mut result = ommegaclient_b::keymaster::relay_tee::relay_error_result(&e);
+                result["error"] = json!(format!("strongbox not supported: {reason}"));
+                return Ok(result);
             }
         }
     } else {
@@ -782,12 +815,51 @@ fn handle_decrypt(_task_type: &str, payload: &Value) -> Result<Value> {
     }))
 }
 
+fn handle_agree(_task_type: &str, payload: &Value) -> Result<Value> {
+    let alias = payload
+        .get("alias")
+        .and_then(Value::as_str)
+        .filter(|alias| !alias.trim().is_empty())
+        .ok_or_else(|| {
+            keymint_error(KmErrorCode::InvalidArgument, "agreement requires an alias")
+        })?;
+    let encoded = payload
+        .get("peer_public_key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            keymint_error(
+                KmErrorCode::InvalidArgument,
+                "agreement requires base64 peer_public_key",
+            )
+        })?;
+    if encoded.len() > 220 {
+        return Err(keymint_error(
+            KmErrorCode::InvalidInputLength,
+            "peer_public_key exceeds the maximum DER SubjectPublicKeyInfo size",
+        ));
+    }
+    let peer_public_key = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| {
+            keymint_error(
+                KmErrorCode::InvalidArgument,
+                "invalid peer_public_key base64",
+            )
+        })?;
+    let secret = tee_ops::agree_key(alias, &peer_public_key)?;
+    Ok(json!({
+        "alias": alias,
+        "data": b64(&secret),
+    }))
+}
+
 fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Value) -> Result<()> {
     let handler: fn(&str, &Value) -> Result<Value> = match task_type {
         "profile" => handle_profile,
         "attest" => handle_generate_attest,
         "sign" => handle_sign,
         "decrypt" => handle_decrypt,
+        "agree" => handle_agree,
         other => {
             log::warn!("task {task_id} type={other} not supported, reporting failure");
             post_result(
@@ -805,7 +877,7 @@ fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Valu
         Ok(v) => v,
         Err(e) => {
             log::error!("task {task_id} type={task_type} failed: {e:#}");
-            json!({ "error": format!("{e:#}") })
+            ommegaclient_b::keymaster::relay_tee::relay_error_result(&e)
         }
     };
     let outcome = if result.get("error").is_some() {
@@ -986,4 +1058,63 @@ fn main() {
     // behind a single HTTP round-trip after each TEE op.
     let tx = spawn_tee_workers();
     run_poll_loop(shared, tx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ommegaclient_b::keymaster::relay_tee::relay_error_result;
+
+    fn assert_mgf_error(value: Value) {
+        let error = parse_mgf_digest(Some(&value)).unwrap_err();
+        assert_eq!(
+            relay_error_result(&error)["keymint_error_code"],
+            KmErrorCode::UnsupportedMgfDigest as i32
+        );
+    }
+
+    #[test]
+    fn mgf_digest_is_exact_or_absent() {
+        assert_eq!(parse_mgf_digest(None).unwrap(), None);
+        assert_eq!(
+            parse_mgf_digest(Some(&json!(KmDigest::Sha224 as i32))).unwrap(),
+            Some(KmDigest::Sha224)
+        );
+        assert_mgf_error(json!(KmDigest::None as i32));
+        assert_mgf_error(json!(99));
+        assert_mgf_error(json!("SHA-256"));
+        assert_mgf_error(json!(i64::MAX));
+    }
+
+    #[test]
+    fn agree_rejects_oversized_peer_spki_with_keymint_code() {
+        let payload = json!({
+            "alias": "synthetic",
+            "peer_public_key": b64(&[0; 165]),
+        });
+        let error = handle_agree("agree", &payload).unwrap_err();
+        assert_eq!(
+            relay_error_result(&error)["keymint_error_code"],
+            KmErrorCode::InvalidInputLength as i32
+        );
+    }
+
+    #[test]
+    fn agree_rejects_missing_alias_and_malformed_input_before_session_or_hal() {
+        for payload in [
+            json!({"peer_public_key": "AA=="}),
+            json!({"alias": " ", "peer_public_key": "AA=="}),
+            json!({"alias": "synthetic"}),
+            json!({"alias": "synthetic", "peer_public_key": 5}),
+            json!({"alias": "synthetic", "peer_public_key": "?"}),
+            json!({"alias": "synthetic", "peer_public_key": ""}),
+            json!({"alias": "synthetic", "peer_public_key": "AA=="}),
+        ] {
+            let error = handle_agree("agree", &payload).unwrap_err();
+            assert_eq!(
+                relay_error_result(&error)["keymint_error_code"],
+                KmErrorCode::InvalidArgument as i32
+            );
+        }
+    }
 }

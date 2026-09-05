@@ -13,8 +13,9 @@
 // limitations under the License.
 
 //! Pure-Rust implementations of the legacy keystore2 crypto helpers, replacing
-//! the BoringSSL-backed ones.  All helpers are byte-for-byte compatible with the
-//! original (same AES-GCM format, same HKDF, same PBKDF2 parameters).
+//! the BoringSSL-backed ones. AES-GCM, HKDF and PBKDF2 retain their wire formats.
+//! P-521 private keys are written as Ommega raw scalars; reads also accept the
+//! SEC1 DER representation used by the former BoringSSL implementation.
 
 use crate::error::Error;
 use crate::zvec::ZVec;
@@ -203,7 +204,10 @@ pub fn hkdf_expand(out_len: usize, prk: &[u8], info: &[u8]) -> Result<ZVec, Erro
 /// Reproduce the accidental PBKDF2-based extract used by older ommega builds.
 #[doc(hidden)]
 pub fn ommega_legacy_kdf_extract(secret: &[u8], salt: &[u8]) -> Result<ZVec, Error> {
-    let mut buf = ZVec::new(HMAC_SHA256_LEN)?;
+    // The old adapter used the whole BoringSSL EVP_MAX_MD_SIZE buffer (64
+    // bytes), without the truncation performed by real HKDF-Extract. Keep
+    // this historical length only in the read-compatibility KDF.
+    let mut buf = ZVec::new(64)?;
     pbkdf2::pbkdf2_hmac::<sha2::Sha256>(secret, salt, 1, &mut buf);
     Ok(buf)
 }
@@ -247,7 +251,7 @@ pub fn ecdh_compute_key(
 ) -> Result<ZVec, Error> {
     let peer =
         p521::PublicKey::from_sec1_bytes(pub_key).map_err(|_| Error::ECDHComputeKeyFailed)?;
-    let shared = p521::ecdh::diffie_hellman(&priv_key.0.to_nonzero_scalar(), peer.as_affine());
+    let shared = p521::ecdh::diffie_hellman(priv_key.0.to_nonzero_scalar(), peer.as_affine());
     let mut out = ZVec::new(ECDH_P521_OUTPUT_LEN)?;
     let bytes = shared.raw_secret_bytes();
     let pad = ECDH_P521_OUTPUT_LEN.saturating_sub(bytes.len());
@@ -279,9 +283,28 @@ pub fn ec_key_marshal_private_key(key: &ECKey) -> Result<ZVec, Error> {
     Ok(buf)
 }
 
-/// Parse a P-521 private key from a big-endian scalar.
+/// Parse an Ommega raw P-521 scalar or a legacy SEC1 DER private key.
 pub fn ec_key_parse_private_key(buf: &[u8]) -> Result<ECKey, Error> {
-    let scalar = p521::SecretKey::from_slice(buf).map_err(|_| Error::ECKEYParsePrivateKeyFailed)?;
+    use der::Decode;
+
+    // Keep all scalar encodings accepted by earlier Ommega versions unchanged.
+    if let Ok(scalar) = p521::SecretKey::from_slice(buf) {
+        return Ok(ECKey(scalar));
+    }
+    let encoded =
+        sec1::EcPrivateKey::from_der(buf).map_err(|_| Error::ECKEYParsePrivateKeyFailed)?;
+    // BoringSSL omitted optional curve/public-key fields for this P-521-only
+    // storage format. If a curve is present, it must not name another curve.
+    let p521_oid = der::asn1::ObjectIdentifier::new_unwrap("1.3.132.0.35");
+    if encoded
+        .parameters
+        .is_some_and(|parameters| parameters.named_curve() != Some(p521_oid))
+    {
+        return Err(Error::ECKEYParsePrivateKeyFailed);
+    }
+    // RustCrypto also verifies any encoded public key against the private scalar.
+    let scalar =
+        p521::SecretKey::from_sec1_der(buf).map_err(|_| Error::ECKEYParsePrivateKeyFailed)?;
     Ok(ECKey(scalar))
 }
 
@@ -300,4 +323,90 @@ pub fn ec_point_point_to_oct(point: &[u8]) -> Result<Vec<u8>, Error> {
 /// Parse an encoded point.
 pub fn ec_point_oct_to_point(buf: &[u8]) -> Result<OwnedECPoint, Error> {
     Ok(OwnedECPoint(buf.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use der::Encode;
+
+    fn scalar(value: u8) -> [u8; ECDH_P521_OUTPUT_LEN] {
+        let mut bytes = [0; ECDH_P521_OUTPUT_LEN];
+        bytes[ECDH_P521_OUTPUT_LEN - 1] = value;
+        bytes
+    }
+
+    #[test]
+    fn legacy_sec1_and_raw_scalar_have_the_same_public_key() {
+        let bytes = scalar(1);
+        let raw = ec_key_parse_private_key(&bytes).unwrap();
+        for parameters in [
+            None,
+            Some(sec1::EcParameters::NamedCurve(
+                der::asn1::ObjectIdentifier::new_unwrap("1.3.132.0.35"),
+            )),
+        ] {
+            let encoded = sec1::EcPrivateKey {
+                private_key: &bytes,
+                parameters,
+                public_key: None,
+            }
+            .to_der()
+            .unwrap();
+            let parsed = ec_key_parse_private_key(&encoded).unwrap();
+            assert_eq!(raw.0.public_key(), parsed.0.public_key());
+            // No migration of the existing write format.
+            assert_eq!(&ec_key_marshal_private_key(&parsed).unwrap()[..], &bytes);
+        }
+    }
+
+    #[test]
+    fn legacy_sec1_rejects_other_curves_and_inconsistent_public_keys() {
+        let bytes = scalar(1);
+        let other = p521::SecretKey::from_slice(&scalar(2)).unwrap();
+        let other_public = other.public_key().to_encoded_point(false);
+        for (parameters, public_key) in [
+            (
+                Some(sec1::EcParameters::NamedCurve(
+                    der::asn1::ObjectIdentifier::new_unwrap("1.3.132.0.34"),
+                )),
+                None,
+            ),
+            (None, Some(other_public.as_bytes())),
+        ] {
+            let encoded = sec1::EcPrivateKey {
+                private_key: &bytes,
+                parameters,
+                public_key,
+            }
+            .to_der()
+            .unwrap();
+            assert!(ec_key_parse_private_key(&encoded).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_sec1_rejects_invalid_scalar_and_trailing_data() {
+        for bytes in [scalar(0), [0xff; ECDH_P521_OUTPUT_LEN]] {
+            let encoded = sec1::EcPrivateKey {
+                private_key: &bytes,
+                parameters: None,
+                public_key: None,
+            }
+            .to_der()
+            .unwrap();
+            assert!(ec_key_parse_private_key(&bytes).is_err());
+            assert!(ec_key_parse_private_key(&encoded).is_err());
+        }
+        let bytes = scalar(1);
+        let mut encoded = sec1::EcPrivateKey {
+            private_key: &bytes,
+            parameters: None,
+            public_key: None,
+        }
+        .to_der()
+        .unwrap();
+        encoded.push(0);
+        assert!(ec_key_parse_private_key(&encoded).is_err());
+    }
 }

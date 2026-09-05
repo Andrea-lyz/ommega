@@ -1,29 +1,29 @@
-//! Real hardware TEE operation proxy (the "everything a normal TEE does" layer).
+//! Native relay operations on the selected B-side KeyMint HAL.
 //!
-//! Building on top of [`super::attest_proxy`], this module exposes the full set
-//! of TEE operations that the relay daemon needs in order to act as a drop-in
-//! replacement for the old `client-b` agent:
+//! Building on top of [`super::attest_proxy`], this module exposes the subset
+//! of hardware operations used by the native relay protocol:
 //!
 //!   * generate an attestation/signing key (with an A-side supplied appid / 709)
 //!   * derive a signing key attested by an attestation key
 //!   * fetch the certificate chain / public key of a previously generated key
 //!   * sign data / sign a to-be-signed (TBS) blob / sign a challenge
-//!   * decrypt data
+//!   * decrypt data / perform EC key agreement
 //!
-//! Every operation is executed by the *real* on-device hardware keymint (TEE)
-//! through `get_system_keymint` + `begin`/`update`/`finish`, so the produced
-//! signatures, decryptions and certificate chains are genuine TEE outputs.
+//! Key generation and private-key operations here use the selected real KeyMint
+//! HAL. This does not move A-side storage, authorization or local software-key
+//! operations to B. Generation translates some authorizations, including
+//! ATTEST_KEY to SIGN and user-auth requirements to NO_AUTH_REQUIRED; it does
+//! not provide hardware enforcement of the original A user's authentication.
 //!
-//! Key blobs and certificate chains are held in a process-local session table
-//! keyed by alias (mirroring the behaviour of the legacy client-b agent, which
-//! also keeps sessions in memory).
+//! Sessions are cached by alias and persisted atomically. A hardware-requested
+//! keyblob upgrade is saved before begin is retried; it never generates a new key.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,8 +33,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use kmr_wire::{
     keymint::{
-        Algorithm as KmAlgorithm, DateTime, Digest as KmDigest, EcCurve as KmEcCurve, KeyParam,
-        KeyPurpose as KmKeyPurpose, PaddingMode as KmPadding,
+        Algorithm as KmAlgorithm, DateTime, Digest as KmDigest, EcCurve as KmEcCurve,
+        ErrorCode as KmErrorCode, KeyParam, KeyPurpose as KmKeyPurpose, PaddingMode as KmPadding,
     },
     KeySizeInBits, RsaExponent,
 };
@@ -65,7 +65,8 @@ use crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose;
 use crate::err as ks_err;
 use crate::keymaster::relay_tee::{
     clear_system_keymint, extract_km_error_code, get_system_keymint, key_params_to_aidl,
-    normalize_keymint_version, probe_keymint_version, KEY_MINT_V5,
+    keymint_error, keymint_status_error, normalize_keymint_version, probe_keymint_version,
+    KEY_MINT_V5,
 };
 
 use super::attest_proxy::{SYSTEM_KEYMINT_DEFAULT, SYSTEM_KEYMINT_STRONGBOX};
@@ -92,15 +93,14 @@ pub struct KeySpec {
     pub ec_curve: Option<KmEcCurve>,
     /// Key size in bits; defaults to 256 (EC) / 2048 (RSA).
     pub key_size: Option<u32>,
-    /// Requested purposes. For business keys `Sign` (and `Decrypt` for RSA) is
-    /// added so the relay's own sign/decrypt operations stay authorized; for an
-    /// App Attest Key (`PURPOSE_ATTEST_KEY`) the purpose is forwarded unchanged.
+    /// Business-key purposes are forwarded unchanged, including AgreeKey.
+    /// ATTEST_KEY is translated to SIGN for the existing child-TBS signing path.
     pub purposes: Vec<KmKeyPurpose>,
-    /// Requested digests. `Sha256` is always added (the relay signs with it).
+    /// Requested digests. SHA-256 is added only for translated ATTEST_KEY keys.
     pub digests: Vec<KmDigest>,
     /// Requested MGF1 digest (RSA-OAEP), when the app specified one.
     pub mgf_digest: Option<KmDigest>,
-    /// Requested paddings (RSA only). The relay's operation paddings are added.
+    /// Requested paddings (RSA only), with signing padding for translated ATTEST_KEY.
     pub paddings: Vec<KmPadding>,
     /// RSA public exponent; defaults to 65537.
     pub rsa_public_exponent: Option<u64>,
@@ -127,6 +127,22 @@ pub struct TeeSession {
     pub hal_service: &'static str,
     /// Canonical KeyMint version (100..500) used for parameter encoding.
     pub km_version: i32,
+}
+
+struct CachedSession {
+    session: TeeSession,
+    // Memory only. Do not discard a hardware-upgraded blob when a disk write
+    // fails, but do not use it for an operation until persistence succeeds.
+    needs_persistence: bool,
+}
+
+impl From<TeeSession> for CachedSession {
+    fn from(session: TeeSession) -> Self {
+        Self {
+            session,
+            needs_persistence: false,
+        }
+    }
 }
 
 /// Stable identity exposed by the real B-side KeyMint HAL.
@@ -274,8 +290,11 @@ fn session_path(alias: &str) -> PathBuf {
 }
 
 fn load_session_from_disk(alias: &str) -> Option<TeeSession> {
-    let path = session_path(alias);
-    let data = std::fs::read_to_string(&path).ok()?;
+    load_session_from_path(&session_path(alias))
+}
+
+fn load_session_from_path(path: &Path) -> Option<TeeSession> {
+    let data = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&data).ok()?;
     let key_blob_b64 = value.get("key_blob")?.as_str()?;
     let key_blob = B64.decode(key_blob_b64).ok()?;
@@ -313,6 +332,10 @@ fn load_session_from_disk(alias: &str) -> Option<TeeSession> {
 fn save_session_to_disk(alias: &str, session: &TeeSession) -> Result<()> {
     let path = session_path(alias);
     ensure_sessions_dir()?;
+    save_session_at(&path, alias, session)
+}
+
+fn save_session_at(path: &Path, alias: &str, session: &TeeSession) -> Result<()> {
     let algorithm = match session.algorithm {
         KeyAlgorithm::EcP256 => "EcP256",
         KeyAlgorithm::Rsa2048 => "Rsa2048",
@@ -346,10 +369,14 @@ fn save_session_to_disk(alias: &str, session: &TeeSession) -> Result<()> {
             .with_context(|| format!("write temporary session {}", temp.display()))?;
         file.sync_all()
             .with_context(|| format!("sync temporary session {}", temp.display()))?;
-        std::fs::rename(&temp, &path)
+        std::fs::rename(&temp, path)
             .with_context(|| format!("replace session {}", path.display()))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod session {}", path.display()))?;
+        // The temp file already has mode 0600. Sync the rename as well as its
+        // contents so a successful save survives a relay/device restart.
+        let directory = path.parent().context("session path has no parent")?;
+        std::fs::File::open(directory)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("sync session directory {}", directory.display()))?;
         Ok(())
     })();
     if write_result.is_err() {
@@ -358,38 +385,71 @@ fn save_session_to_disk(alias: &str, session: &TeeSession) -> Result<()> {
     write_result
 }
 
-fn sessions() -> &'static Mutex<HashMap<String, TeeSession>> {
-    static SESSIONS: OnceLock<Mutex<HashMap<String, TeeSession>>> = OnceLock::new();
+fn sessions() -> &'static Mutex<HashMap<String, CachedSession>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, CachedSession>>> = OnceLock::new();
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn session_put(alias: &str, session: TeeSession) -> Result<()> {
+    // Serialize disk publication with upgrades and cache-miss recovery. An
+    // older operation must not overwrite a newly generated key at this alias.
+    let mut sessions = sessions().lock().unwrap();
     save_session_to_disk(alias, &session)?;
-    sessions()
-        .lock()
-        .unwrap()
-        .insert(alias.to_string(), session);
+    sessions.insert(alias.to_string(), session.into());
     Ok(())
 }
 
 fn session_get(alias: &str) -> Result<TeeSession> {
-    {
-        let sessions = sessions().lock().unwrap();
-        if let Some(session) = sessions.get(alias) {
-            return Ok(session.clone());
-        }
-    }
-    // Miss: try to recover from disk (e.g. after a relay restart).  The TEE key
-    // blob is persisted, so the recovered session can still sign/decrypt.
-    if let Some(session) = load_session_from_disk(alias) {
-        sessions()
-            .lock()
-            .unwrap()
-            .insert(alias.to_string(), session.clone());
+    let mut sessions = sessions().lock().unwrap();
+    if !sessions.contains_key(alias) {
+        let session = load_session_from_disk(alias)
+            .ok_or_else(|| anyhow!("no key for alias '{alias}' (call attest first)"))?;
+        sessions.insert(alias.to_string(), session.into());
         log::info!("recovered persisted session for alias '{alias}'");
-        return Ok(session);
     }
-    Err(anyhow!("no key for alias '{alias}' (call attest first)"))
+    let cached = sessions.get_mut(alias).expect("session was loaded");
+    persist_pending_session(cached, |session| save_session_to_disk(alias, session))?;
+    Ok(cached.session.clone())
+}
+
+fn persist_pending_session(
+    cached: &mut CachedSession,
+    persist: impl FnOnce(&TeeSession) -> Result<()>,
+) -> Result<()> {
+    if cached.needs_persistence {
+        persist(&cached.session)?;
+        cached.needs_persistence = false;
+    }
+    Ok(())
+}
+
+fn recover_upgraded_session(
+    cached: &mut CachedSession,
+    observed: &TeeSession,
+    upgrade: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+    persist: impl FnOnce(&TeeSession) -> Result<()>,
+) -> Result<TeeSession> {
+    if cached.session.cert_chain != observed.cert_chain
+        || cached.session.algorithm != observed.algorithm
+        || cached.session.hal_service != observed.hal_service
+        || cached.session.km_version != observed.km_version
+    {
+        return Err(keymint_status_error(
+            &rsbinder::Status::new_service_specific_error(KmErrorCode::InvalidKeyBlob as i32, None),
+            "session was replaced during keyblob upgrade",
+        ));
+    }
+    // Another worker may have upgraded this same key while begin was running.
+    if cached.session.key_blob == observed.key_blob && !cached.needs_persistence {
+        let upgraded = upgrade(&cached.session.key_blob)?;
+        if upgraded.is_empty() {
+            return Err(anyhow!("real KeyMint upgradeKey returned an empty keyblob"));
+        }
+        cached.session.key_blob = upgraded;
+        cached.needs_persistence = true;
+    }
+    persist_pending_session(cached, persist)?;
+    Ok(cached.session.clone())
 }
 
 /// Loads every persisted session into memory.  Called once at startup so that
@@ -453,7 +513,8 @@ pub fn load_all_sessions() {
                 algorithm,
                 hal_service,
                 km_version,
-            },
+            }
+            .into(),
         );
         loaded += 1;
     }
@@ -505,9 +566,9 @@ pub fn generate_attest_key_on(
             }
             // Extract the KeyMint ErrorCode (e.g., -74, -68) so the caller
             // can distinguish "HAL not provisioned" from "parameter rejected".
-            let km_code = km_error_suffix(&status);
-            return Err(anyhow!(
-                "real keymint {service} generateKey failed {km_code}: {status}"
+            return Err(keymint_status_error(
+                &status,
+                &format!("real keymint {service} generateKey failed"),
             ));
         }
     };
@@ -666,7 +727,7 @@ pub fn get_public_key(alias: &str) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Sign / decrypt operations (real TEE begin/update/finish).
+// Sign / decrypt / key-agreement operations (real TEE begin/update/finish).
 // ---------------------------------------------------------------------------
 
 /// Signs `data` with the TEE key for `alias`.
@@ -674,13 +735,7 @@ pub fn sign(alias: &str, data: &[u8], algorithm: &str) -> Result<Vec<u8>> {
     let session = session_get(alias)?;
     let op_params = sign_begin_params(algorithm, session.algorithm, session.km_version)
         .with_context(|| ks_err!("unsupported sign algorithm {algorithm}"))?;
-    run_single_input_op(
-        &session.key_blob,
-        session.hal_service,
-        KeyPurpose::SIGN,
-        &op_params,
-        data,
-    )
+    run_single_input_op(alias, &session, KeyPurpose::SIGN, &op_params, data)
 }
 
 /// Decrypts `data` with the TEE key for `alias`.
@@ -688,47 +743,166 @@ pub fn decrypt(alias: &str, data: &[u8], algorithm: &str) -> Result<Vec<u8>> {
     let session = session_get(alias)?;
     let op_params = decrypt_begin_params(algorithm, session.algorithm, session.km_version)
         .with_context(|| ks_err!("unsupported decrypt algorithm {algorithm}"))?;
-    run_single_input_op(
-        &session.key_blob,
-        session.hal_service,
-        KeyPurpose::DECRYPT,
-        &op_params,
-        data,
-    )
+    run_single_input_op(alias, &session, KeyPurpose::DECRYPT, &op_params, data)
 }
 
-/// Formats a KeyMint service-specific error code as a `[km_error=CODE]`
-/// suffix when the status carries one, so failures distinguish e.g.
-/// INVALID_KEY_BLOB from KEY_USER_NOT_AUTHENTICATED instead of showing a
-/// generic binder error.
-fn km_error_suffix(status: &rsbinder::Status) -> String {
-    extract_km_error_code(status)
-        .map(|c| format!("[km_error={c}]"))
-        .unwrap_or_default()
+/// Performs EC key agreement with the TEE key for `alias`. `peer_public_key`
+/// must be a DER SubjectPublicKeyInfo, matching the KeyMint operation contract.
+pub fn agree_key(alias: &str, peer_public_key: &[u8]) -> Result<Vec<u8>> {
+    // Validate before session lookup (which can persist a pending upgrade),
+    // and before opening a Binder operation.
+    let peer_curve = agreement_peer_curve(peer_public_key)?;
+    let session = session_get(alias)?;
+    if session.algorithm != KeyAlgorithm::EcP256 {
+        return Err(keymint_error(
+            KmErrorCode::IncompatibleAlgorithm,
+            "agreement requires an EC key",
+        ));
+    }
+    let public_key = session
+        .cert_chain
+        .first()
+        .ok_or_else(|| {
+            keymint_error(
+                KmErrorCode::InvalidKeyBlob,
+                "agreement key has no certificate",
+            )
+        })
+        .and_then(|leaf| {
+            spki_from_cert_der(leaf).map_err(|_| {
+                keymint_error(
+                    KmErrorCode::InvalidKeyBlob,
+                    "invalid agreement key certificate",
+                )
+            })
+        })?;
+    let local_curve = agreement_peer_curve(&public_key)
+        .map_err(|_| keymint_error(KmErrorCode::InvalidKeyBlob, "invalid agreement key SPKI"))?;
+    if peer_curve != local_curve {
+        return Err(keymint_error(
+            KmErrorCode::InvalidArgument,
+            "agreement curve mismatch",
+        ));
+    }
+    run_single_input_op(alias, &session, KeyPurpose::AGREE_KEY, &[], peer_public_key)
+}
+
+/// Check DER, algorithm, curve and point encoding only. The HAL still validates
+/// the public point and the key's authorized purposes. No private key is read.
+fn agreement_peer_curve(input: &[u8]) -> Result<KmEcCurve> {
+    use der::Decode as _;
+    use kmr_common::crypto::ec;
+    if input.len() > 164 {
+        return Err(keymint_error(
+            KmErrorCode::InvalidInputLength,
+            "agreement SPKI exceeds 164 bytes",
+        ));
+    }
+    let invalid = || keymint_error(KmErrorCode::InvalidArgument, "invalid agreement peer SPKI");
+    let spki = x509_cert::spki::SubjectPublicKeyInfoRef::from_der(input).map_err(|_| invalid())?;
+    let point = spki.subject_public_key.as_bytes().ok_or_else(invalid)?;
+    if spki.algorithm.oid == ec::X509_X25519_OID {
+        if spki.algorithm.parameters.is_some() || point.len() != 32 {
+            return Err(invalid());
+        }
+        return Ok(KmEcCurve::Curve25519);
+    }
+    if spki.algorithm.oid != ec::X509_NIST_OID {
+        return Err(invalid());
+    }
+    let oid = spki
+        .algorithm
+        .parameters
+        .ok_or_else(invalid)?
+        .decode_as::<der::asn1::ObjectIdentifier>()
+        .map_err(|_| invalid())?;
+    let (curve, size) = match oid {
+        ec::ALGO_PARAM_P224_OID => (KmEcCurve::P224, 28),
+        ec::ALGO_PARAM_P256_OID => (KmEcCurve::P256, 32),
+        ec::ALGO_PARAM_P384_OID => (KmEcCurve::P384, 48),
+        ec::ALGO_PARAM_P521_OID => (KmEcCurve::P521, 66),
+        _ => return Err(invalid()),
+    };
+    let valid = match point.first() {
+        Some(4) => point.len() == 1 + 2 * size,
+        Some(2 | 3) => point.len() == 1 + size,
+        _ => false,
+    };
+    if !valid {
+        return Err(invalid());
+    }
+    Ok(curve)
+}
+
+fn begin_with_upgrade_retry<T>(
+    session: &TeeSession,
+    mut begin: impl FnMut(&[u8]) -> rsbinder::status::Result<T>,
+    recover: impl FnOnce() -> Result<TeeSession>,
+) -> Result<T> {
+    let result = match begin(&session.key_blob) {
+        Err(status)
+            if extract_km_error_code(&status) == Some(KmErrorCode::KeyRequiresUpgrade as i32) =>
+        {
+            let upgraded = recover()?;
+            // Exactly one retry. No update/finish input has been submitted yet.
+            begin(&upgraded.key_blob)
+        }
+        result => result,
+    };
+    result.map_err(|status| {
+        if is_dead_object_status(&status) {
+            clear_system_keymint(session.hal_service);
+        }
+        keymint_status_error(
+            &status,
+            &format!("real keymint {} begin failed", session.hal_service),
+        )
+    })
 }
 
 fn run_single_input_op(
-    key_blob: &[u8],
-    hal_service: &'static str,
+    alias: &str,
+    session: &TeeSession,
     purpose: KeyPurpose,
     op_params: &[KmKeyParameter],
     input: &[u8],
 ) -> Result<Vec<u8>> {
+    let hal_service = session.hal_service;
     let keymint = get_system_keymint(hal_service)
         .with_context(|| ks_err!("real keymint {hal_service} connect failed"))?;
 
-    let begin = match keymint.begin(purpose, key_blob, op_params, None) {
-        Ok(result) => result,
-        Err(status) => {
-            if is_dead_object_status(&status) {
-                clear_system_keymint(hal_service);
-            }
-            let km_code = km_error_suffix(&status);
-            return Err(anyhow!(
-                "real keymint {hal_service} begin failed {km_code}: {status}"
-            ));
-        }
-    };
+    let begin = begin_with_upgrade_retry(
+        session,
+        |blob| keymint.begin(purpose, blob, op_params, None),
+        || {
+            // Only recovery holds this lock over a HAL call. Ordinary crypto
+            // operations still run concurrently without the session-table lock.
+            let mut sessions = sessions().lock().unwrap();
+            let cached = sessions
+                .get_mut(alias)
+                .context("upgrade session is missing")?;
+            let upgraded = recover_upgraded_session(
+                cached,
+                session,
+                |blob| {
+                    // Relay-generated keys have no APPLICATION_ID/DATA binding.
+                    // ATTESTATION_APPLICATION_ID is a separate, non-hidden tag.
+                    keymint.upgradeKey(blob, &[]).map_err(|status| {
+                        if is_dead_object_status(&status) {
+                            clear_system_keymint(hal_service);
+                        }
+                        keymint_status_error(
+                            &status,
+                            &format!("real keymint {hal_service} upgradeKey failed"),
+                        )
+                    })
+                },
+                |session| save_session_to_disk(alias, session),
+            )?;
+            log::info!("event=keyblob_upgrade_ready alias={alias} hal={hal_service}");
+            Ok(upgraded)
+        },
+    )?;
 
     let Some(operation) = begin.operation else {
         return Err(anyhow!(
@@ -736,26 +910,58 @@ fn run_single_input_op(
         ));
     };
 
-    // Feed the whole payload in a single update, then finish. update() may
+    complete_single_input_op(
+        hal_service,
+        purpose,
+        input,
+        |data| operation.update(data, None, None),
+        |data| operation.finish(data, None, None, None, None),
+        || {
+            let _ = operation.r#abort();
+        },
+    )
+}
+
+fn complete_single_input_op(
+    hal_service: &str,
+    purpose: KeyPurpose,
+    input: &[u8],
+    update: impl FnOnce(&[u8]) -> rsbinder::status::Result<Vec<u8>>,
+    finish: impl FnOnce(Option<&[u8]>) -> rsbinder::status::Result<Vec<u8>>,
+    abort: impl FnOnce(),
+) -> Result<Vec<u8>> {
+    // Agreement follows Android's one-shot finish(peer SPKI) path. It has no
+    // streaming output. Sign/decrypt retain their existing update + finish path.
+    // update() may
     // return output early (e.g. a single-block RSA decrypt can deliver the
     // plaintext from update); finish() then returns whatever is left, so both
     // outputs must be concatenated or the operation's result is silently lost.
     let result = (|| -> Result<Vec<u8>> {
-        let mut out = operation.update(input, None, None).map_err(|status| {
-            let km_code = km_error_suffix(&status);
-            anyhow!("real keymint {hal_service} update failed {km_code}: {status}")
+        if purpose == KeyPurpose::AGREE_KEY {
+            return finish(Some(input)).map_err(|status| {
+                keymint_status_error(
+                    &status,
+                    &format!("real keymint {hal_service} finish failed"),
+                )
+            });
+        }
+        let mut out = update(input).map_err(|status| {
+            keymint_status_error(
+                &status,
+                &format!("real keymint {hal_service} update failed"),
+            )
         })?;
-        out.extend_from_slice(&operation.finish(None, None, None, None, None).map_err(
-            |status| {
-                let km_code = km_error_suffix(&status);
-                anyhow!("real keymint {hal_service} finish failed {km_code}: {status}")
-            },
-        )?);
+        out.extend_from_slice(&finish(None).map_err(|status| {
+            keymint_status_error(
+                &status,
+                &format!("real keymint {hal_service} finish failed"),
+            )
+        })?);
         Ok(out)
     })();
 
     if result.is_err() {
-        let _ = operation.r#abort();
+        abort();
     }
     result
 }
@@ -769,14 +975,61 @@ fn sign_begin_params(
     key_algorithm: KeyAlgorithm,
     km_version: i32,
 ) -> Result<Vec<KmKeyParameter>> {
+    let params = sign_key_params(algorithm, key_algorithm)?;
+    key_params_to_aidl(&params, km_version).with_context(|| ks_err!("encode sign begin parameters"))
+}
+
+fn sign_key_params(algorithm: &str, key_algorithm: KeyAlgorithm) -> Result<Vec<KeyParam>> {
     let digest = digest_for_algorithm(algorithm)?;
-    let params = match key_algorithm {
-        KeyAlgorithm::EcP256 => vec![KeyParam::Digest(digest)],
+    let normalized = algorithm.trim().to_ascii_uppercase();
+    let scheme = normalized
+        .split_once("WITH")
+        .map(|(_, scheme)| scheme)
+        .ok_or_else(|| {
+            keymint_error(
+                KmErrorCode::IncompatibleAlgorithm,
+                format!("unsupported sign algorithm: {algorithm}"),
+            )
+        })?;
+    Ok(match key_algorithm {
+        KeyAlgorithm::EcP256 => {
+            if scheme != "ECDSA" {
+                return Err(keymint_error(
+                    KmErrorCode::IncompatibleAlgorithm,
+                    format!("EC key cannot use sign algorithm: {algorithm}"),
+                ));
+            }
+            vec![KeyParam::Digest(digest)]
+        }
         KeyAlgorithm::Rsa2048 => {
-            let padding = if algorithm.ends_with("/PSS") || algorithm.contains("PSS") {
+            let padding = if scheme == "RSA/NOPADDING" {
+                if digest != KmDigest::None {
+                    return Err(keymint_error(
+                        KmErrorCode::IncompatibleDigest,
+                        format!("RSA NoPadding requires Digest::NONE: {algorithm}"),
+                    ));
+                }
+                KmPadding::None
+            } else if scheme == "RSA/PSS" {
+                if digest == KmDigest::None {
+                    return Err(keymint_error(
+                        KmErrorCode::UnsupportedDigest,
+                        format!("RSA-PSS does not support Digest::NONE: {algorithm}"),
+                    ));
+                }
                 KmPadding::RsaPss
-            } else {
+            } else if scheme == "RSA" {
                 KmPadding::RsaPkcs115Sign
+            } else if scheme.starts_with("RSA/") {
+                return Err(keymint_error(
+                    KmErrorCode::UnsupportedPaddingMode,
+                    format!("unsupported RSA sign algorithm: {algorithm}"),
+                ));
+            } else {
+                return Err(keymint_error(
+                    KmErrorCode::IncompatibleAlgorithm,
+                    format!("RSA key cannot use sign algorithm: {algorithm}"),
+                ));
             };
             let mut p = vec![KeyParam::Digest(digest), KeyParam::Padding(padding)];
             if padding == KmPadding::RsaPss {
@@ -787,8 +1040,7 @@ fn sign_begin_params(
             }
             p
         }
-    };
-    key_params_to_aidl(&params, km_version).with_context(|| ks_err!("encode sign begin parameters"))
+    })
 }
 
 fn decrypt_begin_params(
@@ -796,76 +1048,206 @@ fn decrypt_begin_params(
     key_algorithm: KeyAlgorithm,
     km_version: i32,
 ) -> Result<Vec<KmKeyParameter>> {
-    let params = match key_algorithm {
-        KeyAlgorithm::EcP256 => {
-            return Err(anyhow!("EC keys cannot be used for decrypt"));
-        }
-        KeyAlgorithm::Rsa2048 => {
-            if algorithm.contains("OAEP") {
-                let digest = digest_for_algorithm(algorithm)?;
-                let mgf = mgf_digest_for_algorithm(algorithm);
-                // OAEP requires both the digest and the MGF digest at
-                // begin(DECRYPT); a real TEE fails without them (A-side -1000
-                // / empty plaintext), and the MGF digest must match the one the
-                // encryptor used (the A-side encodes it as a /MGF1-XXX suffix).
-                vec![
-                    KeyParam::Padding(KmPadding::RsaOaep),
-                    KeyParam::Digest(digest),
-                    KeyParam::RsaOaepMgfDigest(mgf),
-                ]
-            } else {
-                vec![KeyParam::Padding(KmPadding::RsaPkcs115Encrypt)]
-            }
-        }
-    };
+    let params = decrypt_key_params(algorithm, key_algorithm)?;
     key_params_to_aidl(&params, km_version)
         .with_context(|| ks_err!("encode decrypt begin parameters"))
+}
+
+fn decrypt_key_params(algorithm: &str, key_algorithm: KeyAlgorithm) -> Result<Vec<KeyParam>> {
+    if key_algorithm == KeyAlgorithm::EcP256 {
+        return Err(keymint_error(
+            KmErrorCode::IncompatiblePurpose,
+            "EC keys cannot be used for decrypt",
+        ));
+    }
+
+    let normalized = algorithm.trim().to_ascii_uppercase();
+    if normalized.starts_with("RSA/OAEP/") {
+        let digest = digest_for_algorithm(algorithm)?;
+        let mgf = mgf_digest_for_algorithm(algorithm)?;
+        // OAEP requires both the digest and the MGF digest at begin(DECRYPT),
+        // and the MGF digest must match the one the encryptor requested.
+        Ok(vec![
+            KeyParam::Padding(KmPadding::RsaOaep),
+            KeyParam::Digest(digest),
+            KeyParam::RsaOaepMgfDigest(mgf),
+        ])
+    } else if normalized == "RSA/ECB/NOPADDING" {
+        Ok(vec![KeyParam::Padding(KmPadding::None)])
+    } else if normalized == "RSA/ECB/PKCS1PADDING" {
+        Ok(vec![KeyParam::Padding(KmPadding::RsaPkcs115Encrypt)])
+    } else {
+        Err(keymint_error(
+            KmErrorCode::UnsupportedPaddingMode,
+            format!("unsupported RSA decrypt algorithm: {algorithm}"),
+        ))
+    }
 }
 
 /// Parses the MGF1 digest from an OAEP algorithm string like
 /// `RSA/OAEP/SHA-256/MGF1-SHA1`. Defaults to SHA1 (the standard OAEP default
 /// when no MGF1 is specified).
-fn mgf_digest_for_algorithm(algorithm: &str) -> KmDigest {
+fn mgf_digest_for_algorithm(algorithm: &str) -> Result<KmDigest> {
     let up = algorithm.to_uppercase();
     if let Some(pos) = up.find("/MGF1-") {
-        let rest = &up[pos + 6..];
-        if rest.starts_with("SHA256") {
-            return KmDigest::Sha256;
+        let token = &up[pos + 6..];
+        let digest = parse_digest_token(token).ok_or_else(|| {
+            keymint_error(
+                KmErrorCode::UnsupportedMgfDigest,
+                format!("unsupported OAEP MGF digest in algorithm: {algorithm}"),
+            )
+        })?;
+        if digest == KmDigest::None {
+            return Err(keymint_error(
+                KmErrorCode::UnsupportedMgfDigest,
+                format!("OAEP MGF digest cannot be NONE: {algorithm}"),
+            ));
         }
-        if rest.starts_with("SHA384") {
-            return KmDigest::Sha384;
-        }
-        if rest.starts_with("SHA512") {
-            return KmDigest::Sha512;
-        }
-        // SHA1 or unknown -> SHA1
-        return KmDigest::Sha1;
+        return Ok(digest);
     }
-    KmDigest::Sha1
+    Ok(KmDigest::Sha1)
 }
 
 fn digest_for_algorithm(algorithm: &str) -> Result<KmDigest> {
-    let up = algorithm.to_uppercase();
-    if up.contains("SHA256") || up.contains("SHA-256") {
-        Ok(KmDigest::Sha256)
-    } else if up.contains("SHA1") || up.contains("SHA-1") {
-        Ok(KmDigest::Sha1)
-    } else if up.contains("SHA384") || up.contains("SHA-384") {
-        Ok(KmDigest::Sha384)
-    } else if up.contains("SHA512") || up.contains("SHA-512") {
-        Ok(KmDigest::Sha512)
-    } else if up.starts_with("NONE") || up.contains("NONE") {
-        Ok(KmDigest::None)
+    let up = algorithm.trim().to_ascii_uppercase();
+    let token = if let Some(rest) = up.strip_prefix("RSA/OAEP/") {
+        rest.split('/').next()
     } else {
-        // Unknown algorithm: fail loudly instead of silently producing a
-        // signature over the wrong digest (which the verifier would reject).
-        Err(anyhow!("unsupported digest algorithm: {algorithm}"))
+        up.split_once("WITH").map(|(digest, _)| digest)
+    };
+    token.and_then(parse_digest_token).ok_or_else(|| {
+        keymint_error(
+            KmErrorCode::UnsupportedDigest,
+            format!("unsupported digest algorithm: {algorithm}"),
+        )
+    })
+}
+
+fn parse_digest_token(token: &str) -> Option<KmDigest> {
+    let normalized = token.trim().replace('-', "");
+    match normalized.as_str() {
+        "NONE" => Some(KmDigest::None),
+        "MD5" => Some(KmDigest::Md5),
+        "SHA1" => Some(KmDigest::Sha1),
+        "SHA224" => Some(KmDigest::Sha224),
+        "SHA256" => Some(KmDigest::Sha256),
+        "SHA384" => Some(KmDigest::Sha384),
+        "SHA512" => Some(KmDigest::Sha512),
+        _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// X.509 helpers.
+// ---------------------------------------------------------------------------
+
+fn spki_from_cert_der(der: &[u8]) -> Result<Vec<u8>> {
+    use x509_cert::{der::Decode as _, der::Encode as _, Certificate};
+    let cert = Certificate::from_der(der).with_context(|| ks_err!("parse leaf certificate"))?;
+    cert.tbs_certificate()
+        .subject_public_key_info()
+        .to_der()
+        .with_context(|| ks_err!("encode subject public key info"))
+}
+
+fn is_dead_object_status(status: &rsbinder::Status) -> bool {
+    status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
+        && status.transaction_error() == rsbinder::StatusCode::DeadObject
 }
 
 #[cfg(test)]
 mod identity_profile_tests {
     use super::*;
+
+    fn generate_ephemeral_session(mut params: Vec<KeyParam>) -> TeeSession {
+        let algorithm = if params.contains(&KeyParam::Algorithm(KmAlgorithm::Rsa)) {
+            KeyAlgorithm::Rsa2048
+        } else {
+            KeyAlgorithm::EcP256
+        };
+        let keymint = get_system_keymint(SYSTEM_KEYMINT_DEFAULT).unwrap();
+        let km_version = probe_keymint_version(&keymint);
+        params.extend([
+            KeyParam::NoAuthRequired,
+            KeyParam::CertificateNotBefore(now_date_time()),
+            KeyParam::CertificateNotAfter(after_date_time()),
+        ]);
+        let params = key_params_to_aidl(&params, km_version).unwrap();
+        let result = keymint.generateKey(&params, None).unwrap_or_else(|status| {
+            panic!(
+                "{}",
+                keymint_status_error(&status, "ephemeral capability generateKey failed")
+            )
+        });
+        TeeSession {
+            key_blob: result.keyBlob,
+            cert_chain: result
+                .certificateChain
+                .into_iter()
+                .map(|cert| cert.encodedCertificate)
+                .collect(),
+            algorithm,
+            hal_service: SYSTEM_KEYMINT_DEFAULT,
+            km_version,
+        }
+    }
+
+    fn generate_ephemeral_key(params: Vec<KeyParam>) -> (Vec<u8>, i32) {
+        let session = generate_ephemeral_session(params);
+        (session.key_blob, session.km_version)
+    }
+
+    fn begin_ephemeral_key(
+        key_blob: &[u8],
+        km_version: i32,
+        purpose: KeyPurpose,
+        params: Vec<KeyParam>,
+    ) -> rsbinder::Strong<
+        dyn crate::android::hardware::security::keymint::IKeyMintOperation::IKeyMintOperation,
+    > {
+        let keymint = get_system_keymint(SYSTEM_KEYMINT_DEFAULT).unwrap();
+        let params = key_params_to_aidl(&params, km_version).unwrap();
+        let result = keymint
+            .begin(purpose, key_blob, &params, None)
+            .unwrap_or_else(|status| {
+                panic!(
+                    "{}",
+                    keymint_status_error(&status, "ephemeral capability begin failed")
+                )
+            });
+        result
+            .operation
+            .expect("capability begin returned no operation")
+    }
+
+    fn run_ephemeral_key(
+        key_blob: &[u8],
+        km_version: i32,
+        purpose: KeyPurpose,
+        params: Vec<KeyParam>,
+        input: &[u8],
+    ) -> Vec<u8> {
+        let operation = begin_ephemeral_key(key_blob, km_version, purpose, params);
+        let mut output = operation
+            .update(input, None, None)
+            .unwrap_or_else(|status| {
+                panic!(
+                    "{}",
+                    keymint_status_error(&status, "ephemeral capability update failed")
+                )
+            });
+        output.extend_from_slice(
+            &operation
+                .finish(None, None, None, None, None)
+                .unwrap_or_else(|status| {
+                    panic!(
+                        "{}",
+                        keymint_status_error(&status, "ephemeral capability finish failed")
+                    )
+                }),
+        );
+        output
+    }
 
     #[test]
     #[ignore = "requires a connected Android device with a real KeyMint HAL"]
@@ -886,22 +1268,725 @@ mod identity_profile_tests {
             .all(|byte| byte.is_ascii_hexdigit()));
         assert!(!profile.keymint_name.trim().is_empty());
     }
+
+    #[test]
+    #[ignore = "requires a connected Android device with a real KeyMint HAL"]
+    fn live_default_keymint_algorithm_capabilities() {
+        rsbinder::ProcessState::init_default().expect("initialize Binder process state");
+
+        let (raw_rsa, km_version) = generate_ephemeral_key(vec![
+            KeyParam::Algorithm(KmAlgorithm::Rsa),
+            KeyParam::KeySize(KeySizeInBits(2048)),
+            KeyParam::RsaPublicExponent(RsaExponent(65537)),
+            KeyParam::Purpose(KmKeyPurpose::Sign),
+            KeyParam::Purpose(KmKeyPurpose::Decrypt),
+            KeyParam::Digest(KmDigest::None),
+            KeyParam::Padding(KmPadding::None),
+        ]);
+        let raw_signature = run_ephemeral_key(
+            &raw_rsa,
+            km_version,
+            KeyPurpose::SIGN,
+            sign_key_params("NONEwithRSA/NoPadding", KeyAlgorithm::Rsa2048).unwrap(),
+            b"raw-rsa",
+        );
+        assert_eq!(raw_signature.len(), 256);
+        let raw_plaintext = run_ephemeral_key(
+            &raw_rsa,
+            km_version,
+            KeyPurpose::DECRYPT,
+            decrypt_key_params("RSA/ECB/NoPadding", KeyAlgorithm::Rsa2048).unwrap(),
+            &[0; 256],
+        );
+        assert!(!raw_plaintext.is_empty());
+
+        let (sha224_rsa, km_version) = generate_ephemeral_key(vec![
+            KeyParam::Algorithm(KmAlgorithm::Rsa),
+            KeyParam::KeySize(KeySizeInBits(2048)),
+            KeyParam::RsaPublicExponent(RsaExponent(65537)),
+            KeyParam::Purpose(KmKeyPurpose::Sign),
+            KeyParam::Digest(KmDigest::Sha224),
+            KeyParam::Padding(KmPadding::RsaPkcs115Sign),
+            KeyParam::Padding(KmPadding::RsaPss),
+        ]);
+        for algorithm in ["SHA224withRSA", "SHA224withRSA/PSS"] {
+            let signature = run_ephemeral_key(
+                &sha224_rsa,
+                km_version,
+                KeyPurpose::SIGN,
+                sign_key_params(algorithm, KeyAlgorithm::Rsa2048).unwrap(),
+                b"sha224-rsa",
+            );
+            assert_eq!(signature.len(), 256, "algorithm={algorithm}");
+        }
+
+        let (md5_rsa, km_version) = generate_ephemeral_key(vec![
+            KeyParam::Algorithm(KmAlgorithm::Rsa),
+            KeyParam::KeySize(KeySizeInBits(2048)),
+            KeyParam::RsaPublicExponent(RsaExponent(65537)),
+            KeyParam::Purpose(KmKeyPurpose::Sign),
+            KeyParam::Digest(KmDigest::Md5),
+            KeyParam::Padding(KmPadding::RsaPkcs115Sign),
+            KeyParam::Padding(KmPadding::RsaPss),
+        ]);
+        for algorithm in ["MD5withRSA", "MD5withRSA/PSS"] {
+            let signature = run_ephemeral_key(
+                &md5_rsa,
+                km_version,
+                KeyPurpose::SIGN,
+                sign_key_params(algorithm, KeyAlgorithm::Rsa2048).unwrap(),
+                b"md5-rsa",
+            );
+            assert_eq!(signature.len(), 256, "algorithm={algorithm}");
+        }
+
+        let (sha224_oaep, km_version) = generate_ephemeral_key(vec![
+            KeyParam::Algorithm(KmAlgorithm::Rsa),
+            KeyParam::KeySize(KeySizeInBits(2048)),
+            KeyParam::RsaPublicExponent(RsaExponent(65537)),
+            KeyParam::Purpose(KmKeyPurpose::Decrypt),
+            KeyParam::Digest(KmDigest::Sha224),
+            KeyParam::Padding(KmPadding::RsaOaep),
+            KeyParam::RsaOaepMgfDigest(KmDigest::Sha224),
+        ]);
+        let operation = begin_ephemeral_key(
+            &sha224_oaep,
+            km_version,
+            KeyPurpose::DECRYPT,
+            decrypt_key_params("RSA/OAEP/SHA-224/MGF1-SHA224", KeyAlgorithm::Rsa2048).unwrap(),
+        );
+        operation.r#abort().unwrap();
+
+        let (md5_oaep, km_version) = generate_ephemeral_key(vec![
+            KeyParam::Algorithm(KmAlgorithm::Rsa),
+            KeyParam::KeySize(KeySizeInBits(2048)),
+            KeyParam::RsaPublicExponent(RsaExponent(65537)),
+            KeyParam::Purpose(KmKeyPurpose::Decrypt),
+            KeyParam::Digest(KmDigest::Md5),
+            KeyParam::Padding(KmPadding::RsaOaep),
+            KeyParam::RsaOaepMgfDigest(KmDigest::Md5),
+        ]);
+        let operation = begin_ephemeral_key(
+            &md5_oaep,
+            km_version,
+            KeyPurpose::DECRYPT,
+            decrypt_key_params("RSA/OAEP/MD5/MGF1-MD5", KeyAlgorithm::Rsa2048).unwrap(),
+        );
+        operation.r#abort().unwrap();
+
+        let (ec, km_version) = generate_ephemeral_key(vec![
+            KeyParam::Algorithm(KmAlgorithm::Ec),
+            KeyParam::KeySize(KeySizeInBits(256)),
+            KeyParam::EcCurve(KmEcCurve::P256),
+            KeyParam::Purpose(KmKeyPurpose::Sign),
+            KeyParam::Digest(KmDigest::None),
+            KeyParam::Digest(KmDigest::Sha224),
+        ]);
+        for algorithm in ["NONEwithECDSA", "SHA224withECDSA"] {
+            let signature = run_ephemeral_key(
+                &ec,
+                km_version,
+                KeyPurpose::SIGN,
+                sign_key_params(algorithm, KeyAlgorithm::EcP256).unwrap(),
+                b"ec-sign",
+            );
+            assert!(!signature.is_empty(), "algorithm={algorithm}");
+        }
+    }
 }
 
-// ---------------------------------------------------------------------------
-// X.509 helpers.
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod agreement_tests {
+    use super::*;
+    use crate::keymaster::relay_tee::relay_error_result;
+    use der::{
+        asn1::{BitStringRef, ObjectIdentifier},
+        AnyRef, Encode,
+    };
+    use kmr_common::crypto::ec;
+    use std::cell::Cell;
 
-fn spki_from_cert_der(der: &[u8]) -> Result<Vec<u8>> {
-    use x509_cert::{der::Decode as _, der::Encode as _, Certificate};
-    let cert = Certificate::from_der(der).with_context(|| ks_err!("parse leaf certificate"))?;
-    cert.tbs_certificate()
-        .subject_public_key_info()
+    fn spki(oid: ObjectIdentifier, curve: Option<ObjectIdentifier>, point: &[u8]) -> Vec<u8> {
+        x509_cert::spki::SubjectPublicKeyInfoRef {
+            algorithm: x509_cert::spki::AlgorithmIdentifierRef {
+                oid,
+                parameters: curve.as_ref().map(AnyRef::from),
+            },
+            subject_public_key: BitStringRef::from_bytes(point).unwrap(),
+        }
         .to_der()
-        .with_context(|| ks_err!("encode subject public key info"))
+        .unwrap()
+    }
+
+    #[test]
+    fn peer_spki_checks_encoding_without_hal() {
+        for (oid, curve, size) in [
+            (ec::ALGO_PARAM_P224_OID, KmEcCurve::P224, 28),
+            (ec::ALGO_PARAM_P256_OID, KmEcCurve::P256, 32),
+            (ec::ALGO_PARAM_P384_OID, KmEcCurve::P384, 48),
+            (ec::ALGO_PARAM_P521_OID, KmEcCurve::P521, 66),
+        ] {
+            // Synthetic points exercise encoding only, never sent to a HAL.
+            let mut point = vec![1; 1 + 2 * size];
+            point[0] = 4;
+            let encoded = spki(ec::X509_NIST_OID, Some(oid), &point);
+            assert_eq!(agreement_peer_curve(&encoded).unwrap(), curve);
+            let mut trailing = encoded.clone();
+            trailing.push(0);
+            assert!(agreement_peer_curve(&trailing).is_err());
+            assert!(agreement_peer_curve(&encoded[..encoded.len() - 1]).is_err());
+        }
+        let xdh = spki(ec::X509_X25519_OID, None, &[1; 32]);
+        assert_eq!(agreement_peer_curve(&xdh).unwrap(), KmEcCurve::Curve25519);
+        for invalid in [
+            vec![],
+            vec![0],
+            spki(ec::X509_ED25519_OID, None, &[1; 32]),
+            spki(ec::X509_X25519_OID, None, &[1; 31]),
+            spki(ec::X509_X25519_OID, Some(ec::ALGO_PARAM_P256_OID), &[1; 32]),
+            spki(ec::X509_NIST_OID, None, &[1; 65]),
+            spki(ec::X509_NIST_OID, Some(ec::ALGO_PARAM_P256_OID), &[1; 65]),
+        ] {
+            let error = agreement_peer_curve(&invalid).unwrap_err();
+            assert_eq!(relay_error_result(&error)["keymint_error_code"], -38);
+        }
+        assert_eq!(
+            relay_error_result(&agreement_peer_curve(&[0; 165]).unwrap_err())["keymint_error_code"],
+            -21
+        );
+    }
+
+    #[test]
+    fn agreement_uses_only_finish_and_keeps_raw_output() {
+        let expected = vec![0; 32];
+        let output = complete_single_input_op(
+            "mock",
+            KeyPurpose::AGREE_KEY,
+            b"peer-spki",
+            |_| panic!("agreement must not call update"),
+            |input| {
+                assert_eq!(input, Some(b"peer-spki".as_slice()));
+                Ok(expected.clone())
+            },
+            || panic!("successful finish must not abort"),
+        )
+        .unwrap();
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn agreement_error_is_preserved_without_repeating_finish() {
+        let aborted = Cell::new(0);
+        let error = complete_single_input_op(
+            "mock",
+            KeyPurpose::AGREE_KEY,
+            b"peer-spki",
+            |_| panic!("agreement must not call update"),
+            |_| Err(rsbinder::Status::new_service_specific_error(-38, None)),
+            || aborted.set(aborted.get() + 1),
+        )
+        .unwrap_err();
+        assert_eq!(relay_error_result(&error)["keymint_error_code"], -38);
+        assert_eq!(aborted.get(), 1);
+    }
+
+    #[test]
+    fn sign_and_decrypt_still_concatenate_update_and_finish_output() {
+        for purpose in [KeyPurpose::SIGN, KeyPurpose::DECRYPT] {
+            let output = complete_single_input_op(
+                "mock",
+                purpose,
+                b"input",
+                |input| {
+                    assert_eq!(input, b"input");
+                    Ok(vec![1, 2])
+                },
+                |input| {
+                    assert!(input.is_none());
+                    Ok(vec![3])
+                },
+                || panic!("successful operation must not abort"),
+            )
+            .unwrap();
+            assert_eq!(output, [1, 2, 3]);
+        }
+    }
+
+    #[test]
+    fn agreement_generation_does_not_add_sign_digest_or_padding() {
+        use crate::android::hardware::security::keymint::Tag::Tag;
+        for curve in [
+            KmEcCurve::P224,
+            KmEcCurve::P256,
+            KmEcCurve::P384,
+            KmEcCurve::P521,
+            KmEcCurve::Curve25519,
+        ] {
+            let spec = KeySpec {
+                ec_curve: Some(curve),
+                key_size: Some(ec::curve_to_key_size(curve).0),
+                purposes: vec![KmKeyPurpose::AgreeKey],
+                ..KeySpec::default()
+            };
+            for version in [100, 200, 300, 400, 500] {
+                let params =
+                    build_attestation_params(b"synthetic-appid", b"challenge", &spec, version)
+                        .unwrap();
+                let purposes: Vec<_> = params.iter().filter(|p| p.tag == Tag::PURPOSE).collect();
+                let expected =
+                    key_params_to_aidl(&[KeyParam::Purpose(KmKeyPurpose::AgreeKey)], version)
+                        .unwrap();
+                assert_eq!(purposes, expected.iter().collect::<Vec<_>>());
+                assert!(params.iter().all(|p| p.tag != Tag::DIGEST
+                    && p.tag != Tag::PADDING
+                    && p.tag != Tag::RSA_OAEP_MGF_DIGEST));
+            }
+        }
+    }
 }
 
-fn is_dead_object_status(status: &rsbinder::Status) -> bool {
-    status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
-        && status.transaction_error() == rsbinder::StatusCode::DeadObject
+#[cfg(test)]
+mod algorithm_mapping_tests {
+    use super::*;
+    use crate::keymaster::relay_tee::relay_error_result;
+
+    fn assert_keymint_error(error: anyhow::Error, expected: KmErrorCode) {
+        assert_eq!(
+            relay_error_result(&error)["keymint_error_code"],
+            expected as i32
+        );
+    }
+
+    #[test]
+    fn existing_sha256_pss_oaep_and_pkcs1_params_are_unchanged() {
+        assert_eq!(
+            sign_key_params("SHA256withRSA/PSS", KeyAlgorithm::Rsa2048).unwrap(),
+            vec![
+                KeyParam::Digest(KmDigest::Sha256),
+                KeyParam::Padding(KmPadding::RsaPss),
+                KeyParam::RsaOaepMgfDigest(KmDigest::Sha256),
+            ]
+        );
+        assert_eq!(
+            decrypt_key_params("RSA/OAEP/SHA-256/MGF1-SHA1", KeyAlgorithm::Rsa2048,).unwrap(),
+            vec![
+                KeyParam::Padding(KmPadding::RsaOaep),
+                KeyParam::Digest(KmDigest::Sha256),
+                KeyParam::RsaOaepMgfDigest(KmDigest::Sha1),
+            ]
+        );
+        assert_eq!(
+            decrypt_key_params("RSA/OAEP/SHA-256", KeyAlgorithm::Rsa2048).unwrap(),
+            vec![
+                KeyParam::Padding(KmPadding::RsaOaep),
+                KeyParam::Digest(KmDigest::Sha256),
+                KeyParam::RsaOaepMgfDigest(KmDigest::Sha1),
+            ]
+        );
+        assert_eq!(
+            decrypt_key_params("RSA/ECB/PKCS1Padding", KeyAlgorithm::Rsa2048).unwrap(),
+            vec![KeyParam::Padding(KmPadding::RsaPkcs115Encrypt)]
+        );
+    }
+
+    #[test]
+    fn no_padding_sha224_and_none_map_exactly() {
+        assert_eq!(
+            sign_key_params("NONEwithRSA/NoPadding", KeyAlgorithm::Rsa2048).unwrap(),
+            vec![
+                KeyParam::Digest(KmDigest::None),
+                KeyParam::Padding(KmPadding::None),
+            ]
+        );
+        assert_eq!(
+            sign_key_params("NONEwithRSA", KeyAlgorithm::Rsa2048).unwrap(),
+            vec![
+                KeyParam::Digest(KmDigest::None),
+                KeyParam::Padding(KmPadding::RsaPkcs115Sign),
+            ]
+        );
+        assert_eq!(
+            decrypt_key_params("RSA/ECB/NoPadding", KeyAlgorithm::Rsa2048).unwrap(),
+            vec![KeyParam::Padding(KmPadding::None)]
+        );
+        assert_eq!(
+            sign_key_params("SHA224withECDSA", KeyAlgorithm::EcP256).unwrap(),
+            vec![KeyParam::Digest(KmDigest::Sha224)]
+        );
+        assert_eq!(
+            sign_key_params("NONEwithECDSA", KeyAlgorithm::EcP256).unwrap(),
+            vec![KeyParam::Digest(KmDigest::None)]
+        );
+        assert_eq!(
+            decrypt_key_params("RSA/OAEP/SHA-224/MGF1-SHA224", KeyAlgorithm::Rsa2048,).unwrap(),
+            vec![
+                KeyParam::Padding(KmPadding::RsaOaep),
+                KeyParam::Digest(KmDigest::Sha224),
+                KeyParam::RsaOaepMgfDigest(KmDigest::Sha224),
+            ]
+        );
+        assert_eq!(
+            sign_key_params("MD5withRSA/PSS", KeyAlgorithm::Rsa2048).unwrap(),
+            vec![
+                KeyParam::Digest(KmDigest::Md5),
+                KeyParam::Padding(KmPadding::RsaPss),
+                KeyParam::RsaOaepMgfDigest(KmDigest::Md5),
+            ]
+        );
+        assert_eq!(
+            decrypt_key_params("RSA/OAEP/MD5/MGF1-MD5", KeyAlgorithm::Rsa2048).unwrap(),
+            vec![
+                KeyParam::Padding(KmPadding::RsaOaep),
+                KeyParam::Digest(KmDigest::Md5),
+                KeyParam::RsaOaepMgfDigest(KmDigest::Md5),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_algorithms_keep_specific_keymint_error_codes() {
+        assert_keymint_error(
+            decrypt_key_params("RSA/OAEP/SHA-256/MGF1-SHA999", KeyAlgorithm::Rsa2048).unwrap_err(),
+            KmErrorCode::UnsupportedMgfDigest,
+        );
+        assert_keymint_error(
+            decrypt_key_params("RSA/OAEP/SHA999/MGF1-SHA256", KeyAlgorithm::Rsa2048).unwrap_err(),
+            KmErrorCode::UnsupportedDigest,
+        );
+        assert_keymint_error(
+            decrypt_key_params("RSA/ECB/UnknownPadding", KeyAlgorithm::Rsa2048).unwrap_err(),
+            KmErrorCode::UnsupportedPaddingMode,
+        );
+        assert_keymint_error(
+            sign_key_params("SHA256withRSA/NoPadding", KeyAlgorithm::Rsa2048).unwrap_err(),
+            KmErrorCode::IncompatibleDigest,
+        );
+        assert_keymint_error(
+            sign_key_params("SHA256withRSA/UnknownPadding", KeyAlgorithm::Rsa2048).unwrap_err(),
+            KmErrorCode::UnsupportedPaddingMode,
+        );
+        assert_keymint_error(
+            sign_key_params("SHA256withRSA", KeyAlgorithm::EcP256).unwrap_err(),
+            KmErrorCode::IncompatibleAlgorithm,
+        );
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    use crate::keymaster::relay_tee::relay_error_result;
+    use std::cell::{Cell, RefCell};
+    use std::sync::{Arc, Barrier};
+
+    fn session() -> TeeSession {
+        TeeSession {
+            key_blob: vec![1],
+            cert_chain: vec![vec![3, 4], vec![5, 6]],
+            algorithm: KeyAlgorithm::EcP256,
+            hal_service: SYSTEM_KEYMINT_DEFAULT,
+            km_version: 400,
+        }
+    }
+
+    fn status(code: KmErrorCode) -> rsbinder::Status {
+        rsbinder::Status::new_service_specific_error(code as i32, None)
+    }
+
+    #[test]
+    fn normal_begin_never_upgrades_or_persists() {
+        let result = begin_with_upgrade_retry(
+            &session(),
+            |blob| Ok(blob.to_vec()),
+            || panic!("successful begin must not recover"),
+        )
+        .unwrap();
+        assert_eq!(result, [1]);
+    }
+
+    #[test]
+    fn other_hal_and_transport_errors_do_not_upgrade() {
+        for code in [
+            KmErrorCode::KeyUserNotAuthenticated,
+            KmErrorCode::InvalidKeyBlob,
+            KmErrorCode::VerificationFailed,
+            KmErrorCode::HardwareTypeUnavailable,
+        ] {
+            let error = begin_with_upgrade_retry::<()>(
+                &session(),
+                |_| Err(status(code)),
+                || panic!("non-upgrade HAL failure must not recover"),
+            )
+            .unwrap_err();
+            assert_eq!(
+                relay_error_result(&error)["keymint_error_code"],
+                code as i32
+            );
+        }
+        let error = begin_with_upgrade_retry::<()>(
+            &session(),
+            |_| Err(rsbinder::Status::from(rsbinder::StatusCode::DeadObject)),
+            || panic!("transport failure must not upgrade"),
+        )
+        .unwrap_err();
+        assert!(relay_error_result(&error)
+            .get("keymint_error_code")
+            .is_none());
+    }
+
+    #[test]
+    fn upgrade_is_saved_before_retry_and_preserves_identity() {
+        let observed = session();
+        let mut cached = CachedSession::from(observed.clone());
+        let events = RefCell::new(Vec::new());
+        let result = begin_with_upgrade_retry(
+            &observed,
+            |blob| {
+                if blob == [1] {
+                    events.borrow_mut().push("begin old");
+                    Err(status(KmErrorCode::KeyRequiresUpgrade))
+                } else {
+                    assert_eq!(blob, [2]);
+                    events.borrow_mut().push("begin upgraded");
+                    Ok(42)
+                }
+            },
+            || {
+                recover_upgraded_session(
+                    &mut cached,
+                    &observed,
+                    |blob| {
+                        assert_eq!(blob, [1]);
+                        events.borrow_mut().push("upgrade");
+                        Ok(vec![2])
+                    },
+                    |updated| {
+                        assert_eq!(updated.key_blob, [2]);
+                        assert_eq!(updated.cert_chain, observed.cert_chain);
+                        assert_eq!(updated.algorithm, observed.algorithm);
+                        assert_eq!(updated.hal_service, observed.hal_service);
+                        assert_eq!(updated.km_version, observed.km_version);
+                        events.borrow_mut().push("persist");
+                        Ok(())
+                    },
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(result, 42);
+        assert!(!cached.needs_persistence);
+        assert_eq!(
+            *events.borrow(),
+            ["begin old", "upgrade", "persist", "begin upgraded"]
+        );
+    }
+
+    #[test]
+    fn upgrade_required_on_retry_is_returned_without_a_loop() {
+        let attempts = Cell::new(0);
+        let recoveries = Cell::new(0);
+        let error = begin_with_upgrade_retry::<()>(
+            &session(),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Err(status(KmErrorCode::KeyRequiresUpgrade))
+            },
+            || {
+                recoveries.set(recoveries.get() + 1);
+                Ok(TeeSession {
+                    key_blob: vec![2],
+                    ..session()
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(recoveries.get(), 1);
+        assert_eq!(relay_error_result(&error)["keymint_error_code"], -62);
+    }
+
+    #[test]
+    fn failed_upgrade_keeps_old_blob_and_preserves_error() {
+        let observed = session();
+        let mut cached = CachedSession::from(observed.clone());
+        let error = recover_upgraded_session(
+            &mut cached,
+            &observed,
+            |_| {
+                Err(keymint_status_error(
+                    &status(KmErrorCode::InvalidArgument),
+                    "upgradeKey",
+                ))
+            },
+            |_| panic!("failed upgrade must not persist"),
+        )
+        .unwrap_err();
+        assert_eq!(relay_error_result(&error)["keymint_error_code"], -38);
+        assert_eq!(cached.session.key_blob, observed.key_blob);
+        assert!(!cached.needs_persistence);
+    }
+
+    #[test]
+    fn empty_upgrade_result_is_rejected_without_overwriting() {
+        let observed = session();
+        let mut cached = CachedSession::from(observed.clone());
+        assert!(recover_upgraded_session(
+            &mut cached,
+            &observed,
+            |_| Ok(Vec::new()),
+            |_| panic!("empty blob must not be saved"),
+        )
+        .is_err());
+        assert_eq!(cached.session.key_blob, observed.key_blob);
+        assert!(!cached.needs_persistence);
+    }
+
+    #[test]
+    fn failed_save_stops_retry_and_pending_blob_is_not_lost() {
+        let observed = session();
+        let mut cached = CachedSession::from(observed.clone());
+        let attempts = Cell::new(0);
+        let error = begin_with_upgrade_retry::<()>(
+            &observed,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Err(status(KmErrorCode::KeyRequiresUpgrade))
+            },
+            || {
+                recover_upgraded_session(
+                    &mut cached,
+                    &observed,
+                    |_| Ok(vec![2]),
+                    |_| Err(anyhow!("simulated disk full")),
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disk full"));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(cached.session.key_blob, [2]);
+        assert!(cached.needs_persistence);
+        assert!(persist_pending_session(&mut cached, |_| Err(anyhow!("still full"))).is_err());
+        assert!(cached.needs_persistence);
+        let fresh = recover_upgraded_session(
+            &mut cached,
+            &observed,
+            |_| panic!("pending blob must not be upgraded again"),
+            |updated| {
+                assert_eq!(updated.key_blob, [2]);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(fresh.key_blob, [2]);
+        assert!(!cached.needs_persistence);
+    }
+
+    #[test]
+    fn replaced_alias_is_not_overwritten_by_stale_upgrade() {
+        let observed = session();
+        for replacement in [
+            TeeSession {
+                cert_chain: vec![vec![9]],
+                ..session()
+            },
+            TeeSession {
+                hal_service: SYSTEM_KEYMINT_STRONGBOX,
+                ..session()
+            },
+            TeeSession {
+                algorithm: KeyAlgorithm::Rsa2048,
+                ..session()
+            },
+        ] {
+            let mut cached = CachedSession::from(replacement);
+            let error = recover_upgraded_session(
+                &mut cached,
+                &observed,
+                |_| panic!("different key identity must not upgrade"),
+                |_| panic!("different key identity must not overwrite the alias"),
+            )
+            .unwrap_err();
+            assert_eq!(relay_error_result(&error)["keymint_error_code"], -33);
+        }
+    }
+
+    #[test]
+    fn persisted_upgrade_survives_cache_reconstruction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.json");
+        let observed = session();
+        save_session_at(&path, "synthetic-key", &observed).unwrap();
+        let mut cached = CachedSession::from(load_session_from_path(&path).unwrap());
+        recover_upgraded_session(
+            &mut cached,
+            &observed,
+            |_| Ok(vec![2, 3, 4]),
+            |session| save_session_at(&path, "synthetic-key", session),
+        )
+        .unwrap();
+        drop(cached);
+        let restored = load_session_from_path(&path).unwrap();
+        assert_eq!(restored.key_blob, [2, 3, 4]);
+        assert_eq!(restored.cert_chain, observed.cert_chain);
+        assert_eq!(restored.algorithm, observed.algorithm);
+        assert_eq!(restored.hal_service, observed.hal_service);
+        assert_eq!(restored.km_version, observed.km_version);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn concurrent_stale_snapshots_share_one_updated_blob() {
+        let cached = Arc::new(Mutex::new(CachedSession::from(session())));
+        let barrier = Arc::new(Barrier::new(2));
+        let upgrades = std::sync::atomic::AtomicUsize::new(0);
+        let saves = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let cached = cached.clone();
+                let barrier = barrier.clone();
+                let upgrades = &upgrades;
+                let saves = &saves;
+                scope.spawn(move || {
+                    let observed = session();
+                    let mut first = true;
+                    let result = begin_with_upgrade_retry(
+                        &observed,
+                        |blob| {
+                            if first {
+                                first = false;
+                                barrier.wait();
+                                Err(status(KmErrorCode::KeyRequiresUpgrade))
+                            } else {
+                                assert_eq!(blob, [2]);
+                                assert_eq!(saves.load(Ordering::SeqCst), 1);
+                                Ok(())
+                            }
+                        },
+                        || {
+                            recover_upgraded_session(
+                                &mut cached.lock().unwrap(),
+                                &observed,
+                                |_| {
+                                    upgrades.fetch_add(1, Ordering::SeqCst);
+                                    Ok(vec![2])
+                                },
+                                |_| {
+                                    saves.fetch_add(1, Ordering::SeqCst);
+                                    Ok(())
+                                },
+                            )
+                        },
+                    );
+                    result.unwrap();
+                });
+            }
+        });
+        assert_eq!(upgrades.load(Ordering::SeqCst), 1);
+        assert_eq!(saves.load(Ordering::SeqCst), 1);
+    }
 }

@@ -1,88 +1,101 @@
 #!/usr/bin/env python3
-"""Bump the product patch version across A/B/server Cargo manifests and the B-app."""
-
+"""Set/check a coherent product version; setting the same version is idempotent."""
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
+import re
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
-
-CARGO_FILES = (
-    ROOT / "a-side" / "source" / "Cargo.toml",
-    ROOT / "a-side" / "source" / "ommega-injector" / "Cargo.toml",
-    ROOT / "b-side" / "source" / "Cargo.toml",
-    ROOT / "server" / "source" / "Cargo.toml",
+CARGOS = (
+    "a-side/source/Cargo.toml",
+    "a-side/source/ommega-injector/Cargo.toml",
+    "b-side/source/Cargo.toml",
+    "server/source/Cargo.toml",
 )
+LOCKS = {
+    "a-side/source/Cargo.lock": ("ommega", "ommega-injector"),
+    "b-side/source/Cargo.lock": ("ommegaclient-b",),
+    "server/source/Cargo.lock": ("relay_rs",),
+}
+APPS = {
+    "b-app/source/app/build.gradle.kts": "-ommega",
+    "StrongBoxCapabilityMask/app/build.gradle.kts": "",
+}
 
-APP_GRADLE = ROOT / "b-app" / "source" / "app" / "build.gradle.kts"
-SERVER_LOCK = ROOT / "server" / "source" / "Cargo.lock"
-VERSION_RE = re.compile(r'^version = "(\d+)\.(\d+)\.(\d+)"', re.MULTILINE)
+def read_version(root: Path = ROOT) -> str:
+    return tomllib.loads((root / CARGOS[0]).read_text(encoding="utf-8"))["package"]["version"]
 
-
-def bump_patch(major: int, minor: int, patch: int) -> str:
-    return f"{major}.{minor}.{patch + 1}"
-
-
-def replace_first_version(path: Path, new_version: str) -> None:
-    text = path.read_text(encoding="utf-8")
-    updated, count = VERSION_RE.subn(f'version = "{new_version}"', text, count=1)
+def replace_one(text: str, pattern: str, replacement, label: str) -> str:
+    updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
     if count != 1:
-        raise SystemExit(f"expected one package version in {path}, found {count}")
-    path.write_text(updated, encoding="utf-8")
+        raise ValueError(f"missing version field: {label}")
+    return updated
 
+def set_version(root: Path, version: str) -> None:
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError(f"invalid version: {version}")
+    updates = {}
+    for relative in CARGOS:
+        text = (root / relative).read_text(encoding="utf-8")
+        updates[relative] = replace_one(text, r'^version = "[^"]+"', f'version = "{version}"', relative)
+    for relative, names in LOCKS.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        for name in names:
+            pattern = rf'(\[\[package\]\]\nname = "{re.escape(name)}"\nversion = ")[^"]+("\n)'
+            text = replace_one(text, pattern, lambda m: m[1] + version + m[2], relative + ":" + name)
+        updates[relative] = text
+    for relative, suffix in APPS.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        match = re.search(r'versionName = "([^"]+)"', text)
+        if not match:
+            raise ValueError(f"missing versionName: {relative}")
+        desired = version + suffix
+        if match[1] != desired:
+            text = replace_one(text, r'versionName = "[^"]+"', f'versionName = "{desired}"', relative)
+            text = replace_one(text, r'versionCode = (\d+)', lambda m: f"versionCode = {int(m[1]) + 1}", relative)
+        updates[relative] = text
+    # Validate every file before writing any of them.
+    for relative, updated in updates.items():
+        target = root / relative
+        if target.read_text(encoding="utf-8") != updated:
+            target.write_text(updated, encoding="utf-8", newline="\n")
 
-def bump_app_gradle(new_version: str) -> None:
-    text = APP_GRADLE.read_text(encoding="utf-8")
-    text, name_count = re.subn(
-        r'versionName = "[^"]+"',
-        f'versionName = "{new_version}-ommega"',
-        text,
-        count=1,
-    )
-    if name_count != 1:
-        raise SystemExit(f"expected one versionName in {APP_GRADLE}, found {name_count}")
-
-    def inc_code(match: re.Match[str]) -> str:
-        return f"versionCode = {int(match.group(1)) + 1}"
-
-    text, code_count = re.subn(r"versionCode = (\d+)", inc_code, text, count=1)
-    if code_count != 1:
-        raise SystemExit(f"expected one versionCode in {APP_GRADLE}, found {code_count}")
-    APP_GRADLE.write_text(text, encoding="utf-8")
-
-
-def update_server_lock(new_version: str) -> None:
-    text = SERVER_LOCK.read_text(encoding="utf-8")
-    pattern = re.compile(r'(\[\[package\]\]\r?\nname = "relay_rs"\r?\nversion = ")[^"]+("\r?\n)')
-    updated, count = pattern.subn(rf"\g<1>{new_version}\g<2>", text, count=1)
-    if count != 1:
-        raise SystemExit(f"expected relay_rs package entry in {SERVER_LOCK}, found {count}")
-    SERVER_LOCK.write_text(updated, encoding="utf-8")
-
+def check_versions(root: Path = ROOT) -> str:
+    version = read_version(root)
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError(f"invalid product version: {version}")
+    for relative in CARGOS:
+        actual = tomllib.loads((root / relative).read_text(encoding="utf-8"))["package"]["version"]
+        if actual != version:
+            raise ValueError(f"version mismatch: {relative}")
+    for relative, names in LOCKS.items():
+        packages = tomllib.loads((root / relative).read_text(encoding="utf-8"))["package"]
+        for name in names:
+            actual = [p["version"] for p in packages if p["name"] == name]
+            if actual != [version]:
+                raise ValueError(f"version mismatch: {relative}:{name}")
+    for relative, suffix in APPS.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        name = re.search(r'versionName = "([^"]+)"', text)
+        code = re.search(r'versionCode = (\d+)', text)
+        if not name or name[1] != version + suffix or not code or int(code[1]) < 1:
+            raise ValueError(f"version mismatch: {relative}")
+    return version
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", help="set an explicit release version")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--version", help="set an explicit product version")
+    mode.add_argument("--check", action="store_true", help="check all versions without changes")
     args = parser.parse_args()
-    root_toml = CARGO_FILES[0].read_text(encoding="utf-8")
-    match = VERSION_RE.search(root_toml)
-    if not match:
-        raise SystemExit(f"no package version in {CARGO_FILES[0]}")
-    if args.version:
-        if not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
-            raise SystemExit(f"invalid explicit version: {args.version}")
-        new_version = args.version
-    else:
-        new_version = bump_patch(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    for path in CARGO_FILES:
-        replace_first_version(path, new_version)
-    bump_app_gradle(new_version)
-    update_server_lock(new_version)
-    print(new_version)
+    if not args.check:
+        current = read_version()
+        major, minor, patch = map(int, current.split("."))
+        set_version(ROOT, args.version or f"{major}.{minor}.{patch + 1}")
+    print(check_versions())
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -25,7 +25,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use kmr_wire::keymint::KeyParam;
+use kmr_wire::keymint::{ErrorCode, KeyParam};
 use log::error;
 use rsbinder::{hub, DeathRecipient, FromIBinder, StatusCode, Strong, WIBinder};
 
@@ -182,6 +182,43 @@ pub fn extract_km_error_code(status: &rsbinder::Status) -> Option<i32> {
     None
 }
 
+/// Preserve HAL business errors through anyhow contexts without parsing log text.
+#[derive(Debug)]
+struct KeyMintFailure(i32);
+
+impl std::fmt::Display for KeyMintFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[km_error={}]", self.0)
+    }
+}
+
+impl std::error::Error for KeyMintFailure {}
+
+/// Build a typed KeyMint business error for relay-side validation failures
+/// that happen before a HAL call (for example an unsupported algorithm token).
+/// Keeping the same carrier as HAL errors preserves the numeric code through
+/// B -> server -> A without parsing diagnostic text.
+pub fn keymint_error(code: ErrorCode, context: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(KeyMintFailure(code as i32)).context(context.into())
+}
+
+pub fn keymint_status_error(status: &rsbinder::Status, context: &str) -> anyhow::Error {
+    let message = format!("{context}: {status}");
+    match extract_km_error_code(status) {
+        Some(code) => anyhow::Error::new(KeyMintFailure(code)).context(message),
+        None => anyhow::anyhow!(message),
+    }
+}
+
+/// The optional numeric field is additive: old relay servers still see `error`.
+pub fn relay_error_result(error: &anyhow::Error) -> serde_json::Value {
+    let mut result = serde_json::json!({ "error": format!("{error:#}") });
+    if let Some(code) = error.downcast_ref::<KeyMintFailure>() {
+        result["keymint_error_code"] = serde_json::json!(code.0);
+    }
+    result
+}
+
 /// Probes the real KeyMint HAL for its implementation version via
 /// `getHardwareInfo()` instead of assuming V5. A StrongBox HAL may only
 /// implement KeyMint V2/V3; encoding parameters for a newer version can
@@ -215,19 +252,6 @@ pub fn normalize_keymint_version(version: i32) -> i32 {
             log::warn!("unknown KeyMint version {version}; using v5 parameter encoding");
             KEY_MINT_V5
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_keymint_version;
-
-    #[test]
-    fn keymint_version_is_normalized_to_canonical_units() {
-        assert_eq!(normalize_keymint_version(1), 100);
-        assert_eq!(normalize_keymint_version(4), 400);
-        assert_eq!(normalize_keymint_version(400), 400);
-        assert_eq!(normalize_keymint_version(999), 500);
     }
 }
 
@@ -336,4 +360,43 @@ pub fn key_param_to_aidl(kp: KeyParam, km_dev_version: i32) -> Result<KmKeyParam
     };
 
     Ok(KmKeyParameter { tag, value })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{keymint_status_error, normalize_keymint_version, relay_error_result};
+
+    #[test]
+    fn hal_error_survives_context_and_json_encoding() {
+        let status = rsbinder::Status::new_service_specific_error(-30, None);
+        let error = keymint_status_error(&status, "finish failed").context("decrypt task");
+        let result = relay_error_result(&error);
+        assert_eq!(result["keymint_error_code"], -30);
+        assert!(result["error"].as_str().unwrap().contains("decrypt task"));
+    }
+
+    #[test]
+    fn transport_and_log_text_are_not_hal_errors() {
+        let status = rsbinder::Status::from(rsbinder::StatusCode::DeadObject);
+        let result = relay_error_result(&keymint_status_error(&status, "begin failed"));
+        assert!(result.get("keymint_error_code").is_none());
+        let result = relay_error_result(&anyhow::anyhow!("untrusted [km_error=-30]"));
+        assert!(result.get("keymint_error_code").is_none());
+        for code in [0, 1] {
+            let status = rsbinder::Status::new_service_specific_error(code, None);
+            assert!(
+                relay_error_result(&keymint_status_error(&status, "invalid status"))
+                    .get("keymint_error_code")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn keymint_version_is_normalized_to_canonical_units() {
+        assert_eq!(normalize_keymint_version(1), 100);
+        assert_eq!(normalize_keymint_version(4), 400);
+        assert_eq!(normalize_keymint_version(400), 400);
+        assert_eq!(normalize_keymint_version(999), 500);
+    }
 }

@@ -342,7 +342,9 @@ mod test {
 
     #[test]
     fn test_output_is_consistent() -> Result<()> {
-        let initial_key = b"initial key";
+        // The production root is a 256-bit HMAC output, not arbitrary input
+        // key material: HKDF-Expand requires a SHA-256-sized PRK.
+        let initial_key = &[0x42_u8; BootLevelKeyCache::HKDF_KEY_SIZE];
         let mut blkc = BootLevelKeyCache::new(ZVec::try_from(initial_key as &[u8])?);
         assert!(blkc.level_accessible(BootLevel(0)));
         assert!(blkc.level_accessible(BootLevel(9)));
@@ -440,7 +442,9 @@ impl LegacyBootLevelKeyCache {
     pub(crate) fn aes_key(&mut self, boot_level: BootLevel) -> Result<Option<ZVec>> {
         self.get_hkdf_key(boot_level)
             .context(err!("Looking up legacy KDF key"))?
-            .map(|key| ommega_legacy_kdf_expand(AES_256_KEY_LENGTH, key, BootLevelKeyCache::HKDF_AES))
+            .map(|key| {
+                ommega_legacy_kdf_expand(AES_256_KEY_LENGTH, key, BootLevelKeyCache::HKDF_AES)
+            })
             .transpose()
             .context(err!("Calling legacy KDF expand"))
     }
@@ -452,7 +456,7 @@ mod ommega_test {
 
     #[test]
     fn legacy_cache_is_independent() -> Result<()> {
-        let initial_key = b"initial key";
+        let initial_key = &[0x42_u8; BootLevelKeyCache::HKDF_KEY_SIZE];
         let mut current = BootLevelKeyCache::new(ZVec::try_from(initial_key as &[u8])?);
         let mut legacy = LegacyBootLevelKeyCache::new(ZVec::try_from(initial_key as &[u8])?);
         assert_ne!(

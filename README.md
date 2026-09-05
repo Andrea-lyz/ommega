@@ -2,12 +2,13 @@
 
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
-> 不是上游官方发行版或官方在线服务。当前源码版本为 **1.4.0**，模块作者信息为
+> 不是上游官方发行版或官方在线服务。当前源码版本为 **1.4.1**，模块作者信息为
 > `jiyin004, Andrea-lyz`。
 
 Ommega 是一套 A/B/Server 三端远程 KeyMint 系统：A 端拦截指定应用的 Android
-Keystore 请求，经 Server 调度到 B 端真实硬件 TEE 执行，并把证明、签名和解密结果
-返回 A 端。本 fork 在上游架构上重点补齐了远程身份一致性、原生 StrongBox、冷启动
+Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬件 KeyMint，
+返回证明、签名、解密和密钥协商结果。A 同时承担软件 TA、密钥存储和认证检查。
+本 fork 在上游架构上重点补齐了远程身份一致性、原生 StrongBox、冷启动
 生命周期、实时 WebUI 配置和 B 端软重启运维。
 
 ## 与上游的主要区别
@@ -21,8 +22,9 @@ Keystore 请求，经 Server 调度到 B 端真实硬件 TEE 执行，并把证�
 - 冷启动网络暂不可用时会等待并重试远程 profile，不再提前冻结错误的本地身份。
 - Server 对 B 端 profile 做结构校验；允许真实厂商 HAL 返回空
   `keymint_author`，但拒绝字段缺失、类型错误和仅含空白字符的值。
-- 远程 profile、证明证书链或安全级别不一致时默认失败关闭；只有明确启用本地回退
-  时才允许切换到本地路径。
+- A 校验远程 profile、叶证书的 challenge、应用 ID、版本和安全级别；校验错误直接失败。
+  当前尚未完成完整证书链的可信根、逐级签名及撤销校验。
+- `fallback_local` 只控制允许回退的远程不可用路径；它不会让身份校验错误变成成功。
 
 ### 2. 原生 StrongBox 与 Android RKP
 
@@ -54,7 +56,7 @@ touch /data/adb/ommega/restart.keymint
 |---|---|
 | 全局默认 | 遵循设备能力和“禁用原生 StrongBox”总开关 |
 | StrongBox | 显式选择 StrongBox 路径，并覆盖全局禁用开关 |
-| TEE | 强制使用 TEE；该应用的 StrongBox 请求返回不可用以触发标准降级 |
+| TEE | 将该应用的安全级别请求改写为 TEE，包括显式 StrongBox 请求 |
 
 显式策略保存在：
 
@@ -68,6 +70,11 @@ touch /data/adb/ommega/restart.keymint
 旧 `strongbox_unavailable_packages` 仅保留一次性迁移兼容：当
 `target-security.toml` 尚不存在时可转成 TEE 策略，之后不再作为正式配置写回。
 `target.txt` 的 `!`、`?` 后缀也不再是正式配置格式。
+
+独立的 StrongBoxCapabilityMask 模块从系统功能表隐藏
+`android.hardware.strongbox_keystore`，保留 `android.hardware.keystore.app_attest_key`。
+它不停止 StrongBox HAL，也不替代上述请求路由。应用忽略功能表仍显式请求 StrongBox 时，
+全局默认加禁用开关会返回 `HARDWARE_TYPE_UNAVAILABLE`；显式 TEE 则改写请求。
 
 ### 4. A 端配置即时生效
 
@@ -88,11 +95,16 @@ touch /data/adb/ommega/restart.keymint
   按顺序重放。
 - 修复了用户 0 super key 未初始化时，生物认证绑定密钥创建/读取失败的问题。
 
+本地旧密钥读取同时支持 P-521 裸标量和旧 SEC1 DER 编码；带曲线标识或公钥的
+DER 会校验其与 P-521 私钥的一致性。旧 PBKDF2 兼容 KDF 保留历史 64 字节
+extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-521 写入格式不变。
+
 ### 6. B 端 SPL WebUI 与纯软重启运维
 
 - B 端 WebUI 可分别设置 System、Boot、Vendor SPL，保存后立即应用。
 - 属性变化时只重载原生 KeyMint 服务和 `keystore2`，模块本身不请求硬重启。
-- 配置保存在 `/data/adb/ommega/spl.conf`；留空可恢复首次记录的基线值。
+- 配置保存在 `/data/adb/ommega/spl.conf`；留空会选择首次记录的基线值。
+  已在较高 SPL 下升级的 keyblob 可能要求保留较高值，首次基线不能直接当作恢复值。
 - B 端故意不提供 `post-fs-data.sh`，只以 `service.sh` 作为生命周期入口；后续
   KernelSU 加载或软重启时由 `service.sh` 重新应用 SPL，再启动 relay。
 - `service.sh` 会按精确模块路径清理旧 relay，避免旧进程继续占用 `relay.lock`。
@@ -102,13 +114,25 @@ touch /data/adb/ommega/restart.keymint
 
 ### 7. B 端 relay 与 Server 稳定性
 
-- B 端 `relay.conf` 支持运行时热加载，修改连接和日志配置无需重启进程。
+- B 端 WebUI 可编辑 `relay.conf` 的连接参数和四项日志设置；连接参数支持热加载，
+  日志设置在 relay 下次启动时生效。保存 Relay 配置不会重启进程或应用 SPL。
+- B 端持久化密钥在 `begin` 返回 `KEY_REQUIRES_UPGRADE` 时，会在原 HAL 上
+  调用 `upgradeKey`，原子保存并同步文件/目录后重试一次。alias、证书链、算法和
+  HAL 归属保持不变，不生成替代密钥；保存失败会保留内存中的新 blob 并阻止操作，
+  后续请求先重试保存。该内存保留不能替代失败写入时的断电保护。
 - 长轮询与 TEE 工作线程分离；任务执行期间仍可继续领取任务，降低批量检测延迟。
 - 修复任务完成早于 waiter 注册、长轮询超时、重复 request ID 和掉线任务回收等队列
   竞态。
-- Server 会校验证明证书链、profile、安全级别和任务归属，避免无效结果静默进入 A 端。
+- Server 校验结果结构、非空证明链字段、profile 字段及任务归属；
+  非空链检查不是证书签名或可信根验证，A 还会执行远程身份与叶证明字段检查。
 - Server 管理后台保留独立的“StrongBox 强健模式”：默认关闭；开启后，仅在 B 端
   StrongBox 返回能力类错误时，才在同一 B 设备上重试 TEE。
+
+远程失败响应保留原有 `error` 文本，并可附带整数 `keymint_error_code`。
+B 端只从真实 HAL 的 service-specific 失败中提取该字段；Server 保持 HTTP 500
+并转发它，A 端将已识别的负值还原为 KeyMint 错误。旧版失败响应、未知代码、HTTP
+鉴权/限流错误仍按通用失败处理，不通过解析错误文本推测硬件错误，也不触发新的
+本地回退。成功响应、证明生成和 StrongBox 能力声明不受该协议变更影响。
 
 Server 强健模式与 A 端控制互不等价：
 
@@ -121,19 +145,36 @@ Server 强健模式与 A 端控制互不等价：
 
 ### 8. 自动构建与版本管理
 
-GitHub Actions 会执行 A/B Android Rust workspace 检查、Server 测试、A/B 模块构建、
-B 端 ELF 动态链接检查、Linux musl Server 构建和 B-app APK 构建，并同步产品版本后
-上传统一 artifact。工作流支持手动指定 `release_version`；本 fork 当前保持
-**1.4.0**。
+GitHub Actions 并行构建 A 模块、B 模块、Linux musl Server 和 Android APK，
+保留 A/B workspace 检查、Server 测试、B ELF 检查，并运行 WebUI、版本同步和
+StrongBoxCapabilityMask 单元测试。Rust 固定到已验证的 `nightly-2026-09-01`，
+A/B/Server 提交 Cargo.lock，按组件缓存 Rust 构建并复用 Gradle 缓存。
+
+当前统一版本为 **1.4.1**。CI 默认使用源码版本，不自动递增或提交版本；
+手动 `release_version` 仅覆盖本次构建。文档单独修改不触发自动构建。
+全部构建成功后生成 `ommega-<版本>` artifact，包含 A/B 模块 ZIP、Server、
+B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
+两个 APK 使用 Android 默认 debug 签名；CI 缓存该调试签名身份供后续构建复用，
+它不是正式发布签名，私钥不随源码或构建产物分发。
 
 ## 系统组成
 
 | 端 | 角色 | 形态 |
 |---|---|---|
 | A 端（`a-side`） | 拦截目标应用 Keystore；远程 TEE；可选 A 端原生 StrongBox | KernelSU/APatch/Magisk 模块，arm64-v8a |
-| B 端（`b-side`） | 调用真实硬件 KeyMint，处理 profile/attest/sign/decrypt | KernelSU/APatch/Magisk 模块，arm64-v8a |
+| B 端（`b-side`） | 调用真实硬件 KeyMint，处理 profile/attest/sign/decrypt/agree | KernelSU/APatch/Magisk 模块，arm64-v8a |
 | B 端 App（`b-app`） | 可选的独立 B 端客户端与连接配置界面 | Android APK |
+| StrongBoxCapabilityMask | 全局隐藏 StrongBox capability；仅加载到 system_server | libxposed API 102 APK |
 | Server（`server`） | 鉴权、任务队列、A/B 调度、设备与后台管理 | Linux x86_64 musl 二进制 |
+
+`remote-only` 表示符合远程生成条件时不允许隐式回退；它不表示所有密钥或方法都在 B 执行。
+软件 TA 仅在有 attestation challenge、未提供调用方 attestation key 且远程已启用时
+进入远程生成；其余生成仍可在 A 完成。远程密钥的签名、解密及协商由 B 执行，
+A 负责本地存储和应用认证检查。B 的请求转换包含 `NO_AUTH_REQUIRED` 和
+`ATTEST_KEY` 转 `SIGN`，因此不能将 A 的用户认证描述为 B 硬件直接验证了 A 的认证令牌。
+
+B-app 当前只分发 `attest/sign/decrypt`，未实现 native B 所需的 `profile/agree`，
+并通过 B-app 自己的 AndroidKeyStore 身份生成密钥；它目前不能替代 native B 完成同一套验收。
 
 ## 快速部署
 
@@ -142,7 +183,8 @@ B 端 ELF 动态链接检查、Linux musl Server 构建和 B-app APK 构建，�
 
 ### B 端
 
-安装 B 模块，在 `/data/adb/ommega/relay.conf` 中填写：
+安装 B 模块后，可在模块 WebUI 的「Relay 配置」中填写以下项目，
+也可直接编辑 `/data/adb/ommega/relay.conf`：
 
 ```ini
 OMMEGA_RELAY_SERVER=https://<server>:8443
@@ -219,7 +261,8 @@ Linux 构件 `relay_rs-linux-x86_64-musl` 为静态链接二进制。更新时�
 | A `config` | 远程连接与全局 StrongBox 策略 | 保存后实时读取 |
 | A `webui-props.sh` / `config.toml [trust]` | Hash、Key、SPL | 实时更新；必要时只重启 Ommega keymint |
 | A `config.toml [main].use_native_strongbox` | StrongBox 后端 | 重启 Ommega keymint，不重启设备 |
-| B `relay.conf` | Server、设备 ID、Token、日志 | relay 热加载 |
+| B `relay.conf` 连接参数 | Server、设备 ID、机器 ID、Token | WebUI 保存后由 relay 热加载 |
+| B `relay.conf` 日志参数 | 文件日志与 logcat 开关、级别 | relay 下次启动时生效 |
 | B `spl.conf` | System/Boot/Vendor SPL | 保存即应用；`service.sh` 再应用 |
 
 ## 构建

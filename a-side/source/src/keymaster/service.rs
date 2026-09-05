@@ -767,7 +767,10 @@ impl IKeymintService for KeystoreService {
         certificate_chain: Option<&[u8]>,
     ) -> Result<(), Status> {
         let _wp = wd::watch("IKeymintService::updateSubcomponent");
-        let ctx = Some(require_ommega_ctx(ctx, "IKeymintService::updateSubcomponent")?);
+        let ctx = Some(require_ommega_ctx(
+            ctx,
+            "IKeymintService::updateSubcomponent",
+        )?);
         self.update_subcomponent(ctx, key, public_cert, certificate_chain)
             .map_err(into_logged_binder)
     }
@@ -824,7 +827,10 @@ impl IKeymintService for KeystoreService {
         namespace: i64,
     ) -> Result<i32, Status> {
         let _wp = wd::watch("IKeymintService::getNumberOfEntries");
-        let ctx = Some(require_ommega_ctx(ctx, "IKeymintService::getNumberOfEntries")?);
+        let ctx = Some(require_ommega_ctx(
+            ctx,
+            "IKeymintService::getNumberOfEntries",
+        )?);
         self.count_num_entries(ctx, domain, namespace)
             .map_err(into_logged_binder)
     }
@@ -837,7 +843,10 @@ impl IKeymintService for KeystoreService {
         start_past_alias: Option<&str>,
     ) -> Result<Vec<KeyDescriptor>, Status> {
         let _wp = wd::watch("IKeymintService::listEntriesBatched");
-        let ctx = Some(require_ommega_ctx(ctx, "IKeymintService::listEntriesBatched")?);
+        let ctx = Some(require_ommega_ctx(
+            ctx,
+            "IKeymintService::listEntriesBatched",
+        )?);
         self.list_entries_batched(ctx, domain, namespace, start_past_alias)
             .map_err(into_logged_binder)
     }

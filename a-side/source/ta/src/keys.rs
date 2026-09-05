@@ -508,15 +508,14 @@ impl crate::KeyMintTa {
         // sign a child cert, `sign_cert_data`/`tbs_certificate` forward the
         // TBS signing back to the relay, which holds the private key.
         //
-        // STRONGBOX requests follow the SAME path as TEE: when a remote
-        // backend is enabled they are forwarded to the relay, which tags the
-        // attestation extension with the forwarded `attestation_security_level`
-        // (= 2); otherwise they fall back to the local software keybox. The
-        // requesting security level only gates which signing key is chosen and
-        // how the attestation extension is tagged. Driving the device's real
-        // `/strongbox` HAL here was tried but failed on devices where that HAL
-        // is declared but not servable from the keystore context (Unknown error
-        // -1000), so it is not wired in.
+        // This software-TA path forwards the requested security level to the
+        // relay and validates the returned hardware identity. The native B
+        // relay selects the corresponding HAL; changing a certificate tag is
+        // not a substitute for using that hardware. A native StrongBox/RKP
+        // backend, when configured, is selected outside this software-TA path.
+        // Without a challenge, or with a caller-supplied attestation key,
+        // generation continues locally. Remote-only does not move those keys
+        // or A-side authorization and storage to B.
         let has_challenge = get_opt_tag_value!(params, AttestationChallenge)?.is_some();
         let remote_enabled = self.dev.remote.as_ref().is_some_and(|r| r.enabled());
         let remote_attest = has_challenge && attestation_key.is_none() && remote_enabled;

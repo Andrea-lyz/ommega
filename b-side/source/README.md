@@ -28,7 +28,9 @@ results carry the same profile so A can reject mixed A/B identities.
 **Android 12 or above required.**
 
 1. Install this module.
-2. Edit `/data/adb/ommega/relay.conf` (first installed from `template/relay.conf`):
+2. Open the module WebUI and fill in **Relay configuration** (server URL, device
+   ID, optional machine ID, token, and file/logcat settings). Editing
+   `/data/adb/ommega/relay.conf` directly is also supported:
 
 ```ini
 OMMEGA_RELAY_SERVER=https://<relay-server>:8443
@@ -48,8 +50,8 @@ OMMEGA_RELAY_LOGCAT_LEVEL=info
 - `OMMEGA_RELAY_MACHINE_ID` — machine id used in the `b/poll` query (optional).
 - `OMMEGA_RELAY_TOKEN` — B-side token sent as `X-Relay-Token` (required).
 - All four logging keys are managed in one place (`relay.conf`) and read at
-  relay startup. Run `sh /data/adb/modules/ommegaclient_b/service.sh` after
-  changing them; this restarts only relay and never reboots the device:
+  relay startup. Saving them does not change the running logger; they take
+  effect on the next approved relay start. The WebUI does not restart services:
   - `OMMEGA_RELAY_LOG_ENABLED` — `true` writes `/data/adb/ommega/logs/relay.log`
     (default), `false` disables the file log.
   - `OMMEGA_RELAY_LOG_LEVEL` — file log level when enabled:
@@ -69,9 +71,27 @@ OMMEGA_RELAY_LOGCAT_LEVEL=info
 touch /data/adb/ommega/restart.all
 ```
 
-## SPL WebUI
+## Relay and SPL WebUI
 
-KernelSU/APatch exposes the bundled `webroot/` UI. It stores optional system,
+The connection and logging form reads all eight keys from the existing file.
+Token is masked by default. Saving validates the fields, preserves comments
+and unknown keys, consolidates duplicate known keys, and atomically replaces
+`relay.conf` with mode `0600`. The previous file is retained at
+`relay.conf.webui.bak`; stale saves are rejected if the file changed since it
+was loaded. Configuration contents are data, never executed as shell code.
+
+Connection edits notify the existing relay watcher via `restart.all`; in-flight
+tasks retain their original connection configuration. Logging edits are marked
+as taking effect on the next relay start. Saving Relay settings does not call
+`service.sh`, change SPL, or restart any process.
+
+Local config parsing and shell-write tests (Node.js plus POSIX sh / Git Bash):
+
+```sh
+node --test scripts/webui.test.mjs
+```
+
+KernelSU/APatch exposes the bundled `webroot/` UI. Its separate SPL section stores optional system,
 boot and vendor SPL overrides in `/data/adb/ommega/spl.conf`. Saving invokes
 `spl-control.sh` immediately; changed properties recycle the native KeyMint
 service and `keystore2`, then wait for the default KeyMint Binder to return.

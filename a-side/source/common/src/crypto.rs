@@ -163,7 +163,7 @@ pub enum KeyMaterial {
     /// ML-DSA asymmetric key.
     MlDsa(MlDsaVariant, OpaqueOr<mldsa::Key>),
     /// Remote TEE key: no local private key material.  The private key lives on
-    /// a B-side real TEE; sign/decrypt are forwarded to it through the relay
+    /// a B-side real TEE; sign/decrypt/key-agreement operations are forwarded through the relay
     /// server.  `alias` identifies the key on the B-side.
     Remote(RemoteRef),
 }

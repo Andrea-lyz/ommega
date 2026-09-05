@@ -3,95 +3,97 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
   <title>Ommega B</title>
   <style>
-    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    * { box-sizing: border-box; }
     body { margin: 0; padding: max(20px, env(safe-area-inset-top)) 18px max(24px, env(safe-area-inset-bottom)); background: #111318; color: #e4e2e9; }
     main { max-width: 720px; margin: auto; }
-    h1 { margin: 8px 0 4px; font-size: 28px; }
-    .sub { color: #c7c4ce; margin: 0 0 20px; }
-    .card { background: #1d1f25; border-radius: 20px; padding: 18px; margin: 14px 0; }
-    label { display: block; margin: 14px 0; font-weight: 600; }
-    input { display: block; box-sizing: border-box; width: 100%; margin-top: 7px; padding: 13px; border: 1px solid #8f9099; border-radius: 12px; background: #111318; color: inherit; font-size: 16px; }
-    .actions { display: flex; gap: 10px; flex-wrap: wrap; }
-    button { border: 0; border-radius: 18px; padding: 12px 18px; background: #d0bcff; color: #381e72; font-weight: 700; font-size: 15px; }
+    header { margin: 8px 0 22px; }
+    h1 { margin: 0 0 6px; font-size: 28px; }
+    h2, summary { margin: 0; font-size: 19px; font-weight: 650; }
+    h3 { margin: 0; font-size: 16px; }
+    p { line-height: 1.55; }
+    .sub, .note { color: #cac4d0; }
+    .sub { margin: 0; }
+    .card { background: #1d1f25; border: 1px solid #30313b; border-radius: 20px; padding: 20px; margin: 14px 0; }
+    .note { margin: 8px 0 0; font-size: 13px; }
+    .field { display: block; margin: 18px 0; font-size: 14px; font-weight: 600; }
+    input:not([type=checkbox]), select { display: block; width: 100%; min-width: 0; margin-top: 8px; padding: 13px; border: 1px solid #797781; border-radius: 12px; background: #111318; color: inherit; font: inherit; font-size: 16px; }
+    input:focus-visible, select:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid #d0bcff; outline-offset: 3px; }
+    input[type=checkbox] { width: 21px; height: 21px; accent-color: #d0bcff; }
+    .row, .actions, .section-heading { display: flex; align-items: center; gap: 10px; }
+    .row input { flex: 1; }
+    .row button { margin-top: 8px; flex-shrink: 0; }
+    .section-heading { justify-content: space-between; }
+    .actions { flex-wrap: wrap; margin-top: 18px; }
+    button { border: 0; border-radius: 14px; padding: 12px 18px; background: #d0bcff; color: #381e72; font-weight: 700; font-size: 14px; cursor: pointer; }
     button.secondary { background: #34323b; color: #e7e0ec; }
-    button:disabled { opacity: .55; }
-    #status { white-space: pre-wrap; overflow-wrap: anywhere; color: #c7c4ce; font-family: ui-monospace, monospace; font-size: 13px; }
-    #message { min-height: 24px; margin-top: 14px; }
+    button:disabled { opacity: .5; cursor: default; }
+    .logging { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    .log-sink { border: 1px solid #393842; border-radius: 14px; padding: 14px; }
+    .toggle { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-weight: 600; font-size: 14px; }
+    .log-sink .field { margin-bottom: 0; }
+    .message { min-height: 22px; margin-top: 12px; font-size: 14px; color: #b9e6c3; overflow-wrap: anywhere; }
     .error { color: #ffb4ab; }
-    .note { color: #cac4d0; font-size: 13px; line-height: 1.5; }
+    .badge { display: inline-block; margin-top: 12px; padding: 5px 10px; border-radius: 20px; background: #34323b; color: #d8d2e0; font-size: 12px; }
+    summary { cursor: pointer; }
+    #status { white-space: pre-wrap; overflow-wrap: anywhere; color: #c7c4ce; font-family: ui-monospace, monospace; font-size: 12px; margin: 16px 0 0; }
+    fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+    @media (max-width: 400px) { .logging { grid-template-columns: 1fr; } .card { padding: 16px; } body { padding-left: 12px; padding-right: 12px; } }
   </style>
 </head>
 <body>
 <main>
-  <h1>Ommega B</h1>
-  <p class="sub">原生 TEE 安全补丁配置</p>
-  <section class="card">
-    <label>System SPL<input id="system" placeholder="2026-08-01；留空恢复自动"></label>
-    <label>Boot SPL<input id="boot" placeholder="2026-08-01；留空恢复自动"></label>
-    <label>Vendor SPL<input id="vendor" placeholder="2026-08-01；留空恢复自动"></label>
-    <div class="actions">
-      <button id="save">保存并立即应用</button>
-      <button id="same" class="secondary">三项使用 System 值</button>
-      <button id="auto" class="secondary">全部恢复自动</button>
-    </div>
-    <div id="message"></div>
-    <p class="note">不会执行设备硬重启。属性变化时只软重载 KeyMint 与 keystore2；Boot SPL 是否被硬件 TEE 接受仍以新生成的证明证书为准。</p>
+  <header>
+    <h1>Ommega B</h1>
+    <p class="sub">远程连接与设备配置</p>
+    <span id="relay-status" class="badge">正在读取 relay 状态…</span>
+  </header>
+  <section class="card" aria-labelledby="relay-title">
+    <div class="section-heading"><h2 id="relay-title">Relay 配置</h2><button id="relay-reload" class="secondary" type="button">重新读取</button></div>
+    <p class="note">连接参数保存后自动加载，正在处理的任务沿用原连接。</p>
+    <form id="relay-form" novalidate autocomplete="off">
+      <fieldset id="relay-fields" disabled>
+        <label class="field" for="relay-server">服务器地址<input id="relay-server" type="url" inputmode="url" placeholder="https://relay.example.com:8443" spellcheck="false" autocapitalize="none" required></label>
+        <label class="field" for="relay-device">设备 ID<input id="relay-device" placeholder="与 Server 注册的设备 ID 一致" spellcheck="false" autocapitalize="none" required></label>
+        <label class="field" for="relay-token">Token</label>
+        <div class="row"><input id="relay-token" type="password" aria-label="Token" placeholder="B 端连接凭据" autocomplete="new-password" spellcheck="false" autocapitalize="none" required><button id="token-toggle" type="button" class="secondary" aria-pressed="false">显示</button></div>
+        <label class="field" for="relay-machine">机器 ID <span class="note">· 可选</span><input id="relay-machine" placeholder="未分配时留空" spellcheck="false" autocapitalize="none"></label>
+        <h3>日志</h3>
+        <p class="note">日志开关和级别在 relay 下次启动时生效。</p>
+        <div class="logging">
+          <div class="log-sink">
+            <label class="toggle" for="file-log-enabled">文件日志<input id="file-log-enabled" type="checkbox"></label>
+            <label class="field" for="file-log-level">记录级别<select id="file-log-level"></select></label>
+          </div>
+          <div class="log-sink">
+            <label class="toggle" for="logcat-enabled">系统日志（logcat）<input id="logcat-enabled" type="checkbox"></label>
+            <label class="field" for="logcat-level">记录级别<select id="logcat-level"></select></label>
+          </div>
+        </div>
+        <div class="actions"><button id="relay-save" type="submit">保存 Relay 配置</button></div>
+      </fieldset>
+    </form>
+    <div id="relay-message" class="message" role="status" aria-live="polite">正在读取配置…</div>
   </section>
-  <section class="card"><div id="status">正在读取…</div></section>
+  <details class="card" id="spl-section">
+    <summary>安全补丁级别（SPL）</summary>
+    <p class="note">单独保存和应用。修改 SPL 可能重载 KeyMint 与 keystore2；留空使用首次记录的基线，已升级的密钥可能仍需要较高 SPL。</p>
+    <label class="field">System SPL<input id="system" placeholder="YYYY-MM-DD"></label>
+    <label class="field">Boot SPL<input id="boot" placeholder="YYYY-MM-DD"></label>
+    <label class="field">Vendor SPL<input id="vendor" placeholder="YYYY-MM-DD"></label>
+    <div class="actions">
+      <button id="save" disabled>保存并应用 SPL</button>
+      <button id="same" class="secondary">三项使用 System 值</button>
+      <button id="auto" class="secondary">清空三项填写</button>
+    </div>
+    <div id="message" class="message" role="status" aria-live="polite"></div>
+    <p class="note">Boot SPL 是否被硬件接受，以新生成的证明证书为准。</p>
+    <div id="status">正在读取…</div>
+  </details>
 </main>
-<script type="module">
-  let seq = 0;
-  function exec(command) {
-    return new Promise(resolve => {
-      const callback = `ommega_b_${Date.now()}_${seq++}`;
-      window[callback] = (errno, stdout, stderr) => {
-        delete window[callback];
-        resolve({errno, stdout, stderr});
-      };
-      try { ksu.exec(command, '{}', callback); }
-      catch (error) { delete window[callback]; resolve({errno: 1, stdout: '', stderr: String(error)}); }
-    });
-  }
-  const moduleDir = '/data/adb/modules/ommegaclient_b';
-  const fields = ['system', 'boot', 'vendor'];
-  const message = document.getElementById('message');
-  const save = document.getElementById('save');
-  const valid = value => value === '' || /^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(value);
-  async function refresh() {
-    const result = await exec(`sh "${moduleDir}/spl-control.sh" status`);
-    document.getElementById('status').textContent = result.stdout || result.stderr || '状态不可用';
-    if (result.errno === 0) {
-      const values = Object.fromEntries(result.stdout.split('\n').map(line => line.split('=', 2)));
-      fields.forEach(name => document.getElementById(name).value = values[`${name.toUpperCase()}_SPL`] || '');
-    }
-  }
-  async function apply() {
-    const values = fields.map(name => document.getElementById(name).value.trim());
-    if (!values.every(valid)) {
-      message.className = 'error';
-      message.textContent = '日期格式必须为 YYYY-MM-DD，或留空恢复自动。';
-      return;
-    }
-    save.disabled = true;
-    message.className = '';
-    message.textContent = '正在保存并软重载服务…';
-    const args = values.map(value => `'${value}'`).join(' ');
-    const result = await exec(`sh "${moduleDir}/spl-control.sh" save ${args}`);
-    message.className = result.errno === 0 ? '' : 'error';
-    message.textContent = result.errno === 0 ? '配置已应用，无需重启设备。' : `应用失败：${result.stderr || result.stdout}`;
-    save.disabled = false;
-    await refresh();
-  }
-  document.getElementById('save').onclick = apply;
-  document.getElementById('same').onclick = () => {
-    const value = document.getElementById('system').value.trim();
-    document.getElementById('boot').value = value;
-    document.getElementById('vendor').value = value;
-  };
-  document.getElementById('auto').onclick = () => fields.forEach(name => document.getElementById(name).value = '');
-  refresh();
-</script>
+<script type="module" src="./app.js"></script>
 </body>
 </html>

@@ -34,6 +34,17 @@ pub struct Task {
 }
 
 impl Task {
+    fn is_agreement(&self) -> bool {
+        self.task_type == "agree"
+            || (self.task_type == "attest"
+                && self
+                    .payload
+                    .get("purpose")
+                    .or_else(|| self.payload.get("device_attest_context")?.get("purpose"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|purposes| purposes.iter().any(|p| p.as_i64() == Some(6))))
+    }
+
     pub fn status_str(&self) -> &'static str {
         match self.status {
             TaskStatus::Pending => "pending",
@@ -407,6 +418,17 @@ impl TaskStore {
             .collect();
         for id in stale {
             if let Some(t) = inner.tasks.get_mut(&id) {
+                // A lost poller does not prove its secure-world call ended.
+                // Never replay an agreement that may still be in flight.
+                if t.is_agreement() {
+                    t.status = TaskStatus::Failed;
+                    t.result = Some(serde_json::json!({
+                        "error": "agreement assignment lost; execution state unknown; not retried"
+                    }));
+                    t.completed_at_ms = now;
+                    inner.failed_queue.push_back((now, id.clone()));
+                    continue;
+                }
                 t.status = TaskStatus::Pending;
                 t.assigned_device_id = None;
                 // Put back into the appropriate bucket.
@@ -721,6 +743,68 @@ mod tests {
             .await;
         assert_eq!(first, second);
         assert_eq!(store.counts().await.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn lost_agreement_is_failed_without_replay_or_fabricated_hal_error() {
+        let store = store();
+        let id = store
+            .create_task("agree", json!({}), "dev", Some("agree-1"))
+            .await;
+        store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
+        {
+            let mut inner = store.inner.lock().await;
+            inner.tasks.get_mut(&id).unwrap().assigned_at_ms = 1;
+            inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
+            TaskStore::reclaim_locked(&mut inner, Duration::ZERO);
+        }
+        let result = store.wait_for_result(&id, Duration::ZERO).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("not retried"));
+        assert!(result.get("keymint_error_code").is_none());
+        assert!(store.pop_for_b("dev", "m1", Duration::ZERO).await.is_none());
+        assert_eq!(
+            store
+                .create_task("agree", json!({}), "dev", Some("agree-1"))
+                .await,
+            id
+        );
+        assert!(store
+            .complete_task(&id, json!({"data": "AQ=="}), "dev")
+            .await
+            .is_err());
+        assert_eq!(store.counts().await.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn lost_agreement_generation_is_not_requeued_but_signing_generation_is() {
+        for (payload, agreement) in [
+            (json!({"purpose": [6]}), true),
+            (json!({"device_attest_context": {"purpose": [6]}}), true),
+            (
+                json!({"purpose": [2], "device_attest_context": {"purpose": [6]}}),
+                false,
+            ),
+        ] {
+            let store = store();
+            let id = store.create_task("attest", payload, "dev", None).await;
+            store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
+            let mut inner = store.inner.lock().await;
+            inner.tasks.get_mut(&id).unwrap().assigned_at_ms = 1;
+            inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
+            TaskStore::reclaim_locked(&mut inner, Duration::ZERO);
+            assert_eq!(
+                inner.tasks[&id].status,
+                if agreement {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Pending
+                }
+            );
+            assert_eq!(
+                inner.pending_by_device.get("dev").map_or(0, |q| q.len()),
+                usize::from(!agreement)
+            );
+        }
     }
 
     #[tokio::test]

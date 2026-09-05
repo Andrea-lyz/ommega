@@ -1,0 +1,46 @@
+name: Android Rust toolchain
+description: Configure the pinned Android NDK and bindgen environment for one workspace
+inputs:
+  workspace:
+    description: Cargo workspace to configure
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install clang libraries
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends clang libclang-dev llvm-dev
+    - name: Install protoc
+      uses: arduino/setup-protoc@v3
+      with:
+        version: "29.3"
+        repo-token: ${{ github.token }}
+    - name: Setup Android NDK
+      uses: nttld/setup-ndk@v1
+      id: ndk
+      with:
+        ndk-version: r28c
+        link-to-sdk: false
+    - name: Configure Android cargo
+      shell: bash
+      env:
+        NDK_PATH: ${{ steps.ndk.outputs.ndk-path }}
+        WORKSPACE: ${{ inputs.workspace }}
+      run: |
+        llvm="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
+        sysroot="$llvm/sysroot"
+        resource_dir="$(find "$llvm/lib/clang" -mindepth 1 -maxdepth 1 -type d | sort | tail -n1)"
+        test -n "$resource_dir"
+        libclang_path="$(llvm-config --libdir)"
+        bindgen="--target=aarch64-linux-android${ANDROID_PLATFORM} --sysroot=$sysroot -resource-dir=$resource_dir -isystem $resource_dir/include -isystem $sysroot/usr/include -isystem $sysroot/usr/include/aarch64-linux-android"
+        {
+          echo "ANDROID_NDK_HOME=$NDK_PATH"
+          echo "ANDROID_NDK_ROOT=$NDK_PATH"
+          echo "ANDROID_NDK=$NDK_PATH"
+          echo "LIBCLANG_PATH=$libclang_path"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=$bindgen"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=$bindgen"
+        } >> "$GITHUB_ENV"
+        python3 "$WORKSPACE/scripts/setup_cargo_config.py" --ndk-root "$NDK_PATH" --api-level "$ANDROID_PLATFORM" --force

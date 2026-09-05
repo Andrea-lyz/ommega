@@ -62,6 +62,20 @@ fn json_err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
+fn keymint_error_code(result: &Value) -> Option<i32> {
+    result.get("error")?.as_str()?;
+    let code = i32::try_from(result.get("keymint_error_code")?.as_i64()?).ok()?;
+    (code < 0).then_some(code)
+}
+
+fn task_error_response(message: &str, code: Option<i32>) -> Response {
+    let mut result = json!({ "error": message });
+    if let Some(code) = code {
+        result["keymint_error_code"] = json!(code);
+    }
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(result)).into_response()
+}
+
 fn auth_fail() -> Response {
     json_err(
         StatusCode::UNAUTHORIZED,
@@ -244,6 +258,16 @@ fn result_shape_valid(task_type: &str, value: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some(),
         "decrypt" => value.get("data").and_then(Value::as_str).is_some(),
+        "agree" => {
+            use base64::Engine as _;
+            value.get("error").is_none()
+                && value
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .filter(|data| data.len() <= 88)
+                    .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+                    .is_some_and(|data| matches!(data.len(), 28 | 32 | 48 | 66))
+        }
         _ => false,
     }
 }
@@ -260,6 +284,10 @@ fn try_keybox_layer_sync(
         "attest" => fulfill.try_handle_attest(device_id, body),
         "sign" => fulfill.try_handle_sign(device_id, body),
         "decrypt" => fulfill.try_handle_decrypt(device_id, body),
+        "agree" => Some(json!({
+            "error": "server_keybox does not hold an EC agreement private key",
+            "keymint_error_code": -100,
+        })),
         _ => None,
     }
 }
@@ -332,6 +360,7 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
     };
 
     let mut last_error: Option<String> = None;
+    let mut last_keymint_error_code = None;
     for &layer in order {
         let result = match layer {
             "b" => try_b_device_layer(state, task_type, body, &device_id).await,
@@ -361,6 +390,7 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
                 return Json(v).into_response();
             }
             Some(v) => {
+                last_keymint_error_code = keymint_error_code(&v);
                 let msg = if v.get("error").is_none() && !result_shape_valid(task_type, &v) {
                     format!("invalid {task_type} result shape")
                 } else {
@@ -416,18 +446,19 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
                 last_error = Some(msg);
             }
             None => {
+                last_keymint_error_code = None;
                 tracing::info!("run_a_side_task: type={task_type} layer={layer} not applicable");
                 last_error = Some(format!("layer {layer} produced no result"));
             }
         }
     }
 
-    json_err(
-        StatusCode::INTERNAL_SERVER_ERROR,
+    task_error_response(
         &format!(
             "all fulfilment layers failed for device {device_id}: {}",
             last_error.unwrap_or_else(|| "unknown".to_string())
         ),
+        last_keymint_error_code,
     )
 }
 
@@ -542,6 +573,17 @@ pub async fn decrypt(
         return r;
     }
     run_a_side_task(&state, "decrypt", &body).await
+}
+
+pub async fn agree(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(r) = check_auth(&state, &headers, Some("a")) {
+        return r;
+    }
+    run_a_side_task(&state, "agree", &body).await
 }
 
 // ---------------------------------------------------------------------------
@@ -793,6 +835,128 @@ pub async fn admin_cancel_task(
 mod tests {
     use super::*;
 
+    fn agreement_state(server_keybox: bool) -> AppState {
+        AppState {
+            cfg: Arc::new(Config {
+                wait_result_timeout_secs: 2,
+                ..Config::default()
+            }),
+            auth: Arc::new(AuthState::new("synthetic-token".into(), 100, 60, true)),
+            store: TaskStore::new(60, 60, 100, 60),
+            fulfill: Fulfill::new(server_keybox, None),
+            db: None,
+            geo: None,
+        }
+    }
+
+    fn agreement_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-relay-token", "synthetic-token".parse().unwrap());
+        headers
+    }
+
+    #[tokio::test]
+    async fn agreement_round_trip_uses_only_requested_b_and_keeps_hal_errors() {
+        use base64::Engine as _;
+        for result in [
+            json!({"data": base64::engine::general_purpose::STANDARD.encode([0; 32])}),
+            json!({"error": "wrong purpose", "keymint_error_code": -3}),
+            json!({"error": "wrong curve", "keymint_error_code": -38}),
+        ] {
+            let state = agreement_state(false);
+            state
+                .store
+                .pop_for_b("synthetic-b", "mock", Duration::ZERO)
+                .await;
+            let body = json!({"device_id": "synthetic-b", "alias": "key", "request_id": "agree-1", "peer_public_key": "synthetic-spki"});
+            let worker = async {
+                let task = state
+                    .store
+                    .pop_for_b("synthetic-b", "mock", Duration::from_secs(1))
+                    .await
+                    .unwrap();
+                assert_eq!(task.task_type, "agree");
+                assert_eq!(task.payload, body);
+                state
+                    .store
+                    .complete_task(&task.task_id, result.clone(), "synthetic-b")
+                    .await
+                    .unwrap();
+            };
+            let (response, ()) = tokio::join!(
+                agree(
+                    State(state.clone()),
+                    agreement_headers(),
+                    Json(body.clone())
+                ),
+                worker
+            );
+            assert_eq!(
+                response.status(),
+                if result.get("error").is_some() {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::OK
+                }
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            if let Some(code) = result.get("keymint_error_code") {
+                assert_eq!(&response["keymint_error_code"], code);
+            } else {
+                assert_eq!(response["data"], result["data"]);
+            }
+            assert_eq!(state.store.counts().await.pending, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn agreement_keybox_and_auth_failure_never_enqueue_b_work() {
+        let state = agreement_state(true);
+        let body = json!({"device_id": "synthetic-b", "alias": "key", "peer_public_key": "synthetic-spki"});
+        let denied = agree(State(state.clone()), HeaderMap::new(), Json(body.clone())).await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let response = agree(State(state.clone()), agreement_headers(), Json(body)).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["keymint_error_code"], -100);
+        assert!(state.store.list_tasks(10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hal_failure_keeps_http_status_and_numeric_code() {
+        let result = json!({ "error": "finish rejected", "keymint_error_code": -30 });
+        let response = task_error_response("task failed", keymint_error_code(&result));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            json!({ "error": "task failed", "keymint_error_code": -30 })
+        );
+    }
+
+    #[test]
+    fn legacy_and_malformed_results_have_no_numeric_hal_code() {
+        for result in [
+            json!({ "error": "legacy [km_error=-30]" }),
+            json!({ "signature": "AQ==", "keymint_error_code": -30 }),
+            json!({ "error": "bad", "keymint_error_code": 0 }),
+            json!({ "error": "bad", "keymint_error_code": 1 }),
+            json!({ "error": "bad", "keymint_error_code": "-30" }),
+            json!({ "error": "bad", "keymint_error_code": -2147483649_i64 }),
+        ] {
+            assert!(keymint_error_code(&result).is_none());
+        }
+    }
+
     #[test]
     fn validates_remote_profile_result_shape() {
         assert!(result_shape_valid(
@@ -849,6 +1013,34 @@ mod tests {
         profile["keymint_author"] = json!("");
         profile["keymint_name"] = json!("   ");
         assert!(!result_shape_valid("profile", &profile));
+    }
+
+    #[test]
+    fn validates_agree_result_shape_without_confusing_errors_for_success() {
+        use base64::Engine as _;
+        for size in [28, 32, 48, 66] {
+            assert!(result_shape_valid(
+                "agree",
+                &json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(vec![0; size])
+                })
+            ));
+        }
+        for data in ["", "AQID", "?"] {
+            assert!(!result_shape_valid("agree", &json!({"data": data})));
+        }
+        assert!(!result_shape_valid(
+            "agree",
+            &json!({
+                "data": base64::engine::general_purpose::STANDARD.encode([0; 32]),
+                "error": "failed", "keymint_error_code": -38
+            })
+        ));
+        assert!(!result_shape_valid(
+            "agree",
+            &json!({ "signature": "AQID" })
+        ));
+        assert!(!result_shape_valid("agree", &json!({ "data": 7 })));
     }
 
     #[test]

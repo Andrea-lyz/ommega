@@ -4120,13 +4120,14 @@ mod tests {
             ..Default::default()
         };
         let password = Password::from(&b"fixed synthetic password"[..]);
-        let super_key = SuperKeyManager::extract_super_key_from_key_entry_with_ommega_compatibility(
-            SuperEncryptionAlgorithm::Aes256Gcm,
-            entry,
-            &password,
-            None,
-        )
-        .unwrap();
+        let super_key =
+            SuperKeyManager::extract_super_key_from_key_entry_with_ommega_compatibility(
+                SuperEncryptionAlgorithm::Aes256Gcm,
+                entry,
+                &password,
+                None,
+            )
+            .unwrap();
 
         let (ciphertext, iv, tag) = aes_gcm_encrypt(b"probe", &[0x42; 32]).unwrap();
         assert_eq!(

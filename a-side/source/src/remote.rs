@@ -74,6 +74,78 @@ fn new_request_id(kind: &str) -> String {
     format!("{kind}-{:x}-{now:x}-{counter:x}", std::process::id())
 }
 
+#[derive(Debug)]
+struct RelayKeyMintError {
+    code: kmr_wire::keymint::ErrorCode,
+    message: String,
+}
+
+impl std::fmt::Display for RelayKeyMintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (KeyMint {})", self.message, self.code as i32)
+    }
+}
+
+impl std::error::Error for RelayKeyMintError {}
+
+fn relay_business_error(response: &Value) -> Option<RelayKeyMintError> {
+    let result = response.get("result").unwrap_or(response);
+    let error = result.get("error")?;
+    let message = error.as_str();
+    let code = result
+        .get("keymint_error_code")
+        .filter(|_| message.is_some())
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .filter(|code| *code < 0)
+        .and_then(|code| kmr_wire::keymint::ErrorCode::try_from(code).ok())
+        .unwrap_or(kmr_wire::keymint::ErrorCode::UnknownError);
+    Some(RelayKeyMintError {
+        code,
+        message: message.unwrap_or("invalid relay error").to_string(),
+    })
+}
+
+fn decode_relay_response(path: &str, status: u16, body: &[u8]) -> Result<Value> {
+    if !(200..300).contains(&status) {
+        // The server reports HAL failures using HTTP 500. Authentication,
+        // rate-limit and transport failures must not become HAL errors.
+        if status == 500 {
+            if let Ok(response) = serde_json::from_slice::<Value>(body) {
+                if let Some(error) = relay_business_error(&response) {
+                    return Err(
+                        anyhow::Error::new(error).context(format!("remote {path} HTTP {status}"))
+                    );
+                }
+            }
+        }
+        return Err(anyhow!(
+            "remote {path} HTTP {status}: {}",
+            String::from_utf8_lossy(body)
+                .chars()
+                .take(256)
+                .collect::<String>()
+        ));
+    }
+    if body.is_empty() {
+        return Err(anyhow!("remote {path} returned an empty success response"));
+    }
+    let response = serde_json::from_slice(body)
+        .map_err(|e| anyhow!("relay returned malformed JSON (status {status}): {e}"))?;
+    if let Some(error) = relay_business_error(&response) {
+        return Err(anyhow::Error::new(error).context(format!("remote {path}")));
+    }
+    Ok(response)
+}
+
+fn remote_operation_error(error: anyhow::Error, operation: &str) -> kmr_common::Error {
+    let code = error
+        .downcast_ref::<RelayKeyMintError>()
+        .map(|failure| failure.code)
+        .unwrap_or(kmr_wire::keymint::ErrorCode::UnknownError);
+    kmr_common::km_verr!(code, "remote {operation}: {error:#}")
+}
+
 // ── reqwest client management ──────────────────────────────────────────
 
 /// Returns a reqwest blocking client configured for the current `tls_insecure`
@@ -214,23 +286,11 @@ impl RemoteRelay {
                 }
             }
         };
-        if !(200..300).contains(&status) {
-            let message = String::from_utf8_lossy(&resp);
-            return Err(anyhow!(
-                "remote {path} HTTP {status}: {}",
-                message.chars().take(256).collect::<String>()
-            ));
-        }
-        if resp.is_empty() {
-            return Err(anyhow!("remote {path} returned an empty success response"));
-        }
         // A 2xx response that is not JSON is a server/protocol error, not
         // "remote unavailable" — surface it loudly instead of silently falling
         // back to the local software keybox (which would emit a self-signed
         // chain and hide the real failure).
-        serde_json::from_slice(&resp)
-            .map(Some)
-            .map_err(|e| anyhow!("relay returned malformed JSON (status {status}): {e}"))
+        decode_relay_response(path, status, &resp).map(Some)
     }
 
     fn fetch_identity_profile() -> Result<RemoteIdentityProfile> {
@@ -463,6 +523,17 @@ impl RemoteRelay {
         });
         Self::post_json("/api/decrypt/", &body)
     }
+
+    /// Forward an EC key-agreement request for a remote key.
+    pub fn agree_key(alias: &str, peer_public_key: &[u8]) -> Result<Option<Value>> {
+        let body = json!({
+            "request_id": new_request_id("agree"),
+            "alias": alias,
+            "peer_public_key": base64_encode(peer_public_key),
+            "device_id": Self::device_id()?,
+        });
+        Self::post_json("/api/agree/", &body)
+    }
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -647,21 +718,14 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
                 "remote identity does not provide StrongBox"
             ));
         }
-        let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial).map_err(
-            |e| kmr_common::km_err!(UnknownError, "remote attest protocol error: {e:#}"),
-        )?;
+        let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial)
+            .map_err(|e| remote_operation_error(e, "attest"))?;
         let Some(resp) = resp else {
             log::warn!("remote relay unavailable after transport retry");
             return Ok(None);
         };
         // The relay wraps the result as `{ result: { cert_chain: [...] } }`.
         let result = resp.get("result").cloned().unwrap_or(resp);
-        if let Some(error) = result.get("error").and_then(Value::as_str) {
-            return Err(kmr_common::km_err!(
-                UnknownError,
-                "remote attest failed: {error}"
-            ));
-        }
         let effective_security_level = parse_strongbox_demotion(&result, params.security_level)?;
         if let Some(result_profile) = result.get("remote_profile") {
             let observed = parse_identity_profile(result_profile).map_err(|error| {
@@ -731,7 +795,7 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         algorithm: &str,
     ) -> Result<Option<Vec<u8>>, kmr_common::Error> {
         let Some(resp) = RemoteRelay::sign(alias, data, algorithm)
-            .map_err(|e| kmr_common::km_err!(UnknownError, "remote sign: {e:#}"))?
+            .map_err(|e| remote_operation_error(e, "sign"))?
         else {
             return Ok(None);
         };
@@ -756,7 +820,7 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         algorithm: &str,
     ) -> Result<Option<Vec<u8>>, kmr_common::Error> {
         let Some(resp) = RemoteRelay::decrypt(alias, data, algorithm)
-            .map_err(|e| kmr_common::km_err!(UnknownError, "remote decrypt: {e:#}"))?
+            .map_err(|e| remote_operation_error(e, "decrypt"))?
         else {
             return Ok(None);
         };
@@ -768,6 +832,28 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
             .decode(plain_b64)
             .map_err(|e| kmr_common::km_err!(UnknownError, "bad remote decrypt base64: {e}"))?;
         Ok(Some(plain))
+    }
+
+    fn agree_key(
+        &self,
+        alias: &str,
+        peer_public_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, kmr_common::Error> {
+        let Some(resp) = RemoteRelay::agree_key(alias, peer_public_key)
+            .map_err(|e| remote_operation_error(e, "agree"))?
+        else {
+            return Ok(None);
+        };
+        let result = resp.get("result").cloned().unwrap_or(resp);
+        let secret_b64 = result.get("data").and_then(Value::as_str).ok_or_else(|| {
+            kmr_common::km_err!(UnknownError, "remote key-agreement response missing data")
+        })?;
+        let secret = base64::engine::general_purpose::STANDARD
+            .decode(secret_b64)
+            .map_err(|e| {
+                kmr_common::km_err!(UnknownError, "bad remote key-agreement base64: {e}")
+            })?;
+        Ok(Some(secret))
     }
 
     fn enabled(&self) -> bool {
@@ -786,6 +872,97 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
 mod tests {
     use super::*;
     use kmr_wire::keymint::SecurityLevel;
+
+    fn response_error_code(
+        path: &str,
+        operation: &str,
+        status: u16,
+        body: &Value,
+    ) -> kmr_wire::keymint::ErrorCode {
+        let error =
+            decode_relay_response(path, status, &serde_json::to_vec(body).unwrap()).unwrap_err();
+        match remote_operation_error(error, operation).kind() {
+            kmr_common::ErrorKind::Hal(code, _) => *code,
+            kind => panic!("unexpected error kind: {kind:?}"),
+        }
+    }
+
+    #[test]
+    fn structured_hal_errors_survive_http_and_contexts() {
+        for code in [-3, -26, -30, -62, -66, -68, -74, -78] {
+            let failure = json!({ "error": "HAL rejected operation", "keymint_error_code": code });
+            for status in [200, 500] {
+                for body in [&failure, &json!({ "result": failure })] {
+                    assert_eq!(
+                        response_error_code("/api/sign/", "sign", status, body) as i32,
+                        code
+                    );
+                }
+            }
+        }
+
+        let unsupported = json!({
+            "error": "server_keybox does not support agreement",
+            "keymint_error_code": -100,
+        });
+        assert_eq!(
+            response_error_code("/api/agree/", "agree", 500, &unsupported),
+            kmr_wire::keymint::ErrorCode::Unimplemented
+        );
+        let old_server = remote_operation_error(
+            decode_relay_response("/api/agree/", 404, b"not found").unwrap_err(),
+            "agree",
+        );
+        assert!(matches!(
+            old_server.kind(),
+            kmr_common::ErrorKind::Hal(kmr_wire::keymint::ErrorCode::UnknownError, _)
+        ));
+    }
+
+    #[test]
+    fn legacy_malformed_and_non_hal_failures_remain_unknown() {
+        use kmr_wire::keymint::ErrorCode;
+        for body in [
+            json!({ "error": "legacy [km_error=-30]" }),
+            json!({ "error": "invalid", "keymint_error_code": 0 }),
+            json!({ "error": "invalid", "keymint_error_code": 1 }),
+            json!({ "error": "invalid", "keymint_error_code": -999999 }),
+            json!({ "error": "invalid", "keymint_error_code": "-30" }),
+            json!({ "error": "invalid", "keymint_error_code": -2147483649_i64 }),
+            json!({ "error": null, "keymint_error_code": -30 }),
+        ] {
+            assert_eq!(
+                response_error_code("/api/sign/", "sign", 500, &body),
+                ErrorCode::UnknownError
+            );
+        }
+        let body = json!({ "error": "access denied", "keymint_error_code": -30 });
+        for status in [401, 403, 429, 502, 503] {
+            assert_eq!(
+                response_error_code("/api/sign/", "sign", status, &body),
+                ErrorCode::UnknownError
+            );
+        }
+        for body in [b"".as_slice(), b"not JSON"] {
+            assert!(decode_relay_response("/api/sign/", 200, body).is_err());
+        }
+    }
+
+    #[test]
+    fn successful_relay_payloads_are_unchanged() {
+        for body in [
+            json!({ "signature": "AQID" }),
+            json!({ "data": "" }),
+            json!({ "cert_chain": ["leaf", "issuer"] }),
+            json!({ "result": { "signature": "AQID" } }),
+        ] {
+            assert_eq!(
+                decode_relay_response("/api/sign/", 200, &serde_json::to_vec(&body).unwrap())
+                    .unwrap(),
+                body
+            );
+        }
+    }
 
     #[test]
     fn parses_coherent_remote_keymint_profile() {

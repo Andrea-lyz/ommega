@@ -253,6 +253,11 @@ pub trait RemoteBackend: Send {
     /// `None` if the remote is unavailable.
     fn decrypt(&self, alias: &str, data: &[u8], algorithm: &str) -> Result<Option<Vec<u8>>, Error>;
 
+    /// Forward an EC key-agreement request for a remote key. `peer_public_key`
+    /// is a DER SubjectPublicKeyInfo, and the returned bytes are the raw shared
+    /// secret produced by the B-side KeyMint HAL.
+    fn agree_key(&self, alias: &str, peer_public_key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
+
     /// Indicate whether the remote backend is currently enabled.
     fn enabled(&self) -> bool;
 

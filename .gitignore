@@ -1,6 +1,12 @@
 # ===== 重复打包副本 / 内部知识库 =====
 ommega-三端全量-20260822-v3/
 .qoder/
+/artifacts/
+/.serena/
+/todo.md
+/AGENTS.md
+/.tmp*/
+**/.webui-test-*/
 
 # ===== 根目录本地运维脚本 =====
 /pull_b_log.sh

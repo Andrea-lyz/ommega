@@ -361,7 +361,12 @@ pub(crate) fn validate_remote_attestation(
     let extension = extensions
         .iter()
         .find(|extension| extension.extn_id == X509_ATTESTATION_EXTENSION_OID)
-        .ok_or_else(|| km_err!(UnknownError, "remote certificate has no attestation extension"))?;
+        .ok_or_else(|| {
+            km_err!(
+                UnknownError,
+                "remote certificate has no attestation extension"
+            )
+        })?;
     let attestation = AttestationExtension::from_der(extension.extn_value.as_bytes())
         .map_err(|e| km_err!(UnknownError, "parse remote attestation extension: {e:?}"))?;
 

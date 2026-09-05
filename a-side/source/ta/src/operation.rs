@@ -63,6 +63,13 @@ pub(crate) enum CryptoOperation {
         algorithm: String,
         data: Vec<u8>,
     },
+    /// Remote (B-side TEE) EC key-agreement operation. The peer public key is
+    /// accumulated as DER SubjectPublicKeyInfo and forwarded at `finish`.
+    RemoteAgree {
+        alias: String,
+        peer_public_key: Vec<u8>,
+        secret_size: usize,
+    },
 }
 
 /// Current state of an operation.
@@ -97,6 +104,9 @@ impl Operation {
     /// realistic challenge / TBS / ciphertext while preventing unbounded
     /// growth from an abusive client.
     const REMOTE_OP_MAX_INPUT: usize = 1 << 20;
+    /// Maximum DER SubjectPublicKeyInfo size accepted by the local EC
+    /// implementation, including P-521. Keep the remote path equivalent.
+    const REMOTE_AGREE_MAX_INPUT: usize = 164;
 
     /// Check whether `len` additional bytes of data can be accommodated by the `Operation`.
     fn check_size(&mut self, len: usize) -> Result<(), Error> {
@@ -111,6 +121,7 @@ impl Operation {
             CryptoOperation::RemoteSign { .. } | CryptoOperation::RemoteDecrypt { .. } => {
                 Some(Self::REMOTE_OP_MAX_INPUT)
             }
+            CryptoOperation::RemoteAgree { .. } => Some(Self::REMOTE_AGREE_MAX_INPUT),
             _ => None,
         };
         if let Some(max_size) = max_size {
@@ -123,6 +134,40 @@ impl Operation {
         }
         Ok(())
     }
+}
+
+fn append_remote_agree_input(buffer: &mut Vec<u8>, input: &[u8]) -> Result<(), Error> {
+    if buffer.len().saturating_add(input.len()) > Operation::REMOTE_AGREE_MAX_INPUT {
+        return Err(km_err!(
+            InvalidInputLength,
+            "remote key-agreement peer SPKI too large"
+        ));
+    }
+    buffer.try_extend_from_slice(input).map_err(|_| {
+        km_err!(
+            MemoryAllocationFailed,
+            "remote key-agreement buffer overflow"
+        )
+    })
+}
+
+fn complete_remote_agreement(
+    peer_public_key: &[u8],
+    secret_size: usize,
+    agree: impl FnOnce(&[u8]) -> Result<Option<Vec<u8>>, Error>,
+) -> Result<Vec<u8>, Error> {
+    if peer_public_key.is_empty() {
+        return Err(km_err!(InvalidArgument, "empty agreement peer SPKI"));
+    }
+    let secret = agree(peer_public_key)?
+        .ok_or_else(|| km_err!(UnknownError, "remote key agreement unavailable"))?;
+    if secret.len() != secret_size {
+        return Err(km_err!(
+            UnknownError,
+            "remote agreement returned an invalid secret length"
+        ));
+    }
+    Ok(secret)
 }
 
 /// Newtype for operation handles.
@@ -283,6 +328,12 @@ impl crate::KeyMintTa {
                 }
                 CryptoOperation::RemoteDecrypt { data: buf, .. } => {
                     buf.try_extend_from_slice(data)?;
+                    Ok(Vec::new())
+                }
+                CryptoOperation::RemoteAgree {
+                    peer_public_key, ..
+                } => {
+                    append_remote_agree_input(peer_public_key, data)?;
                     Ok(Vec::new())
                 }
             }
@@ -461,6 +512,27 @@ impl crate::KeyMintTa {
                 remote
                     .decrypt(&alias, &data, &algorithm)?
                     .ok_or_else(|| km_err!(UnknownError, "remote decrypt failed"))
+            }
+            CryptoOperation::RemoteAgree {
+                alias,
+                mut peer_public_key,
+                secret_size,
+            } => {
+                if let Some(input) = finish_data {
+                    append_remote_agree_input(&mut peer_public_key, input)?;
+                }
+                let remote = self.dev.remote.as_ref().ok_or_else(|| {
+                    km_err!(
+                        UnknownError,
+                        "remote key used but no remote backend configured"
+                    )
+                })?;
+                if !remote.enabled() {
+                    return Err(km_err!(UnknownError, "remote backend disabled"));
+                }
+                complete_remote_agreement(&peer_public_key, secret_size, |peer| {
+                    remote.agree_key(&alias, peer)
+                })
             }
         };
         if result.is_ok() {
@@ -709,5 +781,69 @@ impl crate::KeyMintTa {
         } else {
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kmr_common::ErrorKind;
+    use kmr_wire::keymint::ErrorCode;
+
+    #[test]
+    fn remote_agree_input_limit_matches_local_spki_limit() {
+        let mut input = Vec::new();
+        append_remote_agree_input(&mut input, &[0; 80]).unwrap();
+        append_remote_agree_input(&mut input, &[0; 84]).unwrap();
+        assert_eq!(input.len(), Operation::REMOTE_AGREE_MAX_INPUT);
+
+        let error = append_remote_agree_input(&mut input, &[0]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::Hal(ErrorCode::InvalidInputLength, _)
+        ));
+        assert_eq!(input.len(), Operation::REMOTE_AGREE_MAX_INPUT);
+    }
+
+    #[test]
+    fn agreement_chunks_reach_remote_once_and_raw_secret_is_preserved() {
+        let mut input = Vec::new();
+        append_remote_agree_input(&mut input, b"first").unwrap();
+        append_remote_agree_input(&mut input, b"last").unwrap();
+        for size in [28, 32, 48, 66] {
+            let mut expected = vec![0xa5; size];
+            expected[0] = 0; // Preserve leading zero bytes, no KDF or integer encoding.
+            let actual = complete_remote_agreement(&input, size, |peer| {
+                assert_eq!(peer, b"firstlast");
+                Ok(Some(expected.clone()))
+            })
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn agreement_failure_never_becomes_software_success() {
+        let empty =
+            complete_remote_agreement(&[], 32, |_| panic!("must reject before relay")).unwrap_err();
+        assert!(matches!(
+            empty.kind(),
+            ErrorKind::Hal(ErrorCode::InvalidArgument, _)
+        ));
+        for data in [None, Some(vec![]), Some(vec![1; 31]), Some(vec![1; 48])] {
+            let error = complete_remote_agreement(b"peer", 32, |_| Ok(data)).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                ErrorKind::Hal(ErrorCode::UnknownError, _)
+            ));
+        }
+        let error = complete_remote_agreement(b"peer", 32, |_| {
+            Err(km_err!(IncompatiblePurpose, "mock HAL purpose rejection"))
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::Hal(ErrorCode::IncompatiblePurpose, _)
+        ));
     }
 }

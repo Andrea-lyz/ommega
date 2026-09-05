@@ -125,7 +125,7 @@ def build_binary(
     build_type = "release" if release else "debug"
     print(f"Building {bin_name} for {abi} ({target}, {build_type})...")
 
-    cmd = ["cargo", "build", "--target", target]
+    cmd = ["cargo", "build", "--locked", "--target", target]
     if package:
         cmd.extend(["-p", package, "--bin", bin_name])
     else:
