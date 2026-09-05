@@ -16,6 +16,14 @@ android {
             "io.github.andrealyz.strongboxcapabilitymask.FeatureProbeInstrumentation"
     }
 
+    signingConfigs {
+        getByName("debug") {
+            providers.gradleProperty("ciDebugKeystore").orNull?.let {
+                storeFile = file(it)
+            }
+        }
+    }
+
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")

@@ -210,7 +210,8 @@ jobs:
         working-directory: StrongBoxCapabilityMask
         run: |
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleRelease --build-cache --parallel --no-daemon
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --build-cache --parallel --no-daemon \
+            "-PciDebugKeystore=$HOME/.android/debug.keystore"
       - name: Verify and collect APKs
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -218,8 +219,17 @@ jobs:
           mkdir -p dist
           cp b-app/source/app/build/outputs/apk/release/app-release.apk "dist/Ommega-B-app-${RELEASE_VERSION}-debug-signed.apk"
           cp StrongBoxCapabilityMask/app/build/outputs/apk/release/app-release.apk "dist/StrongBoxCapabilityMask-${RELEASE_VERSION}-debug-signed.apk"
+          expected_digest=
           for apk in dist/*.apk; do
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk"
+            certificate=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk")
+            printf '%s\n' "$certificate"
+            digest=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<<"$certificate")
+            test -n "$digest"
+            if [ -n "$expected_digest" ] && [ "$digest" != "$expected_digest" ]; then
+              echo "APK debug signing identities do not match the shared CI configuration" >&2
+              exit 1
+            fi
+            expected_digest=$digest
           done
       - uses: actions/upload-artifact@v4
         with:
