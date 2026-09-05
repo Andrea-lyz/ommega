@@ -86,8 +86,9 @@ jobs:
       - name: Check Android workspace
         working-directory: ${{ matrix.component }}-side/source
         run: |
-          cargo fmt --all -- --check
+          # build.rs generates src/proto.rs on a clean checkout before rustfmt traverses it.
           cargo clippy --locked --target aarch64-linux-android --workspace --all-targets -- -D warnings
+          cargo fmt --all -- --check
           cargo test --locked --target aarch64-linux-android --workspace --no-run
       - name: Build Android module
         working-directory: ${{ matrix.component }}-side/source
