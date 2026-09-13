@@ -10,7 +10,7 @@ Minimal libxposed API 102 module that runs only in `system_server` and removes
 `android.hardware.strongbox_keystore` from Android's global `SystemConfig`
 feature map.
 
-The module does not load into application processes. Version 1.4.1 is
+The module does not load into application processes. Version 1.4.2 is
 intentionally global; package-specific filtering is not implemented.
 
 ## Why this hook point
@@ -39,7 +39,7 @@ Set `ANDROID_HOME` or create `local.properties`, then run:
 ```
 
 The Ommega root CI also runs `:app:testDebugUnitTest :app:assembleRelease` and
-bundles `StrongBoxCapabilityMask-1.4.1-debug-signed.apk` with A/B/Server artifacts.
+bundles `StrongBoxCapabilityMask-1.4.2-debug-signed.apk` with A/B/Server artifacts.
 The Release build uses the standard Android debug signing configuration.
 This module shares the product version; its runtime feature-mask behavior stays global.
 

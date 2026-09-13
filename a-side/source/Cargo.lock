@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "ommega"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "ommega-injector"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "android_logger",
  "anyhow",

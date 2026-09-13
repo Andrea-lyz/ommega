@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > Community fork of [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega),
-> not an official upstream release or hosted service. Source version: **1.4.1**.
+> not an official upstream release or hosted service. Source version: **1.4.2**.
 > Module authors: `jiyin004, Andrea-lyz`.
 
 Ommega connects A, Server and B for remote KeyMint operations. A intercepts Android
@@ -68,7 +68,7 @@ Android 16's application feature cache motivates this early hook; see
 Following AOSP is an implementation prerequisite, not certification or a guarantee
 for every AOSP-based ROM. Only the A firmware above has device evidence.
 
-1. Install `StrongBoxCapabilityMask-1.4.1-debug-signed.apk` on A.
+1. Install `StrongBoxCapabilityMask-1.4.2-debug-signed.apk` on A.
 2. Enable it in an LSPosed implementation supporting libxposed API 102; keep the
    static scope at `system` (System Framework) only, without application scopes.
 3. Reboot and unlock A where normal reboot is permitted, rebuilding the feature
@@ -186,7 +186,7 @@ This differs from A's native backend, disable switch, per-app policies and Mask.
 CI builds A, B, Linux musl Server and APKs in parallel, with A/B workspace, Server,
 B ELF, WebUI, version-sync and Mask unit checks. Rust is pinned to
 `nightly-2026-09-01`, with committed Cargo.lock and component Rust/Gradle caches.
-Version is **1.4.1**, with no automatic bump commits; manual `release_version`
+Version is **1.4.2**, with no automatic bump commits; manual `release_version`
 only overrides that build. Currently only Markdown-only changes are ignored; TXT
 changes trigger CI. Artifacts include both ZIPs, Server, B-app, Mask,
 `SHA256SUMS` and `build-info.json`. Both APKs use a cached Android debug signing
@@ -265,6 +265,7 @@ Complete distributions: [Build workflow](https://github.com/Andrea-lyz/ommega/ac
 
 ## Validation limits
 
+1.4.2 aligns the A-side client-facing operation contract with AOSP: overlapping calls on the same operation return `OPERATION_BUSY` at the injector boundary instead of depending on backend queueing. Verified on A on 2026-09-13; B is unchanged.
 The first six batches covered remote profile, attestation/signing/decryption,
 P-256/P-384/P-521/X25519 agreement and authentication keys across A reboot.
 NoPadding/SHA-224/NONE/OAEP MGF had targeted tests, not exhaustive algorithm coverage.

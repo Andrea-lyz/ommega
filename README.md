@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
-> 不是上游官方发行版或官方在线服务。当前源码版本为 **1.4.1**，模块作者信息为
+> 不是上游官方发行版或官方在线服务。当前源码版本为 **1.4.2**，模块作者信息为
 > `jiyin004, Andrea-lyz`。
 
 Ommega 是一套 A/B/Server 三端远程 KeyMint 系统：A 端拦截指定应用的 Android
@@ -33,7 +33,7 @@ Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬
 
 Mask 历史验证环境为 LSPosed 2.2.0 / libxposed API 102。A/B 模块在 root 环境运行，
 上述结果不能推广为所有 root 管理器、ROM 或机型的兼容承诺。Server 为 Linux x86_64，
-使用 physical 模式；1.4.1 CI 提供 musl 构件。
+使用 physical 模式；1.4.2 CI 提供 musl 构件。
 
 远程验收配置：A `remote=true`、`local_hw=false`、`disable_native_strongbox=true`、
 `use_native_strongbox=false`，目标应用使用 GlobalDefault，并启用 Mask。
@@ -64,7 +64,7 @@ A 安装器的最低门槛是 API 29，Mask 的 `minSdk` 也是 29；这只代�
 
 使用步骤：
 
-1. 在 A 安装 `StrongBoxCapabilityMask-1.4.1-debug-signed.apk`。
+1. 在 A 安装 `StrongBoxCapabilityMask-1.4.2-debug-signed.apk`。
 2. 在兼容 libxposed API 102 的 LSPosed 实现中启用，保持静态作用域仅 `system`（系统框架），不要勾选应用。
 3. 在允许正常重启的 A 上重启并解锁，让系统功能表及进程缓存重新建立；仅划掉应用不能启用/撤销此 hook。
 4. 检查 `pm has-feature android.hardware.strongbox_keystore` 为 false、原有 `app_attest_key` 仍为 true，
@@ -223,7 +223,7 @@ GitHub Actions 并行构建 A 模块、B 模块、Linux musl Server 和 Android 
 StrongBoxCapabilityMask 单元测试。Rust 固定到已验证的 `nightly-2026-09-01`，
 A/B/Server 提交 Cargo.lock，按组件缓存 Rust 构建并复用 Gradle 缓存。
 
-当前统一版本为 **1.4.1**。CI 默认使用源码版本，不自动递增或提交版本；
+当前统一版本为 **1.4.2**。CI 默认使用源码版本，不自动递增或提交版本；
 手动 `release_version` 仅覆盖本次构建。当前工作流只忽略纯 `*.md` 修改；TXT 修改仍会触发构建。
 全部构建成功后生成 `ommega-<版本>` artifact，包含 A/B 模块 ZIP、Server、
 B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
@@ -378,6 +378,7 @@ cd StrongBoxCapabilityMask
 
 ## 验证范围与限制
 
+1.4.2 在 1.4.1 基础上把 A 端并发操作契约对齐 AOSP：同一 operation 的重叠调用在注入器边界返回 `OPERATION_BUSY`，不再依赖后端排队结果；A 端已实机复验通过（2026-09-13），B 端未改动。
 1.4.1 源码对应的前六批工作已覆盖远程 profile、证明/签名/解密、
 P-256/P-384/P-521/X25519 协商，以及 A 重启前后的认证密钥生命周期。
 NoPadding、SHA-224、NONE、OAEP MGF 修复有定向验证，不代表所有算法参数组合都支持。

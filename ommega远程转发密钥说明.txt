@@ -1,5 +1,5 @@
 ============================================================
-Ommega 1.4.1 远程 KeyMint 使用说明（Andrea-lyz Fork）
+Ommega 1.4.2 远程 KeyMint 使用说明（Andrea-lyz Fork）
 ============================================================
 
 中文 README：README.md
@@ -19,7 +19,7 @@ A：一加 13 / PJZ110，Android 16 / API 36 / arm64-v8a；
    PJZ110_16.0.10.501(CN01)，ColorOS 属性 ro.build.version.oplusrom=V16.1.0。
 B：一加 11 / PHB110，Android 16 / API 36 / arm64-v8a；
    PHB110_16.0.2.400(CN01)，ColorOS 属性 ro.build.version.oplusrom=V16.0.0。
-Server：Linux x86_64，physical 模式，1.4.1 CI 分发 musl 二进制。
+Server：Linux x86_64，physical 模式，1.4.2 CI 分发 musl 二进制。
 Mask 历史实测：LSPosed 2.2.0 / libxposed API 102。
 
 A 有原生 StrongBox 实现，原生 StrongBox + Android RKP 曾单独验证；
@@ -41,7 +41,7 @@ Ommega 实际依赖 keystore2、KeyMint AIDL、root 注入与固件接口；CI �
 其他 ROM、系统版本、root 管理器、架构、B StrongBox 和算法组合需单独验证。
 不能保证所有设备、应用或网络环境可用。不要把检测器结果当作安全认证。
 
-【二、系统结构与 1.4.1 边界】
+【二、系统结构与 1.4.2 边界】
 
 A 接管 target.txt 中应用的 Keystore 请求，经 Server 访问 B。
 B native relay 处理 profile / attest / sign / decrypt / agree。
@@ -72,12 +72,12 @@ CI 成功、历史实机验证与最终安装包应用验收需分别看待。
 
 【三、构建产物与版本】
 
-ommega-1.4.1 aggregate artifact 解压后为平铺文件：
-  ommega-a-release-arm64-v8a-1.4.1-<commit>.zip
-  ommegaclient-b-release-arm64-v8a-1.4.1-<commit>.zip
+ommega-1.4.2 aggregate artifact 解压后为平铺文件：
+  ommega-a-release-arm64-v8a-1.4.2-<commit>.zip
+  ommegaclient-b-release-arm64-v8a-1.4.2-<commit>.zip
   relay_rs-linux-x86_64-musl
-  Ommega-B-app-1.4.1-debug-signed.apk
-  StrongBoxCapabilityMask-1.4.1-debug-signed.apk
+  Ommega-B-app-1.4.2-debug-signed.apk
+  StrongBoxCapabilityMask-1.4.2-debug-signed.apk
   SHA256SUMS
   build-info.json
 
@@ -212,7 +212,7 @@ ROM 保留 AOSP 的该方法、可修改 Map 和功能发布/缓存路径，没�
 Android 16 的进程功能缓存说明见 README 中 AOSP 源码链接。
 
 使用：
-  1. 在 A 安装 StrongBoxCapabilityMask-1.4.1-debug-signed.apk。
+  1. 在 A 安装 StrongBoxCapabilityMask-1.4.2-debug-signed.apk。
   2. LSPosed 启用，静态作用域仅 system（系统框架），不要勾应用。
   3. 在允许正常重启的 A 上重启并解锁；仅退出 App 无法重建系统功能表。
   4. 检查：
