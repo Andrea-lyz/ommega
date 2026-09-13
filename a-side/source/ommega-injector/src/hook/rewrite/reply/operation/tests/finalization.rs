@@ -16,6 +16,7 @@ fn ommega_route_finish_rejects_late_cleanup_abort() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: true,
             backend: Some(backend),
@@ -111,6 +112,7 @@ fn ommega_route_abort_clears_operation_mapping() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: true,
             backend: Some(backend),

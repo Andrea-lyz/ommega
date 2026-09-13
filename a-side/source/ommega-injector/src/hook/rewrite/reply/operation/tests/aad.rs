@@ -10,6 +10,7 @@ fn system_invalid_update_aad_preserves_native_reply() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::System,
             aad_allowed: false,
             backend: None,
@@ -56,6 +57,7 @@ fn ommega_invalid_update_aad_returns_business_error() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: false,
             backend: Some(backend),
@@ -107,6 +109,7 @@ fn ommega_route_operation_transaction_error_uses_ommega_status_mapping() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: false,
             backend: Some(backend),

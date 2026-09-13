@@ -17,6 +17,7 @@ fn synthetic_operation_missing_args_keep_not_enough_data_status() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: true,
             backend: Some(backend),
@@ -80,6 +81,7 @@ fn synthetic_operation_trailing_abort_finalizes_operation() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: true,
             backend: Some(backend),
@@ -132,6 +134,7 @@ fn synthetic_operation_bad_interface_marker_rejects_abort() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: true,
             backend: Some(backend),
@@ -205,6 +208,7 @@ fn synthetic_operation_dispatch_uses_registered_caller_identity() {
         remember_operation_target(
             target,
             OperationTargetInfo {
+                in_flight: Default::default(),
                 route: RouteTarget::Ommega,
                 aad_allowed: true,
                 backend: Some(backend),
@@ -262,6 +266,7 @@ fn tracked_operation_pending_call_uses_transaction_caller_identity() {
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: true,
             backend: None,

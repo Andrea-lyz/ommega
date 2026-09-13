@@ -25,6 +25,7 @@ fn stale_operation_retirement_does_not_remove_reused_target_generation() {
         .insert(
             target,
             OperationTargetInfo {
+                in_flight: Default::default(),
                 route: RouteTarget::Ommega,
                 aad_allowed: false,
                 backend: None,

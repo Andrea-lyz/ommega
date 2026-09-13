@@ -38,6 +38,7 @@ pub(super) unsafe fn register_operation_target_from_reply(
     remember_operation_target(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route,
             aad_allowed,
             backend,
@@ -144,6 +145,23 @@ pub(in crate::hook::rewrite) fn build_operation_reply_rewrite(
         }
         return Ok(None);
     }
+
+    // Enforce the client-facing operation contract before RPC can queue calls.
+    // Cloned target snapshots must share this lock, including terminal calls.
+    // A poisoned lock reports OPERATION_BUSY too, mirroring AOSP keystore2's
+    // `Mutex::try_lock().map_err(|_| Error::Rc(ResponseCode::OPERATION_BUSY))`.
+    let _in_flight = match target.in_flight.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Ok(Some(build_service_specific_reply(
+                ResponseCode::OPERATION_BUSY.0,
+            )?));
+        }
+    };
+    // A prior call may have finalized the operation after our initial lookup.
+    let Some(target) = lookup_operation_target(pending.target) else {
+        return Ok(Some(invalid_operation_handle_reply()?));
+    };
 
     if let Err(error) = ensure_mirror_state_recovered() {
         warn!(

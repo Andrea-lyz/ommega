@@ -70,6 +70,7 @@ fn operation_rewrite_failure_preserves_only_system_route() {
     remember_operation_target(
         ommega_target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed: true,
             backend: None,
@@ -83,6 +84,7 @@ fn operation_rewrite_failure_preserves_only_system_route() {
     remember_operation_target(
         system_target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::System,
             aad_allowed: true,
             backend: None,

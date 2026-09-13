@@ -17,6 +17,7 @@ pub(in crate::hook) use publication::{
 
 #[derive(Clone)]
 pub(super) struct OperationTargetInfo {
+    pub(super) in_flight: Arc<Mutex<()>>,
     pub(super) route: RouteTarget,
     pub(super) aad_allowed: bool,
     pub(super) backend: Option<AospOperationBinder>,
@@ -500,6 +501,7 @@ pub(in crate::hook::rewrite) fn register_synthetic_operation_carrier(
     operations.insert(
         target,
         OperationTargetInfo {
+            in_flight: Default::default(),
             route: RouteTarget::Ommega,
             aad_allowed,
             backend: Some(backend),
