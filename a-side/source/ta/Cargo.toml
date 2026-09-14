@@ -31,3 +31,4 @@ x509-cert = { version = "0.3.0", default-features = false }
 
 [dev-dependencies]
 hex = "0.4.3"
+kmr-crypto-ommega = { path = "../crypto" }

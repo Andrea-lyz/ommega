@@ -1687,6 +1687,7 @@ dependencies = [
  "flagset",
  "hex",
  "kmr-common",
+ "kmr-crypto-ommega",
  "kmr-derive",
  "kmr-wire",
  "log",

@@ -43,6 +43,9 @@ use x509_cert::ext::pkix::KeyUsages;
 /// Maximum size of an attestation challenge value.
 const MAX_ATTESTATION_CHALLENGE_LEN: usize = 128;
 
+#[cfg(test)]
+mod tests;
+
 /// EWMA of remote (B-side TEE) attested generateKey wall time, in nanoseconds.
 /// Duck Detector's Keystore2PostProcessingProbe pairs a challenge-only
 /// generateKey (RKP / batch-key arm, which we send remote) against a
@@ -338,14 +341,6 @@ impl crate::KeyMintTa {
             } else {
                 &hashed_boot
             };
-            let mut overlaid_chars;
-            let chars_for_ext: &[KeyCharacteristics] = if let Some(rot) = remote_rot {
-                overlaid_chars = chars.to_vec();
-                overlay_remote_version_tags(&mut overlaid_chars, rot, self.hw_info.security_level);
-                &overlaid_chars
-            } else {
-                chars
-            };
             // The attestation version must follow the attestation key's when a
             // remote (B-side TEE) attestation key signs this leaf: relay-minted
             // attest keys report their own KeyMint version (e.g. 300), while
@@ -374,7 +369,7 @@ impl crate::KeyMintTa {
                 self.hw_info.security_level,
                 id_info.as_ref().map(|v| v.borrow()),
                 params,
-                chars_for_ext,
+                chars,
                 &unique_id,
                 boot_info_ref,
                 &self.additional_attestation_info,
@@ -889,11 +884,11 @@ impl crate::KeyMintTa {
         &mut self,
         params: &[KeyParam],
         attestation_key: Option<AttestationKey>,
-        chars: Vec<KeyCharacteristics>,
+        mut chars: Vec<KeyCharacteristics>,
         key_material: KeyMaterial,
         purpose: keyblob::SlotPurpose,
     ) -> Result<KeyCreationResult, Error> {
-        let keyblob = keyblob::PlaintextKeyBlob {
+        let mut keyblob = keyblob::PlaintextKeyBlob {
             // Don't include any `SecurityLevel::Keystore` characteristics in the set that is bound
             // to the key.
             characteristics: chars
@@ -1011,6 +1006,25 @@ impl crate::KeyMintTa {
                     None
                 }
             };
+
+            // Normalize new child keys once, before signing and serialization.
+            // The certificate, returned metadata and stored blob must share the
+            // same version tags. Existing blobs and authorization purposes are
+            // not rewritten by this creation-only path.
+            if let Some(SigningInfo {
+                signing_key: KeyMaterial::Remote(remote),
+                ..
+            }) = &signing_info
+            {
+                if let Some(rot) = &remote.root_of_trust {
+                    overlay_remote_version_tags(&mut chars, rot, self.hw_info.security_level);
+                    keyblob.characteristics = chars
+                        .iter()
+                        .filter(|c| c.security_level != SecurityLevel::Keystore)
+                        .cloned()
+                        .collect();
+                }
+            }
 
             // Build the X.509 leaf certificate.
             let spki_der = cert::asn1_der_encode(&spki)

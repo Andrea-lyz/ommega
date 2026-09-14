@@ -83,6 +83,31 @@ maintenance events are captured even while remote identity and RPC startup are
 still pending. RPC warm-up runs in the keystore2 process, and the in-memory
 mirror queue replays captured state changes after the service becomes ready.
 
+## Key consistency and lifecycle
+
+New local child keys signed by a remote attestation key inherit its available
+OS, vendor and boot version tags before certificate generation and keyblob
+serialization. The certificate, returned authorizations and stored new keyblob
+use the same values. Existing keys are not rewritten; their key material and
+credential-encryption state are retained.
+
+The relay's physical authorization policy is distinct from A-side application
+policy: B translates `ATTEST_KEY` to `SIGN` and uses `NO_AUTH_REQUIRED`. A keeps
+the application's original purposes and authentication requirements. Replacing
+those with B's values would change application behavior and weaken local
+authentication. This proxy limitation is not full hardware enforcement of A's
+user authentication, nor full equality between physical and logical purposes.
+
+Keybox rotation retires only dedicated `ATTEST_KEY` entries bound to the old
+keybox. Ordinary signing keys, including entries with legacy keybox metadata,
+are excluded from retirement. This does not recover previously deleted keys.
+
+After System succeeds, `AddAuthToken` mirroring is best-effort: a failed or lost
+mirror can be dropped without poisoning the global replay state. Direct token
+calls retain their validation; lock, user and maintenance events remain ordered
+and fail-closed. A dropped token does not authorize an operation and may require
+a later authentication to replenish the cache.
+
 ## License
 
 `AGPL-3.0-or-later`
