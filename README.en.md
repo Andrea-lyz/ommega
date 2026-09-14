@@ -10,6 +10,19 @@
 > not an official upstream release or hosted service. Source version: **1.4.2**.
 > Module authors: `jiyin004, Andrea-lyz`.
 
+> [!WARNING]
+> **Run B on a spare device that holds no personal data, and keep an off-device backup.**
+> The B module rewrites the System/Boot/Vendor security patch level (SPL) and reloads
+> native KeyMint. That touches credential encryption and keyblob upgrade: once a local
+> keyblob is upgraded under the higher SPL, it may require that higher value from then on.
+> If root disappears after a restart (power loss, a wrong step, or the module not loading
+> at boot), the SPL override is not reapplied, and the device can end up with **a correct
+> password that no longer unlocks and credential-encrypted data that is unavailable**,
+> leaving a factory reset as the only way out.
+> Treat the B device as disposable: keep no primary or irreplaceable data on it, and do
+> not assume root will be available. The current boot-time reapply and script guards do
+> not guarantee native unlock once root is lost.
+
 Ommega connects A, Server and B for remote KeyMint operations. A intercepts Android
 Keystore requests for selected applications. Eligible generation and subsequent
 remote signing, decryption and agreement use B hardware through Server.
@@ -160,6 +173,9 @@ alone do not prove hardware acceptance; check fresh attestation through a safe,
 established application path. SPL affects credential encryption: verify unlocked
 state, no in-flight TEE calls and a viable recovery path. Never combine SPL changes
 with reboot. B's hard-reboot prohibition remains; soft restart is not risk-free.
+If root is lost after a restart the device falls back to its native SPL, while upgraded
+keyblobs do not revert with it: treat such a device as disposable data-wise and see the
+B data risk warning at the top of this file.
 
 ### 7. Relay and Server
 
@@ -229,6 +245,8 @@ Use your own Server and credentials; no public Token is distributed. The
 Use matching A/B device IDs and appropriate role Tokens. Unselected apps keep
 original Keystore routing. A `tls_insecure=true` skips TLS verification; B currently
 accepts invalid certificates. HTTPS alone does not authenticate Server identity.
+Before changing B `spl.conf`, read the **B data risk warning** at the top of this file:
+keep the B device free of personal data and back it up off-device.
 
 Server reads working-directory `.env`; HTTP defaults to 10886, HTTPS to 8443.
 Missing certificates fall back to HTTP. Endpoints: `/api/health/`, `/status/`,
