@@ -34,6 +34,7 @@ use crate::config::{config, Config, CryptoConfig};
 use crate::global::DB;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_km_error, map_ks_error};
+use crate::keymaster::tee_latency::{charge, TaOp};
 use crate::keymaster::utils::{
     key_characteristics_to_internal, key_creation_result_to_aidl,
     key_parameter_conversion_error_code, key_parameters_to_km, key_params_to_aidl,
@@ -558,6 +559,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             })?,
         });
 
+        charge(TaOp::Operation);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result: InternalBeginResult = match result.rsp {
             Some(PerformOpRsp::DeviceBegin(rsp)) => rsp.ret,
@@ -648,6 +650,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             key_params: key_parameters,
             attestation_key,
         });
+        charge(TaOp::KeyGen);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceGenerateKey(rsp)) => rsp.ret,
@@ -693,6 +696,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             key_data: key_data.to_vec(),
             attestation_key,
         });
+        charge(TaOp::KeyGen);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceImportKey(rsp)) => rsp.ret,
@@ -727,6 +731,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             biometric_sid,
         });
 
+        charge(TaOp::KeyGen);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceImportWrappedKey(rsp)) => rsp.ret,
@@ -756,6 +761,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             upgrade_params,
         });
 
+        charge(TaOp::KeyGen);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceUpgradeKey(rsp)) => rsp.ret,
@@ -810,6 +816,7 @@ impl IKeyMintDevice for KeyMintWrapper {
                 storage_key_blob: storage_key_blob.to_vec(),
             });
 
+        charge(TaOp::KeyGen);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceConvertStorageKeyToEphemeral(rsp)) => rsp.ret,
@@ -834,6 +841,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             app_data: app_data.to_vec(),
         });
 
+        charge(TaOp::Operation);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceGetKeyCharacteristics(rsp)) => rsp.ret,
@@ -857,6 +865,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn getRootOfTrustChallenge(&self) -> rsbinder::status::Result<[u8; 16]> {
         let req = PerformOpReq::GetRootOfTrustChallenge(GetRootOfTrustChallengeRequest {});
 
+        charge(TaOp::Control);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::GetRootOfTrustChallenge(rsp)) => rsp.ret,
@@ -877,6 +886,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             challenge: *challenge,
         });
 
+        charge(TaOp::Control);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::GetRootOfTrust(rsp)) => rsp.ret,
@@ -962,6 +972,7 @@ impl KeyMintWrapper {
     }
 
     fn process_status_only(&self, req: PerformOpReq) -> Result<(), Error> {
+        charge(TaOp::Control);
         let error_code = self
             .inner
             .keymint
@@ -995,6 +1006,7 @@ impl KeyMintWrapper {
             auth_token: hardware_auth_token,
             timestamp_token,
         });
+        charge(TaOp::Operation);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let error_code = result.error_code;
         let _result: UpdateAadResponse = match result.rsp {
@@ -1026,6 +1038,7 @@ impl KeyMintWrapper {
             auth_token: hardware_auth_token,
             timestamp_token,
         });
+        charge(TaOp::Operation);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let error_code = result.error_code;
         let result: UpdateResponse = match result.rsp {
@@ -1064,6 +1077,7 @@ impl KeyMintWrapper {
             timestamp_token,
             confirmation_token,
         });
+        charge(TaOp::Operation);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let error_code = result.error_code;
         let result: FinishResponse = match result.rsp {
@@ -1077,6 +1091,7 @@ impl KeyMintWrapper {
 
     pub fn op_abort(&self, op_handle: i64) -> Result<(), Error> {
         let req = PerformOpReq::OperationAbort(AbortRequest { op_handle });
+        charge(TaOp::Operation);
         let result = self.inner.keymint.lock().unwrap().process_req(req);
         let error_code = result.error_code;
         let _result: AbortResponse = match result.rsp {

@@ -26,4 +26,5 @@ pub mod security_level_manager;
 pub mod service;
 pub mod super_key;
 mod sw_keyblob;
+pub mod tee_latency;
 pub mod utils;
