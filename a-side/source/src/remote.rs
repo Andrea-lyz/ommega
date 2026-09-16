@@ -774,6 +774,36 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
             })?;
             chain.push(der);
         }
+        if config::config()
+            .read()
+            .is_ok_and(|config| config.remote.debug_logging)
+        {
+            let tail_bytes: usize = chain.iter().skip(1).map(|cert| cert.len()).sum();
+            let layout = chain
+                .iter()
+                .enumerate()
+                .filter_map(|(index, der)| {
+                    x509_cert::Certificate::from_der(der).ok().map(|cert| {
+                        format!(
+                            "[{index}] len={} sig={} spki={}",
+                            der.len(),
+                            cert.signature_algorithm().oid,
+                            cert.tbs_certificate()
+                                .subject_public_key_info()
+                                .algorithm
+                                .oid
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            log::info!(
+                "event=remote_attest_chain alias={alias} key_algorithm={:?} certs={} tail_bytes={} {layout}",
+                params.key_algorithm,
+                chain.len(),
+                tail_bytes
+            );
+        }
         Ok(Some(kmr_ta::device::RemoteAttestation {
             cert_chain: chain,
             effective_security_level,
