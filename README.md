@@ -316,6 +316,10 @@ disable_native_strongbox: false
 在 WebUI 勾选需要接管的应用，并按需选择“全局默认 / StrongBox / TEE”。未加入
 `target.txt` 的应用继续使用系统原始 Keystore 路径。
 
+应用长按的“模式”对话框里还有一项「检测器兼容」：勾选后，该包经由 A 端自身 Keystore 实现创建的密钥只分配正数
+key id（写入 `/data/misc/keystore/ommega/target-compat.toml`，由 WebUI 保存时维护，默认空）。不勾选即保持与
+原厂一致的随机 64 位 id（约一半为负）。这项只改变 key id 的取值区间，不改变其它行为，也不提供任何硬件安全保证。
+
 ### Server
 
 在二进制工作目录创建 `.env`，最小示例：

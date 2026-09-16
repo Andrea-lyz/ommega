@@ -284,6 +284,10 @@
 
     <string name="mode_leaf_hack">TEE</string>
 
+    <string name="mode_detector_compat">检测器兼容</string>
+
+    <string name="mode_detector_compat_hint">为该包分配正数 key id，兼容把非正 id 视为“未指定”的客户端；不提供硬件安全保证。</string>
+
     <!-- Keybox Automation -->
 
     <string name="menu_automation">自动密钥</string>

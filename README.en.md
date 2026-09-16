@@ -248,6 +248,13 @@ accepts invalid certificates. HTTPS alone does not authenticate Server identity.
 Before changing B `spl.conf`, read the **B data risk warning** at the top of this file:
 keep the B device free of personal data and back it up off-device.
 
+The mode dialog of a long-pressed app also offers a **Detector compat** switch: keys that the
+selected package creates through the A-side Keystore implementation are allocated positive key
+ids only (written to `/data/misc/keystore/ommega/target-compat.toml` when the WebUI saves, empty
+by default). Leaving it unchecked keeps the stock random 64 bit ids, about half of which are
+negative. The switch only changes the key id range; it changes no other behaviour and provides no
+hardware security.
+
 Server reads working-directory `.env`; HTTP defaults to 10886, HTTPS to 8443.
 Missing certificates fall back to HTTP. Endpoints: `/api/health/`, `/status/`,
 `/jiyin004/` (admin), `/login/`. Updates require temporary upload, SHA verification,

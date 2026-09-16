@@ -90,6 +90,12 @@ jobs:
           cargo clippy --locked --target aarch64-linux-android --workspace --all-targets -- -D warnings
           cargo fmt --all -- --check
           cargo test --locked --target aarch64-linux-android --workspace --no-run
+      - name: Check A-side WebUI bundle patch
+        if: matrix.component == 'a'
+        working-directory: a-side/source
+        run: |
+          python3 scripts/webui-patch.py --check
+          node --test scripts/webui-compat.test.mjs
       - name: Build Android module
         working-directory: ${{ matrix.component }}-side/source
         run: |

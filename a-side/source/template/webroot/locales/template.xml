@@ -129,4 +129,6 @@
     <string name="mode_auto">Global default</string>
     <string name="mode_certificate_generating">StrongBox</string>
     <string name="mode_leaf_hack">TEE</string>
+    <string name="mode_detector_compat"></string>
+    <string name="mode_detector_compat_hint"></string>
 </resources>

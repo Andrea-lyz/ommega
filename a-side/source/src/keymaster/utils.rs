@@ -53,10 +53,12 @@ use log::{debug, error, info, warn};
 use rsbinder::{
     get_calling_uid, hub, FromIBinder, ProcessState, SIBinder, Status, StatusCode, Strong,
 };
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::iter::IntoIterator;
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[cfg(test)]
 mod tests;
@@ -1520,4 +1522,149 @@ pub fn once_lock_get_or_try_init<T, E>(
     }
     let value = init()?;
     Ok(lock.get_or_init(|| value))
+}
+
+/// Path of the per-package detector compatibility policy.
+const TARGET_COMPAT_PATH: &str = "/data/misc/keystore/ommega/target-compat.toml";
+
+#[derive(Debug, Default, Deserialize)]
+struct CompatPolicyFile {
+    #[serde(default)]
+    positive_key_id: PositiveKeyIdPolicy,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PositiveKeyIdPolicy {
+    #[serde(default)]
+    packages: Vec<String>,
+}
+
+struct CompatPolicy {
+    modified: Option<SystemTime>,
+    positive_key_id: Arc<HashSet<String>>,
+}
+
+static COMPAT_POLICY: LazyLock<Mutex<CompatPolicy>> = LazyLock::new(|| {
+    Mutex::new(CompatPolicy {
+        modified: None,
+        positive_key_id: Arc::new(HashSet::new()),
+    })
+});
+
+/// Package names resolved from a caller uid, so that a policy that lists packages
+/// does not cost a PackageManager round trip per key creation.
+static UID_PACKAGE_NAMES: LazyLock<Mutex<HashMap<i64, Arc<Vec<String>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The positive-key-id package list of the current policy, reloaded whenever
+/// target-compat.toml changes. A missing or invalid file means "no switch on".
+fn positive_key_id_policy() -> Arc<HashSet<String>> {
+    let modified = std::fs::metadata(TARGET_COMPAT_PATH)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+    {
+        let policy = COMPAT_POLICY.lock().unwrap();
+        if policy.modified == modified {
+            return policy.positive_key_id.clone();
+        }
+    }
+    let packages = match modified {
+        None => HashSet::new(),
+        Some(_) => match std::fs::read_to_string(TARGET_COMPAT_PATH) {
+            Ok(contents) => match toml::from_str::<CompatPolicyFile>(&contents) {
+                Ok(file) => file
+                    .positive_key_id
+                    .packages
+                    .into_iter()
+                    .filter(|package| !package.is_empty())
+                    .collect(),
+                Err(e) => {
+                    warn!("{TARGET_COMPAT_PATH} is not a valid compatibility policy: {e:#}");
+                    HashSet::new()
+                }
+            },
+            Err(e) => {
+                warn!("failed to read {TARGET_COMPAT_PATH}: {e:?}");
+                HashSet::new()
+            }
+        },
+    };
+    let mut policy = COMPAT_POLICY.lock().unwrap();
+    policy.modified = modified;
+    policy.positive_key_id = Arc::new(packages);
+    UID_PACKAGE_NAMES.lock().unwrap().clear();
+    policy.positive_key_id.clone()
+}
+
+/// Whether keys created by `uid` should be allocated positive key ids.
+///
+/// Off by default: an absent, empty, or invalid policy returns false without
+/// touching PackageManager, so this is a no-op unless target-compat.toml lists
+/// the caller's package.
+pub fn positive_key_id_required(uid: i64) -> bool {
+    let packages = positive_key_id_policy();
+    if packages.is_empty() || uid <= 0 {
+        return false;
+    }
+    package_names_for_uid(uid)
+        .iter()
+        .any(|package| packages.contains(package))
+}
+
+fn package_names_for_uid(uid: i64) -> Arc<Vec<String>> {
+    if let Some(cached) = UID_PACKAGE_NAMES.lock().unwrap().get(&uid) {
+        return cached.clone();
+    }
+    let resolved = Arc::new(resolve_package_names(uid).unwrap_or_else(|e| {
+        warn!("failed to resolve packages for uid {uid}: {e:#}");
+        Vec::new()
+    }));
+    UID_PACKAGE_NAMES
+        .lock()
+        .unwrap()
+        .insert(uid, resolved.clone());
+    resolved
+}
+
+fn resolve_package_names(uid: i64) -> Result<Vec<String>> {
+    if !ProcessState::is_initialized() {
+        return Ok(Vec::new());
+    }
+    let uid = i32::try_from(uid).map_err(|_| anyhow!("uid {uid} is out of range"))?;
+    let pm: Strong<dyn IPackageManagerNative> = get_interface_once(PACKAGE_MANAGER_NATIVE_SERVICE)
+        .map_err(|e| anyhow!("failed to connect to PackageManager: {e:?}"))?;
+    let names = pm
+        .getNamesForUids(&[uid])
+        .map_err(|e| anyhow!("getNamesForUids failed: {e:?}"))?;
+    Ok(names.into_iter().filter(|name| !name.is_empty()).collect())
+}
+
+#[cfg(test)]
+mod compat_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_positive_key_id_list() {
+        let policy: CompatPolicyFile = toml::from_str(
+            "version = 1\n\n[positive_key_id]\npackages = [\"com.example.detector\", \"com.example.two\"]\n",
+        )
+        .unwrap();
+        let packages: HashSet<String> = policy.positive_key_id.packages.into_iter().collect();
+        assert_eq!(packages.len(), 2);
+        assert!(packages.contains("com.example.detector"));
+        assert!(packages.contains("com.example.two"));
+    }
+
+    #[test]
+    fn an_empty_or_unknown_policy_means_no_switch() {
+        for contents in [
+            "version = 1\n",
+            "[positive_key_id]\npackages = []\n",
+            "[something_else]\nx = 1\n",
+        ] {
+            let policy: CompatPolicyFile = toml::from_str(contents).unwrap();
+            assert!(policy.positive_key_id.packages.is_empty(), "{contents}");
+        }
+        assert!(toml::from_str::<CompatPolicyFile>("this is not toml").is_err());
+    }
 }

@@ -194,6 +194,9 @@ environment. remote and local_hw are independent. Use an A-role Token where requ
 
 Targets: /data/misc/keystore/ommega/target.txt, plain package names, no !/? suffixes.
 Policies: /data/misc/keystore/ommega/target-security.toml.
+Compat policy: /data/misc/keystore/ommega/target-compat.toml (the "Detector compat" switch in the
+WebUI mode dialog allocates positive key ids for the selected packages; empty by default, which
+keeps the stock random 64 bit ids).
 Long-press selected apps in WebUI:
   Global default: follows global settings/capability.
   StrongBox: explicit selection, overriding global disable.

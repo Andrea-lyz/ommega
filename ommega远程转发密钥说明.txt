@@ -176,6 +176,8 @@ remote 与 local_hw 独立；角色 Token 使用 A 角色。
 
 目标列表：/data/misc/keystore/ommega/target.txt，每行普通包名，不加 !/?。
 策略文件：/data/misc/keystore/ommega/target-security.toml。
+兼容策略：/data/misc/keystore/ommega/target-compat.toml（WebUI“模式”对话框里的「检测器兼容」，
+为勾选的包分配正数 key id；默认空，即保持原厂随机 64 位 id）。
 WebUI 长按已选应用：
   全局默认：遵循全局与能力。
   StrongBox：显式选择，覆盖全局禁用。
