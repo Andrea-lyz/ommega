@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > Community fork of [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega),
-> not an official upstream release or hosted service. Source version: **1.4.5**.
+> not an official upstream release or hosted service. Source version: **1.4.6**.
 > Module authors: `jiyin004, Andrea-lyz`.
 
 > [!WARNING]
@@ -81,7 +81,7 @@ Android 16's application feature cache motivates this early hook; see
 Following AOSP is an implementation prerequisite, not certification or a guarantee
 for every AOSP-based ROM. Only the A firmware above has device evidence.
 
-1. Install `StrongBoxCapabilityMask-1.4.5-debug-signed.apk` on A.
+1. Install `StrongBoxCapabilityMask-1.4.6-debug-signed.apk` on A.
 2. Enable it in an LSPosed implementation supporting libxposed API 102; keep the
    static scope at `system` (System Framework) only, without application scopes.
 3. Reboot and unlock A where normal reboot is permitted, rebuilding the feature
@@ -202,7 +202,7 @@ This differs from A's native backend, disable switch, per-app policies and Mask.
 CI builds A, B, Linux musl Server and APKs in parallel, with A/B workspace, Server,
 B ELF, WebUI, version-sync and Mask unit checks. Rust is pinned to
 `nightly-2026-09-01`, with committed Cargo.lock and component Rust/Gradle caches.
-Version is **1.4.5**, with no automatic bump commits; manual `release_version`
+Version is **1.4.6**, with no automatic bump commits; manual `release_version`
 only overrides that build. Currently only Markdown-only changes are ignored; TXT
 changes trigger CI. Artifacts include both ZIPs, Server, B-app, Mask,
 `SHA256SUMS` and `build-info.json`. Both APKs use a cached Android debug signing
@@ -290,6 +290,7 @@ Complete distributions: [Build workflow](https://github.com/Andrea-lyz/ommega/ac
 
 ## Validation limits
 
+1.4.6 turns the error-E detector compatibility into an explicit per-package switch: A-side KeyMint keeps the stock key-id shape by default (random 64 bit ids, about half of them negative) and allocates positive ids only for packages listed in `target-compat.toml` when they create keys through the on-device Keystore implementation; the policy is hot-reloaded on mtime, and a missing, empty or malformed file disables it entirely at no extra cost. The WebUI exposes it as a Detector compat checkbox in the mode dialog of a long-pressed app and writes the file atomically on save. Compatibility affects only keys created afterwards; existing negative-id keys stay unchanged. The B module, the Server binary and both APKs differ from 1.4.5 by the version string only.
 1.4.5 fixes two A-side issues: KeyMint now charges every HAL entry that reaches the software TA a secure-world round trip (9-21 ms for begin/update/finish/abort/getKeyCharacteristics, 6-16 ms for key generation, 1-4 ms for control entries), so intercepted timing is no longer visibly faster than hardware (re-verified on the A device, where the criterion no longer fires; measured T_triv 16.4-19.3 ms against the 11.93-25.00 ms hardware reference); and the remote `debug_logging` option, which was parsed and persisted but had no consumer, now records `event=remote_attest_chain` (certificate count, tail bytes, and each certificate's length, signature OID and SPKI OID). The B module, the Server binary and both APKs differ from 1.4.2 by the version string only.
 1.4.2 aligns the A-side client-facing operation contract with AOSP: overlapping calls on the same operation return `OPERATION_BUSY` at the injector boundary instead of depending on backend queueing. Verified on A on 2026-09-13; B is unchanged.
 The first six batches covered remote profile, attestation/signing/decryption,

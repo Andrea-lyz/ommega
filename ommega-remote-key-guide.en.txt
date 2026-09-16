@@ -1,5 +1,5 @@
 ============================================================
-Ommega 1.4.5 Remote KeyMint Guide (Andrea-lyz Fork)
+Ommega 1.4.6 Remote KeyMint Guide (Andrea-lyz Fork)
 ============================================================
 
 Chinese README: README.md
@@ -20,7 +20,7 @@ A: OnePlus 13 / PJZ110, Android 16 / API 36 / arm64-v8a;
    PJZ110_16.0.10.501(CN01), ColorOS ro.build.version.oplusrom=V16.1.0.
 B: OnePlus 11 / PHB110, Android 16 / API 36 / arm64-v8a;
    PHB110_16.0.2.400(CN01), ColorOS ro.build.version.oplusrom=V16.0.0.
-Server: Linux x86_64, physical mode; CI 1.4.5 supplies musl.
+Server: Linux x86_64, physical mode; CI 1.4.6 supplies musl.
 Historical Mask test: LSPosed 2.2.0 / libxposed API 102.
 
 A has native StrongBox, previously tested with Android RKP in a separate window.
@@ -46,7 +46,7 @@ architectures, B StrongBox and algorithm combinations need independent validatio
 No universal device/app/network compatibility is guaranteed. Detector results are
 not security certification.
 
-2. ARCHITECTURE AND 1.4.5 BOUNDARIES
+2. ARCHITECTURE AND 1.4.6 BOUNDARIES
 
 A intercepts target.txt apps and uses B through Server.
 Native B supports profile / attest / sign / decrypt / agree.
@@ -80,12 +80,12 @@ CI success, historical device checks and final-package app acceptance are distin
 
 3. ARTIFACTS AND VERSIONS
 
-The ommega-1.4.5 aggregate artifact extracts to flat files:
-  ommega-a-release-arm64-v8a-1.4.5-<commit>.zip
-  ommegaclient-b-release-arm64-v8a-1.4.5-<commit>.zip
+The ommega-1.4.6 aggregate artifact extracts to flat files:
+  ommega-a-release-arm64-v8a-1.4.6-<commit>.zip
+  ommegaclient-b-release-arm64-v8a-1.4.6-<commit>.zip
   relay_rs-linux-x86_64-musl
-  Ommega-B-app-1.4.5-debug-signed.apk
-  StrongBoxCapabilityMask-1.4.5-debug-signed.apk
+  Ommega-B-app-1.4.6-debug-signed.apk
+  StrongBoxCapabilityMask-1.4.6-debug-signed.apk
   SHA256SUMS
   build-info.json
 
@@ -240,7 +240,7 @@ support. Only the A environment in section 1 has device evidence.
 See the README AOSP source link for Android 16 process feature caching.
 
 Usage:
-  1. Install StrongBoxCapabilityMask-1.4.5-debug-signed.apk on A.
+  1. Install StrongBoxCapabilityMask-1.4.6-debug-signed.apk on A.
   2. Enable in LSPosed, static scope system (System Framework) only; no app scopes.
   3. Reboot/unlock A where normal reboot is allowed; closing apps is insufficient.
   4. Check:
