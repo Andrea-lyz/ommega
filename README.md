@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
-> 不是上游官方发行版或官方在线服务。当前源码版本为 **1.4.2**，模块作者信息为
+> 不是上游官方发行版或官方在线服务。当前源码版本为 **1.4.5**，模块作者信息为
 > `jiyin004, Andrea-lyz`。
 
 > [!WARNING]
@@ -42,7 +42,7 @@ Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬
 
 Mask 历史验证环境为 LSPosed 2.2.0 / libxposed API 102。A/B 模块在 root 环境运行，
 上述结果不能推广为所有 root 管理器、ROM 或机型的兼容承诺。Server 为 Linux x86_64，
-使用 physical 模式；1.4.2 CI 提供 musl 构件。
+使用 physical 模式；1.4.5 CI 提供 musl 构件。
 
 远程验收配置：A `remote=true`、`local_hw=false`、`disable_native_strongbox=true`、
 `use_native_strongbox=false`，目标应用使用 GlobalDefault，并启用 Mask。
@@ -73,7 +73,7 @@ A 安装器的最低门槛是 API 29，Mask 的 `minSdk` 也是 29；这只代�
 
 使用步骤：
 
-1. 在 A 安装 `StrongBoxCapabilityMask-1.4.2-debug-signed.apk`。
+1. 在 A 安装 `StrongBoxCapabilityMask-1.4.5-debug-signed.apk`。
 2. 在兼容 libxposed API 102 的 LSPosed 实现中启用，保持静态作用域仅 `system`（系统框架），不要勾选应用。
 3. 在允许正常重启的 A 上重启并解锁，让系统功能表及进程缓存重新建立；仅划掉应用不能启用/撤销此 hook。
 4. 检查 `pm has-feature android.hardware.strongbox_keystore` 为 false、原有 `app_attest_key` 仍为 true，
@@ -234,7 +234,7 @@ GitHub Actions 并行构建 A 模块、B 模块、Linux musl Server 和 Android 
 StrongBoxCapabilityMask 单元测试。Rust 固定到已验证的 `nightly-2026-09-01`，
 A/B/Server 提交 Cargo.lock，按组件缓存 Rust 构建并复用 Gradle 缓存。
 
-当前统一版本为 **1.4.2**。CI 默认使用源码版本，不自动递增或提交版本；
+当前统一版本为 **1.4.5**。CI 默认使用源码版本，不自动递增或提交版本；
 手动 `release_version` 仅覆盖本次构建。当前工作流只忽略纯 `*.md` 修改；TXT 修改仍会触发构建。
 全部构建成功后生成 `ommega-<版本>` artifact，包含 A/B 模块 ZIP、Server、
 B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
@@ -310,6 +310,8 @@ disable_native_strongbox: false
 上面是配置格式示例，不是测试配置的完整复刻。`tls_insecure: true` 会跳过 A 的证书验证；
 部署可信证书后应按实际环境配置。B 当前 HTTP 客户端接受无效证书，不能仅凭 HTTPS 地址
 就宣称已认证 Server 身份；公网部署需自行保护传输与凭据。
+
+`debug_logging: true` 时 A 端会把远端返回的证书链布局写入 keymint 日志（`event=remote_attest_chain`：证书数、尾链总字节数、每张证书的 len/签名 OID/SPKI OID），默认关闭。
 
 在 WebUI 勾选需要接管的应用，并按需选择“全局默认 / StrongBox / TEE”。未加入
 `target.txt` 的应用继续使用系统原始 Keystore 路径。
@@ -391,6 +393,7 @@ cd StrongBoxCapabilityMask
 
 ## 验证范围与限制
 
+1.4.5 修两项 A 端问题：KeyMint 现在为每个进入软件 TA 的 HAL 入口补记“安全世界往返”耗时（begin/update/finish/abort/getKeyCharacteristics 9-21 ms、密钥生成 6-16 ms、控制类 1-4 ms），拦截路径下的时序不再明显快于硬件 TA（实机复验该判据不再命中，实测 T_triv 16.4-19.3 ms，硬件参考区间 11.93-25.00 ms）；远端 `debug_logging` 选项此前只被解析与保存、没有消费点，现开启后记录 `event=remote_attest_chain`（证书数、尾链字节数、每张证书的 len/签名 OID/SPKI OID）。B 端模块、Server 与两个 APK 相对 1.4.2 只有版本号变化。
 1.4.2 在 1.4.1 基础上把 A 端并发操作契约对齐 AOSP：同一 operation 的重叠调用在注入器边界返回 `OPERATION_BUSY`，不再依赖后端排队结果；A 端已实机复验通过（2026-09-13），B 端未改动。
 1.4.1 源码对应的前六批工作已覆盖远程 profile、证明/签名/解密、
 P-256/P-384/P-521/X25519 协商，以及 A 重启前后的认证密钥生命周期。
