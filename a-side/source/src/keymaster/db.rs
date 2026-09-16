@@ -1878,22 +1878,25 @@ impl KeystoreDB {
         let _wp = wd::watch("KeystoreDB::store_super_key");
 
         self.with_transaction(Immediate("TX_store_super_key"), |tx| {
-            let key_id = Self::insert_with_retry(|id| {
-                tx.execute(
-                    "INSERT into persistent.keyentry
+            let key_id = Self::insert_with_retry(
+                |id| {
+                    tx.execute(
+                        "INSERT into persistent.keyentry
                             (id, key_type, domain, namespace, alias, state, km_uuid)
                             VALUES(?, ?, ?, ?, ?, ?, ?);",
-                    params![
-                        id,
-                        KeyType::Super,
-                        Domain::APP.0,
-                        user.0 as i64,
-                        key_type.alias,
-                        KeyLifeCycle::Live,
-                        &KEYSTORE_UUID,
-                    ],
-                )
-            })
+                        params![
+                            id,
+                            KeyType::Super,
+                            Domain::APP.0,
+                            user.0 as i64,
+                            key_type.alias,
+                            KeyLifeCycle::Live,
+                            &KEYSTORE_UUID,
+                        ],
+                    )
+                },
+                false,
+            )
             .context("Failed to insert into keyentry table.")?;
 
             key_metadata
@@ -2021,22 +2024,29 @@ impl KeystoreDB {
                 ));
             }
         }
+        // Compatibility switch: only the callers listed in target-compat.toml
+        // get positive ids, and only for the keys they create from now on.
+        let positive_only = matches!(*domain, Domain::APP)
+            && crate::keymaster::utils::positive_key_id_required(*namespace);
         Ok(KEY_ID_LOCK.get(
-            Self::insert_with_retry(|id| {
-                tx.execute(
-                    "INSERT into persistent.keyentry
+            Self::insert_with_retry(
+                |id| {
+                    tx.execute(
+                        "INSERT into persistent.keyentry
                      (id, key_type, domain, namespace, alias, state, km_uuid)
                      VALUES(?, ?, ?, ?, NULL, ?, ?);",
-                    params![
-                        id,
-                        key_type,
-                        domain.0 as u32,
-                        *namespace,
-                        KeyLifeCycle::Existing,
-                        km_uuid,
-                    ],
-                )
-            })
+                        params![
+                            id,
+                            key_type,
+                            domain.0 as u32,
+                            *namespace,
+                            KeyLifeCycle::Existing,
+                            km_uuid,
+                        ],
+                    )
+                },
+                positive_only,
+            )
             .context(ks_err!())?,
         ))
     }
@@ -3501,13 +3511,16 @@ impl KeystoreDB {
                 .context(ks_err!("Failed to update existing grant."))?;
                 grant_id
             } else {
-                Self::insert_with_retry(|id| {
-                    tx.execute(
-                        "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
+                Self::insert_with_retry(
+                    |id| {
+                        tx.execute(
+                            "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
                         VALUES (?, ?, ?, ?);",
-                        params![id, grantee_uid.0, access.key_id, i32::from(access_vector)],
-                    )
-                })
+                            params![id, grantee_uid.0, access.key_id, i32::from(access_vector)],
+                        )
+                    },
+                    false,
+                )
                 .context(ks_err!())?
             };
 
@@ -3553,15 +3566,22 @@ impl KeystoreDB {
         })
     }
 
-    // Generates a random id and passes it to the given function, which will
-    // try to insert it into a database.  If that insertion fails, retry;
-    // otherwise return the id.
-    fn insert_with_retry(inserter: impl Fn(i64) -> rusqlite::Result<usize>) -> Result<i64> {
+    // Generates a random id and passes it to the given function, which will try
+    // to insert it into a database. If that insertion fails, retry; otherwise
+    // return the id.
+    //
+    // positive_only is set for the callers listed in target-compat.toml: key ids
+    // are i64 on the wire, keystore2 reserves -1 for "self", and some clients
+    // treat a non-positive namespace as an unspecified key id and skip the
+    // KEY_ID operations. Those callers get ids from the positive range only, so
+    // the descriptor a reply hands out is always usable as a KEY_ID lookup.
+    // Every other caller keeps the stock distribution.
+    fn insert_with_retry(
+        inserter: impl Fn(i64) -> rusqlite::Result<usize>,
+        positive_only: bool,
+    ) -> Result<i64> {
         loop {
-            let newid: i64 = match random() {
-                Self::UNASSIGNED_KEY_ID => continue, // UNASSIGNED_KEY_ID cannot be assigned.
-                i => i,
-            };
+            let newid = Self::random_key_id(positive_only);
             match inserter(newid) {
                 // If the id already existed, try again.
                 Err(rusqlite::Error::SqliteFailure(
@@ -3575,6 +3595,26 @@ impl KeystoreDB {
                     return Err(e).context(ks_err!("failed to insert into database."));
                 }
                 _ => return Ok(newid),
+            }
+        }
+    }
+
+    /// Draws a key id. The stock distribution is the full signed 64 bit range
+    /// minus UNASSIGNED_KEY_ID; positive_only restricts it to the positive half
+    /// for the compatibility switches described on insert_with_retry.
+    fn random_key_id(positive_only: bool) -> i64 {
+        if positive_only {
+            loop {
+                let candidate: u64 = random();
+                if candidate != 0 && candidate <= i64::MAX as u64 {
+                    return candidate as i64;
+                }
+            }
+        }
+        loop {
+            let candidate: i64 = random();
+            if candidate != Self::UNASSIGNED_KEY_ID {
+                return candidate;
             }
         }
     }
@@ -3705,6 +3745,29 @@ mod tests {
     use super::*;
 
     const TEST_NAMESPACE: i64 = 10001;
+
+    #[test]
+    fn positive_only_key_ids_are_positive() {
+        for _ in 0..64 {
+            let id = KeystoreDB::insert_with_retry(|_| Ok(1), true).unwrap();
+            assert!(id > 0);
+        }
+    }
+
+    #[test]
+    fn stock_key_ids_keep_the_full_signed_range() {
+        let mut saw_non_positive = false;
+        for _ in 0..256 {
+            let id = KeystoreDB::insert_with_retry(|_| Ok(1), false).unwrap();
+            assert_ne!(id, KeystoreDB::UNASSIGNED_KEY_ID);
+            saw_non_positive |= id <= 0;
+        }
+        // 2^-256 of failing while the implementation still draws both halves.
+        assert!(
+            saw_non_positive,
+            "stock sampling lost the negative half of the range"
+        );
+    }
 
     fn make_test_db() -> KeystoreDB {
         let mut conn = Connection::open_in_memory().unwrap();
