@@ -4259,4 +4259,61 @@ mod tests {
             Err(kmr_crypto_ommega::error::Error::DecryptionFailed)
         ));
     }
+
+    #[test]
+    fn key_id_access_accepts_a_grantee_and_rejects_a_stranger() {
+        const GRANTEE_UID: i64 = 99_014;
+        let mut db = make_test_db();
+        let key_id = 4242i64;
+        {
+            let tx = db.conn.transaction().unwrap();
+            insert_live_client_key(&tx, key_id, KEYSTORE_UUID, "granted");
+            tx.execute(
+                "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
+                    VALUES (?, ?, ?, ?);",
+                params![key_id, GRANTEE_UID, key_id, 260i32],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let key = KeyDescriptor {
+            domain: Domain::KEY_ID,
+            nspace: key_id,
+            ..Default::default()
+        };
+        // Mirrors KeystoreService::is_grant: a KEY_ID descriptor is only acceptable
+        // for the key owner or for a caller the grant table gives an access vector.
+        let grant_check = |descriptor: &KeyDescriptor, access_vector: Option<KeyPermSet>| {
+            if access_vector.is_some()
+                || (descriptor.domain == Domain::APP && descriptor.nspace == GRANTEE_UID)
+            {
+                Ok(())
+            } else {
+                Err(KsError::Rc(ResponseCode::KEY_NOT_FOUND).into())
+            }
+        };
+        assert!(
+            db.load_key_entry(
+                &key,
+                KeyType::Client,
+                KeyEntryLoadBits::NONE,
+                AppUid(GRANTEE_UID),
+                grant_check,
+            )
+            .is_ok(),
+            "the grantee must resolve the key id its grant reply handed out"
+        );
+        assert!(
+            db.load_key_entry(
+                &key,
+                KeyType::Client,
+                KeyEntryLoadBits::NONE,
+                AppUid(GRANTEE_UID + 1),
+                grant_check,
+            )
+            .is_err(),
+            "a caller without a grant must not resolve the key id"
+        );
+    }
 }
