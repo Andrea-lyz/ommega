@@ -83,6 +83,9 @@ const MAX_TEE_OPERATIONS: usize = 16;
 /// Maximum number of parallel operations supported when running as StrongBox.
 const MAX_STRONGBOX_OPERATIONS: usize = 4;
 
+/// Upper bound accepted for a mirrored implementation's operation limit.
+pub const MAX_OPERATION_LIMIT: usize = 1024;
+
 /// Maximum number of keys whose use count can be tracked.
 const MAX_USE_COUNTED_KEYS: usize = 32;
 
@@ -362,6 +365,30 @@ impl KeyMintTa {
             dice_info: RefCell::new(None),
             additional_attestation_info: Vec::new(),
         }
+    }
+
+    /// Set the number of concurrently open operations this TA accepts.
+    ///
+    /// The KeyMint HAL exposes no operation-limit API, so this mirrors the
+    /// implementation the TA stands in for (see `RemoteKeyMintProfile`). It is
+    /// only valid before any operation has been opened.
+    pub fn set_max_operations(&mut self, limit: usize) -> Result<(), Error> {
+        if limit == 0 || limit > MAX_OPERATION_LIMIT {
+            return Err(km_err!(
+                InvalidArgument,
+                "operation limit {} is outside 1..={}",
+                limit,
+                MAX_OPERATION_LIMIT
+            ));
+        }
+        if self.operations.iter().any(Option::is_some) {
+            return Err(km_err!(
+                InvalidOperation,
+                "cannot change the operation limit while operations are open"
+            ));
+        }
+        self.operations = (0..limit).map(|_| None).collect();
+        Ok(())
     }
 
     /// Returns key used to sign auth tokens

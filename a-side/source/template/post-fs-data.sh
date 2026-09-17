@@ -10,21 +10,128 @@ STATE_DIR=/data/adb/ommega
 # A-side config directory (webroot UI writes here; `ommegadata` is a symlink to
 # $TARGET_DIR, so the UI and the keystore process (uid 1017) share one copy).
 CLIENTA_DIR=/data/adb/ommega
-resetprop persist.logd.size ""
-resetprop persist.logd.size.crash ""
-resetprop persist.logd.size.system ""
-resetprop persist.logd.size.main ""
-resetprop ro.boot.flash.locked 1
-resetprop ro.boot.verifiedbootstate green
-resetprop ro.boot.veritymode enforcing
-resetprop ro.boot.vbmeta.device_state locked
-resetprop ro.secure 1
-resetprop ro.adb.secure 1
-resetprop ro.debuggable 0
-# Android 16+ Duck Detector treats any observed sys.oem_unlock_allowed as a
-# tell (dangerousValues="*"). Forcing 0 still leaves the property visible.
-# Delete it instead of publishing a "safe" value.
-resetprop --delete sys.oem_unlock_allowed 2>/dev/null || true
+# --- Boot-state property normalization ---------------------------------------
+# Values that only an unlocked / tampered device reports are rewritten here, in
+# the post-fs-data stage, before the framework or any detector app can read
+# them. Only the property area is reachable from here: the bootloader parameters
+# the kernel exposes separately (/proc/bootconfig, /proc/cmdline) keep their
+# original values and cannot be changed through resetprop.
+RESETPROP_BIN="$(command -v resetprop 2>/dev/null)"
+if [ -z "$RESETPROP_BIN" ]; then
+  for candidate in \
+    /data/adb/ksu/bin/resetprop \
+    /data/adb/magisk/resetprop \
+    /data/adb/ap/bin/resetprop \
+    /system_ext/bin/resetprop \
+    /system/bin/resetprop
+  do
+    if [ -x "$candidate" ]; then
+      RESETPROP_BIN=$candidate
+      break
+    fi
+  done
+fi
+# Fall back to the plain name so PATH lookup keeps working as before.
+[ -n "$RESETPROP_BIN" ] || RESETPROP_BIN=resetprop
+
+prop_get() {
+  local name=$1
+  "$RESETPROP_BIN" "$name" 2>/dev/null | head -n 1
+}
+
+# Write and read back; a value that did not stick is reported instead of being
+# silently assumed, because every one of these properties is a detection signal.
+prop_set_verified() {
+  local name=$1 want=$2 got
+  "$RESETPROP_BIN" "$name" "$want" 2>/dev/null || true
+  got=$(prop_get "$name")
+  [ "$got" = "$want" ] || echo "ommega: failed to set $name='$want' (got '$got')" >&2
+}
+
+prop_delete_verified() {
+  local name=$1 got
+  "$RESETPROP_BIN" --delete "$name" 2>/dev/null || true
+  got=$(prop_get "$name")
+  [ -z "$got" ] || echo "ommega: failed to delete $name (still '$got')" >&2
+}
+
+# Rewrite a property the bootloader published, or create it when it is missing.
+force_prop_or_create() {
+  local name=$1 want=$2 cur
+  cur=$(prop_get "$name")
+  [ "$cur" = "$want" ] || prop_set_verified "$name" "$want"
+}
+
+# Rewrite a property only when the bootloader published it: a property that is
+# normally absent must stay absent, because its presence is itself an anomaly.
+force_prop() {
+  local name=$1 want=$2 cur
+  cur=$(prop_get "$name")
+  [ -n "$cur" ] || return 0
+  [ "$cur" = "$want" ] || prop_set_verified "$name" "$want"
+}
+
+# Rewrite only when the current value contains a substring (stale boot mode).
+replace_prop_if_contains() {
+  local name=$1 match=$2 want=$3 cur
+  cur=$(prop_get "$name")
+  case "$cur" in
+    *"$match"*) prop_set_verified "$name" "$want" ;;
+  esac
+}
+
+# Remove an emulator / mod tell entirely instead of publishing a "safe" value.
+delete_prop_if_present() {
+  local name=$1
+  [ -n "$(prop_get "$name")" ] && prop_delete_verified "$name"
+}
+
+apply_boot_state_props() {
+  # Verified boot / lock state. A locked retail device reports green + locked +
+  # enforcing; an unlocked bootloader reports orange / 0 / permissive.
+  force_prop_or_create ro.boot.vbmeta.device_state locked
+  force_prop_or_create ro.boot.verifiedbootstate   green
+  force_prop_or_create ro.boot.flash.locked        1
+  force_prop_or_create ro.boot.veritymode          enforcing
+  # Vendors that keep a second copy under the vendor namespace.
+  force_prop_or_create vendor.boot.vbmeta.device_state locked
+  force_prop_or_create vendor.boot.verifiedbootstate   green
+  force_prop            vendor.boot.flash.locked        1
+  force_prop            vendor.boot.veritymode          enforcing
+  # Tamper / warranty flags of the ColorOS family bootloaders.
+  force_prop ro.boot.warranty_bit         0
+  force_prop ro.warranty_bit              0
+  force_prop ro.vendor.boot.warranty_bit  0
+  force_prop ro.vendor.warranty_bit       0
+  force_prop ro.secureboot.lockstate      locked
+  # Realme / OPPO (ColorOS family) boot-state duplicates.
+  force_prop ro.boot.realmebootstate  green
+  force_prop ro.boot.realme.lockstate 1
+  # Anti-debug build surface.
+  force_prop_or_create ro.secure           1
+  force_prop_or_create ro.adb.secure       1
+  force_prop_or_create ro.debuggable       0
+  force_prop           ro.force.debuggable 0
+  force_prop           ro.build.type       user
+  force_prop           ro.build.tags       release-keys
+  # User-data encryption state.
+  force_prop ro.crypto.state encrypted
+  # A stale recovery boot mode or an emulator marker is a mod-detection tell.
+  replace_prop_if_contains ro.bootmode          recovery unknown
+  replace_prop_if_contains ro.boot.bootmode     recovery unknown
+  replace_prop_if_contains vendor.boot.bootmode recovery unknown
+  delete_prop_if_present   ro.kernel.qemu
+  # Android 16+ Duck Detector treats any observed sys.oem_unlock_allowed as a
+  # tell (dangerousValues="*"). Forcing 0 still leaves the property visible.
+  # Delete it instead of publishing a "safe" value.
+  delete_prop_if_present sys.oem_unlock_allowed
+}
+
+prop_set_verified persist.logd.size ""
+prop_set_verified persist.logd.size.crash ""
+prop_set_verified persist.logd.size.system ""
+prop_set_verified persist.logd.size.main ""
+apply_boot_state_props
 mkdir -p "$TARGET_DIR"
 chmod 0770 "$TARGET_DIR"
 chown 1017:1017 "$TARGET_DIR"

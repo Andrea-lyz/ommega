@@ -69,6 +69,32 @@ fn config_defaults_and_log_levels_match_contract() {
 }
 
 #[test]
+fn intercept_surface_is_all_or_nothing() {
+    let mut intercept = InterceptConfig::default();
+    assert!(intercept.keystore_surface_enabled());
+    assert!(intercept.is_coherent());
+
+    intercept.list_entries = false;
+    assert!(intercept.keystore_surface_enabled());
+    assert!(!intercept.is_coherent());
+
+    let intercept = InterceptConfig {
+        get_security_level: false,
+        get_key_entry: false,
+        update_subcomponent: false,
+        list_entries: false,
+        delete_key: false,
+        grant: false,
+        ungrant: false,
+        get_number_of_entries: false,
+        list_entries_batched: false,
+        get_supplementary_attestation_info: false,
+    };
+    assert!(!intercept.keystore_surface_enabled());
+    assert!(intercept.is_coherent());
+}
+
+#[test]
 fn parses_new_scoop_format_and_preserves_package_details() {
     let parsed = parse_config(
         r#"

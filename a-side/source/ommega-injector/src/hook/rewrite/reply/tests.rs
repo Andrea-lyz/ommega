@@ -27,7 +27,7 @@ pub(super) fn assert_synthetic_ok_reply(reply: SyntheticReply, label: &str) {
     let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
     let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
         .expect("status reply should parse");
-    assert!(status.is_ok(), "{label} should be OK");
+    assert!(status.is_ok(), "{label} should be OK, got {status:?}");
 }
 
 pub(super) fn assert_synthetic_empty_parcel_reply(reply: SyntheticReply, label: &str) {

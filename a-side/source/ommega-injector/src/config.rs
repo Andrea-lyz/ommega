@@ -174,6 +174,40 @@ impl Default for InterceptConfig {
     }
 }
 
+impl InterceptConfig {
+    /// Every keystore2 surface switch, in field order.
+    fn switches(&self) -> [bool; 10] {
+        [
+            self.get_security_level,
+            self.get_key_entry,
+            self.update_subcomponent,
+            self.list_entries,
+            self.delete_key,
+            self.grant,
+            self.ungrant,
+            self.get_number_of_entries,
+            self.list_entries_batched,
+            self.get_supplementary_attestation_info,
+        ]
+    }
+
+    /// Whether the keystore2 surface of an allowed caller routes to ommega.
+    ///
+    /// The switches stay configurable for compatibility, but routing is
+    /// all-or-nothing per caller: a per-method split would leave one caller's
+    /// keys visible in one backend and missing in the other, a state a stock
+    /// device never produces.
+    pub fn keystore_surface_enabled(&self) -> bool {
+        self.switches().iter().any(|enabled| *enabled)
+    }
+
+    /// Whether the configured switches agree with each other.
+    pub fn is_coherent(&self) -> bool {
+        let switches = self.switches();
+        switches.iter().all(|enabled| *enabled == switches[0])
+    }
+}
+
 #[derive(Debug)]
 enum LoadError {
     Missing(io::Error),
@@ -383,7 +417,34 @@ fn ensure_initialized() {
 fn config_path() -> PathBuf {
     std::env::var_os("OMMEGA_INJECTOR_CONFIG_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH))
+        .unwrap_or_else(default_config_path)
+}
+
+#[cfg(not(test))]
+fn default_config_path() -> PathBuf {
+    PathBuf::from(DEFAULT_CONFIG_PATH)
+}
+
+/// The test process cannot open the module's own config: it lives under
+/// /data/misc/keystore/ommega, which the test domain is not allowed to read, and
+/// a failed startup load disables the injector. Seed the built-in defaults into a
+/// writable file instead, so unit tests exercise the configured injector.
+#[cfg(test)]
+fn default_config_path() -> PathBuf {
+    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+    FIXTURE
+        .get_or_init(|| {
+            let path = std::env::temp_dir().join("ommega-injector-test-config.toml");
+            if let Err(error) = write_config(&path, &InjectorConfig::default()) {
+                log::error!(
+                    "failed to seed the test config at {}: {:#}; unit tests will see a disabled injector",
+                    path.display(),
+                    error
+                );
+            }
+            path
+        })
+        .clone()
 }
 
 fn load_from_path(path: &Path, allow_migration: bool) -> Result<InjectorConfig, LoadError> {
@@ -410,6 +471,11 @@ fn load_from_path(path: &Path, allow_migration: bool) -> Result<InjectorConfig, 
         )
         .map_err(LoadError::Io)?;
         log::info!("migrated injector.toml to version {CURRENT_CONFIG_VERSION}");
+    }
+    if !config.intercept.is_coherent() {
+        log::warn!(
+            "injector.toml [intercept] mixes enabled and disabled methods; the keystore2 surface routes as a whole, so every method follows the enabled ones"
+        );
     }
     Ok(config)
 }
@@ -526,7 +592,10 @@ fn render_config(config: &InjectorConfig) -> io::Result<String> {
     let mut contents = String::from(
         "# With `[filter].enabled = true`, a UID is intercepted when any package\n\
          # sharing that UID is listed in `scoop`.\n\
-         # Filter deny settings still apply to every package resolved for the UID.\n\n",
+         # Filter deny settings still apply to every package resolved for the UID.\n\
+         # The keystore2 surface routes as a whole: with any `[intercept]` switch\n\
+         # enabled every method of an allowed caller uses ommega, with none enabled\n\
+         # all of them pass to System.\n\n",
     );
     let base = toml::to_string_pretty(&WritableConfig {
         version: config.version,

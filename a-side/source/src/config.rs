@@ -804,6 +804,11 @@ pub struct MainConfig {
     /// When enabled, ommega accepts shape-valid HATs without system KeyMint MAC verification.
     #[serde(default)]
     pub force_skip_system_biometric_hat_verification: bool,
+    /// Optional override for the number of concurrently open KeyMint operations.
+    /// Unset follows the remote identity profile, then the AOSP reference limit
+    /// (16 for TEE, 4 for StrongBox).
+    #[serde(default)]
+    pub max_operations: Option<usize>,
 }
 
 impl Default for MainConfig {
@@ -813,6 +818,7 @@ impl Default for MainConfig {
             log_level: "debug".to_string(),
             use_native_strongbox: false,
             force_skip_system_biometric_hat_verification: false,
+            max_operations: None,
         }
     }
 }
@@ -1048,7 +1054,9 @@ pub enum TrustValueSource {
     Computed,
     Original,
     RandomExplicit,
-    RandomFallback,
+    /// No credible value could be resolved from the device; placeholders are not
+    /// written to the property space and never back a verified/locked claim.
+    Unavailable,
 }
 
 impl std::fmt::Display for TrustValueSource {
@@ -1059,7 +1067,7 @@ impl std::fmt::Display for TrustValueSource {
             TrustValueSource::Computed => write!(f, "computed"),
             TrustValueSource::Original => write!(f, "original"),
             TrustValueSource::RandomExplicit => write!(f, "random_explicit"),
-            TrustValueSource::RandomFallback => write!(f, "random_fallback"),
+            TrustValueSource::Unavailable => write!(f, "unavailable"),
         }
     }
 }

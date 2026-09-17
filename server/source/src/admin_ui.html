@@ -458,22 +458,6 @@ h3.sec-title { font-size: 13px; color: var(--muted); text-transform: uppercase; 
   </div>
 </div>
 
-<!-- StrongBox robustness mode -->
-<div class="panel">
-  <h2>StrongBox 强健模式 <span class="hint">B 端无 StrongBox 能力时自动降级为 B 端 TEE 出证（Android 标准静默降级行为）</span></h2>
-  <div class="body">
-    <div class="token-gen" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px;">
-      <div class="switch" style="margin:0;">
-        <span>启用强健模式</span>
-        <input type="checkbox" id="sbrSwitch" onchange="toggleStrongbox(this.checked)">
-        <label for="sbrSwitch" class="track"></label>
-      </div>
-      <span class="hint" id="sbrStatus" style="flex:1;">加载中…</span>
-    </div>
-    <p class="hint" style="margin:0;line-height:1.6;">开启后：B 端设备返回 StrongBox 不支持 / 未预制密钥时，服务端自动把该请求降级为 TEE 级别重新发给 B 端，并向兼容 A 端显式返回降级标记；证书链和 KeyCharacteristics 均如实标记 TRUSTED_ENVIRONMENT（不冒充 StrongBox）。关闭后保持严格原生语义，StrongBox 失败按 server 三层回退处理。</p>
-  </div>
-</div>
-
 <div class="toast" id="toast"></div>
 
 <div class="modal-mask" id="modalMask" onclick="if(event.target===this)closeModal()">
@@ -1015,26 +999,8 @@ async function removeIpFilter(ip) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-async function loadStrongbox() {
-  try {
-    const d = await api('/api/admin/strongbox/');
-    $('#sbrSwitch').checked = !!d.enabled;
-    $('#sbrStatus').textContent = d.enabled
-      ? '已开启：B 端 StrongBox 不可用/未预制时，自动用 B 端 TEE 出证并如实标记降级'
-      : '已关闭：B 端 StrongBox 失败按原生语义回退（server 三层回退）';
-  } catch (e) {}
-}
-
-async function toggleStrongbox(on) {
-  try {
-    await api('/api/admin/strongbox/', { method: 'POST', body: JSON.stringify({ enabled: on }) });
-    toast(on ? 'StrongBox 强健模式已开启' : 'StrongBox 强健模式已关闭');
-    loadStrongbox();
-  } catch (e) { toast(e.message, 'err'); loadStrongbox(); }
-}
-
 function loadAll() {
-  loadOverview(); loadDevices(); loadTasks(); loadReports(); loadTokens(); loadAutoKeybox(); loadIpFilter(); loadStrongbox();
+  loadOverview(); loadDevices(); loadTasks(); loadReports(); loadTokens(); loadAutoKeybox(); loadIpFilter();
 }
 
 /* Upload */

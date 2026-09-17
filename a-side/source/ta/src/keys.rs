@@ -605,15 +605,12 @@ impl crate::KeyMintTa {
             digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
         ]);
         let alias = format!("ommega-remote-{:016x}", alias_seed);
-        // Mirror client-a's `effectiveCertificateSerial`: forward the caller's
-        // CERTIFICATE_SERIAL if present, otherwise derive a deterministic
-        // positive integer from (alias, challenge) so the B-side mints a leaf
-        // with a readable serial instead of a random 16-byte value.
-        let derived_serial = derive_remote_serial(&alias, challenge);
-        let effective_serial = match serial {
-            Some(s) if !s.is_empty() => Some(s),
-            _ => derived_serial.as_ref(),
-        };
+        // Forward the caller's CERTIFICATE_SERIAL when present; otherwise use the
+        // AOSP default of 1. A value derived from the challenge and alias would be
+        // recomputable offline from public request inputs and would therefore
+        // identify this implementation, while the local attestation arm already
+        // mints serial 1 because keystore2 never sets the tag.
+        let effective_serial = effective_remote_serial(serial.map(Vec::as_slice));
         let mut remote_params = extract_remote_attest_params(params);
         // Tag the relay-minted chain with the requesting security level so a
         // STRONGBOX request is not misreported as TEE by the relay's default.
@@ -624,13 +621,8 @@ impl crate::KeyMintTa {
             .remote
             .as_ref()
             .ok_or_else(|| km_err!(UnknownError, "remote backend not configured"))?;
-        let Some(remote_attestation) = remote.attest(
-            challenge,
-            app_id,
-            &alias,
-            effective_serial.map(|v| v.as_slice()),
-            &remote_params,
-        )?
+        let Some(remote_attestation) =
+            remote.attest(challenge, app_id, &alias, effective_serial, &remote_params)?
         else {
             return Ok(None);
         };
@@ -653,20 +645,13 @@ impl crate::KeyMintTa {
         let effective_security_level = remote_attestation
             .effective_security_level
             .unwrap_or(self.hw_info.security_level);
-        if effective_security_level != self.hw_info.security_level
-            && !(self.hw_info.security_level == SecurityLevel::Strongbox
-                && effective_security_level == SecurityLevel::TrustedEnvironment)
-        {
+        // A physical KeyMint never serves a StrongBox request from the TEE, so
+        // the remote result must report exactly the requested level.
+        if effective_security_level != self.hw_info.security_level {
             return Err(km_err!(
                 VerificationFailed,
                 "unsupported remote attestation security-level downgrade"
             ));
-        }
-        if effective_security_level != self.hw_info.security_level {
-            warn!(
-                "remote StrongBox attestation explicitly demoted to {:?}",
-                effective_security_level
-            );
         }
         if chain.is_empty() {
             return Ok(None);
@@ -1403,38 +1388,18 @@ fn needs_attestation_ids(params: &[KeyParam]) -> bool {
     })
 }
 
-/// Derives a deterministic positive certificate serial from `(alias, challenge)`,
-/// mirroring client-a's `effectiveCertificateSerial`.  The first 8 bytes of
-/// SHA-256(alias || base64(challenge)) are treated as a positive big-endian
-/// integer.  This gives the B-side a readable decimal serial instead of a random
-/// 16-byte TEE value (which renders as garbage in attestation viewers).
-fn derive_remote_serial(alias: &str, challenge: &[u8]) -> Option<Vec<u8>> {
-    use base64::Engine as _;
-    if alias.is_empty() {
-        return None;
-    }
-    let mut seed = alias.as_bytes().to_vec();
-    seed.extend_from_slice(
-        base64::engine::general_purpose::STANDARD
-            .encode(challenge)
-            .as_bytes(),
-    );
-    let digest = self_hash_sha256(&seed);
-    if digest.is_empty() {
-        return None;
-    }
-    // Take the first 8 bytes as a positive integer.
-    let mut n = 0u64;
-    for &b in digest.iter().take(8) {
-        n = (n << 8) | u64::from(b);
-    }
-    if n == 0 {
-        Some(vec![1])
-    } else {
-        let bytes = n.to_be_bytes();
-        // Trim leading zeros, keep at least one byte.
-        let start = bytes.iter().position(|&b| b != 0).unwrap_or(7);
-        Some(bytes[start..].to_vec())
+/// Effective leaf serial for a relay-minted attestation: the caller's value when
+/// present, otherwise the AOSP default of `1` (see `KeyCreationResult.aidl`).
+///
+/// It must not be derived from public request inputs: such a derivation is
+/// recomputable offline and turns the leaf serial into an implementation
+/// fingerprint. A constant also keeps the relay-minted leaf consistent with the
+/// local arm, which mints the TA default because keystore2 never sets the tag.
+fn effective_remote_serial(serial: Option<&[u8]>) -> Option<&[u8]> {
+    const DEFAULT_SERIAL: &[u8] = &[1];
+    match serial {
+        Some(value) if !value.is_empty() => Some(value),
+        _ => Some(DEFAULT_SERIAL),
     }
 }
 

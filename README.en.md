@@ -193,9 +193,10 @@ errors may carry integer `keymint_error_code` beside `error`; Server keeps HTTP 
 A restores recognized negative codes. Unknown/old errors and HTTP auth/rate-limit
 errors stay generic; error strings do not infer HAL errors or enable new fallback.
 
-Server's independent StrongBox robust mode defaults off and resets on restart.
-Only capability-class B StrongBox errors trigger a retry on the same B's TEE.
-This differs from A's native backend, disable switch, per-app policies and Mask.
+A StrongBox request is never silently downgraded to TEE on either side: A rejects
+the relay's downgrade marker with `HARDWARE_TYPE_UNAVAILABLE` and Server forwards
+the B-side capability error unchanged. This differs from A's native backend,
+disable switch, per-app policies and Mask.
 
 ### 8. CI and versions
 

@@ -252,6 +252,22 @@ fn current_service_method_from_code(code: u32) -> Option<ServiceMethod> {
     }
 }
 
+/// getSecurityLevel transaction code of the service interface, used to reach the
+/// objects the other interface tables describe.
+pub const SERVICE_GET_SECURITY_LEVEL_CODE: u32 = service_tx::r#getSecurityLevel;
+
+/// Every security-level transaction code this build's AIDL declares.
+pub fn security_level_codes() -> Vec<u32> {
+    vec![
+        security_level_tx::r#createOperation,
+        security_level_tx::r#generateKey,
+        security_level_tx::r#importKey,
+        security_level_tx::r#importWrappedKey,
+        security_level_tx::r#convertStorageKeyToEphemeral,
+        security_level_tx::r#deleteKey,
+    ]
+}
+
 pub fn security_level_method_from_code(code: u32) -> Option<SecurityLevelMethod> {
     match code {
         security_level_tx::r#createOperation => Some(SecurityLevelMethod::CreateOperation),
@@ -276,21 +292,12 @@ pub fn operation_method_from_code(code: u32) -> Option<OperationMethod> {
     }
 }
 
-pub fn is_ommega_service_route_enabled(method: ServiceMethod, intercept: &InterceptConfig) -> bool {
-    match method {
-        ServiceMethod::GetSecurityLevel => intercept.get_security_level,
-        ServiceMethod::GetKeyEntry => intercept.get_key_entry,
-        ServiceMethod::UpdateSubcomponent => intercept.update_subcomponent,
-        ServiceMethod::ListEntries => intercept.list_entries,
-        ServiceMethod::DeleteKey => intercept.delete_key,
-        ServiceMethod::Grant => intercept.grant,
-        ServiceMethod::Ungrant => intercept.ungrant,
-        ServiceMethod::GetNumberOfEntries => intercept.get_number_of_entries,
-        ServiceMethod::ListEntriesBatched => intercept.list_entries_batched,
-        ServiceMethod::GetSupplementaryAttestationInfo => {
-            intercept.get_supplementary_attestation_info
-        }
-    }
+/// Whether the keystore2 surface of an allowed caller routes to ommega.
+///
+/// The decision is taken for the whole surface: per-method routing would leave
+/// one caller's keys visible in one backend and missing in the other.
+pub fn is_ommega_service_route_enabled(intercept: &InterceptConfig) -> bool {
+    intercept.keystore_surface_enabled()
 }
 
 #[cfg(test)]

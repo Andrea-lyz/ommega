@@ -209,23 +209,22 @@ extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-52
   竞态。
 - Server 校验结果结构、非空证明链字段、profile 字段及任务归属；
   非空链检查不是证书签名或可信根验证，A 还会执行远程身份与叶证明字段检查。
-- Server 管理后台保留独立的“StrongBox 强健模式”：默认关闭；开启后，仅在 B 端
-  StrongBox 返回能力类错误时，才在同一 B 设备上重试 TEE。
-
 远程失败响应保留原有 `error` 文本，并可附带整数 `keymint_error_code`。
 B 端只从真实 HAL 的 service-specific 失败中提取该字段；Server 保持 HTTP 500
 并转发它，A 端将已识别的负值还原为 KeyMint 错误。旧版失败响应、未知代码、HTTP
 鉴权/限流错误仍按通用失败处理，不通过解析错误文本推测硬件错误，也不触发新的
 本地回退。成功响应、证明生成和 StrongBox 能力声明不受该协议变更影响。
 
-Server 强健模式与 A 端控制互不等价：
+A 端相关控制项互不等价：
 
 | 控制项 | 生效位置 | 用途 |
 |---|---|---|
 | `use_native_strongbox` | A 端 KeyMint 后端 | 使用 A 设备真实 StrongBox/RKP |
 | 禁用原生 StrongBox | A 端应用路由 | 让全局默认目标应用按无 StrongBox 设备处理 |
 | 每应用 StrongBox/TEE | A 端应用路由 | 覆盖全局默认行为 |
-| Server StrongBox 强健模式 | B 端任务失败之后 | 能力类错误时重试 TEE；默认关闭，Server 重启后复位 |
+
+StrongBox 请求不会被任何一层静默降级为 TEE：A 端拒绝远程降级标记并以
+`HARDWARE_TYPE_UNAVAILABLE` 失败，Server 只原样转发 B 端的能力错误。
 
 ### 8. 自动构建与版本管理
 

@@ -284,9 +284,9 @@
 
     <string name="mode_leaf_hack">TEE</string>
 
-    <string name="mode_detector_compat">Detector compat</string>
+    <string name="mode_detector_compat">Detector compat (global)</string>
 
-    <string name="mode_detector_compat_hint">Allocate positive key ids for this package, for clients that treat a non-positive key id as unspecified. It provides no hardware security.</string>
+    <string name="mode_detector_compat_hint">Allocates positive key ids to every target app, for clients that treat a non-positive key id as unspecified. It provides no hardware security.</string>
 
     <!-- Keybox Automation -->
 

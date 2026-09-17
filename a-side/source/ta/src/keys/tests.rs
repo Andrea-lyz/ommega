@@ -256,3 +256,23 @@ fn check_child_versions(remote: bool, auth_bound: bool) {
     assert_eq!(unchanged.characteristics, old_blob.characteristics);
     assert_eq!(unchanged.key_material, old_blob.key_material);
 }
+
+#[test]
+fn operation_limit_mirrors_the_mirrored_implementation() {
+    let mut ta = test_ta();
+    assert_eq!(ta.operations.len(), 16);
+    assert!(ta.set_max_operations(0).is_err());
+    assert!(ta.set_max_operations(usize::MAX).is_err());
+    ta.set_max_operations(32).unwrap();
+    assert_eq!(ta.operations.len(), 32);
+}
+
+#[test]
+fn relay_leaf_serial_is_the_aosp_default_unless_the_caller_set_it() {
+    assert_eq!(effective_remote_serial(None), Some(&[1u8][..]));
+    assert_eq!(effective_remote_serial(Some(&[])), Some(&[1u8][..]));
+    assert_eq!(
+        effective_remote_serial(Some(&[0x2a, 0x01])),
+        Some(&[0x2a, 0x01][..])
+    );
+}

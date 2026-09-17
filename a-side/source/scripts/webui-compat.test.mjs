@@ -56,25 +56,33 @@ test("the glue evaluates without the WebUI globals", () => {
 
 test("a policy file round-trips through the glue", () => {
   const context = loadGlue();
-  const serialized = context.ommegaTargetCompatToml(new Set(["com.b.two", "com.a.one"]));
+  const serialized = context.ommegaTargetCompatToml(true);
   assert.match(serialized, /^version = 1/m);
   assert.match(serialized, /^\[positive_key_id\]$/m);
-  assert.match(serialized, /^packages = \["com\.a\.one", "com\.b\.two"\]$/m);
-  const parsed = context.ommegaParseTargetCompat(serialized);
-  assert.deepEqual([...parsed].sort(), ["com.a.one", "com.b.two"]);
+  assert.match(serialized, /^enabled = true$/m);
+  assert.equal(context.ommegaParseTargetCompat(serialized), true);
+  assert.equal(context.ommegaParseTargetCompat(context.ommegaTargetCompatToml(false)), false);
 });
 
-test("an absent, empty or unrelated policy lists no packages", () => {
+test("an absent, empty or unrelated policy keeps the switch off", () => {
   const context = loadGlue();
-  assert.equal(context.ommegaParseTargetCompat("").size, 0);
-  assert.equal(context.ommegaParseTargetCompat("version = 1\n").size, 0);
+  assert.equal(context.ommegaParseTargetCompat(""), false);
+  assert.equal(context.ommegaParseTargetCompat("version = 1\n"), false);
   assert.equal(
-    context.ommegaParseTargetCompat("[positive_key_id]\npackages = []\n").size,
-    0,
+    context.ommegaParseTargetCompat("[positive_key_id]\nenabled = false\n"),
+    false,
   );
   assert.equal(
-    context.ommegaParseTargetCompat("[something_else]\npackages = [\"x\"]\n").size,
-    0,
+    context.ommegaParseTargetCompat("[positive_key_id]\npackages = []\n"),
+    false,
+  );
+  assert.equal(
+    context.ommegaParseTargetCompat("[something_else]\npackages = [\"x\"]\n"),
+    false,
+  );
+  // A policy written before the switch became global still enables it.
+  assert.equal(
+    context.ommegaParseTargetCompat("[positive_key_id]\npackages = [\"x\"]\n"),
+    true,
   );
 });
-

@@ -25,13 +25,14 @@
 ### ommega Routing
 
 - For every request routed by `scoop` with `FilterDecision::allowed == true`, ommega is the only
-  backend during normal reachable operation. Per-method intercept settings still determine whether
-  a request is routed by `scoop`.
-- Choose the backend only from the current caller, filter decision, method, and configuration. Do
+  backend during normal reachable operation.
+- Choose the backend only from the current caller, filter decision, and configuration. Do
   not read or infer which backend created a key, `KeyDescriptor`, `KEY_ID`, `GRANT`, alias,
   wrapping key, or attestation key.
-- Per-method intercept settings are authoritative. When interception for a method is disabled, pass
-  the request to System unchanged even for a caller allowed by `scoop`
+- Keystore2 routing is all-or-nothing per caller. When any `[intercept]` switch is enabled, every
+  keystore2 method of an allowed caller routes to ommega; when none is enabled, the whole surface
+  passes to System unchanged even for a caller allowed by `scoop`. A per-method split would make one
+  caller's keys visible in one backend and missing in the other, which no stock device produces.
 - Do not support key or descriptor continuity between System and ommega. Pass old, externally
   supplied, and System-created descriptors to the selected backend unchanged; an ommega business
   error for such a descriptor is authoritative.

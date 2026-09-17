@@ -37,6 +37,7 @@ use rsbinder::{ExceptionCode, Status, StatusCode, Strong};
 mod binding;
 mod mirror;
 mod pending;
+mod platform_surface;
 mod reply;
 mod request;
 mod synthetic;

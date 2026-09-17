@@ -2024,8 +2024,8 @@ impl KeystoreDB {
                 ));
             }
         }
-        // Compatibility switch: only the callers listed in target-compat.toml
-        // get positive ids, and only for the keys they create from now on.
+        // Compatibility switch: with it on, every caller of this security level
+        // gets positive ids, and only for the keys created from now on.
         let positive_only = matches!(*domain, Domain::APP)
             && crate::keymaster::utils::positive_key_id_required(*namespace);
         Ok(KEY_ID_LOCK.get(
@@ -3570,12 +3570,12 @@ impl KeystoreDB {
     // to insert it into a database. If that insertion fails, retry; otherwise
     // return the id.
     //
-    // positive_only is set for the callers listed in target-compat.toml: key ids
+    // positive_only is set while the target-compat.toml switch is on: key ids
     // are i64 on the wire, keystore2 reserves -1 for "self", and some clients
     // treat a non-positive namespace as an unspecified key id and skip the
-    // KEY_ID operations. Those callers get ids from the positive range only, so
-    // the descriptor a reply hands out is always usable as a KEY_ID lookup.
-    // Every other caller keeps the stock distribution.
+    // KEY_ID operations. The switch is global, so every caller gets ids from the
+    // positive range only and the descriptor a reply hands out is always usable
+    // as a KEY_ID lookup. With the switch off the stock distribution is kept.
     fn insert_with_retry(
         inserter: impl Fn(i64) -> rusqlite::Result<usize>,
         positive_only: bool,

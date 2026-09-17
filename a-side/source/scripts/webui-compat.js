@@ -1,57 +1,40 @@
 
 // ── Ommega detector compatibility policy (target-compat.toml) ────────────────
-// Packages listed there get positive key ids, for clients that treat a
-// non-positive key id as "unspecified". The list is empty by default, so the
-// stock id distribution is kept until a package is opted in from the mode
-// dialog below. Applied by scripts/webui-patch.py to the prebuilt WebUI bundle.
+// One global switch: every target app gets positive key ids, for clients that
+// treat a non-positive key id as "unspecified". It is off by default, so the
+// stock id distribution is kept until it is turned on from the mode dialog
+// below. Applied by scripts/webui-patch.py to the prebuilt WebUI bundle.
 const OMMEGA_TARGET_COMPAT = "/data/adb/ommega/ommegadata/target-compat.toml";
-let ommegaCompatPackages = new Set();
+let ommegaCompatEnabled = false;
 
 function ommegaParseTargetCompat(contents) {
-  const packages = new Set();
+  let enabled = false;
   let inSection = false;
-  let buffer = null;
-  const collect = text => {
-    for (const item of text.matchAll(/"([^"]*)"/g)) {
-      const pkg = item[1].trim();
-      if (pkg) packages.add(pkg);
-    }
-  };
   for (const rawLine of String(contents || "").split(/\r?\n/)) {
     const line = rawLine.trim();
-    if (buffer !== null) {
-      buffer += " " + line;
-      if (line.includes("]")) {
-        collect(buffer);
-        buffer = null;
-      }
-      continue;
-    }
     if (line.startsWith("[")) {
       inSection = line === "[positive_key_id]";
       continue;
     }
     if (!inSection || line === "" || line.startsWith("#")) continue;
-    const assignment = line.match(/^packages\s*=\s*\[(.*)$/);
-    if (!assignment) continue;
-    if (assignment[1].includes("]")) collect(assignment[1]);
-    else buffer = assignment[1];
+    if (/^enabled\s*=\s*true\b/.test(line)) enabled = true;
+    // A legacy per-package list means the switch was on before it went global.
+    if (/^packages\s*=\s*\[.*"[^"]+"/.test(line)) enabled = true;
   }
-  return packages;
+  return enabled;
 }
 
-function ommegaTargetCompatToml(packages) {
-  const lines = [
+function ommegaTargetCompatToml(enabled) {
+  return [
     "# Ommega detector compatibility policy, written by the WebUI.",
-    "# Packages under [positive_key_id] get positive key ids, which keeps",
+    "# Global switch: every target app gets positive key ids, which keeps",
     "# clients that treat a non-positive key id as unspecified working.",
     "version = 1",
     "",
     "[positive_key_id]",
-  ];
-  const list = [...packages].sort().map(pkg => '"' + pkg + '"').join(", ");
-  lines.push("packages = [" + list + "]");
-  return lines.join("\n") + "\n";
+    "enabled = " + (enabled ? "true" : "false"),
+    "",
+  ].join("\n");
 }
 
 function ommegaCompatDialogPackage() {
@@ -66,17 +49,14 @@ function ommegaCompatDialogPackage() {
 
 function ommegaCompatSyncOption() {
   const box = document.getElementById("mode-compat");
-  const pkg = ommegaCompatDialogPackage();
-  if (!box || !pkg) return;
-  box.checked = ommegaCompatPackages.has(pkg);
+  if (!box) return;
+  box.checked = ommegaCompatEnabled;
 }
 
 function ommegaApplyCompatToggle() {
   const box = document.getElementById("mode-compat");
-  const pkg = ommegaCompatDialogPackage();
-  if (!box || !pkg) return;
-  if (box.checked) ommegaCompatPackages.add(pkg);
-  else ommegaCompatPackages.delete(pkg);
+  if (!box) return;
+  ommegaCompatEnabled = box.checked;
 }
 
 function ommegaInstallCompatOption() {
@@ -91,7 +71,7 @@ function ommegaInstallCompatOption() {
   const hint = document.createElement("div");
   hint.id = "mode-compat-hint";
   hint.setAttribute("data-i18n", "mode_detector_compat_hint");
-  hint.textContent = "为该包分配正数 key id / Allocate positive key ids for this package";
+  hint.textContent = "对所有目标应用生效 / Applies to every target application";
   hint.style.cssText = "font-size:11px;line-height:1.4;opacity:.7;margin:-4px 0 8px 4px";
   container.parentElement.appendChild(hint);
   const box = row.querySelector("md-checkbox");
@@ -110,17 +90,7 @@ function ommegaInstallCompatOption() {
 }
 
 async function ommegaWriteTargetCompat() {
-  const selected = new Set(
-    Array.from(se.querySelectorAll("md-checkbox"))
-      .filter(box => box.checked)
-      .map(box => box.closest(".card").getAttribute("data-package"))
-      .filter(pkg => /^[A-Za-z0-9_.]+$/.test(pkg))
-  );
-  Dl.forEach(pkg => selected.add(pkg));
-  for (const pkg of [...ommegaCompatPackages]) {
-    if (!selected.has(pkg)) ommegaCompatPackages.delete(pkg);
-  }
-  const body = ommegaTargetCompatToml(ommegaCompatPackages);
+  const body = ommegaTargetCompatToml(ommegaCompatEnabled);
   const command = [
     "set -e",
     "mkdir -p /data/adb/ommega/ommegadata",
@@ -136,7 +106,7 @@ async function ommegaWriteTargetCompat() {
 const ommegaBaseAppLoadCompat = Mi;
 Mi = async function () {
   const {stdout} = await _('cat "' + OMMEGA_TARGET_COMPAT + '" 2>/dev/null || true');
-  ommegaCompatPackages = ommegaParseTargetCompat(stdout);
+  ommegaCompatEnabled = ommegaParseTargetCompat(stdout);
   return ommegaBaseAppLoadCompat();
 };
 

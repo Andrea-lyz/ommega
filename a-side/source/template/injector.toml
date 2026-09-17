@@ -22,6 +22,8 @@ deny_packages = []
 block_android_package = true
 allow_unknown_package = false
 
+# The keystore2 surface routes as a whole: with any switch enabled, every method
+# of an allowed caller uses ommega; with none enabled, all of them pass to System.
 [intercept]
 get_security_level = true
 get_key_entry = true
