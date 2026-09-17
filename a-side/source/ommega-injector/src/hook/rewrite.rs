@@ -34,12 +34,14 @@ use crate::tracker::{self, SecurityLevelTargetInfo};
 use log::{debug, info, warn};
 use rsbinder::{ExceptionCode, Status, StatusCode, Strong};
 
+mod binding;
 mod mirror;
 mod pending;
 mod reply;
 mod request;
 mod synthetic;
 
+use binding::*;
 pub(super) use mirror::start_mirror_recovery_worker;
 use mirror::*;
 use pending::*;
