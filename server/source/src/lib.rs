@@ -13,5 +13,4 @@ pub mod handlers;
 pub mod keybox;
 pub mod pay;
 pub mod queue;
-pub mod strongbox;
 pub mod util;

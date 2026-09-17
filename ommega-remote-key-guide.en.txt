@@ -266,12 +266,11 @@ or detection results. You assume the risks. The authors accept no liability for
 data loss, device problems, account restrictions, business or financial loss,
 to the extent permitted by applicable law. Do not use if you do not accept the risks.
 
-Keep five controls distinct:
+Keep four controls distinct:
   use_native_strongbox: A backend; global disable: GlobalDefault routing;
-  per-app StrongBox/TEE: explicit routing; Mask: global feature declaration;
-  Server robust mode: capability-class B StrongBox errors retry on same B TEE,
-  off by default and reset on Server restart.
-Native A requests do not enter the B retry path; Server settings do not replace A settings.
+  per-app StrongBox/TEE: explicit routing; Mask: global feature declaration.
+StrongBox requests are never silently downgraded to TEE: A rejects the relay's
+downgrade marker and Server forwards the B-side capability error unchanged.
 
 8. ACCEPTANCE, TROUBLESHOOTING AND BACKUPS
 

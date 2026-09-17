@@ -157,53 +157,9 @@ async fn try_b_device_layer(
     }
 }
 
-/// Whether the A-side request explicitly asked for StrongBox (security_level=2).
-fn is_strongbox_request(body: &Value) -> bool {
-    body.get("device_attest_context")
-        .and_then(|c| c.get("attestation_security_level"))
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            body.get("attestation_security_level")
-                .and_then(Value::as_i64)
-        })
-        .unwrap_or(1)
-        == 2
-}
-
-/// Rewrite the request's security level to a plain TEE request (level 1).
-/// Both the `device_attest_context` entry and a top-level entry are rewritten
-/// (b-app reads either), so every B-side relay interprets the downgrade.
-fn demote_to_tee(body: &Value) -> Value {
-    let mut b = body.clone();
-    if let Some(ctx) = b.get_mut("device_attest_context") {
-        if ctx.get("attestation_security_level").is_some() {
-            ctx["attestation_security_level"] = json!(1);
-        }
-    }
-    if b.get("attestation_security_level").is_some() {
-        b["attestation_security_level"] = json!(1);
-    }
-    if let Some(request_id) = b.get("request_id").and_then(Value::as_str) {
-        b["request_id"] = json!(format!("{request_id}-tee"));
-    }
-    b
-}
-
-/// Mark a successful StrongBox robustness retry with the security level that
-/// actually minted the certificate chain.  A-side clients use both fields to
-/// distinguish this explicit downgrade from an arbitrary level mismatch.
-fn mark_strongbox_demotion(result: &mut Value) -> bool {
-    let Some(obj) = result.as_object_mut() else {
-        return false;
-    };
-    obj.insert("strongbox_demoted".to_string(), json!(true));
-    obj.insert("effective_security_level".to_string(), json!(1));
-    true
-}
-
 /// An attest result without a usable cert chain is treated as a failure so the
-/// robustness demotion (or the next layer) gets a chance instead of forwarding
-/// an empty chain to the A-side (which would silently fall back locally).
+/// next layer gets a chance instead of forwarding an empty chain to the A-side
+/// (which would silently fall back locally).
 fn attest_chain_empty(task_type: &str, v: &Value) -> bool {
     if task_type != "attest" {
         return false;
@@ -346,9 +302,8 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
 
     let serverbox = state.fulfill.is_enabled();
 
-    // StrongBox follows the selected strict backend. In physical mode the B
-    // device must provide it, unless the separately controlled robustness mode
-    // explicitly requests an honest retry as TEE.
+    // StrongBox follows the selected strict backend: in physical mode the B
+    // device must provide it, otherwise the capability error is returned.
     let order: &[&str] = if task_type == "profile" {
         // The remote identity must describe the physical B-side HAL even when
         // the server-keybox fulfilment mode is enabled for attestation.
@@ -400,49 +355,6 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
                         .to_string()
                 };
                 tracing::info!("run_a_side_task: type={task_type} layer={layer} failed: {msg}");
-                // StrongBox robustness mode: a StrongBox attest that the B
-                // device cannot fulfil (capability error — not supported /
-                // keys not provisioned / HAL absent — or no cert chain at
-                // all) is transparently retried as a TEE request on the B
-                // side — the Android-standard silent fallback. The B side
-                // tags the downgraded chain TRUSTED_ENVIRONMENT, so this is
-                // an honest degradation, never a mislabelled StrongBox.
-                // When robustness mode is off, return the capability error.
-                if layer == "b"
-                    && task_type == "attest"
-                    && crate::strongbox::is_robust()
-                    && is_strongbox_request(body)
-                {
-                    let demoted = demote_to_tee(body);
-                    if let Some(mut dv) =
-                        try_b_device_layer(state, task_type, &demoted, &device_id).await
-                    {
-                        if dv.get("error").is_none() && result_shape_valid(task_type, &dv) {
-                            if !mark_strongbox_demotion(&mut dv) {
-                                last_error = Some(
-                                    "strongbox demotion returned a non-object result".to_string(),
-                                );
-                                continue;
-                            }
-                            tracing::info!(
-                                "run_a_side_task: type={task_type} layer=b strongbox-robust demoted to TEE ok"
-                            );
-                            return Json(dv).into_response();
-                        }
-                        let dmsg =
-                            if dv.get("error").is_none() && !result_shape_valid(task_type, &dv) {
-                                "invalid attest result shape".to_string()
-                            } else {
-                                dv.get("error")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("unknown error")
-                                    .to_string()
-                            };
-                        tracing::info!(
-                            "run_a_side_task: type={task_type} layer=b strongbox demotion retry failed: {dmsg}"
-                        );
-                    }
-                }
                 last_error = Some(msg);
             }
             None => {
@@ -1041,21 +953,5 @@ mod tests {
             &json!({ "signature": "AQID" })
         ));
         assert!(!result_shape_valid("agree", &json!({ "data": 7 })));
-    }
-
-    #[test]
-    fn strongbox_demotion_marks_effective_tee_level() {
-        let mut result = json!({ "cert_chain": ["leaf"] });
-
-        assert!(mark_strongbox_demotion(&mut result));
-        assert_eq!(result["strongbox_demoted"], json!(true));
-        assert_eq!(result["effective_security_level"], json!(1));
-    }
-
-    #[test]
-    fn strongbox_demotion_rejects_non_object_result() {
-        let mut result = json!(["leaf"]);
-
-        assert!(!mark_strongbox_demotion(&mut result));
     }
 }

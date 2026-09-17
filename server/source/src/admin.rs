@@ -913,43 +913,6 @@ pub async fn admin_ipfilter_remove(
 }
 
 // ---------------------------------------------------------------------------
-// StrongBox robustness mode.
-// ---------------------------------------------------------------------------
-
-/// GET /api/admin/strongbox/ — current StrongBox robustness-mode switch state.
-pub async fn admin_strongbox_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(r) = check_auth(&state, &headers) {
-        return r;
-    }
-    Json(json!({ "status": "ok", "enabled": crate::strongbox::is_robust() })).into_response()
-}
-
-#[derive(serde::Deserialize)]
-pub struct StrongboxToggleBody {
-    pub enabled: bool,
-}
-
-/// POST /api/admin/strongbox/ — enable/disable StrongBox robustness mode.
-///
-/// Enabled: a B-side StrongBox capability error (not supported / no provisioned
-/// attestation keys) is transparently retried as a TEE request on the same B
-/// device. Disabled: strict semantics, StrongBox errors are returned to A.
-pub async fn admin_strongbox_toggle(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<StrongboxToggleBody>,
-) -> Response {
-    if let Err(r) = check_auth(&state, &headers) {
-        return r;
-    }
-    crate::strongbox::set_robust(body.enabled);
-    Json(json!({ "status": "ok", "enabled": body.enabled })).into_response()
-}
-
-// ---------------------------------------------------------------------------
 // Public status page (no auth) — mirrors Django's `device_status`.
 // ---------------------------------------------------------------------------
 

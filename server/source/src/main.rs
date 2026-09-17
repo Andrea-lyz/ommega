@@ -24,7 +24,6 @@ mod handlers;
 mod keybox;
 mod pay;
 mod queue;
-mod strongbox;
 mod util;
 
 use std::sync::Arc;
@@ -213,8 +212,6 @@ fn build_router(cfg: &Arc<Config>) -> Router {
             "/api/admin/ipfilter/remove/",
             post(admin::admin_ipfilter_remove),
         )
-        .route("/api/admin/strongbox/", get(admin::admin_strongbox_status))
-        .route("/api/admin/strongbox/", post(admin::admin_strongbox_toggle))
         .route("/api/admin/tokens/:token/ips/", get(admin::admin_token_ips))
         .route("/api/admin/tokens/:id/", post(admin::admin_toggle_token))
         .route(

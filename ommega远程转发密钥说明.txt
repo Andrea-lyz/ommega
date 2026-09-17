@@ -239,11 +239,10 @@ Bootloader 证明状态，也不阻止直接 StrongBox 请求。HAL running 与 
 对数据丢失、设备异常、账户限制、业务或财产损失概不负责（适用法律允许范围内）。
 不接受风险请勿使用。
 
-五类控制须区分：
+四类控制须区分：
   use_native_strongbox：A 后端；禁用开关：GlobalDefault 路由；
-  每应用 StrongBox/TEE：显式路由；Mask：全局功能声明；
-  Server StrongBox 强健模式：B 能力类错误后同设备重试 TEE，默认关闭且重启复位。
-A 原生请求不经过 B 重试路径，Server 开关不能代替 A 配置。
+  每应用 StrongBox/TEE：显式路由；Mask：全局功能声明。
+StrongBox 请求不会被静默降级为 TEE：A 端拒绝远程降级标记，Server 原样转发 B 端能力错误。
 
 【八、验收、排障与备份】
 
