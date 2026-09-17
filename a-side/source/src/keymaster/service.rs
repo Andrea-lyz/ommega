@@ -605,18 +605,32 @@ impl KeystoreService {
     }
 
     fn is_grant(&self, ctx: Option<&CallerInfo>, grant: &KeyDescriptor) -> Result<bool> {
-        if grant.domain != Domain::GRANT {
-            return Ok(false);
-        }
-
         let caller_uid = calling_uid(ctx);
+        // A grant descriptor only resolves while the caller's grant row exists.
+        // A key-id descriptor resolves for the key owner and for a caller holding
+        // a grant for that key id; the access tuple reports the grant's access
+        // vector, so require either ownership or that vector.
+        let require_grant_access = match grant.domain {
+            Domain::GRANT => false,
+            Domain::KEY_ID => true,
+            _ => return Ok(false),
+        };
         match DB.with(|db| {
             db.borrow_mut().load_key_entry(
                 grant,
                 KeyType::Client,
                 KeyEntryLoadBits::NONE,
                 caller_uid,
-                |_k, _av| Ok(()),
+                |key, access_vector| {
+                    if !require_grant_access
+                        || access_vector.is_some()
+                        || (key.domain == Domain::APP && key.nspace == caller_uid.0)
+                    {
+                        Ok(())
+                    } else {
+                        Err(Error::Rc(ResponseCode::KEY_NOT_FOUND).into())
+                    }
+                },
             )
         }) {
             Ok(_) => Ok(true),

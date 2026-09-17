@@ -192,3 +192,101 @@ pub(super) fn reset_route_state_for_tests() {
 pub(super) fn clear_operation_state_for_tests() {
     super::synthetic::reset_state_for_tests();
 }
+
+#[test]
+fn ommega_grant_descriptor_rule_covers_grant_and_key_id() {
+    let _guard = route_state_test_guard();
+    let caller = CallerInfo {
+        uid: 99_014,
+        sid: "u:r:isolated_app:s0".to_string(),
+        pid: 4242,
+    };
+    let unknown_package = filter::FilterDecision {
+        allowed: false,
+        reason: FilterReason::RejectedUnknownPackage,
+        packages: Vec::new(),
+    };
+    let probes = AtomicUsize::new(0);
+
+    // Both descriptor shapes a grant hands out must be probed through ommega.
+    for domain in [Domain::GRANT, Domain::KEY_ID] {
+        let descriptor = KeyDescriptor {
+            domain,
+            nspace: 7,
+            alias: None,
+            blob: None,
+        };
+        let mut probe = |_: &CallerInfo, _: &KeyDescriptor| {
+            probes.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        };
+        assert!(
+            should_allow_ommega_grant_descriptor_with_probe(
+                &descriptor,
+                &unknown_package,
+                &caller,
+                &mut probe
+            )
+            .unwrap(),
+            "{domain:?} descriptor must be routed through the ommega grant probe"
+        );
+    }
+    assert_eq!(
+        probes.load(Ordering::SeqCst),
+        2,
+        "each accepted descriptor shape must be probed"
+    );
+
+    // A key id ommega does not grant stays with the system.
+    let unknown_key_id = KeyDescriptor {
+        domain: Domain::KEY_ID,
+        nspace: 9,
+        alias: None,
+        blob: None,
+    };
+    let mut deny = |_: &CallerInfo, _: &KeyDescriptor| Ok(false);
+    assert!(!should_allow_ommega_grant_descriptor_with_probe(
+        &unknown_key_id,
+        &unknown_package,
+        &caller,
+        &mut deny
+    )
+    .unwrap());
+
+    // Other descriptor shapes and already-allowed callers keep the previous behavior.
+    let app_descriptor = KeyDescriptor {
+        domain: Domain::APP,
+        nspace: 7,
+        alias: Some("alias".to_string()),
+        blob: None,
+    };
+    let not_probed = AtomicUsize::new(0);
+    let mut probe = |_: &CallerInfo, _: &KeyDescriptor| {
+        not_probed.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    };
+    assert!(!should_allow_ommega_grant_descriptor_with_probe(
+        &app_descriptor,
+        &unknown_package,
+        &caller,
+        &mut probe
+    )
+    .unwrap());
+    let allowed = filter::FilterDecision {
+        allowed: true,
+        reason: FilterReason::Allowed,
+        packages: vec!["com.wu.kk".to_string()],
+    };
+    assert!(!should_allow_ommega_grant_descriptor_with_probe(
+        &unknown_key_id,
+        &allowed,
+        &caller,
+        &mut probe
+    )
+    .unwrap());
+    assert_eq!(
+        not_probed.load(Ordering::SeqCst),
+        0,
+        "descriptors the rule does not accept must not reach the probe"
+    );
+}

@@ -34,12 +34,14 @@ use crate::tracker::{self, SecurityLevelTargetInfo};
 use log::{debug, info, warn};
 use rsbinder::{ExceptionCode, Status, StatusCode, Strong};
 
+mod binding;
 mod mirror;
 mod pending;
 mod reply;
 mod request;
 mod synthetic;
 
+use binding::*;
 pub(super) use mirror::start_mirror_recovery_worker;
 use mirror::*;
 use pending::*;
@@ -153,7 +155,11 @@ fn should_allow_ommega_grant_descriptor_with_probe(
         return Ok(false);
     }
 
-    if grant.domain != Domain::GRANT {
+    // A key that lives in ommega's plane is reached by a caller whose package
+    // cannot be resolved (an isolated process, or an app outside the scoop). Both
+    // descriptor shapes matter: the grant itself, and the key id a reply handed
+    // out for it, which AOSP resolves through the grant table as well.
+    if !matches!(grant.domain, Domain::GRANT | Domain::KEY_ID) {
         return Ok(false);
     }
 

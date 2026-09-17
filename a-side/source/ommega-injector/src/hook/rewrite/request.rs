@@ -117,6 +117,32 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
     if !is_known_keystore_interface(&request_interface) {
         return false;
     }
+    // keystore2 publishes the service, authorization, and maintenance interfaces
+    // as separate binder nodes, and every AIDL stub rejects a foreign interface
+    // token before dispatch. Only handle a request as the interface its node
+    // serves; anything else is left to the real stub.
+    let target = target_from_transaction(tr);
+    let interface = KeystoreInterface::from_token(&request_interface)
+        .expect("known keystore interface token is classified");
+    if let BindingDecision::ForeignToken { bound } =
+        observe_request(target, interface, i64::from(tr.sender_euid.max(0)))
+    {
+        let (ptr, cookie) = target
+            .map(|target| (target.ptr, target.cookie))
+            .unwrap_or_default();
+        info!(
+            "event=decision interface_token_mismatch command={} token={} bound={:?} target ptr=0x{:x} cookie=0x{:x} code=0x{:x} uid={} pid={}; leaving the transaction to the system stub",
+            command_name,
+            request_interface,
+            bound,
+            ptr,
+            cookie,
+            tr.code,
+            tr.sender_euid,
+            tr.sender_pid,
+        );
+        return false;
+    }
     let caller = CallerInfo {
         uid: i64::from(tr.sender_euid.max(0)),
         sid: caller_sid.unwrap_or_default(),
