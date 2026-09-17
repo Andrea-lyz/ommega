@@ -217,6 +217,9 @@ pub struct RemoteKeyMintProfile {
     pub hardware_version: i32,
     pub security_level: keymint::SecurityLevel,
     pub has_strongbox: bool,
+    /// Concurrency limit of the mirrored implementation, when it reports one.
+    /// `None` keeps the AOSP reference limit (16 for TEE, 4 for StrongBox).
+    pub max_operations: Option<usize>,
 }
 
 /// Successful remote attestation result.
@@ -224,8 +227,11 @@ pub struct RemoteKeyMintProfile {
 pub struct RemoteAttestation {
     /// DER certificate chain, leaf first.
     pub cert_chain: Vec<Vec<u8>>,
-    /// Effective level explicitly reported for a relay-approved downgrade.
-    /// `None` preserves strict legacy behavior and uses the requesting level.
+    /// Security level the remote backend reports for this result.
+    ///
+    /// It must equal the requesting level: a physical KeyMint never downgrades
+    /// a StrongBox request to TEE, and the relay's downgrade marker is rejected
+    /// before it reaches the TA.
     pub effective_security_level: Option<keymint::SecurityLevel>,
     /// Frozen B-side HAL identity used to validate this result.
     pub profile: RemoteKeyMintProfile,

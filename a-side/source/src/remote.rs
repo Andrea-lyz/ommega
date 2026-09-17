@@ -63,6 +63,8 @@ pub(crate) struct RemoteIdentityProfile {
     pub keymint_name: String,
     pub keymint_author: String,
     pub has_strongbox: bool,
+    /// Operation limit reported by the B-side implementation, when present.
+    pub max_operations: Option<usize>,
 }
 
 fn new_request_id(kind: &str) -> String {
@@ -331,8 +333,21 @@ impl RemoteRelay {
             "verified_boot_hash".to_string(),
             Value::String(base64_encode(&vb_hash)),
         );
-        ctx.insert("device_locked".to_string(), Value::Bool(true));
-        ctx.insert("verified_boot_state".to_string(), Value::from(0));
+        // Forward the resolved boot state instead of a hardcoded verified/locked
+        // device: an unavailable root of trust is reported as unverified/unlocked,
+        // and the relay-minted record must match the local one.
+        let (device_locked, verified_boot_state) = match config::config().read() {
+            Ok(g) => (
+                g.trust.device_locked,
+                if g.trust.verified_boot_state { 0 } else { 2 },
+            ),
+            Err(_) => (true, 0),
+        };
+        ctx.insert("device_locked".to_string(), Value::Bool(device_locked));
+        ctx.insert(
+            "verified_boot_state".to_string(),
+            Value::from(verified_boot_state),
+        );
         ctx.insert(
             "creation_datetime_ms".to_string(),
             Value::from(Self::now_ms()),
@@ -459,15 +474,14 @@ impl RemoteRelay {
         if let Some(patch) = vendor_patch_level {
             ctx.insert("vendor_patch_level".to_string(), Value::from(patch));
         }
-        let boot_patch_level =
-            crate::plat::resetprop::read_string_property("ro.boot.build.security_patch")
-                .as_deref()
-                .and_then(patch_level_to_yyyymm)
-                .or_else(|| match config::config().read() {
-                    Ok(g) => patch_level_to_yyyymm(&g.trust.boot_patchlevel),
-                    Err(_) => None,
-                })
-                .or(os_patch_level);
+        let boot_patch_level = crate::plat::vbmeta::boot_patch_property()
+            .as_deref()
+            .and_then(patch_level_to_yyyymm)
+            .or_else(|| match config::config().read() {
+                Ok(g) => patch_level_to_yyyymm(&g.trust.boot_patchlevel),
+                Err(_) => None,
+            })
+            .or(os_patch_level);
         if let Some(patch) = boot_patch_level {
             ctx.insert("boot_patch_level".to_string(), Value::from(patch));
         }
@@ -558,14 +572,21 @@ fn patch_level_to_yyyymm(value: &str) -> Option<u32> {
     None
 }
 
-/// Accept only the relay's explicit, narrowly scoped StrongBox-to-TEE
-/// robustness marker.  Legacy responses keep strict requested-level checks.
-fn parse_strongbox_demotion(
+/// Reject the relay's StrongBox-to-TEE "robustness" marker.
+///
+/// A physical KeyMint never serves a request that selected the StrongBox
+/// security level with TEE-minted material: the framework asks keystore2 for
+/// the StrongBox instance and a device without one fails the operation
+/// (`HARDWARE_TYPE_UNAVAILABLE`).  Accepting the marker would hand back a chain
+/// whose attestation security level is TRUSTED_ENVIRONMENT while
+/// `KeyMetadata.keySecurityLevel` still reports STRONGBOX, so the two
+/// app-visible security-level sources would disagree.
+fn reject_strongbox_demotion(
     result: &Value,
     requested_security_level: Option<i32>,
-) -> Result<Option<kmr_wire::keymint::SecurityLevel>, kmr_common::Error> {
+) -> Result<(), kmr_common::Error> {
     let demoted = match result.get("strongbox_demoted") {
-        None => return Ok(None),
+        None => return Ok(()),
         Some(Value::Bool(value)) => *value,
         Some(_) => {
             return Err(kmr_common::km_err!(
@@ -575,7 +596,7 @@ fn parse_strongbox_demotion(
         }
     };
     if !demoted {
-        return Ok(None);
+        return Ok(());
     }
     if requested_security_level != Some(kmr_wire::keymint::SecurityLevel::Strongbox as i32) {
         return Err(kmr_common::km_err!(
@@ -598,7 +619,10 @@ fn parse_strongbox_demotion(
             "remote StrongBox demotion did not report TEE as the effective level"
         ));
     }
-    Ok(Some(kmr_wire::keymint::SecurityLevel::TrustedEnvironment))
+    Err(kmr_common::km_err!(
+        HardwareTypeUnavailable,
+        "remote identity cannot serve the requested StrongBox security level"
+    ))
 }
 
 fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
@@ -639,11 +663,29 @@ fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
         ));
     }
     let interface_hash = field_string("interface_hash")?;
+    let max_operations = match value.get("max_operations") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(number)) => {
+            let limit = number
+                .as_u64()
+                .ok_or_else(|| anyhow!("remote profile returned a non-integer max_operations"))?;
+            if limit == 0 || limit > kmr_ta::MAX_OPERATION_LIMIT as u64 {
+                return Err(anyhow!(
+                    "remote profile returned max_operations {limit} outside 1..={}",
+                    kmr_ta::MAX_OPERATION_LIMIT
+                ));
+            }
+            Some(limit as usize)
+        }
+        Some(_) => return Err(anyhow!("remote profile returned an invalid max_operations")),
+    };
+
     if interface_hash.len() != 40 || !interface_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(anyhow!("remote profile returned an invalid interface hash"));
     }
 
     Ok(RemoteIdentityProfile {
+        max_operations,
         interface_version,
         interface_hash,
         profile_version,
@@ -726,7 +768,7 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         };
         // The relay wraps the result as `{ result: { cert_chain: [...] } }`.
         let result = resp.get("result").cloned().unwrap_or(resp);
-        let effective_security_level = parse_strongbox_demotion(&result, params.security_level)?;
+        reject_strongbox_demotion(&result, params.security_level)?;
         if let Some(result_profile) = result.get("remote_profile") {
             let observed = parse_identity_profile(result_profile).map_err(|error| {
                 kmr_common::km_err!(
@@ -806,7 +848,9 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         }
         Ok(Some(kmr_ta::device::RemoteAttestation {
             cert_chain: chain,
-            effective_security_level,
+            // The relay may only confirm the level that was requested; its
+            // downgrade marker is rejected above.
+            effective_security_level: None,
             profile: kmr_ta::device::RemoteKeyMintProfile {
                 interface_version: profile.interface_version,
                 interface_hash: profile.interface_hash,
@@ -814,6 +858,7 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
                 hardware_version: profile.hardware_version,
                 security_level: kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
                 has_strongbox: profile.has_strongbox,
+                max_operations: profile.max_operations,
             },
         }))
     }
@@ -1015,6 +1060,37 @@ mod tests {
     }
 
     #[test]
+    fn validates_the_remote_operation_limit() {
+        let base = json!({
+            "interface_version": 2,
+            "interface_hash": "207c9f218b9b9e4e74ff5232eb16511eca9d7d2e",
+            "profile_version": 200,
+            "hardware_version": 400,
+            "security_level": 1,
+            "keymint_name": "QTI KeyMint",
+            "keymint_author": "Qualcomm",
+            "has_strongbox": false,
+        });
+        assert_eq!(parse_identity_profile(&base).unwrap().max_operations, None);
+
+        let mut with_limit = base.clone();
+        with_limit["max_operations"] = json!(32);
+        assert_eq!(
+            parse_identity_profile(&with_limit).unwrap().max_operations,
+            Some(32)
+        );
+
+        for invalid in [json!(0), json!(1025), json!(-1), json!("many")] {
+            let mut profile = base.clone();
+            profile["max_operations"] = invalid;
+            assert!(
+                parse_identity_profile(&profile).is_err(),
+                "invalid max_operations must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_mixed_remote_keymint_profile_versions() {
         let result = parse_identity_profile(&json!({
             "interface_version": 2,
@@ -1031,23 +1107,19 @@ mod tests {
     }
 
     #[test]
-    fn accepts_explicit_strongbox_to_tee_demotion() {
+    fn rejects_explicit_strongbox_to_tee_demotion() {
         let result = json!({
             "strongbox_demoted": true,
             "effective_security_level": 1,
         });
 
-        assert_eq!(
-            parse_strongbox_demotion(&result, Some(SecurityLevel::Strongbox as i32)).unwrap(),
-            Some(SecurityLevel::TrustedEnvironment)
-        );
+        assert!(reject_strongbox_demotion(&result, Some(SecurityLevel::Strongbox as i32)).is_err());
     }
 
     #[test]
     fn legacy_response_keeps_strict_requested_level() {
-        assert_eq!(
-            parse_strongbox_demotion(&json!({}), Some(SecurityLevel::Strongbox as i32)).unwrap(),
-            None
+        assert!(
+            reject_strongbox_demotion(&json!({}), Some(SecurityLevel::Strongbox as i32)).is_ok()
         );
     }
 
@@ -1059,7 +1131,7 @@ mod tests {
         });
 
         assert!(
-            parse_strongbox_demotion(&result, Some(SecurityLevel::TrustedEnvironment as i32))
+            reject_strongbox_demotion(&result, Some(SecurityLevel::TrustedEnvironment as i32))
                 .is_err()
         );
     }
@@ -1071,6 +1143,6 @@ mod tests {
             "effective_security_level": 2,
         });
 
-        assert!(parse_strongbox_demotion(&result, Some(SecurityLevel::Strongbox as i32)).is_err());
+        assert!(reject_strongbox_demotion(&result, Some(SecurityLevel::Strongbox as i32)).is_err());
     }
 }

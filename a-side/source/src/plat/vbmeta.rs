@@ -32,7 +32,16 @@ use crate::{
 const SECURITY_PATCH_PROP: &str = "ro.build.version.security_patch";
 const SECURITY_PATCH_FALLBACK: &str = "2025-06-05";
 const VENDOR_PATCH_PROP: &str = "ro.vendor.build.security_patch";
-const BOOT_PATCH_PROP: &str = "ro.vendor.boot_security_patch";
+/// Boot image security-patch properties, most standard name first.
+///
+/// The boot image's AVB property (`com.android.build.boot.security_patch`) is
+/// what a bootloader hands to the kernel, and init exports that command-line
+/// entry as `ro.boot.image.build.security_patch`; vendor trees that only carry
+/// the value in a build.prop use the vendor-flavoured name.
+const BOOT_PATCH_PROPS: [&str; 2] = [
+    "ro.boot.image.build.security_patch",
+    "ro.vendor.boot_security_patch",
+];
 const VBMETA_KEY_PROP: &str = "ro.boot.vbmeta.public_key_digest";
 const VBMETA_HASH_PROP: &str = "ro.boot.vbmeta.digest";
 const ORIGINAL_HASH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -90,6 +99,23 @@ pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
         &slot_suffix,
     );
     let vb_hash = resolve_vb_hash(&config_file.trust.vb_hash);
+    let (verified_boot_state, device_locked) = honest_boot_state(
+        config_file.trust.verified_boot_state,
+        config_file.trust.device_locked,
+        &vb_key,
+        &vb_hash,
+    );
+    if verified_boot_state != config_file.trust.verified_boot_state
+        || device_locked != config_file.trust.device_locked
+    {
+        log::error!(
+            "root of trust is not fully resolvable (vb_key={}, vb_hash={}); reporting an unverified, unlocked record instead of the configured state={} locked={}",
+            vb_key.source,
+            vb_hash.source,
+            config_file.trust.verified_boot_state,
+            config_file.trust.device_locked
+        );
+    }
 
     sync_sysprops_if_needed(&vb_key, &vb_hash)?;
     if patches.write_security_patch {
@@ -104,11 +130,13 @@ pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
     let vb_key_hex = hex::encode(vb_key.value);
     let vb_hash_hex = hex::encode(vb_hash.value);
     log::info!(
-        "Resolved vbmeta trust: vb_key={} source={} vb_hash={} source={}",
+        "Resolved vbmeta trust: vb_key={} source={} vb_hash={} source={} verified_boot_state={} device_locked={}",
         vb_key_hex,
         vb_key.source,
         vb_hash_hex,
-        vb_hash.source
+        vb_hash.source,
+        verified_boot_state,
+        device_locked
     );
 
     Ok(ResolvedTrust {
@@ -121,8 +149,8 @@ pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
         vb_hash: vb_hash.value,
         vb_key_source: vb_key.source,
         vb_hash_source: vb_hash.source,
-        verified_boot_state: config_file.trust.verified_boot_state,
-        device_locked: config_file.trust.device_locked,
+        verified_boot_state,
+        device_locked,
     })
 }
 
@@ -156,8 +184,14 @@ fn resolve_vb_key(spec: &TrustValueSpec, device_locked: bool, slot_suffix: &str)
                     source: TrustValueSource::Computed,
                 },
                 Err(error) => {
-                    log::warn!("computed vbmeta public key digest unavailable: {error:#}");
-                    random_field(TrustValueSource::RandomFallback)
+                    // Never invent a value here: a random digest would contradict the
+                    // verified/locked claim, would change on every restart and would
+                    // therefore invalidate every keyblob. Report the root of trust as
+                    // unavailable and leave the properties untouched.
+                    log::error!(
+                        "vbmeta public key digest unavailable, reporting an unavailable root of trust: {error:#}"
+                    );
+                    unavailable_field()
                 }
             }
         }
@@ -185,8 +219,11 @@ fn resolve_vb_hash(spec: &TrustValueSpec) -> ResolvedField {
                     source: TrustValueSource::Original,
                 },
                 Err(error) => {
-                    log::warn!("original verified boot hash unavailable: {error:#}");
-                    random_field(TrustValueSource::RandomFallback)
+                    // See `resolve_vb_key`: no fabricated hash and no property write.
+                    log::error!(
+                        "verified boot hash unavailable, reporting an unavailable root of trust: {error:#}"
+                    );
+                    unavailable_field()
                 }
             }
         }
@@ -198,6 +235,36 @@ fn random_field(source: TrustValueSource) -> ResolvedField {
     let mut value = [0u8; 32];
     rng.fill_bytes(&mut value);
     ResolvedField { value, source }
+}
+
+/// Placeholder for a root-of-trust value that could not be resolved from the
+/// device. It never backs a verified/locked claim: see [`honest_boot_state`].
+fn unavailable_field() -> ResolvedField {
+    ResolvedField {
+        value: [0u8; 32],
+        source: TrustValueSource::Unavailable,
+    }
+}
+
+/// Boot state actually reported in the attestation record.
+///
+/// A root of trust that could not be resolved must not be reported as a verified,
+/// locked device: `Verified` (green) implies a locked bootloader and a hash that
+/// stays constant across boots, so placeholder values behind a green/locked claim
+/// are externally detectable. A green claim without a locked bootloader is
+/// rejected for the same reason.
+fn honest_boot_state(
+    configured_state: bool,
+    configured_locked: bool,
+    vb_key: &ResolvedField,
+    vb_hash: &ResolvedField,
+) -> (bool, bool) {
+    let unavailable = matches!(vb_key.source, TrustValueSource::Unavailable)
+        || matches!(vb_hash.source, TrustValueSource::Unavailable);
+    if unavailable {
+        return (false, false);
+    }
+    (configured_state && configured_locked, configured_locked)
 }
 
 pub(crate) fn resolve_patch_levels(trust: &RawTrustConfig) -> Result<ResolvedPatchLevels> {
@@ -212,8 +279,7 @@ pub(crate) fn resolve_patch_levels(trust: &RawTrustConfig) -> Result<ResolvedPat
     }
     let vendor_patch = resetprop::read_string_property(VENDOR_PATCH_PROP)
         .or_else(|| read_build_prop_value(VENDOR_PATCH_PROP));
-    let property_boot_patch = resetprop::read_string_property(BOOT_PATCH_PROP)
-        .or_else(|| read_build_prop_value(BOOT_PATCH_PROP));
+    let property_boot_patch = boot_patch_property();
     let boot_patch = if trust.boot_patchlevel.trim() == "auto" {
         match read_abl_boot_patchlevel() {
             Ok(value) => Some(value),
@@ -325,6 +391,18 @@ fn read_build_prop_value(key: &str) -> Option<String> {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|contents| parse_build_prop_value(&contents, key))
+    })
+}
+
+/// First nonempty boot patch-level property, runtime value before build.prop.
+///
+/// Only used when the boot image metadata cannot be read: that metadata is what
+/// the bootloader itself consumes, and it is the source a physical device uses.
+pub(crate) fn boot_patch_property() -> Option<String> {
+    BOOT_PATCH_PROPS.iter().find_map(|prop| {
+        resetprop::read_string_property(prop)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| read_build_prop_value(prop))
     })
 }
 
@@ -456,7 +534,6 @@ impl TrustValueSource {
             TrustValueSource::Computed
                 | TrustValueSource::Original
                 | TrustValueSource::RandomExplicit
-                | TrustValueSource::RandomFallback
         )
     }
 }
@@ -1172,9 +1249,14 @@ mod tests {
 # comment
 ro.vendor.boot_security_patch = 2025-10-05
 ro.vendor.boot_security_patch.extra = ignored
+ro.boot.image.build.security_patch = 2025-11-05
 "#;
         assert_eq!(
-            parse_build_prop_value(contents, BOOT_PATCH_PROP).as_deref(),
+            parse_build_prop_value(contents, BOOT_PATCH_PROPS[0]).as_deref(),
+            Some("2025-11-05")
+        );
+        assert_eq!(
+            parse_build_prop_value(contents, BOOT_PATCH_PROPS[1]).as_deref(),
             Some("2025-10-05")
         );
     }
@@ -1212,11 +1294,38 @@ ro.vendor.boot_security_patch.extra = ignored
     }
 
     #[test]
-    fn random_sources_still_require_sysprop_writeback() {
+    fn only_derived_sources_require_sysprop_writeback() {
         assert!(TrustValueSource::RandomExplicit.needs_sysprop_write());
-        assert!(TrustValueSource::RandomFallback.needs_sysprop_write());
+        assert!(TrustValueSource::Computed.needs_sysprop_write());
+        assert!(TrustValueSource::Original.needs_sysprop_write());
         assert!(!TrustValueSource::ExplicitHex.needs_sysprop_write());
         assert!(!TrustValueSource::Property.needs_sysprop_write());
+        assert!(!TrustValueSource::Unavailable.needs_sysprop_write());
+    }
+
+    #[test]
+    fn unresolved_trust_never_reports_a_verified_locked_device() {
+        let available = ResolvedField {
+            value: [0x11; 32],
+            source: TrustValueSource::Computed,
+        };
+        let unavailable = unavailable_field();
+        assert_eq!(
+            honest_boot_state(true, true, &available, &available),
+            (true, true)
+        );
+        assert_eq!(
+            honest_boot_state(true, true, &unavailable, &available),
+            (false, false)
+        );
+        assert_eq!(
+            honest_boot_state(true, true, &available, &unavailable),
+            (false, false)
+        );
+        assert_eq!(
+            honest_boot_state(true, false, &available, &available),
+            (false, false)
+        );
     }
 
     fn build_test_vbmeta(

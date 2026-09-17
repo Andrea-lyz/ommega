@@ -143,6 +143,10 @@ apply_live() {
   scope=$1
   stock_system=$(sed -n 's/^ro.build.version.security_patch=//p' /system/build.prop /system/system/build.prop 2>/dev/null | tail -n 1)
   stock_vendor=$(sed -n 's/^ro.vendor.build.security_patch=//p' /vendor/build.prop 2>/dev/null | tail -n 1)
+  # The boot patch level has no build.prop entry: a stock device exposes the
+  # boot image's AVB property through the bootloader config, which init turns
+  # into ro.boot.image.build.security_patch.
+  stock_boot=$(sed -n 's/^androidboot\.image\.build\.security_patch = "\(.*\)"$/\1/p' /proc/bootconfig 2>/dev/null | head -n 1)
   case "$scope" in
     patch)
       if [ -n "$SYS_PATCH" ]; then
@@ -152,6 +156,8 @@ apply_live() {
       fi
       if [ -n "$BOOT_PATCH" ]; then
         resetprop -n ro.boot.image.build.security_patch "$BOOT_PATCH" 2>/dev/null
+      elif [ -n "$stock_boot" ]; then
+        resetprop -n ro.boot.image.build.security_patch "$stock_boot" 2>/dev/null
       else
         resetprop --delete ro.boot.image.build.security_patch 2>/dev/null || true
       fi

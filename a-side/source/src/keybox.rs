@@ -17,7 +17,7 @@ use kmr_common::{
 };
 use kmr_crypto_ommega::{ec::OmmegaEc, mldsa::OmmegaMlDsa, rsa::OmmegaRsa, sha256::OmmegaSha256};
 use kmr_ta::device::{
-    RetrieveCertSigningInfo, SigningAlgorithm, SigningInfoSnapshot, SigningKeyType,
+    RetrieveCertSigningInfo, SigningAlgorithm, SigningInfoSnapshot, SigningKey, SigningKeyType,
 };
 use kmr_wire::keymint;
 use log::{debug, error, info, warn};
@@ -26,6 +26,16 @@ use x509_cert::der as x509_der;
 use x509_cert::Certificate;
 
 pub const KEYBOX_PATH: &str = "/data/misc/keystore/ommega/keybox.xml";
+
+/// Optional dedicated attestation material for the StrongBox security level.
+///
+/// A real device signs StrongBox attestations with a keychain of its own, kept
+/// separate from the TEE batch chain. Reusing one chain for both levels is
+/// externally observable: an app can create a TEE key and a StrongBox key and
+/// compare the issuers and serial numbers of the two chains. When this file is
+/// absent, StrongBox attestation fails with `ATTESTATION_KEYS_NOT_PROVISIONED`
+/// instead of silently labelling the batch chain as StrongBox.
+pub const KEYBOX_STRONGBOX_PATH: &str = "/data/misc/keystore/ommega/keybox-strongbox.xml";
 
 const BUNDLED_KEYBOX_XML: &str = include_str!("../template/keybox.xml");
 
@@ -57,6 +67,8 @@ pub struct CertSignAlgoInfo {
 pub struct KeyBox {
     rsa_info: Option<CertSignAlgoInfo>,
     ec_info: Option<CertSignAlgoInfo>,
+    strongbox_rsa_info: Option<CertSignAlgoInfo>,
+    strongbox_ec_info: Option<CertSignAlgoInfo>,
     identity_digest: [u8; 32],
 }
 
@@ -77,9 +89,27 @@ impl KeyBox {
     }
 
     pub fn from_xml_str(xml: &str) -> Result<Self> {
+        let (rsa_entry, ec_entry) = Self::parse_key_entries(xml)?;
+        let rsa_info = rsa_entry.map(Self::build_rsa_info).transpose()?;
+        let ec_info = ec_entry.map(Self::build_ec_info).transpose()?;
+        if rsa_info.is_none() && ec_info.is_none() {
+            bail!("keybox.xml must contain at least one RSA or EC key entry");
+        }
+        let mut keybox = Self {
+            rsa_info,
+            ec_info,
+            strongbox_rsa_info: None,
+            strongbox_ec_info: None,
+            identity_digest: [0u8; 32],
+        };
+        keybox.refresh_identity_digest()?;
+        Ok(keybox)
+    }
+
+    /// Parse the RSA/EC `<Key>` entries of one keybox document.
+    fn parse_key_entries(xml: &str) -> Result<(Option<ParsedKeyEntry>, Option<ParsedKeyEntry>)> {
         let mut rsa_entry = None;
         let mut ec_entry = None;
-
         for captures in KEY_BLOCK_RE.captures_iter(xml) {
             let algorithm = match captures.get(1).map(|m| m.as_str().trim()) {
                 Some("ecdsa") | Some("ec") => KeyAlgorithm::Ec,
@@ -99,21 +129,24 @@ impl KeyBox {
                 KeyAlgorithm::Rsa => rsa_entry = Some(entry),
             }
         }
+        Ok((rsa_entry, ec_entry))
+    }
 
+    /// Install dedicated StrongBox material from its own keybox document (same
+    /// schema as `keybox.xml`). It stays strictly separate from the batch
+    /// material, so a StrongBox attestation can never be produced from the TEE
+    /// keychain.
+    pub fn set_strongbox_material_from_xml(&mut self, xml: &str) -> Result<()> {
+        let (rsa_entry, ec_entry) = Self::parse_key_entries(xml)?;
         let rsa_info = rsa_entry.map(Self::build_rsa_info).transpose()?;
         let ec_info = ec_entry.map(Self::build_ec_info).transpose()?;
         if rsa_info.is_none() && ec_info.is_none() {
-            bail!("keybox.xml must contain at least one RSA or EC key entry");
+            bail!("StrongBox keybox must contain at least one RSA or EC key entry");
         }
-        let identity_digest = Self::compute_identity_digest(rsa_info.as_ref(), ec_info.as_ref())?;
-
-        Ok(Self {
-            rsa_info,
-            ec_info,
-            identity_digest,
-        })
+        self.strongbox_rsa_info = rsa_info;
+        self.strongbox_ec_info = ec_info;
+        self.refresh_identity_digest()
     }
-
     fn build_rsa_info(entry: ParsedKeyEntry) -> Result<CertSignAlgoInfo> {
         if entry.chain.is_empty() {
             bail!("RSA certificate chain is empty");
@@ -160,6 +193,8 @@ impl KeyBox {
     fn compute_identity_digest(
         rsa_info: Option<&CertSignAlgoInfo>,
         ec_info: Option<&CertSignAlgoInfo>,
+        strongbox_rsa_info: Option<&CertSignAlgoInfo>,
+        strongbox_ec_info: Option<&CertSignAlgoInfo>,
     ) -> Result<[u8; 32]> {
         let mut material = Vec::new();
         if let Some(rsa_info) = rsa_info {
@@ -170,6 +205,14 @@ impl KeyBox {
             append_labeled_bytes(&mut material, b"ec-key", &ec_info.key_der);
             append_labeled_chain(&mut material, b"ec-chain", &ec_info.chain);
         }
+        if let Some(rsa_info) = strongbox_rsa_info {
+            append_labeled_bytes(&mut material, b"strongbox-rsa-key", &rsa_info.key_der);
+            append_labeled_chain(&mut material, b"strongbox-rsa-chain", &rsa_info.chain);
+        }
+        if let Some(ec_info) = strongbox_ec_info {
+            append_labeled_bytes(&mut material, b"strongbox-ec-key", &ec_info.key_der);
+            append_labeled_chain(&mut material, b"strongbox-ec-chain", &ec_info.chain);
+        }
 
         OmmegaSha256 {}
             .hash(&material)
@@ -177,8 +220,12 @@ impl KeyBox {
     }
 
     fn refresh_identity_digest(&mut self) -> Result<()> {
-        self.identity_digest =
-            Self::compute_identity_digest(self.rsa_info.as_ref(), self.ec_info.as_ref())?;
+        self.identity_digest = Self::compute_identity_digest(
+            self.rsa_info.as_ref(),
+            self.ec_info.as_ref(),
+            self.strongbox_rsa_info.as_ref(),
+            self.strongbox_ec_info.as_ref(),
+        )?;
         Ok(())
     }
 
@@ -186,17 +233,59 @@ impl KeyBox {
         self.identity_digest
     }
 
+    #[cfg(test)]
     fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
-        let info = match key_type.algo_hint {
-            SigningAlgorithm::Rsa => self.rsa_info.as_ref(),
-            SigningAlgorithm::Ec => self.ec_info.as_ref(),
+        self.signing_info_at(keymint::SecurityLevel::TrustedEnvironment, key_type)
+    }
+
+    /// Snapshot the attestation signing material for one security level.
+    ///
+    /// StrongBox attestations use their own material only; the batch/TEE chain is
+    /// never reused for them, because a TEE chain labelled StrongBox is externally
+    /// distinguishable from a real device's separate StrongBox chain.
+    pub fn signing_info_at(
+        &self,
+        security_level: keymint::SecurityLevel,
+        key_type: SigningKeyType,
+    ) -> Result<SigningInfoSnapshot, Error> {
+        let strongbox = matches!(security_level, keymint::SecurityLevel::Strongbox);
+        match key_type.which {
+            SigningKey::DeviceUnique => {
+                if !strongbox {
+                    return Err(kmr_common::km_err!(
+                        InvalidArgument,
+                        "device unique attestation supported only by Strongbox TA"
+                    ));
+                }
+                // AOSP explicitly allows a StrongBox implementation without
+                // device-unique support to reject the request with this code.
+                return Err(kmr_common::km_err!(
+                    CannotAttestIds,
+                    "device unique attestation is not supported"
+                ));
+            }
+            SigningKey::Batch => {}
+        }
+
+        let info = match (strongbox, key_type.algo_hint) {
+            (false, SigningAlgorithm::Rsa) => self.rsa_info.as_ref(),
+            (false, SigningAlgorithm::Ec) => self.ec_info.as_ref(),
+            (true, SigningAlgorithm::Rsa) => self.strongbox_rsa_info.as_ref(),
+            (true, SigningAlgorithm::Ec) => self.strongbox_ec_info.as_ref(),
         };
         let info = info.ok_or_else(|| {
-            kmr_common::km_err!(
-                UnknownError,
-                "keybox has no {:?} signing key",
-                key_type.algo_hint
-            )
+            if strongbox {
+                kmr_common::km_err!(
+                    AttestationKeysNotProvisioned,
+                    "no dedicated StrongBox keybox is configured"
+                )
+            } else {
+                kmr_common::km_err!(
+                    UnknownError,
+                    "keybox has no {:?} signing key",
+                    key_type.algo_hint
+                )
+            }
         })?;
 
         Ok(SigningInfoSnapshot {
@@ -615,6 +704,35 @@ fn is_fallback_continuation_with_state(
 }
 
 fn load_keybox_with_fallback(path: &str) -> Result<(KeyBox, bool)> {
+    let (mut keybox, used_fallback) = load_batch_keybox(path)?;
+    attach_strongbox_material(&mut keybox, KEYBOX_STRONGBOX_PATH);
+    Ok((keybox, used_fallback))
+}
+
+/// Attach the optional dedicated StrongBox keybox. A missing file simply leaves
+/// StrongBox attestation unavailable; an invalid file is reported and ignored so
+/// that the batch keybox keeps working.
+fn attach_strongbox_material(keybox: &mut KeyBox, path: &str) {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            debug!("no dedicated StrongBox keybox at {path}");
+            return;
+        }
+        Err(error) => {
+            warn!("failed to read {path}: {error:#}");
+            return;
+        }
+    };
+    match keybox.set_strongbox_material_from_xml(&contents) {
+        Ok(()) => info!("loaded dedicated StrongBox keybox from {path}"),
+        Err(error) => warn!(
+            "invalid StrongBox keybox at {path}: {error:#}; StrongBox attestation stays unavailable"
+        ),
+    }
+}
+
+fn load_batch_keybox(path: &str) -> Result<(KeyBox, bool)> {
     match fs::read_to_string(path) {
         Ok(contents) => match KeyBox::from_xml_str(&contents) {
             Ok(keybox) => {
@@ -684,6 +802,17 @@ pub fn initialize() -> Result<()> {
         ) {
             error!("failed to watch keybox.xml: {error:#}");
         }
+        if let Err(error) = kmr_common::runtime::file_watch::spawn_path_watcher(
+            "ommega-keybox-strongbox-watch",
+            PathBuf::from(KEYBOX_STRONGBOX_PATH),
+            |_trigger| {
+                if let Err(reload_error) = reload_from_disk() {
+                    error!("failed to reload the StrongBox keybox after change: {reload_error:#}");
+                }
+            },
+        ) {
+            error!("failed to watch the StrongBox keybox: {error:#}");
+        }
     });
     Ok(())
 }
@@ -722,17 +851,27 @@ pub(crate) fn signing_certificate_ders_from_disk() -> Result<Vec<Vec<u8>>> {
     if let Some(ec_info) = &keybox.ec_info {
         certs.push(ec_info.chain[0].encoded_certificate.clone());
     }
+    if let Some(rsa_info) = &keybox.strongbox_rsa_info {
+        certs.push(rsa_info.chain[0].encoded_certificate.clone());
+    }
+    if let Some(ec_info) = &keybox.strongbox_ec_info {
+        certs.push(ec_info.chain[0].encoded_certificate.clone());
+    }
     Ok(certs)
 }
 
-pub struct KeyboxManager;
+pub struct KeyboxManager {
+    /// Security level of the TA instance that owns this manager; selects which
+    /// keybox material may be used for attestation.
+    pub security_level: keymint::SecurityLevel,
+}
 
 impl RetrieveCertSigningInfo for KeyboxManager {
     fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
         let keybox = KEYBOX
             .read()
             .map_err(|_| kmr_common::km_err!(UnknownError, "failed to lock KEYBOX"))?;
-        keybox.signing_info(key_type)
+        keybox.signing_info_at(self.security_level, key_type)
     }
 }
 
@@ -921,5 +1060,111 @@ mod tests {
             true,
             keybox.identity_digest(),
         ));
+    }
+
+    #[test]
+    fn strongbox_batch_attestation_never_uses_the_batch_keybox() {
+        let keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
+        let batch = keybox
+            .signing_info(SigningKeyType {
+                which: SigningKey::Batch,
+                algo_hint: SigningAlgorithm::Ec,
+            })
+            .unwrap();
+        assert_eq!(batch.cert_chain.len(), 2);
+
+        let error = keybox
+            .signing_info_at(
+                keymint::SecurityLevel::Strongbox,
+                SigningKeyType {
+                    which: SigningKey::Batch,
+                    algo_hint: SigningAlgorithm::Ec,
+                },
+            )
+            .err()
+            .expect("StrongBox attestation must fail without dedicated material");
+        assert!(format!("{error:?}").contains("AttestationKeysNotProvisioned"));
+    }
+
+    #[test]
+    fn strongbox_material_is_selected_by_security_level() {
+        let mut keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
+        let before = keybox.identity_digest();
+        let ec_block = KeyBox::to_xml_block(
+            KeyAlgorithm::Ec,
+            "ecdsa",
+            "EC PRIVATE KEY",
+            keybox.ec_info.as_ref().unwrap(),
+        );
+        let strongbox_xml = format!(
+            r#"<?xml version=\"1.0\"?>
+<AndroidAttestation>
+<NumberOfKeyboxes>1</NumberOfKeyboxes>
+<Keybox DeviceID=\"sb\">
+{ec_block}
+</Keybox>
+</AndroidAttestation>
+"#
+        );
+        keybox
+            .set_strongbox_material_from_xml(&strongbox_xml)
+            .unwrap();
+        assert_ne!(keybox.identity_digest(), before);
+
+        let strongbox_ec = keybox
+            .signing_info_at(
+                keymint::SecurityLevel::Strongbox,
+                SigningKeyType {
+                    which: SigningKey::Batch,
+                    algo_hint: SigningAlgorithm::Ec,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            strongbox_ec.cert_chain,
+            keybox.ec_info.as_ref().unwrap().chain
+        );
+
+        // The batch RSA entry must stay invisible to the StrongBox level.
+        assert!(keybox
+            .signing_info_at(
+                keymint::SecurityLevel::Strongbox,
+                SigningKeyType {
+                    which: SigningKey::Batch,
+                    algo_hint: SigningAlgorithm::Rsa,
+                },
+            )
+            .is_err());
+        assert!(keybox
+            .signing_info(SigningKeyType {
+                which: SigningKey::Batch,
+                algo_hint: SigningAlgorithm::Rsa,
+            })
+            .is_ok());
+    }
+
+    #[test]
+    fn device_unique_attestation_is_rejected_per_level() {
+        let keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
+        let tee_error = keybox
+            .signing_info(SigningKeyType {
+                which: SigningKey::DeviceUnique,
+                algo_hint: SigningAlgorithm::Ec,
+            })
+            .err()
+            .expect("TEE device-unique attestation must be rejected");
+        assert!(format!("{tee_error:?}").contains("InvalidArgument"));
+
+        let strongbox_error = keybox
+            .signing_info_at(
+                keymint::SecurityLevel::Strongbox,
+                SigningKeyType {
+                    which: SigningKey::DeviceUnique,
+                    algo_hint: SigningAlgorithm::Ec,
+                },
+            )
+            .err()
+            .expect("StrongBox device-unique attestation must be rejected");
+        assert!(format!("{strongbox_error:?}").contains("CannotAttestIds"));
     }
 }

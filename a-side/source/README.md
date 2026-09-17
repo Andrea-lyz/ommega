@@ -44,10 +44,30 @@ relay_server.
    optional per-package `global_default` / `strongbox` / `tee` policy stored in
    `/data/misc/keystore/ommega/target-security.toml`.
 
+   Two lists feed routing and they are merged when the injector config is read:
+   `scoop` in `/data/misc/keystore/ommega/injector.toml` (the shipped defaults
+   plus anything added by hand) and `target.txt` (what the WebUI writes). A
+   package listed in either one is routed; `target.txt` entries are appended to
+   `scoop`, so the effective list is the union. `target-security.toml` only
+   carries the per-app StrongBox / TEE / global-default choice.
+
    The remote settings dialog also provides a global "disable native
    StrongBox" switch. It only affects target apps whose policy is
    `global_default`; explicit StrongBox or TEE choices take precedence. All
    target and policy changes are read live by the injector.
+
+   Keystore2 routing is all-or-nothing per caller: keys, listings and
+   operations of an allowed caller always use the same backend, so the
+   `[intercept]` switches in `injector.toml` select the whole surface (any
+   enabled switch routes everything to ommega, none enabled passes everything
+   to System).
+
+   The detector compatibility switch in
+   `/data/misc/keystore/ommega/target-compat.toml` (`[positive_key_id]`) is
+   global as well: while it is on, every app routed through Ommega gets positive
+   key ids, for clients that treat a non-positive namespace as an unspecified
+   key id. It is off by default, and a policy written before the switch became
+   global (a `packages` list) still enables it.
 
 4. Replace the template `keybox.xml` if you want local-mode attestation with
    your own keys.
@@ -59,6 +79,63 @@ are written to `/data/misc/keystore/ommega/webui-props.sh` and mirrored into
 verified boot hash/key changes automatically recycle only Ommega's keymint
 child and wait for RPC recovery. No device reboot is required. Overlay-installing
 the module zip does not wipe these values.
+
+Boot-state properties are normalized by `post-fs-data.sh` before the framework
+starts: verified boot state, boot lock and verity mode (plus the vendor-namespace
+copies some bootloaders publish), warranty and lock-state flags, the anti-debug
+build properties and the user-data encryption state. Every write is read back and
+a value that did not stick is reported on stderr; properties a bootloader does
+not publish are left absent. The bootloader parameters the kernel exposes on its
+own (`/proc/bootconfig`, `/proc/cmdline`) are outside the property area and keep
+their original values.
+
+The boot patch level always comes from the boot image metadata (the AVB
+`com.android.build.boot.security_patch` property), which is the source the
+bootloader itself consumes. Only when that metadata cannot be read does the
+resolver fall back to a property, and it then reads the standard name a stock
+device exposes (`ro.boot.image.build.security_patch`, the command-line export)
+before the vendor-flavoured `ro.vendor.boot_security_patch`. The WebUI overlay
+writes that same standard name, and clearing the override restores the value the
+bootloader passed instead of dropping a property a stock device exposes.
+
+Attestation material is selected per security level. The batch keybox in
+`/data/misc/keystore/ommega/keybox.xml` signs TEE attestations only; StrongBox
+attestations use a dedicated keybox at
+`/data/misc/keystore/ommega/keybox-strongbox.xml` (same XML schema, optional).
+When that file is absent the StrongBox security level still exists, but its
+attestation fails with `ATTESTATION_KEYS_NOT_PROVISIONED` instead of relabelling
+the TEE chain, and `DEVICE_UNIQUE_ATTESTATION` requests are rejected with
+`CANNOT_ATTEST_IDS`, the way a StrongBox implementation without device-unique
+support is allowed to. Reusing one chain for both levels is externally
+observable: an app can create a TEE key and a StrongBox key and compare the two
+chains. Installing dedicated StrongBox material, or enabling
+`main.use_native_strongbox` so the device's real StrongBox HAL serves that level,
+is what makes StrongBox attestation available again.
+
+A StrongBox request is never silently served from the TEE. A relay may answer an
+attestation with a `strongbox_demoted` marker, but that result is rejected with
+`HARDWARE_TYPE_UNAVAILABLE`: a physical KeyMint serves a StrongBox request from
+its StrongBox instance and a device without one fails the operation, so returning
+a TEE chain while `KeyMetadata.keySecurityLevel` still reports StrongBox would
+leave the two app-visible security-level sources disagreeing.
+
+If the root of trust cannot be resolved from the device (no readable verified
+boot property, no readable vbmeta image and no reachable system keystore to probe
+the original value), the module no longer fabricates a random verified boot
+hash/key: placeholder values would contradict the verified, locked claim, change
+on every restart and invalidate every stored keyblob. The record is reported as
+unverified and unlocked instead, the property space is left untouched, and an
+error is logged. A configured `verified_boot_state = true` is likewise only
+honoured together with `device_locked = true`, because `Verified` (green) implies
+a locked bootloader on a real device.
+
+The number of concurrently open KeyMint operations (the value behind
+`TOO_MANY_OPERATIONS`) follows the mirrored implementation: the relay profile may
+carry an optional integer `max_operations` (1..=1024), which is validated and applied
+to the TA; when it is absent, or for a locally served level, the AOSP reference
+limits stay in force (16 for TEE, 4 for StrongBox). An optional `[main]`
+`max_operations` entry overrides both for local testing. KeyMint exposes no API for
+this value, so the B side has to measure or configure it.
 
 > **Path note**: `/data/adb/` is root-only, so the keystore process (uid 1017)
 > cannot read `/data/adb/ommega/*` directly. `post-fs-data.sh` and the

@@ -1153,6 +1153,7 @@ struct ResolvedHardwareProfile {
     impl_name: &'static str,
     author_name: &'static str,
     unique_id: &'static str,
+    max_operations: Option<usize>,
 }
 
 fn resolve_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwareProfile {
@@ -1165,6 +1166,7 @@ fn resolve_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwarePr
             impl_name: Box::leak(profile.impl_name.into_boxed_str()),
             author_name: Box::leak(profile.author_name.into_boxed_str()),
             unique_id: Box::leak(profile.unique_id.into_boxed_str()),
+            max_operations: profile.max_operations,
         }
     };
 
@@ -1214,6 +1216,7 @@ fn bootstrap_auth_token_hmac(ta: &mut KeyMintTa, crypto: &CryptoConfig) -> Resul
 fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<KeyMintTa> {
     let security_level = get_keymint_security_level(security_level)?;
     let profile = resolve_hardware_profile(get_keymaster_security_level(security_level)?);
+    let remote_max_operations = profile.max_operations;
 
     let hw_info = HardwareInfo {
         version_number: profile.version_number,
@@ -1287,7 +1290,7 @@ fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<Key
 
     let dev = kmr_ta::device::Implementation {
         keys,
-        sign_info: Some(Box::new(crate::keybox::KeyboxManager {})),
+        sign_info: Some(Box::new(crate::keybox::KeyboxManager { security_level })),
         remote,
         // HAL populates attestation IDs from properties.
         attest_ids: Some(Box::new(crate::att_mgr::AttestationIdMgr {})),
@@ -1319,6 +1322,11 @@ fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<Key
         dev,
         allowed_aidl_versions,
     );
+    if let Some(limit) = config.main.max_operations.or(remote_max_operations) {
+        ta.set_max_operations(limit)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))
+            .context(err!("Failed to apply the operation limit"))?;
+    }
     bootstrap_auth_token_hmac(&mut ta, &config.crypto)?;
 
     let hal_info = populate_hal_info_from(

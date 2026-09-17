@@ -28,6 +28,8 @@ pub(crate) struct KeyMintHardwareProfile {
     pub impl_name: String,
     pub author_name: String,
     pub unique_id: String,
+    /// Operation limit reported by the mirrored implementation, if any.
+    pub max_operations: Option<usize>,
 }
 
 pub(crate) fn strongbox_keymint_present() -> bool {
@@ -69,6 +71,7 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
                         impl_name: remote.keymint_name,
                         author_name: remote.keymint_author,
                         unique_id,
+                        max_operations: remote.max_operations,
                     };
                 }
                 Err(error) => {
@@ -169,6 +172,7 @@ fn resolve_property_profile_from_namespace(
     let unique_id = derive_unique_id(&author_name, &impl_name, security_level, version_number)?;
 
     Some(KeyMintHardwareProfile {
+        max_operations: None,
         version_number,
         impl_name,
         author_name,
@@ -255,6 +259,7 @@ fn profile_from_system_hardware_info(
         .ok_or_else(|| anyhow!("failed to derive KeyMint unique id"))?;
 
     Ok(KeyMintHardwareProfile {
+        max_operations: None,
         version_number,
         impl_name,
         author_name,
@@ -355,6 +360,7 @@ fn fallback_profile(security_level: SecurityLevel, version_number: i32) -> KeyMi
         impl_name: format!("Android {sec_label} KeyMint {line}"),
         author_name: AOSP_AUTHOR_NAME.to_string(),
         unique_id: format!("android-{sec_label}-keymint-{line}"),
+        max_operations: None,
     }
 }
 
