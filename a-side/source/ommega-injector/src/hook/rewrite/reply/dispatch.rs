@@ -57,6 +57,9 @@ fn synthetic_unknown_transaction_reply_for(
     let known = match kind {
         SyntheticTargetKind::SecurityLevel => {
             identify::security_level_method_from_code(code).is_some()
+                && crate::hook::rewrite::platform_surface::platform_implements_security_level_code(
+                    code,
+                )
         }
         SyntheticTargetKind::Operation => identify::operation_method_from_code(code).is_some(),
     };

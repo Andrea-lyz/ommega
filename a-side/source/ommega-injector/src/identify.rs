@@ -252,6 +252,22 @@ fn current_service_method_from_code(code: u32) -> Option<ServiceMethod> {
     }
 }
 
+/// getSecurityLevel transaction code of the service interface, used to reach the
+/// objects the other interface tables describe.
+pub const SERVICE_GET_SECURITY_LEVEL_CODE: u32 = service_tx::r#getSecurityLevel;
+
+/// Every security-level transaction code this build's AIDL declares.
+pub fn security_level_codes() -> Vec<u32> {
+    vec![
+        security_level_tx::r#createOperation,
+        security_level_tx::r#generateKey,
+        security_level_tx::r#importKey,
+        security_level_tx::r#importWrappedKey,
+        security_level_tx::r#convertStorageKeyToEphemeral,
+        security_level_tx::r#deleteKey,
+    ]
+}
+
 pub fn security_level_method_from_code(code: u32) -> Option<SecurityLevelMethod> {
     match code {
         security_level_tx::r#createOperation => Some(SecurityLevelMethod::CreateOperation),
