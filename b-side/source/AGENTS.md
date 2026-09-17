@@ -1,5 +1,13 @@
 # ommegaclient-b Agent Guide
 
+## Mandatory parent safety rule
+
+The repository-root `AGENTS.md` B-device safety rules are mandatory and take
+precedence over every validation/deployment example below. In particular: never
+hard reboot B; never run ignored/live direct HAL or TEE probes on the primary B
+device; never interrupt an in-flight secure-world call; stop after the first
+disconnect, lock-state regression, SystemUI crash, or unexpected KeyMint error.
+
 This repository is the **new B-side relay agent**. It receives tasks from the
 relay_server (ommega-old), calls the **real on-device hardware TEE** to mint
 attestation certificate chains that embed a caller-supplied application id
