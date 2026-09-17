@@ -383,7 +383,34 @@ fn ensure_initialized() {
 fn config_path() -> PathBuf {
     std::env::var_os("OMMEGA_INJECTOR_CONFIG_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH))
+        .unwrap_or_else(default_config_path)
+}
+
+#[cfg(not(test))]
+fn default_config_path() -> PathBuf {
+    PathBuf::from(DEFAULT_CONFIG_PATH)
+}
+
+/// The test process cannot open the module's own config: it lives under
+/// /data/misc/keystore/ommega, which the test domain is not allowed to read, and
+/// a failed startup load disables the injector. Seed the built-in defaults into a
+/// writable file instead, so unit tests exercise the configured injector.
+#[cfg(test)]
+fn default_config_path() -> PathBuf {
+    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+    FIXTURE
+        .get_or_init(|| {
+            let path = std::env::temp_dir().join("ommega-injector-test-config.toml");
+            if let Err(error) = write_config(&path, &InjectorConfig::default()) {
+                log::error!(
+                    "failed to seed the test config at {}: {:#}; unit tests will see a disabled injector",
+                    path.display(),
+                    error
+                );
+            }
+            path
+        })
+        .clone()
 }
 
 fn load_from_path(path: &Path, allow_migration: bool) -> Result<InjectorConfig, LoadError> {
