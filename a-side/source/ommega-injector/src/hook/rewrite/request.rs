@@ -12,10 +12,10 @@ pub(super) fn target_from_transaction(tr: &binder_transaction_data) -> Option<Lo
 }
 
 fn route_for_service_request(
-    request: &ParsedServiceRequest,
+    _request: &ParsedServiceRequest,
     intercept: &config::InterceptConfig,
 ) -> RouteTarget {
-    if identify::is_ommega_service_route_enabled(request.method(), intercept) {
+    if identify::is_ommega_service_route_enabled(intercept) {
         RouteTarget::Ommega
     } else {
         RouteTarget::System
@@ -60,7 +60,7 @@ fn apply_target_security_policy(
 }
 
 pub(super) fn security_level_scoop_enabled(intercept: &config::InterceptConfig) -> bool {
-    intercept.get_security_level || intercept.get_key_entry
+    intercept.keystore_surface_enabled()
 }
 
 fn is_known_keystore_interface(interface: &str) -> bool {

@@ -292,21 +292,12 @@ pub fn operation_method_from_code(code: u32) -> Option<OperationMethod> {
     }
 }
 
-pub fn is_ommega_service_route_enabled(method: ServiceMethod, intercept: &InterceptConfig) -> bool {
-    match method {
-        ServiceMethod::GetSecurityLevel => intercept.get_security_level,
-        ServiceMethod::GetKeyEntry => intercept.get_key_entry,
-        ServiceMethod::UpdateSubcomponent => intercept.update_subcomponent,
-        ServiceMethod::ListEntries => intercept.list_entries,
-        ServiceMethod::DeleteKey => intercept.delete_key,
-        ServiceMethod::Grant => intercept.grant,
-        ServiceMethod::Ungrant => intercept.ungrant,
-        ServiceMethod::GetNumberOfEntries => intercept.get_number_of_entries,
-        ServiceMethod::ListEntriesBatched => intercept.list_entries_batched,
-        ServiceMethod::GetSupplementaryAttestationInfo => {
-            intercept.get_supplementary_attestation_info
-        }
-    }
+/// Whether the keystore2 surface of an allowed caller routes to ommega.
+///
+/// The decision is taken for the whole surface: per-method routing would leave
+/// one caller's keys visible in one backend and missing in the other.
+pub fn is_ommega_service_route_enabled(intercept: &InterceptConfig) -> bool {
+    intercept.keystore_surface_enabled()
 }
 
 #[cfg(test)]

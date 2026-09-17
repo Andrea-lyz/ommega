@@ -251,7 +251,7 @@ fn grant_precompute_returns_reachable_ommega_business_error() {
 }
 
 #[test]
-fn service_route_respects_intercept_configuration() {
+fn service_route_is_all_or_nothing_per_caller() {
     let _guard = route_state_test_guard();
     let intercept = config::InterceptConfig::default();
 
@@ -259,10 +259,11 @@ fn service_route_respects_intercept_configuration() {
         assert_eq!(
             route_for_service_request(&request, &intercept),
             RouteTarget::Ommega,
-            "{:?} should use the ommega backend when the method is enabled",
+            "{:?} should use the ommega backend when the surface is enabled",
             request.method()
         );
     }
+    assert!(security_level_scoop_enabled(&intercept));
 
     let intercept = disabled_intercept_config();
 
@@ -270,18 +271,27 @@ fn service_route_respects_intercept_configuration() {
         assert_eq!(
             route_for_service_request(&request, &intercept),
             RouteTarget::System,
-            "{:?} should use the system backend when the method is disabled",
+            "{:?} should use the system backend when the surface is disabled",
             request.method()
         );
     }
+    assert!(!security_level_scoop_enabled(&intercept));
 
+    // One enabled switch routes the whole surface: a per-method split would
+    // make one caller's keys visible in one backend and missing in the other.
     let mut intercept = disabled_intercept_config();
-    intercept.get_key_entry = true;
+    intercept.list_entries = true;
+    for request in sample_service_requests() {
+        assert_eq!(
+            route_for_service_request(&request, &intercept),
+            RouteTarget::Ommega,
+            "{:?} must follow the surface decision, not the single switch",
+            request.method()
+        );
+    }
     assert!(security_level_scoop_enabled(&intercept));
-    intercept.get_key_entry = false;
-    intercept.get_security_level = true;
-    assert!(security_level_scoop_enabled(&intercept));
-    intercept.get_security_level = false;
+
+    intercept.list_entries = false;
     assert!(!security_level_scoop_enabled(&intercept));
 }
 

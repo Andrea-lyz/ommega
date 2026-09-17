@@ -28,7 +28,7 @@ GLUE = ROOT / "scripts" / "webui-compat.js"
 MARKER = "OMMEGA_TARGET_COMPAT"
 
 # sha256 of the unpatched bundle this glue was written against.
-BASELINE = "88e369b9dcc6176c50dcc2666e0e49c568d966ab9400f4a817f57227d39a9309"
+BASELINE = "003bf0d913c98dbfc607434865fd9b5bc478a6f18e023d36cadd6bf057e1ad85"
 
 
 def sha256(path: Path) -> str:
