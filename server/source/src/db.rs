@@ -14,6 +14,8 @@
 use mysql::prelude::*;
 use mysql::{params, Column, OptsBuilder, Pool, Value};
 use serde_json::Value as JsonValue;
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 /// Card token durations (seconds), applied when a card is delivered.
 pub const YEAR_SECS: i64 = 31_536_000;
@@ -73,8 +75,22 @@ fn row_str(row: &mysql::Row, col: &str) -> String {
     row_str_opt(row, col).unwrap_or_default()
 }
 
+/// How long to wait before trying to rebuild a pool that just failed to
+/// connect. Without this, every request during an outage would serialize on the
+/// pool lock behind its own full connect timeout, turning a fast 503 into a
+/// pile-up.
+const POOL_RETRY_COOLDOWN: Duration = Duration::from_secs(2);
+
 pub struct Db {
-    pool: Pool,
+    /// Connection URL, retained so a dropped pool can be rebuilt in place.
+    url: String,
+    /// `None` until the pool is successfully built. A MySQL outage, at startup
+    /// or at runtime, leaves this empty and every `conn()` returns `Err`, which
+    /// callers must surface as "temporarily unavailable" rather than as a
+    /// negative answer (see `auth::TokenCheck::Unavailable`).
+    pool: RwLock<Option<Pool>>,
+    /// When the last pool build failed, used to rate-limit reconnect attempts.
+    last_connect_failure: Mutex<Option<Instant>>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,10 +148,23 @@ pub struct ClientReportRow {
 }
 
 impl Db {
-    /// Connect to MySQL. `url` is a MySQL connection URL such as
-    /// `mysql://user:pass@host:port/dbname`. Sets the session time zone to
+    /// Connect to MySQL lazily. `url` is a MySQL connection URL such as
+    /// `mysql://user:pass@host:port/dbname`; the session time zone is set to
     /// Beijing time (`+08:00`) so all `NOW()` values are local time.
-    pub fn open(url: &str) -> anyhow::Result<Self> {
+    ///
+    /// Creates the handle without connecting. The pool is built on first use and
+    /// rebuilt after an outage, so a database that is unavailable when the
+    /// server boots (or that restarts underneath it) recovers on its own
+    /// instead of disabling persistence for the lifetime of the process.
+    pub fn open_lazy(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            pool: RwLock::new(None),
+            last_connect_failure: Mutex::new(None),
+        }
+    }
+
+    fn build_pool(url: &str) -> anyhow::Result<Pool> {
         let base = mysql::Opts::from_url(url)?;
         let opts = OptsBuilder::from_opts(base)
             .init(vec![
@@ -145,14 +174,93 @@ impl Db {
         let pool = Pool::new(opts)?;
         // Verify connection: check out once and immediately return it.
         let _conn = pool.get_conn()?;
-        Ok(Self { pool })
+        Ok(pool)
+    }
+
+    /// Return the live pool, building it if this is the first use or if a
+    /// previous attempt failed.
+    fn ensure_pool(&self) -> anyhow::Result<Pool> {
+        if let Ok(guard) = self.pool.read() {
+            if let Some(pool) = guard.as_ref() {
+                return Ok(pool.clone());
+            }
+        }
+        let mut guard = self
+            .pool
+            .write()
+            .map_err(|_| anyhow::anyhow!("db pool lock poisoned"))?;
+        // Another thread may have won the race while we waited for the lock.
+        if let Some(pool) = guard.as_ref() {
+            return Ok(pool.clone());
+        }
+        if let Some(failed_at) = self.last_failure() {
+            let since = failed_at.elapsed();
+            if since < POOL_RETRY_COOLDOWN {
+                anyhow::bail!(
+                    "MySQL unavailable; retrying in {:?}",
+                    POOL_RETRY_COOLDOWN - since
+                );
+            }
+        }
+        match Self::build_pool(&self.url) {
+            Ok(pool) => {
+                self.set_last_failure(None);
+                *guard = Some(pool.clone());
+                tracing::info!("MySQL pool connected");
+                Ok(pool)
+            }
+            Err(e) => {
+                self.set_last_failure(Some(Instant::now()));
+                Err(e)
+            }
+        }
+    }
+
+    fn last_failure(&self) -> Option<Instant> {
+        self.last_connect_failure
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+    }
+
+    fn set_last_failure(&self, at: Option<Instant>) {
+        if let Ok(mut guard) = self.last_connect_failure.lock() {
+            *guard = at;
+        }
+    }
+
+    /// Try to reach the database now. Used at startup for an early, honest log
+    /// line; never required before serving traffic.
+    pub fn ping(&self) -> anyhow::Result<()> {
+        self.conn().map(|_| ())
+    }
+
+    /// Drop the pool so the next call rebuilds it. Called when a checkout fails,
+    /// which is how a restarted or briefly unreachable MySQL is detected.
+    fn invalidate_pool(&self) {
+        if let Ok(mut guard) = self.pool.write() {
+            if guard.take().is_some() {
+                tracing::warn!("MySQL pool dropped after a failed checkout; will reconnect");
+            }
+        }
     }
 
     /// Get a connection from the pool. The `OptsBuilder::init` above ensures
     /// every new connection has the correct time_zone and charset — no need
     /// to repeat SET queries on every checkout.
+    ///
+    /// A failed checkout drops the pool and retries once, so a MySQL restart
+    /// costs one request instead of every request until the server is bounced.
     fn conn(&self) -> anyhow::Result<mysql::PooledConn> {
-        Ok(self.pool.get_conn()?)
+        let pool = self.ensure_pool()?;
+        match pool.get_conn() {
+            Ok(conn) => Ok(conn),
+            Err(first) => {
+                tracing::warn!("MySQL checkout failed ({first}); rebuilding the pool");
+                self.invalidate_pool();
+                Ok(self.ensure_pool()?.get_conn()?)
+            }
+        }
     }
 
     // ---- DeviceServerIdentity ----
@@ -776,5 +884,27 @@ impl Db {
             });
         }
         Ok(out)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_connection_is_not_retried_on_every_request() {
+        let db = Db::open_lazy("mysql://ommega@127.0.0.1:1/unreachable");
+        // First attempt genuinely tries to connect and fails.
+        let first = db.ping().unwrap_err().to_string();
+        assert!(
+            !first.contains("retrying in"),
+            "the first attempt should be a real connection attempt, got: {first}"
+        );
+        // Subsequent attempts inside the cooldown fail fast instead of each
+        // paying a full connect timeout and queueing behind the pool lock.
+        let second = db.ping().unwrap_err().to_string();
+        assert!(
+            second.contains("MySQL unavailable; retrying in"),
+            "expected a fast cooldown rejection, got: {second}"
+        );
     }
 }

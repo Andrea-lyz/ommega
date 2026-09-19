@@ -113,10 +113,16 @@ fn route(
             Ok((200, b"{\"ok\":true}".to_vec(), "application/json"))
         }
         ("GET", "/api/status") => {
-            let status = json!({
+            let mut status = json!({
                 "remote_enabled": remote_enabled(),
                 "relay": "A-side Ommega relay",
             });
+            // Surface the daemon's last relay result. Without this the WebUI
+            // showed only "remote enabled", so a server-side 401 or 429 looked
+            // like a local fault and users resorted to toggling the checkbox.
+            if let Some(health) = read_remote_health() {
+                status["remote_health"] = health;
+            }
             Ok((200, status.to_string().into_bytes(), "application/json"))
         }
         _ => {
@@ -216,6 +222,34 @@ fn update_config(value: Value) -> Result<()> {
     }
     ommegaclient_config::save(&cfg)?;
     Ok(())
+}
+
+/// Health snapshot published by the keymint daemon (a separate process), so
+/// the panel can name the actual cause of a remote failure.
+const REMOTE_HEALTH_PATH: &str = "/data/misc/keystore/ommega/remote-health.json";
+
+fn read_remote_health() -> Option<Value> {
+    let raw = fs::read_to_string(REMOTE_HEALTH_PATH).ok()?;
+    let mut health: Value = serde_json::from_str(&raw).ok()?;
+    // Add a ready-made explanation so the panel does not have to know the
+    // protocol to say something useful.
+    let summary = match health.get("last_kind").and_then(Value::as_str) {
+        Some("unauthorized") => {
+            "The server rejected this token (HTTP 401/403). Check the relay token and card expiry; \
+             toggling remote mode will not change this."
+        }
+        Some("throttled") => {
+            "The server is rate limiting or temporarily unavailable (HTTP 429/503). \
+             It recovers on its own; no action needed."
+        }
+        Some("transport") => "Could not reach the server. Check the URL and network.",
+        Some("error") => "The server returned an error. See last_status and last_message.",
+        _ => "",
+    };
+    if !summary.is_empty() {
+        health["summary"] = Value::String(summary.to_string());
+    }
+    Some(health)
 }
 
 fn remote_enabled() -> bool {

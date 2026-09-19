@@ -80,16 +80,23 @@ fn build_router(cfg: &Arc<Config>) -> Router {
     );
     // Initialize the Fernet cipher used to encrypt stored private keys.
     crate::crypto::init_fernet(&cfg.secret_key);
+    // A configured database is always attached, even when it is unreachable
+    // right now. The pool is built lazily and rebuilt after an outage, so MySQL
+    // starting later than the relay (or restarting under it) no longer strands
+    // the process with `db = None` — which used to make every DB-issued token
+    // fail authentication until someone restarted the server by hand.
     let db = if cfg.mysql_url.is_empty() {
         None
     } else {
-        match Db::open(&cfg.mysql_url) {
-            Ok(d) => Some(Arc::new(d)),
-            Err(e) => {
-                tracing::warn!("DB open failed ({e}); running without persistence");
-                None
-            }
+        let db = Arc::new(Db::open_lazy(&cfg.mysql_url));
+        match db.ping() {
+            Ok(()) => tracing::info!("MySQL connected"),
+            Err(e) => tracing::warn!(
+                "MySQL unavailable at startup ({e}); \
+                 requests will get 503 until it recovers"
+            ),
         }
+        Some(db)
     };
     let auth = Arc::new(
         crate::auth::AuthState::new(
@@ -100,6 +107,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
         )
         .with_db(db.clone())
         .with_invalid_rate_limit(cfg.invalid_rate_limit_requests)
+        .with_relay_rate_limit(cfg.relay_rate_limit_requests)
         .with_admin_credentials(&cfg.admin_user, &cfg.admin_password, &cfg.admin_extra),
     );
     let fulfill = Fulfill::new(cfg.server_keybox_enabled(), db.clone());
