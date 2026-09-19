@@ -82,8 +82,10 @@ the module zip does not wipe these values.
 
 Boot-state properties are normalized by `post-fs-data.sh` before the framework
 starts: verified boot state, boot lock and verity mode (plus the vendor-namespace
-copies some bootloaders publish), warranty and lock-state flags, the anti-debug
-build properties and the user-data encryption state. Every write is read back and
+copies some bootloaders publish), the anti-debug build properties and the
+user-data encryption state. Vendor-private warranty and secure-boot flags are
+left untouched, because rewriting them can abort startup on some devices.
+Every write is read back and
 a value that did not stick is reported on stderr; properties a bootloader does
 not publish are left absent. The bootloader parameters the kernel exposes on its
 own (`/proc/bootconfig`, `/proc/cmdline`) are outside the property area and keep

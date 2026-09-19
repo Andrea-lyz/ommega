@@ -98,15 +98,6 @@ apply_boot_state_props() {
   force_prop_or_create vendor.boot.verifiedbootstate   green
   force_prop            vendor.boot.flash.locked        1
   force_prop            vendor.boot.veritymode          enforcing
-  # Tamper / warranty flags of the ColorOS family bootloaders.
-  force_prop ro.boot.warranty_bit         0
-  force_prop ro.warranty_bit              0
-  force_prop ro.vendor.boot.warranty_bit  0
-  force_prop ro.vendor.warranty_bit       0
-  force_prop ro.secureboot.lockstate      locked
-  # Realme / OPPO (ColorOS family) boot-state duplicates.
-  force_prop ro.boot.realmebootstate  green
-  force_prop ro.boot.realme.lockstate 1
   # Anti-debug build surface.
   force_prop_or_create ro.secure           1
   force_prop_or_create ro.adb.secure       1
