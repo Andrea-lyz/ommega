@@ -181,7 +181,9 @@ extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-52
 
 ### 6. B 端 SPL WebUI 与服务级运维
 
-- B 端 WebUI 可分别设置 System、Boot、Vendor SPL，保存后立即应用。
+- B 端 WebUI 可分别设置 System、Boot、Vendor SPL 与 OS 版本，保存后立即应用。
+- OS 版本写入 `ro.build.version.release`，决定证明证书里的 OS_VERSION（tag 705）。
+  它与 SPL 一样来自系统属性而非硬件，`ro.build.version.sdk` 不随之改变。
 - 属性变化时只重载原生 KeyMint 服务和 `keystore2`，模块本身不请求硬重启。
 - 配置保存在 `/data/adb/ommega/spl.conf`；留空会选择首次记录的基线值。
   已在较高 SPL 下升级的 keyblob 可能要求保留较高值，首次基线不能直接当作恢复值。
@@ -359,7 +361,7 @@ Linux 构件 `relay_rs-linux-x86_64-musl` 为静态链接二进制。更新时�
 | A `config.toml [main].use_native_strongbox` | StrongBox 后端 | 重启 Ommega keymint，不重启设备 |
 | B `relay.conf` 连接参数 | Server、设备 ID、机器 ID、Token | WebUI 保存后由 relay 热加载 |
 | B `relay.conf` 日志参数 | 文件日志与 logcat 开关、级别 | relay 下次启动时生效 |
-| B `spl.conf` | System/Boot/Vendor SPL | 保存即应用；`service.sh` 再应用 |
+| B `spl.conf` | System/Boot/Vendor SPL、OS 版本（`ro.build.version.release`） | 保存即应用；`service.sh` 再应用 |
 
 ## 构建
 

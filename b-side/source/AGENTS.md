@@ -60,9 +60,15 @@ The relay daemon supports every task type the relay_server can dispatch:
 - The real keymint HAL does **not** validate the `ATTESTATION_APPLICATION_ID`
   blob passed to `generateKey`; it only signs it into the attestation extension.
   This is what lets us embed an arbitrary appid requested by the A-side.
-- The resulting certificate chain is minted by the **real** on-device TEE, so
-  `rootOfTrust`, OS version and patch level reflect the B-side device. These
-  cannot be forged.
+- The resulting certificate chain is minted by the **real** on-device TEE. The
+  `rootOfTrust` fields (verified boot key, hash, state, device lock state) come
+  from the hardware and are not settable from userspace.
+- OS version (`ro.build.version.release`) and the System/Vendor/Boot patch
+  levels are **not** hardware-derived: the stock HAL reads them from system
+  properties, which `spl-control.sh` deliberately overrides. A certificate
+  therefore reports whatever those properties hold, so `Tag::OsVersion` must
+  not be described as hardware-attested. `ro.build.version.sdk` is left
+  untouched, which a strict verifier can observe as a mismatch.
 - `get_system_keymint` connects directly to the TEE HAL Binder service and
   caches the proxy with a death recipient; reuse the cache, do not reconnect
   per request.

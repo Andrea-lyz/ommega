@@ -157,6 +157,11 @@ reinitialization or SPL application.
 File log: /data/adb/ommega/logs/relay.log; logcat tag: ommegaclient-b.
 
 The separate collapsed SPL panel accepts System/Boot/Vendor dates as YYYY-MM-DD.
+The same panel sets the OS version (1-2 digits, e.g. 17), which writes
+ro.build.version.release and decides OS_VERSION (tag 705) in the attestation
+certificate. Like SPL it comes from a system property rather than the hardware,
+and ro.build.version.sdk is left unchanged, so a strict verifier may notice the
+two values disagree.
 Saving writes /data/adb/ommega/spl.conf; changed properties reload native KeyMint
 and keystore2. Empty fields choose the first spl-baseline.conf values, which are
 not necessarily safe recovery values. Higher SPL can ratchet keyblobs; lowering it

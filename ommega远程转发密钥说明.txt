@@ -142,6 +142,9 @@ WebUI 支持以上八项、Token 隐藏/显示、校验及冲突检测，保存�
 文件日志：/data/adb/ommega/logs/relay.log；logcat tag：ommegaclient-b。
 
 SPL 位于独立折叠面板：System/Boot/Vendor，格式 YYYY-MM-DD。
+同一面板可设置 OS 版本（1-2 位数字，如 17），写入 ro.build.version.release，
+决定证明证书里的 OS_VERSION（tag 705）。它与 SPL 一样来自系统属性而非硬件，
+ro.build.version.sdk 不随之改变，严格校验方可能看出两者不一致。
 保存写 /data/adb/ommega/spl.conf；属性变化时重载原生 KeyMint 和 keystore2。
 留空选择首次记录的 spl-baseline.conf；这不一定是安全恢复值！
 较高 SPL 可使 keyblob 升级并绑定该值，降回旧值可能导致密钥或凭据数据无法使用。

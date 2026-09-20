@@ -100,32 +100,44 @@ $('token-toggle').onclick = () => {
 };
 
 const fields = ['system', 'boot', 'vendor'];
+// Field id -> the key spl-control.sh reports in `status` and expects in `save`.
+// Order matters: it is both the save argument order and the status order.
+const propertyFields = [
+  ...fields.map(name => ({id: name, status: `${name.toUpperCase()}_SPL`})),
+  {id: 'osversion', status: 'OS_VERSION'},
+];
 const message = $('message');
 const save = $('save');
 const valid = value => value === '' || /^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(value);
+// Android major version, matching valid_os_version in spl-control.sh.
+const validOsVersion = value => value === '' || /^\d{1,2}$/.test(value);
 async function refreshSpl() {
   const result = await exec(`sh "${moduleDir}/spl-control.sh" status`);
   $('status').textContent = result.stdout || result.stderr || '状态不可用';
   save.disabled = result.errno !== 0;
   if (result.errno === 0) {
     const values = Object.fromEntries(result.stdout.split('\n').map(line => line.split('=', 2)));
-    fields.forEach(name => $(name).value = values[`${name.toUpperCase()}_SPL`] || '');
+    propertyFields.forEach(field => $(field.id).value = values[field.status] || '');
   }
 }
 save.onclick = async () => {
-  const values = fields.map(name => $(name).value.trim());
-  if (!values.every(valid)) { message.className = 'message error'; message.textContent = '日期格式必须为 YYYY-MM-DD，或留空使用基线。'; return; }
+  const values = propertyFields.map(field => $(field.id).value.trim());
+  const datesValid = fields.every(name => valid($(name).value.trim()));
+  if (!datesValid) { message.className = 'message error'; message.textContent = '日期格式必须为 YYYY-MM-DD，或留空使用基线。'; return; }
+  if (!validOsVersion($('osversion').value.trim())) { message.className = 'message error'; message.textContent = 'OS 版本必须是 1-2 位数字，或留空使用基线。'; return; }
   save.disabled = true;
   message.className = 'message';
-  message.textContent = '正在保存并应用 SPL…';
+  message.textContent = '正在保存并应用…';
   const args = values.map(value => `'${value}'`).join(' ');
   const result = await exec(`sh "${moduleDir}/spl-control.sh" save ${args}`);
   message.className = result.errno === 0 ? 'message' : 'message error';
-  message.textContent = result.errno === 0 ? 'SPL 配置已应用。' : `应用失败：${result.stderr || result.stdout}`;
+  message.textContent = result.errno === 0
+    ? '已应用。新生成的证明证书才会体现 OS 版本；已存在的密钥不变。'
+    : `应用失败：${result.stderr || result.stdout}`;
   await refreshSpl();
 };
 $('same').onclick = () => { $('boot').value = $('vendor').value = $('system').value.trim(); };
-$('auto').onclick = () => fields.forEach(name => $(name).value = '');
+$('auto').onclick = () => propertyFields.forEach(field => $(field.id).value = '');
 readRelay();
 refreshSpl();
 exec('pidof relay').then(result => {
