@@ -42,6 +42,12 @@ pub struct Config {
     pub geo_db_path: String,
     /// Rate limit: max valid requests per token per window.
     pub rate_limit_requests: u64,
+    /// Rate limit for the relay data plane (A attest/sign/decrypt/agree/profile
+    /// and B poll/result), per token per window. 0 disables it. Separate from
+    /// `rate_limit_requests` because a B device legitimately spends thousands
+    /// of requests an hour and a throttled `b/result` silently discards a
+    /// finished task.
+    pub relay_rate_limit_requests: u64,
     /// Rate limit: max invalid (failed-auth) requests per IP per window.
     pub invalid_rate_limit_requests: u64,
     pub rate_limit_window_secs: u64,
@@ -93,6 +99,7 @@ impl Default for Config {
             mysql_time_zone: "+08:00".to_string(),
             geo_db_path: "ip2region.xdb".to_string(),
             rate_limit_requests: 800,
+            relay_rate_limit_requests: 20_000,
             invalid_rate_limit_requests: 40,
             rate_limit_window_secs: 3600,
             pay_gateway: String::new(),
@@ -230,6 +237,7 @@ impl Config {
             cfg.geo_db_path = v;
         }
         cfg.rate_limit_requests = env_u64("RELAY_RATE_LIMIT_REQUESTS", 800);
+        cfg.relay_rate_limit_requests = env_u64("RELAY_DATA_RATE_LIMIT_REQUESTS", 20_000);
         cfg.invalid_rate_limit_requests = env_u64("RELAY_INVALID_RATE_LIMIT_REQUESTS", 40);
         cfg.rate_limit_window_secs = env_u64("RELAY_RATE_LIMIT_WINDOW", 3600);
         if let Some(v) = env_or_dotenv(&dotenv, "PAY_GATEWAY") {

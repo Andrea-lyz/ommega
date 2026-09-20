@@ -22,7 +22,7 @@ sleep 1
 # ---------------------------------------------------------------------------
 rm -f "$STATE_DIR/relay"              # hot-update relay binary
 rm -f "$STATE_DIR/relay.conf"         # relay configuration
-rm -f "$STATE_DIR/spl.conf"           # B-side SPL overrides
+rm -f "$STATE_DIR/spl.conf"           # B-side SPL and OS version overrides
 rm -f "$STATE_DIR/spl-baseline.conf"  # values captured before the first override
 rm -f "$STATE_DIR/restart.all"
 rm -rf "$STATE_DIR/logs"              # relay logs

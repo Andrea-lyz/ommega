@@ -48,7 +48,9 @@ jobs:
       - name: Test version synchronization
         run: python3 .github/scripts/test_bump_version.py
       - name: Test B WebUI configuration handling
-        run: node --test b-side/source/scripts/webui.test.mjs
+        run: |
+          node --test b-side/source/scripts/webui.test.mjs
+          node --test b-side/source/scripts/spl-control.test.mjs
 
   android:
     name: Android ${{ matrix.component }}

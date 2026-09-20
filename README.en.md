@@ -165,7 +165,8 @@ existing P-521 write format.
 
 ### 6. B SPL and service lifecycle
 
-WebUI edits System/Boot/Vendor SPL in `/data/adb/ommega/spl.conf`; changes reload
+WebUI edits System/Boot/Vendor SPL and the OS version in
+`/data/adb/ommega/spl.conf`; changes reload
 native KeyMint and keystore2. Empty fields choose the first saved baseline, which
 may be too low for already-upgraded keyblobs. `service.sh`, not `post-fs-data.sh`,
 reapplies SPL and starts relay, cleaning old processes by exact path. Properties
@@ -176,6 +177,10 @@ with reboot. B's hard-reboot prohibition remains; soft restart is not risk-free.
 If root is lost after a restart the device falls back to its native SPL, while upgraded
 keyblobs do not revert with it: treat such a device as disposable data-wise and see the
 B data risk warning at the top of this file.
+The OS version writes `ro.build.version.release`, which decides OS_VERSION
+(tag 705) in the attestation certificate. Like SPL it comes from a system
+property rather than the hardware, and `ro.build.version.sdk` is left unchanged,
+so the two values can disagree under a strict verifier.
 
 ### 7. Relay and Server
 
@@ -241,7 +246,7 @@ Use your own Server and credentials; no public Token is distributed. The
 | A `[main].use_native_strongbox` | Restart Ommega keymint |
 | B `relay.conf` connections | Hot reload; optional `touch /data/adb/ommega/restart.all` |
 | B `relay.conf` logging | Next relay start; marker does not reinitialize logging |
-| B `spl.conf` | Applies on save; reapplied by `service.sh` |
+| B `spl.conf` | SPL and OS version; applies on save, reapplied by `service.sh` |
 
 Use matching A/B device IDs and appropriate role Tokens. Unselected apps keep
 original Keystore routing. A `tls_insecure=true` skips TLS verification; B currently

@@ -73,6 +73,24 @@ const STATE_DIR: &str = "/data/adb/ommega";
 const INSTANCE_LOCK_PATH: &str = "/data/adb/ommega/relay.lock";
 const RESTART_MARKER: &str = "/data/adb/ommega/restart.all";
 const RELOAD_POLL_MS: u64 = 1000;
+/// Backoff floor and ceiling after a failed poll.
+///
+/// The old loop retried every poll failure after a flat 1s. Against an HTTP 401
+/// that burns the server's per-address failed-auth budget (40/hour) in under a
+/// minute, after which the server answers "too many invalid requests" and the
+/// device is locked out for the rest of the window — turning a brief server-side
+/// outage into an hour of downtime. Rejections now back off.
+const POLL_BACKOFF_MIN_MS: u64 = 1000;
+const POLL_BACKOFF_MAX_MS: u64 = 15_000;
+/// A rejected credential is not going to be accepted a second later. The
+/// ceiling is chosen so that steady-state retries stay well under the server's
+/// 40-per-hour invalid-request budget: at 5 minutes apart that is 12 an hour,
+/// so a wrong or expired token can never lock the address out by itself.
+/// Editing the config resets this, so a corrected token is picked up at once.
+const AUTH_BACKOFF_MIN_MS: u64 = 5_000;
+const AUTH_BACKOFF_MAX_MS: u64 = 300_000;
+/// Fallback when a throttling response carries no `Retry-After`.
+const THROTTLE_BACKOFF_MS: u64 = 30_000;
 const MODULE_PROP: &str = "/data/adb/modules/ommegaclient_b/module.prop";
 
 fn acquire_instance_lock() -> Result<File> {
@@ -350,12 +368,32 @@ fn reset_http_client() {
     }
 }
 
+/// A completed HTTP exchange.
+///
+/// `retry_after` carries the server's own backoff hint, which the relay honours
+/// instead of guessing; a throttled client that keeps retrying at a fixed
+/// interval only deepens the throttle.
+struct HttpResponse {
+    status: u16,
+    body: Vec<u8>,
+    retry_after: Option<Duration>,
+}
+
+/// Parse a `Retry-After` header. Only the delta-seconds form is accepted; the
+/// HTTP-date form is rare here and a bad parse must not become a zero wait.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    // Clamp: a hostile or broken value must not park the relay for hours.
+    Some(Duration::from_secs(secs.clamp(1, 300)))
+}
+
 fn http_request(
     method: &str,
     url: &str,
     headers: &[(String, String)],
     body: Option<&[u8]>,
-) -> Result<(u16, Vec<u8>)> {
+) -> Result<HttpResponse> {
     let client = get_http_client()?;
     let mut req = match method {
         "GET" => client.get(url),
@@ -379,6 +417,7 @@ fn http_request(
         .send()
         .with_context(|| format!("http {method} {url} failed"))?;
     let status = resp.status().as_u16();
+    let retry_after = parse_retry_after(resp.headers());
     let bytes = resp
         .bytes()
         .with_context(|| format!("http {method} {url} read body failed"))?;
@@ -392,49 +431,144 @@ fn http_request(
         read_ms,
         String::from_utf8_lossy(&bytes[..bytes.len().min(120)])
     );
-    Ok((status, bytes.to_vec()))
+    Ok(HttpResponse {
+        status,
+        body: bytes.to_vec(),
+        retry_after,
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Relay protocol helpers.
 // ---------------------------------------------------------------------------
 
-fn poll_tasks(cfg: &RelayConfig) -> Result<Option<(String, String, Value)>> {
+/// How the poll loop should wait after a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollFailure {
+    /// Network error, timeout, or a server-side 5xx: likely transient.
+    Transient,
+    /// The server rejected our credential (401/403). Retrying at speed only
+    /// spends the failed-auth budget that then blocks the whole address.
+    Rejected,
+    /// The server asked us to slow down (429/503), with its own hint when given.
+    Throttled(Option<Duration>),
+}
+
+struct PollError {
+    error: anyhow::Error,
+    failure: PollFailure,
+}
+
+impl PollError {
+    fn transient(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            failure: PollFailure::Transient,
+        }
+    }
+}
+
+fn poll_tasks(
+    cfg: &RelayConfig,
+) -> std::result::Result<Option<(String, String, Value)>, PollError> {
     let url = format!(
         "{}/api/b/poll/?device_id={}&machine_id={}&timeout={}",
         cfg.server, cfg.device_id, cfg.machine_id, POLL_TIMEOUT_SEC
     );
     let headers = vec![("X-Relay-Token".to_string(), cfg.token.clone())];
-    let (status, body) =
-        http_request("GET", &url, &headers, None).with_context(|| "b/poll failed")?;
+    let response = http_request("GET", &url, &headers, None)
+        .with_context(|| "b/poll failed")
+        .map_err(PollError::transient)?;
+    let HttpResponse {
+        status,
+        body,
+        retry_after,
+    } = response;
     log::debug!("b/poll status={status} body_len={}", body.len());
     match status {
         204 => Ok(None),
         200 => {
-            let v: Value = serde_json::from_slice(&body).with_context(|| "b/poll bad json")?;
-            let task_id = v
-                .get("task_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("b/poll missing task_id"))?
-                .to_string();
-            let task_type = v
-                .get("task_type")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let payload = v.get("payload").cloned().unwrap_or(Value::Null);
-            Ok(Some((task_id, task_type, payload)))
+            let parse = |body: &[u8]| -> Result<(String, String, Value)> {
+                let v: Value = serde_json::from_slice(body).with_context(|| "b/poll bad json")?;
+                let task_id = v
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("b/poll missing task_id"))?
+                    .to_string();
+                let task_type = v
+                    .get("task_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let payload = v.get("payload").cloned().unwrap_or(Value::Null);
+                Ok((task_id, task_type, payload))
+            };
+            parse(&body).map(Some).map_err(PollError::transient)
         }
-        other => Err(anyhow!("b/poll unexpected status {other}")),
+        other => Err(PollError {
+            error: anyhow!("b/poll unexpected status {other}"),
+            failure: poll_failure_for(other, retry_after),
+        }),
     }
 }
 
+/// Classify a poll response status into a wait strategy.
+fn poll_failure_for(status: u16, retry_after: Option<Duration>) -> PollFailure {
+    match status {
+        401 | 403 => PollFailure::Rejected,
+        408 | 429 | 503 => PollFailure::Throttled(retry_after),
+        _ => PollFailure::Transient,
+    }
+}
+
+/// Next wait after a failed poll, given the failure kind and the current
+/// transient/rejected backoff levels. Returns the wait and the updated levels.
+fn next_poll_backoff(
+    failure: PollFailure,
+    transient_ms: u64,
+    rejected_ms: u64,
+) -> (Duration, u64, u64) {
+    match failure {
+        PollFailure::Transient => {
+            let wait = transient_ms.clamp(POLL_BACKOFF_MIN_MS, POLL_BACKOFF_MAX_MS);
+            (
+                Duration::from_millis(wait),
+                (wait * 2).min(POLL_BACKOFF_MAX_MS),
+                rejected_ms,
+            )
+        }
+        PollFailure::Rejected => {
+            let wait = rejected_ms.clamp(AUTH_BACKOFF_MIN_MS, AUTH_BACKOFF_MAX_MS);
+            (
+                Duration::from_millis(wait),
+                transient_ms,
+                (wait * 2).min(AUTH_BACKOFF_MAX_MS),
+            )
+        }
+        PollFailure::Throttled(hint) => {
+            let wait = hint.unwrap_or(Duration::from_millis(THROTTLE_BACKOFF_MS));
+            (wait, transient_ms, rejected_ms)
+        }
+    }
+}
+
+/// True when a result-upload status will not improve on retry.
+///
+/// 429 (rate limited) and 408 (request timeout) are excluded, and 5xx never
+/// reaches here: the work is already done and the server is only asking us to
+/// wait. Treating those as permanent threw away a finished TEE result, which
+/// the A side then reported as an attestation failure even though nothing on
+/// either device was actually wrong.
+fn result_status_is_permanent(status: u16) -> bool {
+    (400..500).contains(&status) && status != 429 && status != 408
+}
+
 /// POST the task result to the server, retrying transient failures
-/// (network errors / 5xx) with exponential backoff so a task is not lost to a
-/// single glitch. Permanent 4xx rejections (bad token, unknown task) are not
-/// retried.
+/// (network errors, 5xx, and throttling) with exponential backoff so a task is
+/// not lost to a single glitch. Permanent 4xx rejections (bad token, unknown
+/// task) are not retried.
 fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
-    const MAX_ATTEMPTS: u32 = 4;
+    const MAX_ATTEMPTS: u32 = 6;
     let url = format!("{}/api/b/result/", cfg.server);
     let body = json!({
         "task_id": task_id,
@@ -447,13 +581,24 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
     ];
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 1..=MAX_ATTEMPTS {
-        match http_request("POST", &url, &headers, Some(body.to_string().as_bytes())) {
-            Ok((200, _body)) => {
+        // The server's own `Retry-After`, when it sent one, wins over our
+        // exponential guess.
+        let retry_hint = match http_request(
+            "POST",
+            &url,
+            &headers,
+            Some(body.to_string().as_bytes()),
+        ) {
+            Ok(HttpResponse { status: 200, .. }) => {
                 log::info!("b/result task={task_id} accepted (HTTP 200)");
                 return Ok(());
             }
-            Ok((status, _body)) => {
-                if (400..500).contains(&status) {
+            Ok(HttpResponse {
+                status,
+                retry_after,
+                ..
+            }) => {
+                if result_status_is_permanent(status) {
                     log::warn!("b/result task={task_id} rejected: HTTP {status}");
                     return Err(anyhow!("b/result rejected with HTTP {status}"));
                 }
@@ -461,16 +606,19 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
                     "b/result task={task_id} HTTP {status} (attempt {attempt}/{MAX_ATTEMPTS})"
                 );
                 last_err = Some(anyhow!("b/result unexpected status {status}"));
+                retry_after
             }
             Err(e) => {
                 log::warn!(
                     "b/result task={task_id} network error: {e:#} (attempt {attempt}/{MAX_ATTEMPTS})"
                 );
                 last_err = Some(e);
+                None
             }
-        }
+        };
         if attempt < MAX_ATTEMPTS {
-            std::thread::sleep(Duration::from_secs(1 << (attempt - 1)));
+            let backoff = retry_hint.unwrap_or(Duration::from_secs(1 << (attempt - 1)));
+            std::thread::sleep(backoff);
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow!("b/result failed after {MAX_ATTEMPTS} attempts")))
@@ -977,6 +1125,9 @@ fn spawn_tee_workers() -> mpsc::SyncSender<TeeWork> {
 }
 
 fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>) {
+    let mut transient_ms = POLL_BACKOFF_MIN_MS;
+    let mut rejected_ms = AUTH_BACKOFF_MIN_MS;
+    let mut endpoint = String::new();
     loop {
         let cfg = match shared.read() {
             Ok(g) => g.clone(),
@@ -986,8 +1137,22 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
                 continue;
             }
         };
+        // A changed server or token is a new credential to try: clear the
+        // backoff so a fix made in the WebUI applies on the next poll rather
+        // than after the current (possibly minutes-long) wait.
+        let current_endpoint = format!("{}|{}", cfg.server, cfg.token);
+        if current_endpoint != endpoint {
+            if !endpoint.is_empty() {
+                log::info!("relay endpoint or token changed; clearing poll backoff");
+            }
+            endpoint = current_endpoint;
+            transient_ms = POLL_BACKOFF_MIN_MS;
+            rejected_ms = AUTH_BACKOFF_MIN_MS;
+        }
         match poll_tasks(&cfg) {
             Ok(Some((task_id, task_type, payload))) => {
+                transient_ms = POLL_BACKOFF_MIN_MS;
+                rejected_ms = AUTH_BACKOFF_MIN_MS;
                 log::info!("poll received task {task_id} type={task_type}");
                 if tx
                     .send(TeeWork {
@@ -1001,10 +1166,31 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
                     return;
                 }
             }
-            Ok(None) => { /* long poll timed out, loop again */ }
-            Err(e) => {
-                log::warn!("poll failed: {e:#}; retrying");
-                thread::sleep(Duration::from_millis(1000));
+            Ok(None) => {
+                // Long poll timed out cleanly: the link is healthy.
+                transient_ms = POLL_BACKOFF_MIN_MS;
+                rejected_ms = AUTH_BACKOFF_MIN_MS;
+            }
+            Err(PollError { error, failure }) => {
+                let (wait, next_transient, next_rejected) =
+                    next_poll_backoff(failure, transient_ms, rejected_ms);
+                transient_ms = next_transient;
+                rejected_ms = next_rejected;
+                match failure {
+                    PollFailure::Rejected => log::warn!(
+                        "poll rejected by server (check the relay token / card expiry): \
+                         {error:#}; retrying in {}s",
+                        wait.as_secs()
+                    ),
+                    PollFailure::Throttled(_) => log::warn!(
+                        "poll throttled by server: {error:#}; retrying in {}s",
+                        wait.as_secs()
+                    ),
+                    PollFailure::Transient => {
+                        log::warn!("poll failed: {error:#}; retrying in {}ms", wait.as_millis())
+                    }
+                }
+                thread::sleep(wait);
             }
         }
     }
@@ -1071,6 +1257,106 @@ mod tests {
             relay_error_result(&error)["keymint_error_code"],
             KmErrorCode::UnsupportedMgfDigest as i32
         );
+    }
+
+    #[test]
+    fn a_rejected_credential_backs_off_instead_of_hammering() {
+        // 40 invalid requests per hour is the server's per-address budget. At
+        // the old flat 1s retry the relay spent it in 40 seconds and then sat
+        // in "too many invalid requests" for the rest of the window.
+        assert_eq!(poll_failure_for(401, None), PollFailure::Rejected);
+        assert_eq!(poll_failure_for(403, None), PollFailure::Rejected);
+
+        let mut rejected_ms = AUTH_BACKOFF_MIN_MS;
+        let mut transient_ms = POLL_BACKOFF_MIN_MS;
+        let mut total = Duration::ZERO;
+        let mut attempts = 0;
+        // One hour of continuous rejection must stay well inside the budget.
+        while total < Duration::from_secs(3600) {
+            let (wait, next_transient, next_rejected) =
+                next_poll_backoff(PollFailure::Rejected, transient_ms, rejected_ms);
+            assert!(
+                wait >= Duration::from_millis(AUTH_BACKOFF_MIN_MS),
+                "a rejection must never retry faster than the auth floor"
+            );
+            assert!(wait <= Duration::from_millis(AUTH_BACKOFF_MAX_MS));
+            transient_ms = next_transient;
+            rejected_ms = next_rejected;
+            total += wait;
+            attempts += 1;
+        }
+        assert!(
+            attempts < 40,
+            "{attempts} attempts in an hour would exhaust the server's 40-request \
+             invalid budget and lock the device out"
+        );
+    }
+
+    #[test]
+    fn throttling_honours_the_servers_own_hint() {
+        let hint = Duration::from_secs(12);
+        assert_eq!(
+            poll_failure_for(429, Some(hint)),
+            PollFailure::Throttled(Some(hint))
+        );
+        let (wait, ..) = next_poll_backoff(
+            PollFailure::Throttled(Some(hint)),
+            POLL_BACKOFF_MIN_MS,
+            AUTH_BACKOFF_MIN_MS,
+        );
+        assert_eq!(wait, hint);
+
+        // No hint: fall back to a fixed, generous pause.
+        assert_eq!(poll_failure_for(503, None), PollFailure::Throttled(None));
+        let (wait, ..) = next_poll_backoff(
+            PollFailure::Throttled(None),
+            POLL_BACKOFF_MIN_MS,
+            AUTH_BACKOFF_MIN_MS,
+        );
+        assert_eq!(wait, Duration::from_millis(THROTTLE_BACKOFF_MS));
+    }
+
+    #[test]
+    fn transient_failures_grow_then_settle_at_the_ceiling() {
+        assert_eq!(poll_failure_for(500, None), PollFailure::Transient);
+        assert_eq!(poll_failure_for(502, None), PollFailure::Transient);
+
+        let mut transient_ms = POLL_BACKOFF_MIN_MS;
+        let rejected_ms = AUTH_BACKOFF_MIN_MS;
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            let (wait, next_transient, _) =
+                next_poll_backoff(PollFailure::Transient, transient_ms, rejected_ms);
+            transient_ms = next_transient;
+            waits.push(wait);
+        }
+        assert_eq!(waits[0], Duration::from_millis(POLL_BACKOFF_MIN_MS));
+        assert!(waits[1] > waits[0], "backoff must grow");
+        assert!(
+            waits
+                .iter()
+                .all(|w| *w <= Duration::from_millis(POLL_BACKOFF_MAX_MS)),
+            "backoff must stay bounded so a recovered server is noticed promptly"
+        );
+        assert_eq!(
+            *waits.last().unwrap(),
+            Duration::from_millis(POLL_BACKOFF_MAX_MS)
+        );
+    }
+
+    #[test]
+    fn a_throttled_result_upload_is_retried_not_discarded() {
+        // The finished TEE work is already in hand; these only mean "wait".
+        assert!(!result_status_is_permanent(429));
+        assert!(!result_status_is_permanent(408));
+        // A genuinely wrong request will not improve on retry.
+        assert!(result_status_is_permanent(401));
+        assert!(result_status_is_permanent(403));
+        assert!(result_status_is_permanent(404));
+        assert!(result_status_is_permanent(400));
+        // 5xx is retried by the caller's own branch.
+        assert!(!result_status_is_permanent(500));
+        assert!(!result_status_is_permanent(503));
     }
 
     #[test]

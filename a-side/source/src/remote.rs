@@ -32,7 +32,7 @@
 //! encoding and HTTP keep-alive, both of which the hand-written client did not.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -46,12 +46,155 @@ use crate::config;
 
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
+/// Upper bound honoured from a server `Retry-After`. A keystore call is
+/// blocking an app, so we cap the wait well below the HAL watchdog rather than
+/// obeying an arbitrarily large value.
+const MAX_RETRY_AFTER_SECS: u64 = 3;
 
 /// A relay-server client.  All configuration is read from `config().remote`.
 pub struct RemoteRelay;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-static REMOTE_IDENTITY_PROFILE: OnceLock<RemoteIdentityProfile> = OnceLock::new();
+/// Cached B-side identity profile.
+///
+/// Deliberately not a `OnceLock`: it has to be clearable. While it was
+/// write-once, saving the WebUI config could not refresh it, so the
+/// "uncheck enable remote, save, re-check, save" ritual users fall back on
+/// genuinely did nothing to the running daemon.
+static REMOTE_IDENTITY_PROFILE: RwLock<Option<RemoteIdentityProfile>> = RwLock::new(None);
+/// Last observed health of the relay, surfaced to the WebUI so a server-side
+/// rejection reads as a server-side rejection instead of an unexplained
+/// attestation error.
+static REMOTE_HEALTH: RwLock<Option<RemoteHealth>> = RwLock::new(None);
+
+/// Why the relay last refused us, if it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteRejection {
+    /// 401/403: the server did not accept the token.
+    Unauthorized,
+    /// 429/503: the server is throttling or its backend is unavailable.
+    Throttled,
+    /// Any other non-2xx response.
+    Other,
+}
+
+impl RemoteRejection {
+    fn classify(status: u16) -> Option<Self> {
+        match status {
+            200..=299 => None,
+            401 | 403 => Some(Self::Unauthorized),
+            408 | 429 | 503 => Some(Self::Throttled),
+            _ => Some(Self::Other),
+        }
+    }
+
+    /// Whether the same request is worth sending again shortly.
+    fn is_retryable(self) -> bool {
+        matches!(self, Self::Throttled)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::Throttled => "throttled",
+            Self::Other => "error",
+        }
+    }
+}
+
+/// A snapshot of relay reachability for operator-facing status.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteHealth {
+    pub last_ok_unix: Option<i64>,
+    pub last_error_unix: Option<i64>,
+    pub last_status: Option<u16>,
+    pub last_kind: Option<&'static str>,
+    pub last_message: Option<String>,
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Whether a successful request should rewrite the published snapshot.
+///
+/// The WebUI reads the file, so it must not keep reporting an outage that is
+/// over, and it must not inherit one from an earlier process: the first success
+/// after a restart publishes a clean snapshot. Every other success is silent —
+/// a healthy relay would otherwise rewrite the file on every request.
+fn ok_snapshot_is_news(health: &RemoteHealth) -> bool {
+    match (health.last_ok_unix, health.last_error_unix) {
+        (None, _) => true,
+        (Some(ok), Some(err)) => ok < err,
+        (Some(_), None) => false,
+    }
+}
+
+fn record_remote_ok() {
+    let publish = if let Ok(mut guard) = REMOTE_HEALTH.write() {
+        let health = guard.get_or_insert_with(RemoteHealth::default);
+        let publish = ok_snapshot_is_news(health);
+        health.last_ok_unix = Some(now_unix());
+        publish
+    } else {
+        false
+    };
+    if publish {
+        write_health_snapshot();
+    }
+}
+
+fn record_remote_failure(status: Option<u16>, kind: &'static str, message: &str) {
+    if let Ok(mut guard) = REMOTE_HEALTH.write() {
+        let health = guard.get_or_insert_with(RemoteHealth::default);
+        health.last_error_unix = Some(now_unix());
+        health.last_status = status;
+        health.last_kind = Some(kind);
+        health.last_message = Some(message.chars().take(200).collect());
+    }
+    write_health_snapshot();
+}
+
+/// Current relay health, for status reporting.
+pub fn remote_health() -> Option<RemoteHealth> {
+    REMOTE_HEALTH.read().ok().and_then(|g| g.clone())
+}
+
+/// Path the daemon publishes health to, so the separate WebUI process can show
+/// why remote attestation is failing without guessing.
+pub const REMOTE_HEALTH_PATH: &str = "/data/misc/keystore/ommega/remote-health.json";
+
+/// Publish the current health snapshot for the WebUI. Best-effort: a failure
+/// here must never disturb an attestation path.
+fn write_health_snapshot() {
+    let Some(health) = remote_health() else {
+        return;
+    };
+    let payload = json!({
+        "last_ok_unix": health.last_ok_unix,
+        "last_error_unix": health.last_error_unix,
+        "last_status": health.last_status,
+        "last_kind": health.last_kind,
+        "last_message": health.last_message,
+    });
+    if let Some(parent) = std::path::Path::new(REMOTE_HEALTH_PATH).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(REMOTE_HEALTH_PATH, payload.to_string());
+}
+
+/// Drop the cached identity profile so the next attestation re-reads it from
+/// the relay. Called when the runtime config is applied.
+pub fn invalidate_identity_profile() {
+    if let Ok(mut guard) = REMOTE_IDENTITY_PROFILE.write() {
+        if guard.take().is_some() {
+            log::info!("remote identity profile cache cleared after config change");
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteIdentityProfile {
@@ -190,12 +333,20 @@ fn build_client(insecure: bool) -> Client {
 /// `Ok` with the corresponding status code — only transport-level failures
 /// produce `Err`.  This matches the original hand-written client contract so
 /// callers (`post_json` and its retry logic) behave identically.
+/// Parse a `Retry-After` delta-seconds header, clamped so a bad or hostile
+/// value cannot stall a keystore call.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    Some(Duration::from_secs(secs.clamp(1, MAX_RETRY_AFTER_SECS)))
+}
+
 fn http_request(
     method: &str,
     url: &str,
     headers: &[(String, String)],
     body: Option<&[u8]>,
-) -> Result<(u16, Vec<u8>)> {
+) -> Result<(u16, Vec<u8>, Option<Duration>)> {
     let client = get_client()?;
     let method = method
         .parse::<Method>()
@@ -214,12 +365,13 @@ fn http_request(
         .with_context(|| format!("HTTP request to {url}"))?;
 
     let status = resp.status().as_u16();
+    let retry_after = parse_retry_after(resp.headers());
     let body_bytes = resp
         .bytes()
         .with_context(|| format!("reading response body from {url}"))?
         .to_vec();
 
-    Ok((status, body_bytes))
+    Ok((status, body_bytes, retry_after))
 }
 
 // ── RemoteRelay public API ─────────────────────────────────────────────
@@ -273,21 +425,63 @@ impl RemoteRelay {
         // Transient transport failures (connect timeout, network jitter, TLS
         // handshake) are retried once before giving up. Without the retry a
         // single dropped attempt falls back to the local software keybox and
-        // briefly emits a self-signed chain. HTTP error responses are NOT
-        // retried — the server answered, and its body carries the real result.
+        // briefly emits a self-signed chain.
+        //
+        // Most HTTP error responses are NOT retried — the server answered, and
+        // its body carries the real result. The exception is an explicit
+        // "slow down" (429/503): the request was never processed, so resending
+        // it once after the server's own `Retry-After` recovers the call
+        // instead of failing an attestation over a moment of throttling.
         let (status, resp) = match http_request("POST", &url, &headers, Some(body_str.as_bytes())) {
-            Ok(v) => v,
+            Ok((status, body, retry_after)) => match RemoteRejection::classify(status) {
+                Some(rejection) if rejection.is_retryable() => {
+                    let wait = retry_after
+                        .unwrap_or(Duration::from_millis(500))
+                        .min(Duration::from_secs(MAX_RETRY_AFTER_SECS));
+                    log::warn!(
+                        "remote {path} throttled (HTTP {status}); retrying once in {}ms",
+                        wait.as_millis()
+                    );
+                    std::thread::sleep(wait);
+                    match http_request("POST", &url, &headers, Some(body_str.as_bytes())) {
+                        Ok((status, body, _)) => (status, body),
+                        Err(second) => {
+                            log::warn!("remote {path} unavailable after retry: {second:#}");
+                            record_remote_failure(None, "transport", &second.to_string());
+                            return Ok(None);
+                        }
+                    }
+                }
+                _ => (status, body),
+            },
             Err(first) => {
                 log::warn!("remote {path} transport error, retrying once: {first:#}");
                 match http_request("POST", &url, &headers, Some(body_str.as_bytes())) {
-                    Ok(value) => value,
+                    Ok((status, body, _)) => (status, body),
                     Err(second) => {
                         log::warn!("remote {path} unavailable after retry: {second:#}");
+                        record_remote_failure(None, "transport", &second.to_string());
                         return Ok(None);
                     }
                 }
             }
         };
+        // Record what the server actually said, so the WebUI can report
+        // "rejected by server" rather than leaving the user to guess.
+        match RemoteRejection::classify(status) {
+            None => record_remote_ok(),
+            Some(rejection) => {
+                let detail = String::from_utf8_lossy(&resp)
+                    .chars()
+                    .take(200)
+                    .collect::<String>();
+                log::warn!(
+                    "remote {path} rejected by server: HTTP {status} ({})",
+                    rejection.as_str()
+                );
+                record_remote_failure(Some(status), rejection.as_str(), &detail);
+            }
+        }
         // A 2xx response that is not JSON is a server/protocol error, not
         // "remote unavailable" — surface it loudly instead of silently falling
         // back to the local software keybox (which would emit a self-signed
@@ -705,12 +899,16 @@ fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
 }
 
 pub(crate) fn remote_identity_profile() -> Result<RemoteIdentityProfile> {
-    if let Some(profile) = REMOTE_IDENTITY_PROFILE.get() {
-        return Ok(profile.clone());
+    if let Ok(guard) = REMOTE_IDENTITY_PROFILE.read() {
+        if let Some(profile) = guard.as_ref() {
+            return Ok(profile.clone());
+        }
     }
     let profile = RemoteRelay::fetch_identity_profile()?;
-    let _ = REMOTE_IDENTITY_PROFILE.set(profile.clone());
-    Ok(REMOTE_IDENTITY_PROFILE.get().cloned().unwrap_or(profile))
+    if let Ok(mut guard) = REMOTE_IDENTITY_PROFILE.write() {
+        *guard = Some(profile.clone());
+    }
+    Ok(profile)
 }
 
 /// Convenience: `true` if remote relay is enabled in config.
@@ -1021,6 +1219,148 @@ mod tests {
         for body in [b"".as_slice(), b"not JSON"] {
             assert!(decode_relay_response("/api/sign/", 200, body).is_err());
         }
+    }
+
+    #[test]
+    fn server_rejections_are_classified_so_the_ui_can_explain_them() {
+        // A rejected token is the server's verdict: retrying will not help, and
+        // the user needs to be told it is a token problem rather than left
+        // toggling "enable remote" in the WebUI.
+        for status in [401, 403] {
+            let rejection = RemoteRejection::classify(status).unwrap();
+            assert_eq!(rejection, RemoteRejection::Unauthorized);
+            assert!(!rejection.is_retryable());
+            assert_eq!(rejection.as_str(), "unauthorized");
+        }
+        // Throttling is temporary and the request never ran, so one retry is
+        // both safe and worth doing.
+        for status in [408, 429, 503] {
+            let rejection = RemoteRejection::classify(status).unwrap();
+            assert_eq!(rejection, RemoteRejection::Throttled);
+            assert!(rejection.is_retryable());
+            assert_eq!(rejection.as_str(), "throttled");
+        }
+        for status in [400, 404, 500, 502] {
+            let rejection = RemoteRejection::classify(status).unwrap();
+            assert_eq!(rejection, RemoteRejection::Other);
+            assert!(!rejection.is_retryable());
+        }
+        for status in [200, 201, 204, 299] {
+            assert_eq!(RemoteRejection::classify(status), None);
+        }
+    }
+
+    #[test]
+    fn health_records_the_last_server_verdict() {
+        record_remote_failure(
+            Some(401),
+            "unauthorized",
+            "missing or invalid X-Relay-Token",
+        );
+        let health = remote_health().expect("health should be recorded");
+        assert_eq!(health.last_status, Some(401));
+        assert_eq!(health.last_kind, Some("unauthorized"));
+        assert!(health
+            .last_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("X-Relay-Token"));
+        assert!(health.last_error_unix.is_some());
+
+        record_remote_ok();
+        let health = remote_health().unwrap();
+        assert!(health.last_ok_unix.is_some());
+        // A later success must not erase the record of what went wrong.
+        assert_eq!(health.last_status, Some(401));
+    }
+
+    #[test]
+    fn a_recovery_publishes_a_clean_snapshot_but_stays_quiet_after_that() {
+        // A fresh process: the first success has to be published, otherwise the
+        // WebUI keeps showing an outage inherited from the previous run.
+        let empty = RemoteHealth::default();
+        assert!(ok_snapshot_is_news(&empty));
+
+        // Failure then success: the recovery is news, because the panel is
+        // still claiming the relay is down.
+        let after_failure = RemoteHealth {
+            last_ok_unix: None,
+            last_error_unix: Some(1_000),
+            ..RemoteHealth::default()
+        };
+        assert!(ok_snapshot_is_news(&after_failure));
+
+        // Already healthy: a success is not news, and rewriting the file on
+        // every request would be pure write amplification.
+        let healthy = RemoteHealth {
+            last_ok_unix: Some(2_000),
+            last_error_unix: Some(1_000),
+            ..RemoteHealth::default()
+        };
+        assert!(!ok_snapshot_is_news(&healthy));
+
+        // Success before any failure: the snapshot is already accurate.
+        let never_failed = RemoteHealth {
+            last_ok_unix: Some(2_000),
+            last_error_unix: None,
+            ..RemoteHealth::default()
+        };
+        assert!(!ok_snapshot_is_news(&never_failed));
+
+        // Interleaved: a failure newer than the last success is still pending,
+        // so the next success must clear it.
+        let failure_is_newer = RemoteHealth {
+            last_ok_unix: Some(1_000),
+            last_error_unix: Some(2_000),
+            ..RemoteHealth::default()
+        };
+        assert!(ok_snapshot_is_news(&failure_is_newer));
+    }
+
+    #[test]
+    fn a_long_retry_after_cannot_stall_a_keystore_call() {
+        // The header is advisory; a keystore call is blocking an app, so an
+        // outsized value must be clamped rather than obeyed.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "86400".parse().unwrap());
+        assert_eq!(
+            parse_retry_after(&headers),
+            Some(Duration::from_secs(MAX_RETRY_AFTER_SECS))
+        );
+
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(2)));
+
+        // A zero or malformed value must not become an immediate retry.
+        headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(1)));
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
+        assert_eq!(parse_retry_after(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn the_identity_profile_cache_can_be_cleared() {
+        let profile = RemoteIdentityProfile {
+            interface_version: 3,
+            interface_hash: "hash".into(),
+            profile_version: 300,
+            hardware_version: 300,
+            security_level: 1,
+            keymint_name: "synthetic".into(),
+            keymint_author: "synthetic".into(),
+            has_strongbox: false,
+            max_operations: None,
+        };
+        *REMOTE_IDENTITY_PROFILE.write().unwrap() = Some(profile);
+        assert!(REMOTE_IDENTITY_PROFILE.read().unwrap().is_some());
+        // Saving the config has to actually drop this, otherwise a corrected
+        // token or server URL keeps serving the stale profile.
+        invalidate_identity_profile();
+        assert!(REMOTE_IDENTITY_PROFILE.read().unwrap().is_none());
     }
 
     #[test]

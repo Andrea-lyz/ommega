@@ -5,7 +5,7 @@
 //!   - server_keybox:      A-side requests are intercepted and fulfilled locally
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::AuthState;
+use crate::auth::{AuthState, TokenCheck};
 use crate::config::Config;
 use crate::db::Db;
 use crate::fulfill::Fulfill;
@@ -83,6 +83,27 @@ fn auth_fail() -> Response {
     )
 }
 
+/// A 4xx/5xx response carrying `Retry-After`, so a client can back off by the
+/// server's own estimate instead of guessing (or hammering at a fixed 1s).
+fn json_err_retry_after(status: StatusCode, msg: &str, retry_after_secs: u64) -> Response {
+    let mut response = json_err(status, msg);
+    if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+        response.headers_mut().insert("retry-after", value);
+    }
+    response
+}
+
+/// Which rate-limit budget an endpoint draws from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RateClass {
+    /// Relay data plane: A attest/sign/decrypt/agree/profile, B poll/result.
+    /// Authenticated, device-driven, and the traffic the product exists to
+    /// carry. Throttling it breaks attestation rather than protecting anything.
+    Relay,
+    /// Everything else reachable with a token (ping, status, registration).
+    Standard,
+}
+
 /// Authenticate + rate-limit a request. Returns Ok(token) or an error response.
 ///
 /// `role`: `Some("a")` for A-side endpoints, `Some("b")` for B-side, `None` for
@@ -91,6 +112,15 @@ fn check_auth(
     state: &AppState,
     headers: &HeaderMap,
     role: Option<&str>,
+) -> Result<String, Response> {
+    check_auth_class(state, headers, role, RateClass::Standard)
+}
+
+fn check_auth_class(
+    state: &AppState,
+    headers: &HeaderMap,
+    role: Option<&str>,
+    class: RateClass,
 ) -> Result<String, Response> {
     let token = token_from_headers(headers).unwrap_or("").to_string();
     let ip = client_ip(headers);
@@ -105,22 +135,46 @@ fn check_auth(
 
     // Authenticate first. Failed auth counts against the (much tighter)
     // invalid-request limit, keyed by client IP.
-    if !state.auth.check_token(Some(&token), role, &ip) {
-        if !state.auth.allow_invalid(&ip) {
-            return Err(json_err(
-                StatusCode::TOO_MANY_REQUESTS,
-                "too many invalid requests",
+    match state.auth.check_token(Some(&token), role, &ip) {
+        TokenCheck::Valid => {}
+        // The token store is unreachable, so we do not know whether this
+        // credential is good. Answering 401 would be a lie, and it would burn
+        // the caller's failed-auth budget until the whole IP is blocked for an
+        // hour over an outage it did not cause. Report 503 and let it retry.
+        TokenCheck::Unavailable(reason) => {
+            tracing::warn!("auth backend unavailable for ip={ip}: {reason}");
+            return Err(json_err_retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "token verification temporarily unavailable",
+                5,
             ));
         }
-        return Err(auth_fail());
+        TokenCheck::Invalid => {
+            if !state.auth.allow_invalid(&ip) {
+                return Err(json_err_retry_after(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many invalid requests",
+                    60,
+                ));
+            }
+            return Err(auth_fail());
+        }
     }
 
     // Valid auth: rate limit by token (or IP when no token).
     let rl_key = if token.is_empty() { ip } else { token.clone() };
-    if !state.auth.allow(&rl_key) {
-        return Err(json_err(
+    let allowed = match class {
+        RateClass::Relay => state.auth.allow_relay(&rl_key),
+        RateClass::Standard => state.auth.allow(&rl_key),
+    };
+    if !allowed {
+        let retry_after = state
+            .auth
+            .retry_after_secs(&rl_key, class == RateClass::Relay);
+        return Err(json_err_retry_after(
             StatusCode::TOO_MANY_REQUESTS,
             "rate limit exceeded",
+            retry_after,
         ));
     }
     Ok(token)
@@ -448,7 +502,7 @@ pub async fn attest(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(r) = check_auth(&state, &headers, Some("a")) {
+    if let Err(r) = check_auth_class(&state, &headers, Some("a"), RateClass::Relay) {
         return r;
     }
     run_a_side_task(&state, "attest", &body).await
@@ -459,7 +513,7 @@ pub async fn profile(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(r) = check_auth(&state, &headers, Some("a")) {
+    if let Err(r) = check_auth_class(&state, &headers, Some("a"), RateClass::Relay) {
         return r;
     }
     run_a_side_task(&state, "profile", &body).await
@@ -470,7 +524,7 @@ pub async fn sign(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(r) = check_auth(&state, &headers, Some("a")) {
+    if let Err(r) = check_auth_class(&state, &headers, Some("a"), RateClass::Relay) {
         return r;
     }
     run_a_side_task(&state, "sign", &body).await
@@ -481,7 +535,7 @@ pub async fn decrypt(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(r) = check_auth(&state, &headers, Some("a")) {
+    if let Err(r) = check_auth_class(&state, &headers, Some("a"), RateClass::Relay) {
         return r;
     }
     run_a_side_task(&state, "decrypt", &body).await
@@ -492,7 +546,7 @@ pub async fn agree(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(r) = check_auth(&state, &headers, Some("a")) {
+    if let Err(r) = check_auth_class(&state, &headers, Some("a"), RateClass::Relay) {
         return r;
     }
     run_a_side_task(&state, "agree", &body).await
@@ -573,7 +627,7 @@ pub async fn b_poll(
     headers: HeaderMap,
     Query(q): Query<PollQuery>,
 ) -> Response {
-    if let Err(r) = check_auth(&state, &headers, Some("b")) {
+    if let Err(r) = check_auth_class(&state, &headers, Some("b"), RateClass::Relay) {
         return r;
     }
     if q.device_id.is_empty() {
@@ -615,7 +669,7 @@ pub async fn b_result(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(r) = check_auth(&state, &headers, Some("b")) {
+    if let Err(r) = check_auth_class(&state, &headers, Some("b"), RateClass::Relay) {
         return r;
     }
     let task_id = body
@@ -821,6 +875,109 @@ mod tests {
                 assert_eq!(response["data"], result["data"]);
             }
             assert_eq!(state.store.counts().await.pending, 0);
+        }
+    }
+
+    /// A relay state whose token store is unreachable: a MySQL outage, which is
+    /// what the 503 path exists for.
+    fn state_with_unreachable_db() -> AppState {
+        let db = Arc::new(Db::open_lazy("mysql://ommega@127.0.0.1:1/unreachable"));
+        AppState {
+            cfg: Arc::new(Config {
+                wait_result_timeout_secs: 2,
+                ..Config::default()
+            }),
+            // No static token, so every credential has to be resolved in the DB.
+            auth: Arc::new(AuthState::new(String::new(), 100, 60, true).with_db(Some(db.clone()))),
+            store: TaskStore::new(60, 60, 100, 60),
+            fulfill: Fulfill::new(false, Some(db.clone())),
+            db: Some(db),
+            geo: None,
+        }
+    }
+
+    fn headers_with_token(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-relay-token", token.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn an_unreachable_token_store_answers_503_and_spares_the_invalid_budget() {
+        let state = state_with_unreachable_db();
+        for attempt in 0..3 {
+            let response =
+                check_auth(&state, &headers_with_token("card-token"), Some("a")).unwrap_err();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "attempt {attempt} should report an outage, not a verdict"
+            );
+            assert_eq!(
+                response.headers().get("retry-after").unwrap(),
+                "5",
+                "clients need a backoff hint instead of a fixed 1s retry"
+            );
+        }
+        // The failed-auth budget must be untouched. It exists to stop credential
+        // probing; spending it on an outage is what escalated a brief MySQL blip
+        // into an hour of "too many invalid requests" for the whole address.
+        let budget = state.auth.invalid_rate_limit_requests;
+        for spent in 0..budget {
+            assert!(
+                state.auth.allow_invalid("10.0.0.1"),
+                "outage consumed the failed-auth budget after {spent} of {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuinely_bad_token_still_answers_401_then_429() {
+        let state = AppState {
+            cfg: Arc::new(Config::default()),
+            auth: Arc::new(AuthState::new("right".into(), 100, 60, true)),
+            store: TaskStore::new(60, 60, 100, 60),
+            fulfill: Fulfill::new(false, None),
+            db: None,
+            geo: None,
+        };
+        let response = check_auth(&state, &headers_with_token("wrong"), Some("a")).unwrap_err();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        // The failed-auth budget is 40 per address; exhaust it.
+        let mut saw_throttle = false;
+        for _ in 0..80 {
+            let response = check_auth(&state, &headers_with_token("wrong"), Some("a")).unwrap_err();
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                assert!(response.headers().contains_key("retry-after"));
+                saw_throttle = true;
+                break;
+            }
+        }
+        assert!(saw_throttle, "credential probing must still be throttled");
+    }
+
+    #[test]
+    fn the_relay_data_plane_is_not_throttled_by_the_standard_budget() {
+        let state = AppState {
+            cfg: Arc::new(Config::default()),
+            // One standard request per window, a generous relay budget.
+            auth: Arc::new(AuthState::new("right".into(), 1, 60, true).with_relay_rate_limit(500)),
+            store: TaskStore::new(60, 60, 100, 60),
+            fulfill: Fulfill::new(false, None),
+            db: None,
+            geo: None,
+        };
+        let headers = headers_with_token("right");
+        // A B device polls and posts results far more often than the standard
+        // budget allows. Draining that budget must not stop the data plane,
+        // because a throttled b/result silently discards a finished task.
+        assert!(check_auth(&state, &headers, Some("a")).is_ok());
+        assert!(check_auth(&state, &headers, Some("a")).is_err());
+        for _ in 0..200 {
+            assert!(
+                check_auth_class(&state, &headers, Some("b"), RateClass::Relay).is_ok(),
+                "relay traffic must draw on its own budget"
+            );
         }
     }
 

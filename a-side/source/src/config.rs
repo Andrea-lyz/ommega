@@ -504,7 +504,15 @@ fn reload_runtime_config(trigger: WatchTrigger) {
         update_patchlevels,
         security_patch_update,
     ) {
-        Ok(()) => log::info!("config updated via {}", trigger.label()),
+        Ok(()) => {
+            // Drop the cached B-side identity profile. It is fetched once and
+            // reused, so without this a saved config change (a corrected token,
+            // a new server) left the daemon serving the old profile — which is
+            // why toggling "enable remote" off and on in the WebUI appeared to
+            // fix nothing.
+            crate::remote::invalidate_identity_profile();
+            log::info!("config updated via {}", trigger.label());
+        }
         Err(error) => log::error!(
             "failed to apply config update via {}; keeping previous runtime: {error:#}",
             trigger.label()
