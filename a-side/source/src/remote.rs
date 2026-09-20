@@ -119,10 +119,31 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether a successful request should rewrite the published snapshot.
+///
+/// The WebUI reads the file, so it must not keep reporting an outage that is
+/// over, and it must not inherit one from an earlier process: the first success
+/// after a restart publishes a clean snapshot. Every other success is silent —
+/// a healthy relay would otherwise rewrite the file on every request.
+fn ok_snapshot_is_news(health: &RemoteHealth) -> bool {
+    match (health.last_ok_unix, health.last_error_unix) {
+        (None, _) => true,
+        (Some(ok), Some(err)) => ok < err,
+        (Some(_), None) => false,
+    }
+}
+
 fn record_remote_ok() {
-    if let Ok(mut guard) = REMOTE_HEALTH.write() {
+    let publish = if let Ok(mut guard) = REMOTE_HEALTH.write() {
         let health = guard.get_or_insert_with(RemoteHealth::default);
+        let publish = ok_snapshot_is_news(health);
         health.last_ok_unix = Some(now_unix());
+        publish
+    } else {
+        false
+    };
+    if publish {
+        write_health_snapshot();
     }
 }
 
@@ -1251,6 +1272,49 @@ mod tests {
         assert!(health.last_ok_unix.is_some());
         // A later success must not erase the record of what went wrong.
         assert_eq!(health.last_status, Some(401));
+    }
+
+    #[test]
+    fn a_recovery_publishes_a_clean_snapshot_but_stays_quiet_after_that() {
+        // A fresh process: the first success has to be published, otherwise the
+        // WebUI keeps showing an outage inherited from the previous run.
+        let empty = RemoteHealth::default();
+        assert!(ok_snapshot_is_news(&empty));
+
+        // Failure then success: the recovery is news, because the panel is
+        // still claiming the relay is down.
+        let after_failure = RemoteHealth {
+            last_ok_unix: None,
+            last_error_unix: Some(1_000),
+            ..RemoteHealth::default()
+        };
+        assert!(ok_snapshot_is_news(&after_failure));
+
+        // Already healthy: a success is not news, and rewriting the file on
+        // every request would be pure write amplification.
+        let healthy = RemoteHealth {
+            last_ok_unix: Some(2_000),
+            last_error_unix: Some(1_000),
+            ..RemoteHealth::default()
+        };
+        assert!(!ok_snapshot_is_news(&healthy));
+
+        // Success before any failure: the snapshot is already accurate.
+        let never_failed = RemoteHealth {
+            last_ok_unix: Some(2_000),
+            last_error_unix: None,
+            ..RemoteHealth::default()
+        };
+        assert!(!ok_snapshot_is_news(&never_failed));
+
+        // Interleaved: a failure newer than the last success is still pending,
+        // so the next success must clear it.
+        let failure_is_newer = RemoteHealth {
+            last_ok_unix: Some(1_000),
+            last_error_unix: Some(2_000),
+            ..RemoteHealth::default()
+        };
+        assert!(ok_snapshot_is_news(&failure_is_newer));
     }
 
     #[test]
