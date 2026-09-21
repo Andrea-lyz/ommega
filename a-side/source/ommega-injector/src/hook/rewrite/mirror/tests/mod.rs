@@ -443,3 +443,112 @@ fn mirror_business_error_preserves_event_and_blocks_routes() {
     assert!(mirror_state_dirty(MirrorStateKind::Maintenance));
     assert!(ensure_mirror_state_recovered().is_err());
 }
+
+#[test]
+fn mirror_gate_waits_for_a_draining_replay_instead_of_refusing_the_call() {
+    let _guard = route_state_test_guard();
+    reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::FailClosed,
+    )
+    .expect("lock state should reserve")
+    .enqueue(MirrorReplayEvent::Authorization {
+        request: ParsedAuthorizationRequest::OnUserStorageLocked { user_id: 10 },
+        caller: CallerInfo {
+            uid: 1000,
+            sid: String::new(),
+            pid: 2000,
+        },
+    })
+    .expect("lock state should queue");
+    MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned")
+        .authorization
+        .draining = true;
+
+    // Stand in for the recovery worker finishing the replay a moment later.
+    let drainer = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(30));
+        let mut state = MIRROR_RECOVERY_STATE
+            .lock()
+            .expect("mirror recovery state poisoned");
+        state.authorization.pending.clear();
+        state.authorization.draining = false;
+    });
+
+    let started = Instant::now();
+    ensure_mirror_state_recovered_with(Duration::from_secs(5))
+        .expect("a transient replay must not fail the ommega call");
+    assert!(started.elapsed() >= Duration::from_millis(20));
+    drainer.join().expect("drainer thread must finish");
+    assert!(ensure_mirror_state_recovered().is_ok());
+}
+
+#[test]
+fn mirror_gate_still_refuses_when_the_replay_never_drains() {
+    let _guard = route_state_test_guard();
+    reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::FailClosed,
+    )
+    .expect("lock state should reserve")
+    .enqueue(MirrorReplayEvent::Authorization {
+        request: ParsedAuthorizationRequest::OnUserStorageLocked { user_id: 10 },
+        caller: CallerInfo {
+            uid: 1000,
+            sid: String::new(),
+            pid: 2000,
+        },
+    })
+    .expect("lock state should queue");
+    MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned")
+        .authorization
+        .draining = true;
+
+    let started = Instant::now();
+    let error = ensure_mirror_state_recovered_with(Duration::from_millis(40))
+        .expect_err("a stuck replay must keep the fail-closed refusal");
+    assert!(
+        format!("{error:#}").contains("ommega mirror recovery is busy"),
+        "{error:#}"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(30));
+}
+
+#[test]
+fn mirror_gate_reports_pending_when_nothing_is_draining() {
+    let _guard = route_state_test_guard();
+    // The reservation has no replay payload yet, so the worker cannot make
+    // progress: the gate must time out with the pending message.
+    let _reservation = reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::FailClosed,
+    )
+    .expect("lock state should reserve");
+
+    let error = ensure_mirror_state_recovered_with(Duration::from_millis(30))
+        .expect_err("an event without a replayed payload cannot be served");
+    assert!(
+        format!("{error:#}").contains("ommega mirror recovery is pending"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn mirror_gate_refuses_a_poisoned_lane_without_waiting() {
+    let _guard = route_state_test_guard();
+    MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned")
+        .maintenance
+        .poisoned = true;
+
+    let started = Instant::now();
+    let error = ensure_mirror_state_recovered_with(Duration::from_secs(30))
+        .expect_err("poisoned mirror state must stay fail-closed");
+    assert!(format!("{error:#}").contains("poisoned"), "{error:#}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
