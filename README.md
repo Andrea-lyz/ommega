@@ -187,6 +187,11 @@ extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-52
 - 属性变化时只重载原生 KeyMint 服务和 `keystore2`，模块本身不请求硬重启。
 - 配置保存在 `/data/adb/ommega/spl.conf`；留空会选择首次记录的基线值。
   已在较高 SPL 下升级的 keyblob 可能要求保留较高值，首次基线不能直接当作恢复值。
+- 补丁级别与 OS 版本对硬件 KeyMint 是单向的：在较高值下产生或升级过的 keyblob
+  遇到更低的上报值会拒绝升级，此后这些密钥的签名与证明都以 `INVALID_ARGUMENT`（-38）
+  失败，模块侧无法回退。因此 `spl-control.sh` 默认拒绝任何低于当前生效值的写入：
+  启动时的 `apply` 只在 stderr 提示，交互式 `save` 返回非零并由 WebUI 显示原因；
+  确需降级时先创建 `/data/adb/ommega/allow-spl-downgrade`，再执行一次保存。
 - B 端故意不提供 `post-fs-data.sh`，只以 `service.sh` 作为生命周期入口；后续
   KernelSU 加载或软重启时由 `service.sh` 重新应用 SPL，再启动 relay。
 - `service.sh` 会按精确模块路径清理旧 relay，避免旧进程继续占用 `relay.lock`。

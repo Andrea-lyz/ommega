@@ -108,22 +108,32 @@ test('saving an OS version rewrites the property and restarts the stack', t => {
   assert.match(calls, /setprop ctl\.restart keystore2/);
 });
 
-test('an empty OS version restores the recorded baseline', t => {
+test('an empty OS version restores the recorded baseline only upwards', t => {
   const box = sandbox(t);
   assert.equal(box.run('save', '', '', '', '17').status, 0);
   assert.equal(box.prop('ro.build.version.release'), '17');
-  assert.equal(box.run('save', '', '', '', '').status, 0);
-  assert.equal(box.prop('ro.build.version.release'), '16');
+  // Clearing the field asks for the recorded baseline (16). The release is the
+  // same one-way ratchet as the patch levels, so the downgrade is refused and
+  // the device keeps the newer value.
+  const result = box.run('save', '', '', '', '');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /refused to lower ro\.build\.version\.release from 17 to 16/);
+  assert.equal(box.prop('ro.build.version.release'), '17');
 });
 
 test('a baseline from an older module gains an OS version instead of losing it', t => {
   const box = sandbox(t);
-  writeFileSync(path.join(box.dir, 'state', 'spl-baseline.conf'), 'SYSTEM_SPL=2025-12-01\nVENDOR_SPL=2025-12-01\n');
+  writeFileSync(
+    path.join(box.dir, 'state', 'spl-baseline.conf'),
+    'SYSTEM_SPL=2026-08-01\nVENDOR_SPL=2026-08-01\n',
+  );
   const result = box.run('save', '', '', '', '17');
   assert.equal(result.status, 0, result.stderr);
   assert.equal(box.prop('ro.build.version.release'), '17');
   assert.match(readFileSync(path.join(box.dir, 'state', 'spl-baseline.conf'), 'utf8'), /^OS_VERSION=16$/m);
-  // Clearing the field must then return to that late-recorded baseline.
+  // The late-recorded baseline is still the value a cleared field asks for; the
+  // explicit marker is what makes that lowering deliberate.
+  writeFileSync(path.join(box.dir, 'state', 'allow-spl-downgrade'), '');
   assert.equal(box.run('save', '', '', '', '').status, 0);
   assert.equal(box.prop('ro.build.version.release'), '16');
 });
@@ -151,3 +161,65 @@ test('reapplying the current value does not restart the stack', t => {
   assert.doesNotMatch(box.calls(), /ctl\.restart/);
 });
 
+test('refuses to lower a security patch level', t => {
+  const box = sandbox(t);
+  const result = box.run('save', '2025-12-01', '', '', '');
+  assert.notEqual(result.status, 0, 'a downgrade must not report success');
+  assert.match(
+    result.stderr,
+    /refused to lower ro\.build\.version\.security_patch from 2026-08-01 to 2025-12-01/,
+  );
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
+  assert.doesNotMatch(box.calls(), /set ro\.build\.version\.security_patch=/);
+  assert.doesNotMatch(box.calls(), /ctl\.restart/);
+});
+
+test('applies a newer security patch level', t => {
+  const box = sandbox(t);
+  const result = box.run('save', '2026-09-01', '', '', '');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-09-01');
+  assert.match(box.calls(), /ctl\.restart/);
+});
+
+test('refuses to lower the OS release', t => {
+  const box = sandbox(t);
+  const result = box.run('save', '', '', '', '15');
+  assert.notEqual(result.status, 0, 'lowering the release must not report success');
+  assert.match(result.stderr, /refused to lower ro\.build\.version\.release from 16 to 15/);
+  assert.equal(box.prop('ro.build.version.release'), '16');
+  assert.doesNotMatch(box.calls(), /ctl\.restart/);
+});
+
+test('a baseline recorded under an override cannot lower the patch level', t => {
+  const box = sandbox(t);
+  writeFileSync(
+    path.join(box.dir, 'state', 'spl-baseline.conf'),
+    'SYSTEM_SPL=2025-12-01\nVENDOR_SPL=2025-12-01\nOS_VERSION=16\n',
+  );
+  const result = box.run('save', '', '', '', '');
+  assert.notEqual(result.status, 0, 'the recorded baseline must not be applied downwards');
+  assert.match(result.stderr, /refused to lower ro\.build\.version\.security_patch/);
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
+});
+
+test('boot-time apply reports a persisted downgrade without failing startup', t => {
+  const box = sandbox(t);
+  writeFileSync(
+    path.join(box.dir, 'state', 'spl.conf'),
+    'SYSTEM_SPL=2025-12-01\nBOOT_SPL=\nVENDOR_SPL=2025-12-01\nOS_VERSION=\n',
+  );
+  const result = box.run('apply');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /refused to lower ro\.build\.version\.security_patch/);
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
+});
+
+test('the downgrade marker allows one deliberate lowering', t => {
+  const box = sandbox(t);
+  writeFileSync(path.join(box.dir, 'state', 'allow-spl-downgrade'), '');
+  const result = box.run('save', '2025-12-01', '', '', '');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(box.prop('ro.build.version.security_patch'), '2025-12-01');
+  assert.match(box.calls(), /ctl\.restart/);
+});
