@@ -80,6 +80,8 @@ verified boot hash/key changes automatically recycle only Ommega's keymint
 child and wait for RPC recovery. No device reboot is required. Overlay-installing
 the module zip does not wipe these values.
 
+Keep `[trust]` on `auto` for real use and align upwards only: lowering a device's reported patch level or OS version makes the hardware KeyMint refuse to upgrade the keyblobs minted under the newer value (`INVALID_ARGUMENT`, -38), and aligning A down to an older B date also breaks Google Wallet card binding.
+
 Boot-state properties are normalized by `post-fs-data.sh` before the framework
 starts: verified boot state, boot lock and verity mode (plus the vendor-namespace
 copies some bootloaders publish), the anti-debug build properties and the
