@@ -15,6 +15,8 @@ BASE_BOOT_VENDOR_SPL=
 BASE_BOOT_IMAGE_SPL=
 BASE_VENDOR_SPL=
 BASE_OS_VERSION=
+DOWNGRADE_REFUSED=
+SAVE_IN_PROGRESS=
 
 resetprop_bin() {
   if command -v resetprop >/dev/null 2>&1; then
@@ -77,9 +79,40 @@ load_baseline() {
   BASE_OS_VERSION=$(read_key_file "$BASELINE_FILE" OS_VERSION)
 }
 
+SPL_DOWNGRADE_MARKER=$STATE_DIR/allow-spl-downgrade
+
+# Security patch levels and the OS release are one-way ratchets for the
+# hardware KeyMint: a key blob minted - or upgraded - while the device reported
+# a newer value refuses to be upgraded once the device reports an older one, so
+# every later sign and attestation for those keys fails with
+# INVALID_ARGUMENT (-38) and nothing on the module side can undo it. A stored
+# baseline is not a safe value either: it may have been recorded while an
+# override was already active.
+is_older_value() {
+  # $1 = current value, $2 = desired value; both are non-empty.
+  case "$1$2" in
+    *[!0-9]*) [ "$2" \< "$1" ] ;;
+    *) [ "$2" -lt "$1" ] ;;
+  esac
+}
+
+refuses_downgrade() {
+  # $1 = property name, $2 = desired value.
+  [ -f "$SPL_DOWNGRADE_MARKER" ] && return 1
+  current=$(getprop "$1")
+  [ -n "$current" ] && [ -n "$2" ] || return 1
+  is_older_value "$current" "$2" || return 1
+  return 0
+}
+
 write_property() {
   name=$1
   desired=$2
+  if refuses_downgrade "$name" "$desired"; then
+    echo "refused to lower $name from $(getprop "$name") to $desired: patch levels and the OS version are one-way for the hardware KeyMint, and lowering them permanently breaks existing key blobs on this device (later signs and attestations fail with INVALID_ARGUMENT/-38). Keep the newer value, or create $SPL_DOWNGRADE_MARKER to force this one change." >&2
+    DOWNGRADE_REFUSED=1
+    return 1
+  fi
   current=$(getprop "$name")
   [ "$current" = "$desired" ] && return 1
   if [ -n "$desired" ]; then
@@ -122,6 +155,7 @@ restart_keymint_stack() {
 apply_config() {
   load_config
   load_baseline || return 1
+  DOWNGRADE_REFUSED=
   RESETPROP=$(resetprop_bin) || {
     echo "resetprop is unavailable" >&2
     return 1
@@ -179,6 +213,13 @@ apply_config() {
   [ "$rc" -eq 0 ] && changed=1
 
   [ "$changed" -eq 0 ] || restart_keymint_stack
+
+  # A refusal during an interactive save must reach the WebUI; the boot-time
+  # apply only reports it on stderr so a persisted downgrade cannot fail the
+  # module startup path.
+  if [ -n "$DOWNGRADE_REFUSED" ] && [ -n "$SAVE_IN_PROGRESS" ]; then
+    return 3
+  fi
 }
 
 save_config() {
@@ -202,6 +243,7 @@ save_config() {
   } > "$tmp" || return 1
   chmod 0600 "$tmp" 2>/dev/null || true
   mv "$tmp" "$CONF_FILE" || return 1
+  SAVE_IN_PROGRESS=1
   apply_config
 }
 

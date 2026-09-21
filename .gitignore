@@ -59,3 +59,9 @@ b-side/source/diag*.py
 b-side/source/fix_pid.py
 b-side/source/restart_relay_for_logs.py
 b-side/source/watch_relay.py
+
+# ===== 本地参考资料 / 抓取日志（不入库）=====
+/OhMyKeymint/
+/检测器/
+/log/
+**/.spl-test-*/

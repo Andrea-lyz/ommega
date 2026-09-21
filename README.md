@@ -187,6 +187,12 @@ extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-52
 - 属性变化时只重载原生 KeyMint 服务和 `keystore2`，模块本身不请求硬重启。
 - 配置保存在 `/data/adb/ommega/spl.conf`；留空会选择首次记录的基线值。
   已在较高 SPL 下升级的 keyblob 可能要求保留较高值，首次基线不能直接当作恢复值。
+- 补丁级别与 OS 版本对硬件 KeyMint 是单向的：在较高值下产生或升级过的 keyblob
+  遇到更低的上报值会拒绝升级，此后这些密钥的签名与证明都以 `INVALID_ARGUMENT`（-38）
+  失败，模块侧无法回退。因此 `spl-control.sh` 默认拒绝任何低于当前生效值的写入：
+  启动时的 `apply` 只在 stderr 提示，交互式 `save` 返回非零并由 WebUI 显示原因；
+  确需降级时先创建 `/data/adb/ommega/allow-spl-downgrade`，再执行一次保存。
+- 对齐规则（实机验证）：只向**补丁日期更新的一侧**对齐——把上报值较旧的一端抬到较新的一端，任何一端都不要调低。实测把 B 端上报值降到旧基线（2025-12-01）后，一天内累积 2371 次签名失败（全部 `INVALID_ARGUMENT`/-38），恢复到较高值（2026-08-01）后立即归零；`spl-baseline.conf` 可能是在覆写生效期间记录的，不能当作“原始值”。A 端同理：为了对齐把 A 降到 B 的旧日期会让 Google Wallet 绑卡失败，A 的 `[trust]` 应保持 `auto`（上报自身值），需要两端一致时抬高较旧的一端。
 - B 端故意不提供 `post-fs-data.sh`，只以 `service.sh` 作为生命周期入口；后续
   KernelSU 加载或软重启时由 `service.sh` 重新应用 SPL，再启动 relay。
 - `service.sh` 会按精确模块路径清理旧 relay，避免旧进程继续占用 `relay.lock`。
@@ -397,6 +403,8 @@ cd StrongBoxCapabilityMask
 [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)。
 
 ## 验证范围与限制
+
+1.6.0 修复三处会直接打断应用的 A 端 KeyMint 实现问题：镜像重放期间不再把 ommega 路由调用打成 `SYSTEM_ERROR`（改为有界等待，`poisoned` 仍 fail-closed）；EC 密钥生成恢复 AOSP 语义（EC + ENCRYPT 只警告不拒绝，不再硬报 `INCOMPATIBLE_PURPOSE`）；RSA 与 ECDSA 按密钥请求的摘要选择签名方案（此前 RSA 的 PKCS#1/PSS 写死 SHA-256、ECDSA 用曲线默认摘要：前者让非 SHA-256 的 RSA 密钥签名直接失败，后者产生摘要不匹配的静默错误签名）。B 端 `spl-control.sh` 拒绝 SPL/OS 版本降级，A 端新增 `event=local_sign` 诊断日志（记录本地签名的 padding/digest）。实机验证：HDFC 的 RSA-SHA512 指纹登录、Google Pay 的 EC 密钥生成、以及锁屏令牌重放窗口内被打断的指纹流程均恢复正常；A 端 mirror 12/12、tag 12/12、crypto 7/7 单测与 B 端 13 个 spl-control 用例通过，CI 全绿。Server 相对 1.5.3 只有版本号变化；B 端模块额外包含降级防护脚本。
 
 1.4.6 把“异常 E”类检测器兼容改成按包名的显式开关：A 端 KeyMint 默认维持原厂形态（随机 64 位 key id，约一半为负），只有 `target-compat.toml` 里列出的包名在本机 Keystore 实现中新建密钥时才分配正 id；策略按 mtime 热重载，文件缺失、为空或格式非法即整条关闭且不产生额外开销。WebUI 在应用长按的“模式”对话框提供「检测器兼容」复选框，保存时原子写入该文件。兼容只影响改动后新建的密钥，已有负 id 密钥保持原样。B 端模块、Server 与两个 APK 相对 1.4.5 只有版本号变化。
 1.4.5 修两项 A 端问题：KeyMint 现在为每个进入软件 TA 的 HAL 入口补记“安全世界往返”耗时（begin/update/finish/abort/getKeyCharacteristics 9-21 ms、密钥生成 6-16 ms、控制类 1-4 ms），拦截路径下的时序不再明显快于硬件 TA（实机复验该判据不再命中，实测 T_triv 16.4-19.3 ms，硬件参考区间 11.93-25.00 ms）；远端 `debug_logging` 选项此前只被解析与保存、没有消费点，现开启后记录 `event=remote_attest_chain`（证书数、尾链字节数、每张证书的 len/签名 OID/SPKI OID）。B 端模块、Server 与两个 APK 相对 1.4.2 只有版本号变化。

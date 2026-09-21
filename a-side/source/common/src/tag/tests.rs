@@ -18,22 +18,26 @@ use kmr_wire::{keymint::KeyParam, KeySizeInBits};
 use std::vec;
 
 #[test]
-fn test_ec_generation_rejects_invalid_purposes() {
+fn test_ec_generation_tolerates_unsupported_public_key_purposes() {
+    // AOSP's reference implementation only warns about a purpose an EC key
+    // cannot use; generation still succeeds, and the purpose is carried into
+    // the key characteristics. Applications rely on that leniency - an EC key
+    // requested with a broad purpose mask would otherwise never be created -
+    // so this arm must stay a warning rather than a rejection.
     for purpose in [
         KeyPurpose::Encrypt,
         KeyPurpose::Decrypt,
         KeyPurpose::WrapKey,
     ] {
-        let error = check_ec_params(
-            EcCurve::P256,
-            &[KeyParam::Purpose(purpose)],
-            SecurityLevel::TrustedEnvironment,
-        )
-        .expect_err("invalid EC purpose must be rejected");
-        assert!(matches!(
-            error.kind(),
-            crate::ErrorKind::Hal(ErrorCode::IncompatiblePurpose, _)
-        ));
+        assert_eq!(
+            check_ec_params(
+                EcCurve::P256,
+                &[KeyParam::Purpose(purpose)],
+                SecurityLevel::TrustedEnvironment,
+            )
+            .expect("AOSP tolerates a purpose an EC key cannot use"),
+            Some(purpose)
+        );
     }
 }
 

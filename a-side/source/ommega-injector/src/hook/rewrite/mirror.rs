@@ -7,6 +7,19 @@ static MIRROR_RECOVERY_WORKER: OnceLock<Result<std::sync::mpsc::SyncSender<()>, 
 
 const MAX_PENDING_MIRROR_REPLAYS: usize = 64;
 const MIRROR_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// How long an ommega-routed call waits for in-flight mirror work before it
+/// falls back to the fail-closed refusal.
+///
+/// A mirror replay is a local RPC that normally completes within a few
+/// milliseconds, but refusing the call as soon as the worker is mid-replay
+/// turned a routine `addAuthToken` or lock-state notification into a
+/// user-visible `SYSTEM_ERROR` for whichever app happened to call keystore at
+/// that instant (fingerprint-gated decrypts were the common victim). Waiting
+/// preserves the ordering guarantee - the replay still completes before the
+/// call is served - while removing the spurious failure.
+const MIRROR_RECOVERY_WAIT_LIMIT: Duration = Duration::from_secs(2);
+/// Poll interval used while waiting for the recovery worker to drain a lane.
+const MIRROR_RECOVERY_WAIT_STEP: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MirrorStateKind {
@@ -364,21 +377,55 @@ impl Drop for MirrorUpdateReservation {
 }
 
 pub(super) fn ensure_mirror_state_recovered() -> anyhow::Result<()> {
-    let state = MIRROR_RECOVERY_STATE
-        .lock()
-        .expect("mirror recovery state poisoned");
-    if state.authorization.poisoned || state.maintenance.poisoned {
-        anyhow::bail!("ommega mirror recovery is poisoned by a non-retryable failure");
+    ensure_mirror_state_recovered_with(MIRROR_RECOVERY_WAIT_LIMIT)
+}
+
+/// Block until no mirror replay is in flight or queued, up to `wait_limit`.
+///
+/// `poisoned` lanes keep the previous fail-closed behaviour: a FailClosed event
+/// lost its System reply, so no retry can be trusted until the process
+/// restarts. `draining` and pending lanes are transient, so the caller wakes the
+/// recovery worker and waits for it instead of refusing the call outright. The
+/// previous `busy`/`pending` errors are still returned once `wait_limit`
+/// expires, so a stuck worker degrades to the old behaviour instead of blocking
+/// the caller forever.
+fn ensure_mirror_state_recovered_with(wait_limit: Duration) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let deadline = started + wait_limit;
+    let mut waited = false;
+    loop {
+        let draining = {
+            let state = MIRROR_RECOVERY_STATE
+                .lock()
+                .expect("mirror recovery state poisoned");
+            if state.authorization.poisoned || state.maintenance.poisoned {
+                anyhow::bail!("ommega mirror recovery is poisoned by a non-retryable failure");
+            }
+            if !state.authorization.draining
+                && !state.maintenance.draining
+                && state.pending_len() == 0
+            {
+                if waited {
+                    debug!(
+                        "event=mirror recovery drained after {}ms; serving the ommega call",
+                        started.elapsed().as_millis()
+                    );
+                }
+                return Ok(());
+            }
+            state.authorization.draining || state.maintenance.draining
+        };
+        let now = Instant::now();
+        if now >= deadline {
+            if draining {
+                anyhow::bail!("ommega mirror recovery is busy");
+            }
+            anyhow::bail!("ommega mirror recovery is pending");
+        }
+        waited = true;
+        wake_mirror_recovery_worker();
+        std::thread::sleep(MIRROR_RECOVERY_WAIT_STEP.min(deadline - now));
     }
-    if state.authorization.draining || state.maintenance.draining {
-        anyhow::bail!("ommega mirror recovery is busy");
-    }
-    if state.pending_len() == 0 {
-        return Ok(());
-    }
-    drop(state);
-    wake_mirror_recovery_worker();
-    anyhow::bail!("ommega mirror recovery is pending")
 }
 
 fn recover_mirror_state_with(

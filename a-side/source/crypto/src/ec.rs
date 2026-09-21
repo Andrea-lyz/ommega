@@ -18,7 +18,8 @@
 
 use der::Decode as _;
 use der::Encode as _;
-use ecdsa::signature::{SignatureEncoding as _, Signer as _};
+use ecdsa::signature::hazmat::PrehashSigner as _;
+use ecdsa::signature::SignatureEncoding as _;
 use ecdsa::SigningKey as EcdsaSigningKey;
 use kmr_common::{
     crypto,
@@ -219,6 +220,20 @@ fn nist_priv_bytes(key: &Key) -> Result<Vec<u8>, Error> {
     Ok(ec_key.private_key.to_vec())
 }
 
+/// Hash data with the requested digest.
+fn hash_digest(digest: Digest, data: &[u8]) -> Result<Vec<u8>, Error> {
+    use sha2::Digest as _;
+    let out = match digest {
+        Digest::Sha1 => sha1::Sha1::digest(data).to_vec(),
+        Digest::Sha224 => sha2::Sha224::digest(data).to_vec(),
+        Digest::Sha256 => sha2::Sha256::digest(data).to_vec(),
+        Digest::Sha384 => sha2::Sha384::digest(data).to_vec(),
+        Digest::Sha512 => sha2::Sha512::digest(data).to_vec(),
+        d => return Err(km_err!(UnsupportedDigest, "unsupported digest {:?}", d)),
+    };
+    Ok(out)
+}
+
 /// ECDH operation (peer public key arrives as DER SubjectPublicKeyInfo).
 pub struct OmmegaEcAgreeOperation {
     key: Key,
@@ -322,8 +337,13 @@ impl crypto::AccumulatingOperation for OmmegaEcDigestSignOperation {
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
-        let _ = self.digest;
-        sign_ecdsa(&self.key, self.curve, &self.pending_input)
+        // Hash with the digest the key was created for. The previous code signed
+        // the input with the curve default digest (P-256 -> SHA-256, P-384 ->
+        // SHA-384) and dropped the requested one, so any other digest produced a
+        // valid-looking signature over the wrong digest: the peer rejected it and
+        // nothing was logged on this device.
+        let hashed = hash_digest(self.digest, &self.pending_input)?;
+        sign_ecdsa_prehash(&self.key, self.curve, &hashed)
     }
 }
 
@@ -357,25 +377,31 @@ impl crypto::AccumulatingOperation for OmmegaEcUndigestSignOperation {
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
-        sign_ecdsa(&self.key, self.curve, &self.pending_input)
+        // Digest::None means the caller already hashed the input: sign it as the
+        // prehash instead of hashing it a second time.
+        sign_ecdsa_prehash(&self.key, self.curve, &self.pending_input)
     }
 }
 
-/// Sign `msg` (already hashed or raw, per caller) with ECDSA, returning a DER signature.
-fn sign_ecdsa(key: &Key, curve: ec::NistCurve, msg: &[u8]) -> Result<Vec<u8>, Error> {
+/// Sign a prehash (raw digest material) with ECDSA, returning a DER signature.
+fn sign_ecdsa_prehash(key: &Key, curve: ec::NistCurve, prehash: &[u8]) -> Result<Vec<u8>, Error> {
     let priv_bytes = nist_priv_bytes(key)?;
     let sig = match curve {
         ec::NistCurve::P224 => return Err(km_err!(UnsupportedEcCurve, "P-224 ECDSA unsupported")),
         ec::NistCurve::P256 => {
             let sk = EcdsaSigningKey::<p256::NistP256>::from_slice(&priv_bytes)
                 .map_err(|e| km_err!(UnknownError, "P-256 key: {e:?}"))?;
-            let s: SigP256 = sk.sign(msg);
+            let s: SigP256 = sk
+                .sign_prehash(prehash)
+                .map_err(|e| km_err!(UnknownError, "P-256 ECDSA sign failed: {e:?}"))?;
             s.to_der().to_vec()
         }
         ec::NistCurve::P384 => {
             let sk = EcdsaSigningKey::<p384::NistP384>::from_slice(&priv_bytes)
                 .map_err(|e| km_err!(UnknownError, "P-384 key: {e:?}"))?;
-            let s: SigP384 = sk.sign(msg);
+            let s: SigP384 = sk
+                .sign_prehash(prehash)
+                .map_err(|e| km_err!(UnknownError, "P-384 ECDSA sign failed: {e:?}"))?;
             s.to_der().to_vec()
         }
         ec::NistCurve::P521 => {
@@ -421,3 +447,6 @@ impl crypto::AccumulatingOperation for OmmegaEd25519SignOperation {
         Ok(sig.to_bytes().to_vec())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -96,6 +96,17 @@ boot and vendor SPL overrides in `/data/adb/ommega/spl.conf`. Saving invokes
 `spl-control.sh` immediately; changed properties recycle the native KeyMint
 service and `keystore2`, then wait for the default KeyMint Binder to return.
 
+Patch levels and the Android release are one-way ratchets for the hardware
+KeyMint: a key blob minted or upgraded under a newer value refuses to be
+upgraded once the device reports an older one, after which every sign and
+attestation for those keys fails with `INVALID_ARGUMENT` (-38) and nothing on
+the module side can undo it. A baseline recorded while an override was already
+active is equally unsafe to apply downwards. `spl-control.sh` therefore refuses
+any value lower than the one in effect: the boot-time `apply` only warns on
+stderr, while an interactive `save` returns non-zero so the WebUI shows the
+reason. Create `/data/adb/ommega/allow-spl-downgrade` to force one deliberate
+downgrade.
+
 The B-side module intentionally uses `service.sh` as its only lifecycle entry
 point. It does not ship `post-fs-data.sh` and never requests a hard reboot.
 `service.sh` reapplies the persisted SPL configuration before starting relay.

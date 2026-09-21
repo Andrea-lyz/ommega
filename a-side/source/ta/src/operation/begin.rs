@@ -33,7 +33,7 @@ use kmr_wire::{
     secureclock::Timestamp,
     InternalBeginResult, KeySizeInBits,
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 use std::vec::Vec;
 
 impl crate::KeyMintTa {
@@ -262,6 +262,7 @@ impl crate::KeyMintTa {
                     }
                     KeyPurpose::Sign => {
                         let mode = rsa_sign_mode(&params)?;
+                        debug!("event=local_sign algorithm=RSA mode={mode:?}");
                         CryptoOperation::RsaSign(self.imp.rsa.begin_sign(key, mode)?)
                     }
                     _ => {
@@ -283,6 +284,7 @@ impl crate::KeyMintTa {
                     KeyPurpose::AgreeKey => CryptoOperation::EcAgree(self.imp.ec.begin_agree(key)?),
                     KeyPurpose::Sign => {
                         let digest = get_digest(&params)?;
+                        debug!("event=local_sign algorithm=EC digest={digest:?}");
                         CryptoOperation::EcSign(self.imp.ec.begin_sign(key, digest)?)
                     }
                     _ => {

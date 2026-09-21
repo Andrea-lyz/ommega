@@ -102,8 +102,7 @@ impl crypto::Rsa for OmmegaRsa {
             SignMode::NoPadding | SignMode::Pkcs1_1_5Padding(Digest::None) => {
                 Ok(Box::new(OmmegaRsaUndigestSignOperation::new(key, mode)?))
             }
-            SignMode::Pkcs1_1_5Padding(digest) | SignMode::PssPadding(digest) => {
-                let _ = digest;
+            SignMode::Pkcs1_1_5Padding(_) | SignMode::PssPadding(_) => {
                 Ok(Box::new(OmmegaRsaDigestSignOperation::new(key, mode)?))
             }
         }
@@ -206,6 +205,35 @@ fn oaep_scheme_with_mgf(msg_digest: Digest, mgf_digest: Digest) -> Result<Oaep, 
     })
 }
 
+/// Select the PKCS#1 v1.5 signature scheme for the digest the key was created
+/// with. The scheme fixes both the DigestInfo prefix and the digest length the
+/// backend accepts, so a hardcoded SHA-256 scheme rejects every other digest
+/// with `InputNotHashed` ("input must be hashed") and the whole signing
+/// operation fails with UNKNOWN_ERROR (-1000).
+fn pkcs1v15_scheme(digest: Digest) -> Result<Pkcs1v15Sign, Error> {
+    Ok(match digest {
+        Digest::Sha1 => Pkcs1v15Sign::new::<Sha1>(),
+        Digest::Sha224 => Pkcs1v15Sign::new::<Sha224>(),
+        Digest::Sha256 => Pkcs1v15Sign::new::<Sha256>(),
+        Digest::Sha384 => Pkcs1v15Sign::new::<Sha384>(),
+        Digest::Sha512 => Pkcs1v15Sign::new::<Sha512>(),
+        d => return Err(km_err!(UnsupportedDigest, "unsupported digest {:?}", d)),
+    })
+}
+
+/// Select the RSA-PSS scheme (digest, MGF1 digest and salt length all follow
+/// the requested digest) for the digest the key was created with.
+fn pss_scheme(digest: Digest) -> Result<Pss, Error> {
+    Ok(match digest {
+        Digest::Sha1 => Pss::new::<Sha1>(),
+        Digest::Sha224 => Pss::new::<Sha224>(),
+        Digest::Sha256 => Pss::new::<Sha256>(),
+        Digest::Sha384 => Pss::new::<Sha384>(),
+        Digest::Sha512 => Pss::new::<Sha512>(),
+        d => return Err(km_err!(UnsupportedDigest, "unsupported digest {:?}", d)),
+    })
+}
+
 /// RSA digest signing operation (PKCS1/PSS).
 pub struct OmmegaRsaDigestSignOperation {
     key: crypto::rsa::Key,
@@ -238,7 +266,7 @@ impl crypto::AccumulatingOperation for OmmegaRsaDigestSignOperation {
         let hashed = hash_digest(digest, &self.pending_input)?;
         let sig = match self.mode {
             SignMode::Pkcs1_1_5Padding(_) => priv_key
-                .sign(Pkcs1v15Sign::new::<Sha256>(), &hashed)
+                .sign(pkcs1v15_scheme(digest)?, &hashed)
                 .map_err(|e| km_err!(UnknownError, "RSA-PKCS1 sign failed: {e:?}"))?,
             SignMode::PssPadding(_) => {
                 // RSA-PSS needs a random salt, so a rng is mandatory: the
@@ -247,7 +275,7 @@ impl crypto::AccumulatingOperation for OmmegaRsaDigestSignOperation {
                 // RSA-PSS signature operations.
                 let mut rng = OsRng;
                 priv_key
-                    .sign_with_rng(&mut rng, Pss::new::<Sha256>(), &hashed)
+                    .sign_with_rng(&mut rng, pss_scheme(digest)?, &hashed)
                     .map_err(|e| km_err!(UnknownError, "RSA-PSS sign failed: {e:?}"))?
             }
             _ => return Err(km_err!(UnsupportedPaddingMode, "unsupported sign mode")),
@@ -339,3 +367,6 @@ fn hash_digest(digest: Digest, data: &[u8]) -> Result<Vec<u8>, Error> {
     };
     try_to_vec(out.as_slice())
 }
+
+#[cfg(test)]
+mod tests;
