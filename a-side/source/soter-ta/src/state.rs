@@ -260,6 +260,48 @@ impl TaState {
         (SOTER_OK, blob::encode(&json, &signature))
     }
 
+    /// `exportAttkPublicKey`: the device key that signs every ASK blob.
+    ///
+    /// On a real device this is the factory ATTK burned into the secure world.
+    /// No live capture of this transaction exists (the A-side TA has been dead
+    /// for the whole investigation, 调查-Soter中继可行性.md 18.2), so the reply
+    /// reuses the ASK export shape: the key JSON signed by that same key.
+    pub fn export_attk(&mut self) -> (i32, Vec<u8>) {
+        let Some(device_key) = self.attk.private() else {
+            return (SOTER_ERR_NO_KEY, Vec::new());
+        };
+        let counter = self.next_counter(0);
+        let json = blob::key_json(&self.attk.public_pem, &self.cpu_id, counter, 0);
+        let Some(signature) = blob::sign(&device_key, &json) else {
+            return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
+        };
+        (SOTER_OK, blob::encode(&json, &signature))
+    }
+
+    /// `verifyAttkKeyPair`: the real TA compares the factory ATTK against a copy
+    /// in the secure world. The vendor engineering-mode key check reaches this
+    /// transaction through cryptoeng, so a present device key is valid.
+    pub fn verify_attk(&self) -> i32 {
+        if self.attk.private().is_some() {
+            SOTER_OK
+        } else {
+            SOTER_ERR_NO_KEY
+        }
+    }
+
+    /// `generateAttkKeyPair`: idempotent on purpose.
+    ///
+    /// Rotating here would invalidate every ASK blob already signed by this
+    /// device key, and the vendor UI treats an existing key as already
+    /// generated anyway. The byte argument is a magic the answer ignores.
+    pub fn generate_attk(&mut self, _magic: i8) -> i32 {
+        if self.attk.private().is_some() {
+            SOTER_OK
+        } else {
+            SOTER_ERR_NO_KEY
+        }
+    }
+
     /// `generateAuthKeyPair`: needs the uid's ASK to exist, since the ASK is
     /// what signs the AuthKey blob.
     pub fn generate_auth(&mut self, uid: u32, kname: &str) -> i32 {

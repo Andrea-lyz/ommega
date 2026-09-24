@@ -348,14 +348,16 @@ fn the_ledger_is_written_atomically_and_never_silently_replaced() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 #[test]
-fn dispatch_serves_the_java_layer_and_leaves_attk_alone() {
+fn dispatch_serves_the_java_layer_and_the_attk_trio() {
     let mut state = state();
     let token = parcel::SOTER_INTERFACE;
 
     assert!(dispatch::handles(dispatch::TX_GENERATE_ASK));
-    assert!(!dispatch::handles(dispatch::TX_VERIFY_ATTK));
-    assert!(!dispatch::handles(dispatch::TX_EXPORT_ATTK));
-    assert!(!dispatch::handles(dispatch::TX_GENERATE_ATTK));
+    // Answered since 2026-09-25: the vendor engineering-mode key check reads
+    // verifyAttkKeyPair through cryptoeng, and with a dead TA that item failed.
+    assert!(dispatch::handles(dispatch::TX_VERIFY_ATTK));
+    assert!(dispatch::handles(dispatch::TX_EXPORT_ATTK));
+    assert!(dispatch::handles(dispatch::TX_GENERATE_ATTK));
 
     let reply = call(
         &mut state,
@@ -687,15 +689,17 @@ fn ffi_serves_the_daemon_path_end_to_end() {
     assert_eq!(reloaded.has_ask(UID), SOTER_OK);
     assert_eq!(reloaded.has_auth(UID, KNAME), SOTER_OK);
 
-    // the ATTK trio and unknown codes belong to the stock HAL
+    // the ATTK trio is answered now; unknown codes still belong to the stock HAL
     let mut reply = empty_reply();
     for tx in dispatch::ATTK_TRANSACTIONS {
         assert_eq!(
             unsafe { ffi::soterta_handle(tx, UID, kname_arg.as_ptr(), ptr::null(), 0, &mut reply) },
-            ffi::SOTERTA_UNHANDLED,
+            ffi::SOTERTA_HANDLED,
             "code {tx}"
         );
     }
+    // verifyAttkKeyPair is the one the engineering-mode key check reads
+    assert_eq!(reply.code, SOTER_OK, "verifyAttkKeyPair");
     assert_eq!(
         unsafe { ffi::soterta_handle(99, UID, ptr::null(), ptr::null(), 0, &mut reply) },
         ffi::SOTERTA_UNHANDLED

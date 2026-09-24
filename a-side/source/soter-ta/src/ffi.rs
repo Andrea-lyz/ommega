@@ -200,6 +200,10 @@ fn request_for(
             challenge: challenge.unwrap_or_default(),
         }),
         dispatch::TX_FINISH_SIGN => Some(Request::Session(session as u64)),
+        // The daemon does not read the byte `generateAttkKeyPair` carries; the
+        // answer does not depend on it.
+        dispatch::TX_GENERATE_ATTK => Some(Request::Magic(0)),
+        dispatch::TX_EXPORT_ATTK | dispatch::TX_VERIFY_ATTK => Some(Request::None),
         _ => None,
     })
 }

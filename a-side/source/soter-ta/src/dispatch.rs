@@ -1,8 +1,11 @@
 //! Transaction dispatch: `(transaction code, request arguments)` to an answer.
 //!
 //! Codes come from the vendor AIDL stubs in `vendor.qti.hardware.soter-V1-ndk.so`.
-//! Everything the Java `SoterService` and its clients use is answered here; the
-//! ATTK trio and the AIDL metadata codes are left to the stock HAL.
+//! Everything the Java `SoterService` and its clients use is answered here, as is
+//! the ATTK trio (`exportAttkPublicKey`, `generateAttkKeyPair`,
+//! `verifyAttkKeyPair`): no Soter client declares those, but the vendor
+//! engineering-mode key check reaches `verifyAttkKeyPair` through cryptoeng. The
+//! AIDL metadata codes are left to the stock HAL.
 //!
 //! Two callers share the same core. The host tests and the wire captures go
 //! through [`handle`], which parses a request parcel and renders reply bytes. The
@@ -31,21 +34,24 @@ pub const TX_REMOVE_ALL_UID_KEY: u32 = 12;
 pub const TX_REMOVE_AUTH: u32 = 13;
 pub const TX_VERIFY_ATTK: u32 = 14;
 
-/// The ATTK transactions, which no Soter client on this ROM calls.
+/// The ATTK transactions: no Soter client on this ROM calls them, but the vendor
+/// engineering-mode key check reaches `verifyAttkKeyPair` through cryptoeng.
 pub const ATTK_TRANSACTIONS: [u32; 3] = [TX_EXPORT_ATTK, TX_GENERATE_ATTK, TX_VERIFY_ATTK];
 
 /// Transactions this TA answers.
 ///
-/// `tx2 exportAttkPublicKey`, `tx6 generateAttkKeyPair` and `tx14 verifyAttkKeyPair`
-/// are deliberately absent: the APK's Java stubs do not even declare them, so no
-/// Soter client reaches them, and the stock HAL keeps answering them.
+/// The APK's Java stubs do not declare the ATTK trio, so no Soter client on this
+/// ROM reaches them; the vendor engineering-mode key check does, through
+/// cryptoeng, and with the stock TA dead it reads a failed key there.
 pub fn handles(tx: u32) -> bool {
     matches!(
         tx,
         TX_EXPORT_ASK
+            | TX_EXPORT_ATTK
             | TX_EXPORT_AUTH
             | TX_FINISH_SIGN
             | TX_GENERATE_ASK
+            | TX_GENERATE_ATTK
             | TX_GENERATE_AUTH
             | TX_GET_DEVICE_ID
             | TX_HAS_ASK
@@ -53,6 +59,7 @@ pub fn handles(tx: u32) -> bool {
             | TX_INIT_SIGN
             | TX_REMOVE_ALL_UID_KEY
             | TX_REMOVE_AUTH
+            | TX_VERIFY_ATTK
     )
 }
 
@@ -73,6 +80,8 @@ pub enum Request {
     },
     /// `int64 session`.
     Session(u64),
+    /// One byte, the magic `generateAttkKeyPair` passes.
+    Magic(i8),
 }
 
 /// What one handled transaction answers.
@@ -147,6 +156,8 @@ fn parse_request(tx: u32, args: &mut Args) -> Option<Request> {
             challenge: args.read_string16()?,
         },
         TX_FINISH_SIGN => Request::Session(args.read_i64()? as u64),
+        TX_GENERATE_ATTK => Request::Magic(args.read_byte()?),
+        TX_EXPORT_ATTK | TX_VERIFY_ATTK => Request::None,
         _ => return None,
     })
 }
@@ -210,6 +221,16 @@ pub fn handle_request(state: &mut TaState, tx: u32, request: Request) -> Option<
                 data,
             }
         }
+        (TX_EXPORT_ATTK, Request::None) => {
+            let (code, data) = state.export_attk();
+            Outcome::Buffer {
+                field: data.len() as i32,
+                code,
+                data,
+            }
+        }
+        (TX_GENERATE_ATTK, Request::Magic(magic)) => Outcome::Code(state.generate_attk(magic)),
+        (TX_VERIFY_ATTK, Request::None) => Outcome::Code(state.verify_attk()),
         _ => return None,
     })
 }

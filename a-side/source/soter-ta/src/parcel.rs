@@ -59,8 +59,7 @@ impl<'a> Args<'a> {
         Some(i64::from_le_bytes(bytes.try_into().ok()?))
     }
 
-    /// One byte. Only `generateAttkKeyPair` uses it, and that transaction is
-    /// passed through to the stock HAL.
+    /// One byte, the magic `generateAttkKeyPair` passes.
     pub fn read_byte(&mut self) -> Option<i8> {
         let byte = *self.buf.get(self.pos)?;
         self.pos += 1;
