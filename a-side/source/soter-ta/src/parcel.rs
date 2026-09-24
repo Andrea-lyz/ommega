@@ -88,10 +88,14 @@ impl<'a> Args<'a> {
         let len = len as usize;
         let end = self.pos.checked_add(len.checked_mul(2)?)?;
         let raw = self.buf.get(self.pos..end)?;
-        let units: Vec<u16> = raw
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
+        // An explicit index loop instead of `chunks_exact(2)`: that helper is a
+        // clippy lint target (`chunks_exact_to_as_chunks`) on the pinned nightly,
+        // and the wire length is exactly `len` code units here.
+        let mut units = Vec::with_capacity(len);
+        for index in 0..len {
+            let pair = raw.get(index * 2..index * 2 + 2)?;
+            units.push(u16::from_le_bytes([pair[0], pair[1]]));
+        }
         self.pos += align4(len * 2 + 2);
         String::from_utf16(&units).ok()
     }
