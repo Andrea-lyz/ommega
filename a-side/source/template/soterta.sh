@@ -64,17 +64,61 @@ debug() {
 
 # Only one converge may run at a time: the WebUI switch, a shell `enable` and the
 # watchdog all converge, and two of them at once would stop each other's daemon.
-# The holder writes its pid so a killed converge cannot wedge the lock.
+#
+# The holder records the pid along with the data that makes that pid mean
+# something: pids are reused after a reboot, so "the pid is alive" alone cannot
+# tell a live converge from an unrelated process that inherited the number. A
+# lock left behind by a killed converge (or by a reboot in the middle of a pass)
+# is broken instead of wedging every later pass -- the 2026-09-25 outage where
+# the software TA was not taken over after a reboot was exactly that: the stale
+# pid belonged to a media codec process.
+LOCK_MAX_AGE=600
+
+# Start time is field 22 of /proc/<pid>/stat. The comm field may contain spaces
+# and parentheses, so everything up to the last ')' is dropped first.
+proc_starttime() {
+  sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+}
+
+lock_is_stale() {
+  local hpid hboot hstart cur now mtime
+  hpid=$(cat "$LOCK/pid" 2>/dev/null)
+  hboot=$(cat "$LOCK/boot-id" 2>/dev/null)
+  hstart=$(cat "$LOCK/starttime" 2>/dev/null)
+  # A lock written before this metadata existed carries only the pid.
+  [ -n "$hpid" ] && [ -n "$hboot" ] && [ -n "$hstart" ] || return 0
+  # A lock from an earlier boot can never belong to a live converge.
+  [ "$hboot" = "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ] || return 0
+  kill -0 "$hpid" 2>/dev/null || return 0
+  # A zombie still answers kill -0, but its converge is gone.
+  case "$(sed 's/.*) //' "/proc/$hpid/stat" 2>/dev/null | awk '{print $1}')" in
+    Z | "") return 0 ;;
+  esac
+  # Same pid, different process: the number was reused.
+  cur=$(proc_starttime "$hpid")
+  [ -n "$cur" ] && [ "$cur" = "$hstart" ] || return 0
+  # Last resort: a pass that holds the lock for ten minutes is not a pass.
+  now=$(date +%s 2>/dev/null)
+  mtime=$(stat -c %Y "$LOCK" 2>/dev/null)
+  if [ -n "$now" ] && [ -n "$mtime" ] && [ $((now - mtime)) -gt "$LOCK_MAX_AGE" ]; then
+    return 0
+  fi
+  return 1
+}
+
 acquire_lock() {
-  i=0
+  local i=0 owner
   while :; do
     if mkdir "$LOCK" 2>/dev/null; then
       echo $$ > "$LOCK/pid"
+      cat /proc/sys/kernel/random/boot_id > "$LOCK/boot-id" 2>/dev/null
+      proc_starttime $$ > "$LOCK/starttime" 2>/dev/null
       return 0
     fi
-    owner=$(cat "$LOCK/pid" 2>/dev/null)
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$LOCK"
+    if lock_is_stale; then
+      owner=$(cat "$LOCK/pid" 2>/dev/null)
+      log "breaking stale lock (holder pid ${owner:-unknown})"
+      mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null || rm -rf "$LOCK"
       continue
     fi
     i=$((i + 1))
