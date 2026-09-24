@@ -120,9 +120,12 @@ static const char *mode_name(enum mode mode) {
 /* Platform symbols the NDK does not declare in its headers. */
 typedef binder_status_t (*add_service_fn)(AIBinder *, const char *);
 typedef void (*start_thread_pool_fn)(void);
+/* The VINTF-stable HAL binder can be called from both system and vendor. */
+typedef void (*mark_vintf_stability_fn)(AIBinder *);
 
 static add_service_fn g_add_service;
 static start_thread_pool_fn g_start_thread_pool;
+static mark_vintf_stability_fn g_mark_vintf_stability;
 
 struct request {
     uint32_t uid;
@@ -433,8 +436,14 @@ int main(int argc, char **argv) {
     g_add_service = (add_service_fn)dlsym(library, "AServiceManager_addService");
     g_start_thread_pool =
         (start_thread_pool_fn)dlsym(library, "ABinderProcess_startThreadPool");
+    g_mark_vintf_stability =
+        (mark_vintf_stability_fn)dlsym(library, "AIBinder_markVintfStability");
     if (g_add_service == NULL || g_start_thread_pool == NULL) {
         LOGE("libbinder_ndk.so is missing a platform symbol");
+        return 5;
+    }
+    if (g_mark_vintf_stability == NULL) {
+        LOGE("libbinder_ndk.so is missing AIBinder_markVintfStability");
         return 5;
     }
 
@@ -459,7 +468,17 @@ int main(int argc, char **argv) {
         LOGE("AIBinder_Class_define(%s) failed", SOTER_DESCRIPTOR);
         return 2;
     }
-    binder_status_t status = g_add_service(AIBinder_new(clazz, NULL), service_name);
+    AIBinder *binder = AIBinder_new(clazz, NULL);
+    if (binder == NULL) {
+        LOGE("AIBinder_new(%s) failed", SOTER_DESCRIPTOR);
+        return 2;
+    }
+    /* A vendor-only binder lets cryptoeng through but breaks SoterService on
+     * the system side; system-only has the opposite failure. The stock AIDL
+     * HAL is declared in VINTF, so mark the replacement accordingly. */
+    g_mark_vintf_stability(binder);
+    LOGI("service marked as VINTF stability");
+    binder_status_t status = g_add_service(binder, service_name);
     LOGI("addService(%s) status=%d", service_name, (int)status);
     if (status != STATUS_OK) {
         LOGE("is the stock HAL still running? stop vendor.soter first "
