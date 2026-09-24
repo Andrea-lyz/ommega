@@ -17,12 +17,14 @@
 pub mod blob;
 pub mod dispatch;
 pub mod error;
+pub mod ffi;
 pub mod parcel;
 pub mod state;
 
-pub use error::{SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_KEY, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK};
+pub use error::{
+    SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_KEY, SOTER_ERR_NO_SESSION, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK,
+};
 pub use state::TaState;
 
 #[cfg(test)]
 mod tests;
-

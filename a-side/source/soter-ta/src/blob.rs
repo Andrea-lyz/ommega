@@ -101,15 +101,23 @@ pub fn parse(blob: &[u8]) -> Option<(&[u8], &[u8])> {
 pub fn sign(key: &RsaPrivateKey, data: &[u8]) -> Option<Vec<u8>> {
     let digest = Sha256::digest(data);
     let mut rng = rand_core::OsRng;
-    key.sign_with_rng(&mut rng, Pss::new_with_salt::<Sha256>(PSS_SALT_LEN), &digest)
-        .ok()
+    key.sign_with_rng(
+        &mut rng,
+        Pss::new_with_salt::<Sha256>(PSS_SALT_LEN),
+        &digest,
+    )
+    .ok()
 }
 
 /// Verify a blob tail produced by [`sign`].
 pub fn verify(key: &RsaPublicKey, data: &[u8], signature: &[u8]) -> bool {
     let digest = Sha256::digest(data);
-    key.verify(Pss::new_with_salt::<Sha256>(PSS_SALT_LEN), &digest, signature)
-        .is_ok()
+    key.verify(
+        Pss::new_with_salt::<Sha256>(PSS_SALT_LEN),
+        &digest,
+        signature,
+    )
+    .is_ok()
 }
 
 /// SPKI/PEM encoding of a public key, the spelling the blobs use.
@@ -121,4 +129,3 @@ pub fn public_key_pem(key: &RsaPublicKey) -> Option<String> {
 pub fn public_key_from_pem(pem: &str) -> Option<RsaPublicKey> {
     RsaPublicKey::from_public_key_pem(pem).ok()
 }
-

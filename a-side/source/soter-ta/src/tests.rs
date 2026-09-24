@@ -38,12 +38,13 @@ impl RequestBuilder {
 
     fn string16(mut self, value: &str) -> Self {
         let units: Vec<u16> = value.encode_utf16().collect();
-        self.buf.extend_from_slice(&(units.len() as i32).to_le_bytes());
+        self.buf
+            .extend_from_slice(&(units.len() as i32).to_le_bytes());
         for unit in &units {
             self.buf.extend_from_slice(&unit.to_le_bytes());
         }
         self.buf.extend_from_slice(&0u16.to_le_bytes());
-        while self.buf.len() % 4 != 0 {
+        while !self.buf.len().is_multiple_of(4) {
             self.buf.push(0);
         }
         self
@@ -77,7 +78,11 @@ fn parse_buffer_return(reply: &[u8]) -> Vec<u8> {
     assert_eq!(args.read_i32(), Some(1), "out parameter is present");
     let size = args.read_i32().expect("size");
     let buffer = args.read_byte_array().expect("buffer");
-    assert_eq!(args.read_i32(), Some(0), "buffer field");
+    assert_eq!(
+        args.read_i32(),
+        Some(buffer.len() as i32),
+        "buffer field carries the export length"
+    );
     assert_eq!(size as usize, 4 + 4 + ((buffer.len() + 3) & !3) + 4);
     buffer
 }
@@ -143,7 +148,10 @@ fn ask_blob_signature_verifies_under_the_device_key() {
     assert!(blob::verify(&device_key, json, signature));
 
     let text = String::from_utf8(json.to_vec()).expect("utf8 json");
-    let position = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} in {text}"));
+    let position = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle} in {text}"))
+    };
     assert!(position("\"pub_key\"") < position("\"cpu_id\""));
     assert!(position("\"cpu_id\"") < position("\"counter\""));
     assert!(position("\"counter\"") < position("\"uid\""));
@@ -159,10 +167,9 @@ fn auth_blob_and_sign_result_verify_along_the_chain() {
     let (code, auth_blob) = state.export_auth(UID, KNAME);
     assert_eq!(code, SOTER_OK);
     let (auth_json, auth_signature) = blob::parse(&auth_blob).expect("auth blob");
-    let ask_public = blob::public_key_from_pem(
-        &state.uids[&UID].ask.as_ref().expect("ask").public_pem,
-    )
-    .expect("ask public key");
+    let ask_public =
+        blob::public_key_from_pem(&state.uids[&UID].ask.as_ref().expect("ask").public_pem)
+            .expect("ask public key");
     assert!(blob::verify(&ask_public, auth_json, auth_signature));
 
     let (code, session) = state.init_sign(UID, KNAME, "challenge-1");
@@ -205,7 +212,11 @@ fn ledger_tracks_presence_and_removal() {
     let mut state = state();
     assert_eq!(state.has_ask(UID), SOTER_ERR_NO_KEY);
     assert_eq!(state.export_ask(UID).0, SOTER_ERR_NO_KEY);
-    assert_eq!(state.generate_auth(UID, KNAME), SOTER_ERR_NO_KEY, "no ASK yet");
+    assert_eq!(
+        state.generate_auth(UID, KNAME),
+        SOTER_ERR_NO_KEY,
+        "no ASK yet"
+    );
 
     assert_eq!(state.generate_ask(UID), SOTER_OK);
     assert_eq!(state.has_ask(UID), SOTER_OK);
@@ -231,7 +242,11 @@ fn sign_sessions_are_single_use() {
     let (code, session) = state.init_sign(UID, KNAME, "challenge");
     assert_eq!(code, SOTER_OK);
     assert_eq!(state.finish_sign(session).0, SOTER_OK);
-    assert_ne!(state.finish_sign(session).0, SOTER_OK, "session is consumed");
+    assert_ne!(
+        state.finish_sign(session).0,
+        SOTER_OK,
+        "session is consumed"
+    );
     assert_ne!(state.finish_sign(4242).0, SOTER_OK, "unknown session");
     assert_ne!(state.init_sign(UID, "missing", "challenge").0, SOTER_OK);
 
@@ -246,14 +261,15 @@ fn device_id_matches_the_cpu_id_inside_the_blobs() {
     let mut state = state();
     let (code, id) = state.device_id();
     assert_eq!(code, SOTER_OK);
-    let id = String::from_utf8(id).expect("ascii device id");
-    assert_eq!(id, state.cpu_id);
-    assert_eq!(id.len(), 32);
-    assert!(id.starts_with("00000000"));
+    // Raw bytes, not the hex spelling: that is what a device with a working TA
+    // answers, and their hex is the `cpu_id` inside every blob.
+    assert_eq!(id.len(), 16, "16 raw bytes");
+    assert_eq!(hex::encode(&id), state.cpu_id);
+    assert!(state.cpu_id.starts_with("00000000"));
 
     assert_eq!(state.generate_ask(UID), SOTER_OK);
     let (_, ask_blob) = state.export_ask(UID);
-    assert_eq!(json_field(&ask_blob, "cpu_id"), id);
+    assert_eq!(json_field(&ask_blob, "cpu_id"), hex::encode(&id));
 }
 
 #[test]
@@ -270,10 +286,67 @@ fn state_json_round_trip_preserves_the_ledger() {
     assert_eq!(restored.has_auth(UID, KNAME), SOTER_OK);
     let (code, after) = restored.export_auth(UID, KNAME);
     assert_eq!(code, SOTER_OK);
-    assert_eq!(json_field(&before, "pub_key"), json_field(&after, "pub_key"));
+    assert_eq!(
+        json_field(&before, "pub_key"),
+        json_field(&after, "pub_key")
+    );
     assert!(counter_of(&after) > counter_of(&before));
 }
 
+/// The ledger has to survive a truncated file, and an unreadable one must never
+/// be replaced by a fresh identity behind the operator's back: clients (and the
+/// relay-era registration) remember the old device id.
+#[test]
+fn the_ledger_is_written_atomically_and_never_silently_replaced() {
+    let dir = std::env::temp_dir().join(format!("soterta-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("state.json");
+    let backup = path.with_file_name("state.json.bak");
+
+    // No identity yet: the caller may mint one.
+    assert!(TaState::load_or_error(&path)
+        .expect("a missing file is not an error")
+        .is_none());
+
+    let mut state = state();
+    assert_eq!(state.generate_ask(UID), SOTER_OK);
+    state.store(&path).expect("first revision");
+    let kept_id = state.cpu_id.clone();
+    assert!(!backup.exists(), "nothing to keep yet");
+
+    // A second revision keeps the previous one beside the ledger.
+    assert_eq!(state.generate_auth(UID, KNAME), SOTER_OK);
+    state.store(&path).expect("second revision");
+    assert!(backup.exists(), "the previous revision is kept");
+    let older = TaState::load(&backup).expect("the backup parses");
+    assert_eq!(older.cpu_id, kept_id);
+    assert_eq!(older.has_ask(UID), SOTER_OK);
+    assert_ne!(older.has_auth(UID, KNAME), SOTER_OK, "the backup is older");
+
+    // A truncated ledger falls back to the kept revision, same identity.
+    std::fs::write(&path, b"{\"cpu_id\": \"0000").expect("truncate");
+    let recovered = TaState::load_or_error(&path)
+        .expect("the backup recovers")
+        .expect("state");
+    assert_eq!(recovered.cpu_id, kept_id, "the identity is preserved");
+    assert_eq!(recovered.has_ask(UID), SOTER_OK);
+    assert_eq!(
+        TaState::load(&path)
+            .expect("the main file is restored")
+            .cpu_id,
+        kept_id
+    );
+
+    // With both files broken it is an error, not a new identity.
+    std::fs::write(&path, b"not json").expect("break the main file");
+    std::fs::write(&backup, b"not json either").expect("break the backup");
+    assert!(
+        TaState::load_or_error(&path).is_err(),
+        "unreadable must not become a new identity"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
 #[test]
 fn dispatch_serves_the_java_layer_and_leaves_attk_alone() {
     let mut state = state();
@@ -353,7 +426,8 @@ fn dispatch_serves_the_java_layer_and_leaves_attk_alone() {
         &RequestBuilder::new(token).build(),
     );
     let id = parse_buffer_return(&reply);
-    assert_eq!(String::from_utf8(id).expect("ascii"), state.cpu_id);
+    assert_eq!(id.len(), 16, "the device id is raw bytes");
+    assert_eq!(hex::encode(&id), state.cpu_id);
 
     let reply = call(
         &mut state,
@@ -369,7 +443,332 @@ fn dispatch_serves_the_java_layer_and_leaves_attk_alone() {
     assert_eq!(word(&reply, 1), SOTER_ERR_NO_KEY);
 
     // a truncated request must not be passed through in silence
-    let reply = call(&mut state, dispatch::TX_HAS_ASK, &RequestBuilder::new(token).build());
+    let reply = call(
+        &mut state,
+        dispatch::TX_HAS_ASK,
+        &RequestBuilder::new(token).build(),
+    );
     assert_ne!(word(&reply, 0), 0, "exception status");
 }
 
+/// Every reply the live HAL of the OnePlus 13 produced while its TA was dead,
+/// captured on 2026-09-24 with `service call vendor.qti.hardware.soter.ISoter/default`,
+/// once per transaction code. `soterta-svc --mode=dead` answers exactly this,
+/// so a client cannot tell the daemon apart from the stock HAL it replaces.
+#[test]
+fn dead_replies_match_captured_hal_failures() {
+    let cases: [(u32, &str); 14] = [
+        (
+            dispatch::TX_EXPORT_ASK,
+            "00000000fbffffff010000000c0000000000000000000000",
+        ),
+        (
+            dispatch::TX_EXPORT_ATTK,
+            "00000000ecffffff010000000c0000000000000000000000",
+        ),
+        (
+            dispatch::TX_EXPORT_AUTH,
+            "00000000fbffffff010000000c0000000000000000000000",
+        ),
+        (
+            dispatch::TX_FINISH_SIGN,
+            "0000000018fcffff010000000c0000000000000000000000",
+        ),
+        (dispatch::TX_GENERATE_ASK, "00000000ecffffff"),
+        (dispatch::TX_GENERATE_ATTK, "00000000ecffffff"),
+        (dispatch::TX_GENERATE_AUTH, "00000000fbffffff"),
+        (
+            dispatch::TX_GET_DEVICE_ID,
+            "00000000ecffffff010000000c0000000000000000000000",
+        ),
+        (dispatch::TX_HAS_ASK, "00000000fbffffff"),
+        (dispatch::TX_HAS_AUTH, "00000000fbffffff"),
+        (
+            dispatch::TX_INIT_SIGN,
+            "000000000100000010000000fbffffff0000000000000000",
+        ),
+        (dispatch::TX_REMOVE_ALL_UID_KEY, "00000000fbffffff"),
+        (dispatch::TX_REMOVE_AUTH, "00000000fbffffff"),
+        (dispatch::TX_VERIFY_ATTK, "00000000ecffffff"),
+    ];
+    for (tx, expected) in cases {
+        let outcome = dispatch::dead_reply(tx).unwrap_or_else(|| panic!("code {tx} has a reply"));
+        assert_eq!(hex::encode(outcome.to_reply_bytes()), expected, "code {tx}");
+    }
+
+    // the AIDL metadata codes and anything unknown are not TA traffic
+    assert!(dispatch::dead_reply(0x00ff_ffff).is_none());
+    assert!(dispatch::dead_reply(99).is_none());
+}
+
+/// The path `soterta-svc` uses: arguments in, structured answer out, ledger on
+/// disk. Everything the daemon needs must work without a parcel.
+#[test]
+fn ffi_serves_the_daemon_path_end_to_end() {
+    use crate::ffi::{self, SotertaReply};
+    use std::ffi::{c_char, CStr, CString};
+    use std::ptr;
+    use std::slice;
+
+    fn empty_reply() -> SotertaReply {
+        SotertaReply {
+            kind: -1,
+            code: 0,
+            field: 0,
+            session: 0,
+            buffer: ptr::null_mut(),
+            buffer_len: 0,
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("soterta-ffi-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("state.json");
+    let path_arg = CString::new(path.to_str().expect("utf-8 temp path")).expect("no NUL");
+    let kname_arg = CString::new(KNAME).expect("no NUL");
+    let challenge_arg = CString::new("challenge-ffi").expect("no NUL");
+
+    assert_eq!(
+        unsafe { ffi::soterta_init(path_arg.as_ptr()) },
+        1,
+        "fresh state is generated"
+    );
+    assert_eq!(
+        unsafe { ffi::soterta_init(path_arg.as_ptr()) },
+        0,
+        "an existing state is loaded"
+    );
+    assert!(path.exists(), "the state file is persisted");
+
+    let mut reply = empty_reply();
+    assert_eq!(
+        unsafe {
+            ffi::soterta_handle(
+                dispatch::TX_GET_DEVICE_ID,
+                0,
+                ptr::null(),
+                ptr::null(),
+                0,
+                &mut reply,
+            )
+        },
+        ffi::SOTERTA_HANDLED
+    );
+    assert_eq!(reply.kind, ffi::SOTERTA_KIND_BUFFER);
+    assert_eq!(reply.code, SOTER_OK);
+    let id = unsafe { slice::from_raw_parts(reply.buffer, reply.buffer_len) }.to_vec();
+    assert_eq!(id.len(), 16, "the device id is raw bytes");
+    assert_eq!(
+        reply.field, 16,
+        "the buffer field carries the export length"
+    );
+    unsafe { ffi::soterta_free(&mut reply) };
+    assert!(reply.buffer.is_null(), "the reply buffer is released");
+
+    let mut reply = empty_reply();
+    assert_eq!(
+        unsafe {
+            ffi::soterta_handle(
+                dispatch::TX_HAS_ASK,
+                UID,
+                ptr::null(),
+                ptr::null(),
+                0,
+                &mut reply,
+            )
+        },
+        ffi::SOTERTA_HANDLED
+    );
+    assert_eq!(reply.kind, ffi::SOTERTA_KIND_CODE);
+    assert_eq!(reply.code, SOTER_ERR_NO_KEY, "no ASK yet");
+    unsafe { ffi::soterta_free(&mut reply) };
+
+    let mut reply = empty_reply();
+    assert_eq!(
+        unsafe {
+            ffi::soterta_handle(
+                dispatch::TX_GENERATE_ASK,
+                UID,
+                ptr::null(),
+                ptr::null(),
+                0,
+                &mut reply,
+            )
+        },
+        ffi::SOTERTA_HANDLED
+    );
+    assert_eq!(reply.code, SOTER_OK);
+    unsafe { ffi::soterta_free(&mut reply) };
+
+    let mut reply = empty_reply();
+    assert_eq!(
+        unsafe {
+            ffi::soterta_handle(
+                dispatch::TX_EXPORT_ASK,
+                UID,
+                ptr::null(),
+                ptr::null(),
+                0,
+                &mut reply,
+            )
+        },
+        ffi::SOTERTA_HANDLED
+    );
+    let ask_blob = unsafe { slice::from_raw_parts(reply.buffer, reply.buffer_len) }.to_vec();
+    unsafe { ffi::soterta_free(&mut reply) };
+    let device_pem = TaState::load(&path)
+        .expect("the ledger reloads from disk")
+        .attk
+        .public_pem;
+    let (json, signature) = blob::parse(&ask_blob).expect("blob structure");
+    let device_key = blob::public_key_from_pem(&device_pem).expect("device key");
+    assert!(blob::verify(&device_key, json, signature));
+
+    let mut reply = empty_reply();
+    assert_eq!(
+        unsafe {
+            ffi::soterta_handle(
+                dispatch::TX_GENERATE_AUTH,
+                UID,
+                kname_arg.as_ptr(),
+                ptr::null(),
+                0,
+                &mut reply,
+            )
+        },
+        ffi::SOTERTA_HANDLED
+    );
+    assert_eq!(reply.code, SOTER_OK);
+    unsafe { ffi::soterta_free(&mut reply) };
+
+    let mut reply = empty_reply();
+    assert_eq!(
+        unsafe {
+            ffi::soterta_handle(
+                dispatch::TX_INIT_SIGN,
+                UID,
+                kname_arg.as_ptr(),
+                challenge_arg.as_ptr(),
+                0,
+                &mut reply,
+            )
+        },
+        ffi::SOTERTA_HANDLED
+    );
+    assert_eq!(reply.kind, ffi::SOTERTA_KIND_INIT);
+    assert_eq!(reply.code, SOTER_OK);
+    let session = reply.session;
+    assert!(session > 0, "initSign opens a session");
+    unsafe { ffi::soterta_free(&mut reply) };
+
+    let mut reply = empty_reply();
+    assert_eq!(
+        unsafe {
+            ffi::soterta_handle(
+                dispatch::TX_FINISH_SIGN,
+                0,
+                ptr::null(),
+                ptr::null(),
+                session,
+                &mut reply,
+            )
+        },
+        ffi::SOTERTA_HANDLED
+    );
+    let result_blob = unsafe { slice::from_raw_parts(reply.buffer, reply.buffer_len) }.to_vec();
+    unsafe { ffi::soterta_free(&mut reply) };
+    let (json, signature) = blob::parse(&result_blob).expect("result blob");
+    let persisted = TaState::load(&path).expect("the ledger reloads after the AuthKey");
+    let auth_key =
+        blob::public_key_from_pem(&persisted.uids[&UID].auth[KNAME].public_pem).expect("auth key");
+    assert!(blob::verify(&auth_key, json, signature));
+
+    let reloaded = TaState::load(&path).expect("the ledger reloads after signing");
+    assert_eq!(reloaded.has_ask(UID), SOTER_OK);
+    assert_eq!(reloaded.has_auth(UID, KNAME), SOTER_OK);
+
+    // the ATTK trio and unknown codes belong to the stock HAL
+    let mut reply = empty_reply();
+    for tx in dispatch::ATTK_TRANSACTIONS {
+        assert_eq!(
+            unsafe { ffi::soterta_handle(tx, UID, kname_arg.as_ptr(), ptr::null(), 0, &mut reply) },
+            ffi::SOTERTA_UNHANDLED,
+            "code {tx}"
+        );
+    }
+    assert_eq!(
+        unsafe { ffi::soterta_handle(99, UID, ptr::null(), ptr::null(), 0, &mut reply) },
+        ffi::SOTERTA_UNHANDLED
+    );
+
+    // a request that is missing an argument is an error, not an answer
+    assert_eq!(
+        unsafe {
+            ffi::soterta_handle(
+                dispatch::TX_GENERATE_AUTH,
+                UID,
+                ptr::null(),
+                ptr::null(),
+                0,
+                &mut reply,
+            )
+        },
+        ffi::SOTERTA_ERROR
+    );
+    let mut message = [0 as c_char; 128];
+    let len = unsafe { ffi::soterta_last_error(message.as_mut_ptr(), message.len() as i32) };
+    assert!(len > 0, "the error is recorded");
+    let text = unsafe { CStr::from_ptr(message.as_ptr()) }
+        .to_string_lossy()
+        .to_string();
+    assert!(text.contains("key name"), "{text}");
+
+    assert_eq!(ffi::soterta_save(), ffi::SOTERTA_HANDLED);
+
+    // An identity file that exists but cannot be read is not a fresh device: the
+    // previous revision is restored when possible, and a real failure refuses to
+    // start instead of minting keys behind the operator's back.
+    let broken_dir = std::env::temp_dir().join(format!("soterta-broken-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&broken_dir);
+    std::fs::create_dir_all(&broken_dir).expect("temp dir");
+    let broken_path = broken_dir.join("state.json");
+    let broken_arg = CString::new(broken_path.to_str().expect("utf-8 path")).expect("no NUL");
+    let mut seeded = TaState::generate_local().expect("state");
+    assert_eq!(seeded.generate_ask(UID), SOTER_OK);
+    seeded.store(&broken_path).expect("seed");
+    assert_eq!(seeded.generate_auth(UID, KNAME), SOTER_OK);
+    seeded.store(&broken_path).expect("second revision");
+    let kept_id = seeded.cpu_id.clone();
+
+    std::fs::write(&broken_path, b"{\"cpu_id\": \"trunc").expect("truncate");
+    assert_eq!(
+        unsafe { ffi::soterta_init(broken_arg.as_ptr()) },
+        0,
+        "the backup recovers"
+    );
+    let restored = TaState::load(&broken_path).expect("the main file is restored");
+    assert_eq!(restored.cpu_id, kept_id, "the identity is preserved");
+
+    std::fs::write(&broken_path, b"not json").expect("break the main file");
+    std::fs::write(
+        broken_path.with_file_name("state.json.bak"),
+        b"not json either",
+    )
+    .expect("break the backup");
+    assert!(
+        unsafe { ffi::soterta_init(broken_arg.as_ptr()) } < 0,
+        "an unreadable ledger must not become a new identity"
+    );
+    let mut broken_message = [0 as c_char; 160];
+    let broken_len = unsafe {
+        ffi::soterta_last_error(broken_message.as_mut_ptr(), broken_message.len() as i32)
+    };
+    assert!(broken_len > 0);
+    let broken_text = unsafe { CStr::from_ptr(broken_message.as_ptr()) }
+        .to_string_lossy()
+        .to_string();
+    assert!(broken_text.contains("unreadable"), "{broken_text}");
+    let _ = std::fs::remove_dir_all(&broken_dir);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

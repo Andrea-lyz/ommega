@@ -142,7 +142,7 @@ impl Reply {
     pub fn byte_array(&mut self, value: &[u8]) {
         self.i32(value.len() as i32);
         self.bytes.extend_from_slice(value);
-        while self.bytes.len() % 4 != 0 {
+        while !self.bytes.len().is_multiple_of(4) {
             self.bytes.push(0);
         }
     }
@@ -154,7 +154,7 @@ impl Reply {
             self.bytes.extend_from_slice(&unit.to_le_bytes());
         }
         self.bytes.extend_from_slice(&0u16.to_le_bytes());
-        while self.bytes.len() % 4 != 0 {
+        while !self.bytes.len().is_multiple_of(4) {
             self.bytes.push(0);
         }
     }
@@ -190,4 +190,3 @@ impl Reply {
         self.bytes
     }
 }
-

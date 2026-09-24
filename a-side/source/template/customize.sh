@@ -101,9 +101,10 @@ extract "$ZIPFILE" 'injector.toml'   "$MODPATH"
 extract "$ZIPFILE" 'keybox.xml'      "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'    "$MODPATH"
 extract "$ZIPFILE" 'webui-trust.sh'  "$MODPATH"
+extract "$ZIPFILE" 'soterta.sh'      "$MODPATH"
 chmod 755 "$MODPATH/daemon" "$MODPATH/daemon-injector" \
   "$MODPATH/post-fs-data.sh" "$MODPATH/service.sh" "$MODPATH/uninstall.sh" \
-  "$MODPATH/webui-trust.sh"
+  "$MODPATH/webui-trust.sh" "$MODPATH/soterta.sh"
 
 
 if [ "$ARCH" = "x64" ] || [ "$ARCH" = "x86_64" ]; then
@@ -111,18 +112,21 @@ if [ "$ARCH" = "x64" ] || [ "$ARCH" = "x86_64" ]; then
   BINDIR="$MODPATH/libs/x86_64"
   extract "$ZIPFILE" 'libs/x86_64/keymint' "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/ommega-inject'  "$MODPATH"
+  extract "$ZIPFILE" 'libs/x86_64/soterta-svc'   "$MODPATH"
 elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "arm64-v8a" ]; then
   ui_print "- Using packaged arm64 binaries"
   BINDIR="$MODPATH/libs/arm64-v8a"
   extract "$ZIPFILE" 'libs/arm64-v8a/keymint' "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/ommega-inject'  "$MODPATH"
+  extract "$ZIPFILE" 'libs/arm64-v8a/soterta-svc'   "$MODPATH"
 else
   abort "! Unsupported platform: $ARCH"
 fi
 
 [ -f "$BINDIR/keymint" ] || abort "! Missing $BINDIR/keymint"
 [ -f "$BINDIR/ommega-inject" ] || abort "! Missing $BINDIR/ommega-inject"
-chmod 755 "$BINDIR/keymint" "$BINDIR/ommega-inject"
+[ -f "$BINDIR/soterta-svc" ] || abort "! Missing $BINDIR/soterta-svc"
+chmod 755 "$BINDIR/keymint" "$BINDIR/ommega-inject" "$BINDIR/soterta-svc"
 
 # Extract the WebUI webroot. KernelSU/APatch manager auto-detects this folder,
 # serves it in-app and injects the window.ksu bridge; Magisk has no built-in WebUI.

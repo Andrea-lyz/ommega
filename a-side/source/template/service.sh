@@ -56,6 +56,8 @@ kill_all() {
   pkill -9 -f 'modules/ommega/libs' 2>/dev/null
   pkill -9 -f "$STATE_DIR/keymint" 2>/dev/null
   pkill -9 -f "$STATE_DIR/ommega-inject" 2>/dev/null
+  pkill -9 -f "$STATE_DIR/soterta/soter-svc" 2>/dev/null
+  pkill -9 -f 'soterta.sh' 2>/dev/null
   sleep 1
 }
 
@@ -65,6 +67,11 @@ update_status "Ommega ⏳ 启动中"
 
 start_daemon "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid"
 start_daemon "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid"
+# The Soter watchdog runs whether or not the software TA is enabled: the enable
+# flag is a file the WebUI writes, so something has to notice it, and the same
+# loop is what restores the stock HAL after a daemon crash instead of leaving
+# Soter stopped with nobody to fix it.
+start_daemon "$MODDIR/soterta.sh" "$STATE_DIR/soterta-watchdog.pid"
 
 # config.toml is created on first keymint start. Sync WebUI overlay trust
 # after that so boot_patchlevel / vb_key / vb_hash are not left as auto.

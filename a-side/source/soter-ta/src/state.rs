@@ -1,19 +1,50 @@
 //! Software TA state: key ledger, anti-rollback counters and sign sessions.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use rand_core::{OsRng, RngCore};
-use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::pkcs8::{
+    DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding,
+};
 use rsa::{BigUint, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 
 use crate::blob;
-use crate::error::{SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_KEY, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK};
+use crate::error::{
+    SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_KEY, SOTER_ERR_NO_SESSION, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK,
+};
 
 /// Key size the stock TA uses for ASK and AuthKey.
 const RSA_BITS: usize = 2048;
 const RSA_EXPONENT: u32 = 65537;
+
+/// Suffix of the temporary file the atomic write goes through.
+const SIDECAR_TEMP: &str = ".tmp";
+/// Suffix of the previous revision kept beside the ledger.
+const SIDECAR_BACKUP: &str = ".bak";
+
+/// `state.json` + `.bak` / `.tmp`, without touching the extension.
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().map(OsString::from).unwrap_or_default();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// Owner-only permissions for anything that holds key material.
+fn set_owner_only(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
 
 /// A key pair in PEM form, so the whole ledger fits in one JSON file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,18 +138,61 @@ impl TaState {
     }
 
     pub fn load(path: &Path) -> Option<Self> {
-        std::fs::read(path).ok().and_then(|bytes| Self::from_json(&bytes))
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| Self::from_json(&bytes))
     }
 
+    /// Load the ledger, falling back to the previous revision.
+    ///
+    /// `Ok(None)` means no identity exists yet, so the caller may mint one.
+    /// `Err` means an identity file is present but unreadable: the caller must
+    /// stop instead of generating a second identity, because a new device id
+    /// would look like a different device to every client that remembers this
+    /// one (including the relay-era material they were registered against).
+    pub fn load_or_error(path: &Path) -> Result<Option<Self>, String> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        if let Some(state) = Self::from_json(&bytes) {
+            return Ok(Some(state));
+        }
+        let backup = sibling_path(path, SIDECAR_BACKUP);
+        match std::fs::read(&backup).map(|bytes| Self::from_json(&bytes)) {
+            Ok(Some(state)) => {
+                // Restore the last good revision so the next start is clean.
+                state
+                    .store(path)
+                    .map_err(|error| format!("cannot restore {}: {error}", path.display()))?;
+                Ok(Some(state))
+            }
+            _ => Err(format!(
+                "{} is unreadable and {} cannot be used either",
+                path.display(),
+                backup.display()
+            )),
+        }
+    }
+
+    /// Persist the ledger atomically and keep the previous revision beside it.
+    ///
+    /// The write goes to a temporary file that is renamed over the target, and
+    /// the file being replaced is copied to `<path>.bak` first, so a crash or a
+    /// full disk can never leave a truncated file that the next start would
+    /// read as "no identity yet".
     pub fn store(&self, path: &Path) -> std::io::Result<()> {
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        std::fs::write(path, bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        let tmp = sibling_path(path, SIDECAR_TEMP);
+        std::fs::write(&tmp, &bytes)?;
+        set_owner_only(&tmp)?;
+        if path.exists() {
+            std::fs::copy(path, sibling_path(path, SIDECAR_BACKUP))?;
         }
+        std::fs::rename(&tmp, path)?;
+        set_owner_only(path)?;
         Ok(())
     }
 
@@ -282,7 +356,7 @@ impl TaState {
     /// session, whether or not signing worked.
     pub fn finish_sign(&mut self, session: u64) -> (i32, Vec<u8>) {
         let Some(entry) = self.sessions.remove(&session) else {
-            return (SOTER_ERR_BAD_VALUE, Vec::new());
+            return (SOTER_ERR_NO_SESSION, Vec::new());
         };
         let Some(key) = self.auth_of(entry.uid, &entry.kname) else {
             return (SOTER_ERR_NO_KEY, Vec::new());
@@ -304,7 +378,14 @@ impl TaState {
     /// byte buffer and the Java layer passes it through, so keeping both
     /// spellings identical keeps a checker from seeing two ids on one device.
     pub fn device_id(&self) -> (i32, Vec<u8>) {
-        (SOTER_OK, self.cpu_id.as_bytes().to_vec())
+        // Raw bytes, not the hex spelling: a device with a working TA reports
+        // the id whose hex is the `cpu_id` every blob carries (B-side capture,
+        // 2026-09-24: 16 bytes `AAAAACAcoOGHTCs+rGtnwg==` against `cpu_id`
+        // `00000000201ca0e1874c2b3eac6b67c2`), and the Java layer hands those
+        // bytes to the application unchanged.
+        match hex::decode(&self.cpu_id) {
+            Ok(bytes) => (SOTER_OK, bytes),
+            Err(_) => (SOTER_ERR_TA_UNAVAILABLE, Vec::new()),
+        }
     }
 }
-

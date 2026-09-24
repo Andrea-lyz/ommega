@@ -6,6 +6,10 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "Software Soter TA (A-side): local key ledger, blob codec and AIDL reply encoder"
 
+[lib]
+# rlib for the workspace and its tests, staticlib for the soter-svc daemon.
+crate-type = ["rlib", "staticlib"]
+
 [dependencies]
 rsa = { version = "0.9", features = ["sha2"] }
 sha2 = "0.10"

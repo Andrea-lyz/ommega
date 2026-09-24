@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import zipfile
 
 try:
@@ -40,6 +41,9 @@ BINARY_SPECS = (
     {"package": "ommega-injector", "bin": "ommega-inject", "output_name": "ommega-inject"},
 )
 
+# Built by scripts/build_soterta_svc.py (C daemon + the soter-ta staticlib), not cargo.
+SOTERTA_SVC_OUTPUT_NAME = "soterta-svc"
+
 REQUIRED_TEMPLATE_FILES = (
     "customize.sh",
     "daemon",
@@ -48,6 +52,7 @@ REQUIRED_TEMPLATE_FILES = (
     "module.prop",
     "post-fs-data.sh",
     "service.sh",
+    "soterta.sh",
     "verify.sh",
     "webui-trust.sh",
 )
@@ -64,6 +69,7 @@ MODULE_TEXT_FILES = (
     "post-fs-data.sh",
     "sepolicy.rule",
     "service.sh",
+    "soterta.sh",
     "uninstall.sh",
     "verify.sh",
     "webui-trust.sh",
@@ -147,6 +153,43 @@ def copy_binary(binary: Path, output_name: str, abi: str, stage_dir: Path) -> No
     dest_path = dest_dir / output_name
     shutil.copy2(binary, dest_path)
     print(f"Copied {binary} to {dest_path}")
+
+
+def build_soterta_svc(*, abi: str, release: bool) -> Path:
+    """Build the software Soter TA daemon for `abi`.
+
+    It is a C program linked against the `soter-ta` Rust staticlib, so it is not
+    part of BINARY_SPECS (plain cargo binaries): scripts/build_soterta_svc.py owns
+    that build and is reused here so the packaged daemon and the standalone build
+    cannot drift apart.
+    """
+    scripts_dir = REPO_ROOT / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from build_soterta_svc import (  # noqa: E402 - the path is inserted above
+        DEFAULT_API_LEVEL,
+        build_staticlib,
+        cargo_config_ndk_root,
+        compile_daemon,
+        detect_ndk_root,
+        resolve_host_tag,
+    )
+
+    profile_dir = "release" if release else "debug"
+    binary = TARGET_ROOT / "soterta-svc" / abi / profile_dir / SOTERTA_SVC_OUTPUT_NAME
+    library = build_staticlib(abi, not release)
+    ndk_root = detect_ndk_root(cargo_config_ndk_root())
+    compile_daemon(
+        abi=abi,
+        ndk_root=ndk_root,
+        host_tag=resolve_host_tag(ndk_root, None),
+        api_level=DEFAULT_API_LEVEL,
+        library=library,
+        output=binary,
+    )
+    if not binary.exists():
+        raise FileNotFoundError(f"Built daemon not found at {binary}")
+    return binary
 
 
 def copy_template_files(stage_dir: Path) -> None:
@@ -286,26 +329,29 @@ def build_package_for_abi(
     stage_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        built_binaries: dict[str, Path] = {}
+        built_binaries: list[tuple[Path, str]] = []
         for spec in BINARY_SPECS:
-            built_binaries[spec["output_name"]] = build_binary(
-                abi=abi,
-                target=target,
-                release=release,
-                package=spec["package"],
-                bin_name=spec["bin"],
+            built_binaries.append(
+                (
+                    build_binary(
+                        abi=abi,
+                        target=target,
+                        release=release,
+                        package=spec["package"],
+                        bin_name=spec["bin"],
+                    ),
+                    spec["output_name"],
+                )
             )
+        built_binaries.append(
+            (build_soterta_svc(abi=abi, release=release), SOTERTA_SVC_OUTPUT_NAME)
+        )
 
         copy_template_files(stage_dir)
         normalize_module_text_files(stage_dir)
         configure_template_for_abi(stage_dir, abi)
-        for spec in BINARY_SPECS:
-            copy_binary(
-                built_binaries[spec["output_name"]],
-                spec["output_name"],
-                abi,
-                stage_dir,
-            )
+        for binary, output_name in built_binaries:
+            copy_binary(binary, output_name, abi, stage_dir)
 
         modify_module_prop(stage_dir, version, git_count, git_hash)
         normalize_module_text_files(stage_dir)

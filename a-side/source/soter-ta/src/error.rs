@@ -19,6 +19,11 @@ pub const SOTER_ERR_NO_KEY: i32 = -5;
 /// and it is also the honest answer when local key generation or signing fails.
 pub const SOTER_ERR_TA_UNAVAILABLE: i32 = -20;
 
+/// No such sign session.
+///
+/// The stock HAL answers `-1000` (`0xfffffc18`) to `finishSign` for a session it
+/// does not know, captured on the OnePlus 13 on 2026-09-24 while its TA was dead.
+pub const SOTER_ERR_NO_SESSION: i32 = -1000;
+
 /// Malformed request, unknown alias/session and similar argument errors.
 pub const SOTER_ERR_BAD_VALUE: i32 = -22;
-
