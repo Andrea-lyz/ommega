@@ -80,11 +80,11 @@
   </section>
   <details class="card" id="spl-section">
     <summary>设备属性（SPL 与 OS 版本）</summary>
-    <p class="note">单独保存和应用。修改 SPL 或 OS 版本会重载 KeyMint 与 keystore2；留空使用首次记录的基线，已升级的密钥可能仍需要较高 SPL。</p>
+    <p class="note">单独保存和应用。修改 SPL 或 OS 版本会重载 KeyMint 与 keystore2；可以升也可以降，但不能低于设备原始值，留空即恢复原始值。在新日期下产生或升级过的密钥，降回旧日期后可能永久不可用。</p>
     <label class="field">System SPL<input id="system" placeholder="YYYY-MM-DD"></label>
     <label class="field">Boot SPL<input id="boot" placeholder="YYYY-MM-DD"></label>
     <label class="field">Vendor SPL<input id="vendor" placeholder="YYYY-MM-DD"></label>
-    <label class="field">OS 版本<input id="osversion" inputmode="numeric" placeholder="如 17，留空使用基线"></label>
+    <label class="field">OS 版本<input id="osversion" inputmode="numeric" placeholder="如 17，留空恢复原始值"></label>
     <p class="note">OS 版本只写入 <code>ro.build.version.release</code>，决定证明证书里的 OS_VERSION（tag 705）。SDK 等级不变，因此严格校验方可能发现两者不一致。</p>
     <div class="actions">
       <button id="save" disabled>保存并应用</button>
@@ -92,6 +92,7 @@
       <button id="auto" class="secondary">清空全部填写</button>
     </div>
     <div id="message" class="message" role="status" aria-live="polite"></div>
+    <p class="note" id="origin">设备原始值：读取中…</p>
     <p class="note">Boot SPL 是否被硬件接受，以新生成的证明证书为准。</p>
     <div id="status">正在读取…</div>
   </details>

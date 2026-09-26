@@ -86,6 +86,46 @@ delete_prop_if_present() {
   [ -n "$(prop_get "$name")" ] && prop_delete_verified "$name"
 }
 
+# The OPLUS/Goodix fingerprint HAL reads ro.boot.vbmeta.device_state once, while
+# it starts, and picks the plain or the wrapped calibration object from it. A
+# device that really is unlocked can only read the plain one: once the property
+# below claims "locked", the TA tries to unwrap an object the secure world
+# refuses, and the factory calibration check (engineering mode -> 器件校准状态)
+# reports "cali hash get failed" with status 1036. Starting the HAL here, before
+# the properties are rewritten, keeps that check passing while the rest of the
+# boot still hides the unlock.
+#
+# This does not widen the window in which a detector could read the real value:
+# it is the same window that already exists between the bootloader and this
+# script, and nothing user facing runs this early.
+start_fingerprint_hal_early() {
+  local binary=/odm/bin/hw/vendor.oplus.hardware.biometrics.fingerprint@2.1-service_uff i=0
+  # The HAL's own rc file creates these from an `on boot` trigger that has not
+  # run yet this early, so mirror that part here.
+  mkdir -p /data/vendor/fingerprint /data/vendor/fingerprint/dump 2>/dev/null
+  mkdir -p /data/vendor/fingerprint_ori /data/vendor/fingerprint_ori/dump 2>/dev/null
+  chmod 0770 /data/vendor/fingerprint /data/vendor/fingerprint/dump 2>/dev/null
+  chmod 0770 /data/vendor/fingerprint_ori /data/vendor/fingerprint_ori/dump 2>/dev/null
+  chown system system /data/vendor/fingerprint /data/vendor/fingerprint/dump 2>/dev/null
+  chown system system /data/vendor/fingerprint_ori /data/vendor/fingerprint_ori/dump 2>/dev/null
+  chown system system /dev/fingerprint_dev 2>/dev/null
+  chmod 0666 /dev/fingerprint_dev 2>/dev/null
+  # Without the sensor node the HAL cannot come up; init would start it later
+  # instead, i.e. after the rewrite. Keep the previous behaviour then (the check
+  # stays red, exactly as it was before this change).
+  [ -e /dev/fingerprint_dev ] || return 0
+  setprop ctl.start fps_hal 2>/dev/null || true
+  while [ "$i" -lt 8 ]; do
+    pidof "$binary" >/dev/null 2>&1 && break
+    sleep 1
+    i=$((i + 1))
+  done
+  [ "$i" -lt 8 ] || return 0
+  # It reads the property while opening its storage; let that init finish before
+  # the rewrite below.
+  sleep 3
+}
+
 apply_boot_state_props() {
   # Verified boot / lock state. A locked retail device reports green + locked +
   # enforcing; an unlocked bootloader reports orange / 0 / permissive.
@@ -122,6 +162,8 @@ prop_set_verified persist.logd.size ""
 prop_set_verified persist.logd.size.crash ""
 prop_set_verified persist.logd.size.system ""
 prop_set_verified persist.logd.size.main ""
+# The fingerprint HAL has to be up before the lock state is rewritten.
+start_fingerprint_hal_early
 apply_boot_state_props
 mkdir -p "$TARGET_DIR"
 chmod 0770 "$TARGET_DIR"

@@ -115,16 +115,30 @@ async function refreshSpl() {
   const result = await exec(`sh "${moduleDir}/spl-control.sh" status`);
   $('status').textContent = result.stdout || result.stderr || '状态不可用';
   save.disabled = result.errno !== 0;
-  if (result.errno === 0) {
-    const values = Object.fromEntries(result.stdout.split('\n').map(line => line.split('=', 2)));
-    propertyFields.forEach(field => $(field.id).value = values[field.status] || '');
+  if (result.errno !== 0) {
+    $('origin').textContent = '设备原始值：不可用';
+    return;
   }
+  const values = Object.fromEntries(result.stdout.split('\n').map(line => line.split('=', 2)));
+  propertyFields.forEach(field => $(field.id).value = values[field.status] || '');
+  // The floor a save is checked against: the device's own values, read from the
+  // read-only firmware property files rather than from the live property. A
+  // value that had to come from the recorded baseline says so.
+  const floor = key => {
+    const origin = values['ORIGIN_' + key];
+    const value = origin || values['FLOOR_' + key] || '未知';
+    return origin || value === '未知' ? value : value + '（基线回退）';
+  };
+  $('origin').textContent = '设备原始值：System ' + floor('SYSTEM_SPL')
+    + ' · Vendor ' + floor('VENDOR_SPL')
+    + ' · OS ' + floor('OS_VERSION')
+    + '。低于原始值的保存会被拒绝。';
 }
 save.onclick = async () => {
   const values = propertyFields.map(field => $(field.id).value.trim());
   const datesValid = fields.every(name => valid($(name).value.trim()));
-  if (!datesValid) { message.className = 'message error'; message.textContent = '日期格式必须为 YYYY-MM-DD，或留空使用基线。'; return; }
-  if (!validOsVersion($('osversion').value.trim())) { message.className = 'message error'; message.textContent = 'OS 版本必须是 1-2 位数字，或留空使用基线。'; return; }
+  if (!datesValid) { message.className = 'message error'; message.textContent = '日期格式必须为 YYYY-MM-DD，或留空恢复设备原始值。'; return; }
+  if (!validOsVersion($('osversion').value.trim())) { message.className = 'message error'; message.textContent = 'OS 版本必须是 1-2 位数字，或留空恢复设备原始值。'; return; }
   save.disabled = true;
   message.className = 'message';
   message.textContent = '正在保存并应用…';

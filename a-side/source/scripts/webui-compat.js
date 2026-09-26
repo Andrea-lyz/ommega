@@ -237,3 +237,267 @@ if (typeof loadRemoteConfig === "function") {
     await ommegaRefreshHealth();
   };
 }
+
+// ── Ommega software Soter TA switch (local Soter checks) ─────────────────────
+// The vendor AIDL HAL vendor.qti.hardware.soter.ISoter/default is a thin proxy
+// over a Qualcomm TA in the secure world. When that applet cannot run, every
+// Soter call fails and applications that use Soter as a local integrity probe
+// read the device as tampered with. The module's soterta.sh watchdog answers
+// those calls from a software TA while the stock HAL is stopped.
+//
+// This panel owns the switch and nothing else: the enable flag and the published
+// status are plain files, so the UI needs no module path, no shell quoting and no
+// privileged command of its own. Local checks only; the server-side check path
+// stays impossible, and turning the switch off rolls the stock HAL back.
+const OMMEGA_SOTERTA_DIR = "/data/adb/ommega/soterta";
+const OMMEGA_SOTERTA_FLAG = OMMEGA_SOTERTA_DIR + "/enabled";
+const OMMEGA_SOTERTA_STATUS = OMMEGA_SOTERTA_DIR + "/status.json";
+// The watchdog rewrites status.json on every change and otherwise every 30 s, so
+// an old stamp means the watchdog is gone, not that nothing happened.
+const OMMEGA_SOTERTA_STALE = 120;
+
+function ommegaSotertaParseJson(text) {
+  const raw = String(text === undefined || text === null ? "" : text).trim();
+  if (raw === "") return null;
+  try {
+    const value = JSON.parse(raw);
+    return value && typeof value === "object" ? value : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function ommegaSotertaStamp(unix) {
+  const seconds = Number(unix) || 0;
+  if (seconds <= 0) return "";
+  try {
+    return new Date(seconds * 1000).toLocaleString();
+  } catch (error) {
+    return String(seconds);
+  }
+}
+
+function ommegaSotertaStale(status) {
+  const updated = Number(status && status.updated) || 0;
+  if (updated <= 0) return true;
+  return Math.floor(Date.now() / 1000) - updated > OMMEGA_SOTERTA_STALE;
+}
+
+// The only command this panel has to run. Writing the flag is enough: the
+// watchdog notices it within a couple of seconds and does the takeover itself.
+function ommegaSotertaSwitchCommand(on) {
+  if (!on) return 'rm -f "' + OMMEGA_SOTERTA_FLAG + '"';
+  return [
+    "set -e",
+    'mkdir -p "' + OMMEGA_SOTERTA_DIR + '"',
+    'date +%s > "' + OMMEGA_SOTERTA_FLAG + '.tmp"',
+    'chmod 0600 "' + OMMEGA_SOTERTA_FLAG + '.tmp"',
+    'mv "' + OMMEGA_SOTERTA_FLAG + '.tmp" "' + OMMEGA_SOTERTA_FLAG + '"',
+  ].join("\n");
+}
+
+// What the panel can honestly say. `known` is false only when the flag could not
+// be read at all, which is not the same as "off".
+function ommegaSotertaReport(known, enabled, status) {
+  if (!known) {
+    return "无法读取开关状态（soterta 目录不可访问）/ " +
+      "Could not read the switch state (the soterta directory is not accessible).";
+  }
+  const lines = [];
+  lines.push(enabled
+    ? "开关：已启用 / Switch: on"
+    : "开关：已停用 / Switch: off");
+
+  if (!enabled) {
+    lines.push("软件 TA：未运行 / Software Soter TA: not running");
+    if (status && status.owner === "us") {
+      lines.push("原厂 HAL：仍被接管，看门狗还没回滚 / " +
+        "Stock HAL: still taken over; the watchdog has not rolled back yet");
+    } else {
+      lines.push("原厂 HAL：在跑，Soter 维持现状（本地检查会失败）/ " +
+        "Stock HAL: serving; Soter stays as it is (local checks fail)");
+    }
+    return lines.join("\n");
+  }
+
+  if (!status) {
+    lines.push("软件 TA：已请求启用，等待看门狗上报 / " +
+      "Software Soter TA: requested; waiting for the watchdog to report");
+    lines.push("看门狗：还没有状态文件（模块装好后是否重启过？）/ " +
+      "Watchdog: no status file yet (has the module been restarted since install?)");
+    return lines.join("\n");
+  }
+
+  const mode = status.mode || "-";
+  const pid = status.pid || "-";
+  lines.push(status.running
+    ? "软件 TA：运行中（mode=" + mode + "，pid=" + pid + "）/ Software Soter TA: running (mode=" +
+      mode + ", pid=" + pid + ")"
+    : "软件 TA：未运行 / Software Soter TA: not running");
+  if (status.owner === "us") {
+    lines.push("原厂 HAL：已停止（服务名已接管）/ Stock HAL: stopped (service name taken over)");
+  } else if (status.hal === "running") {
+    lines.push("原厂 HAL：在跑（接管尚未完成）/ Stock HAL: serving (takeover not finished)");
+  } else {
+    lines.push("原厂 HAL：" + (status.hal || "unknown") + " / Stock HAL: " + (status.hal || "unknown"));
+  }
+  if (status.device_id && status.device_id !== "-") {
+    lines.push("设备 ID：" + status.device_id + "（账本：" +
+      (status.ledger ? "已就绪" : "缺失，下次启动会重建") + "）/ Device id: " +
+      status.device_id + " (ledger: " +
+      (status.ledger ? "ready" : "missing; it is regenerated on the next start") + ")");
+  }
+  if (Number(status.id_changed) === 1) {
+    lines.push("⚠ 设备 ID 变过：" + (status.id_note || "?") +
+      " / the device id changed (" + (status.id_note || "?") +
+      "); every client that remembers this device will see a new one");
+  }
+  const stamp = ommegaSotertaStamp(status.updated);
+  if (stamp !== "") {
+    lines.push(ommegaSotertaStale(status)
+      ? "看门狗：自 " + stamp + " 起没有更新，可能已经停了 / Watchdog: nothing since " + stamp + "; it may be down"
+      : "看门狗：" + stamp + " 更新 / Watchdog: updated " + stamp);
+  }
+  const failures = Number(status.failures) || 0;
+  if (failures > 0) {
+    lines.push("启动失败：" + failures + " 次（看门狗会继续重试）/ Start failures: " + failures +
+      " (the watchdog keeps retrying)");
+  }
+  if (status.note) lines.push(String(status.note));
+  return lines.join("\n");
+}
+
+// One round trip: the flag marker first, then the published status.
+async function ommegaSotertaRead() {
+  const {stdout} = await _(
+    'if [ -f "' + OMMEGA_SOTERTA_FLAG + '" ]; then echo OMMEGA_FLAG=1; else echo OMMEGA_FLAG=0; fi\n' +
+    'cat "' + OMMEGA_SOTERTA_STATUS + '" 2>/dev/null'
+  );
+  const text = String(stdout === undefined || stdout === null ? "" : stdout);
+  const lines = text.split(/\r?\n/);
+  const marker = (lines.shift() || "").trim();
+  const match = marker.match(/^OMMEGA_FLAG=([01])$/);
+  return {
+    known: !!match,
+    enabled: match ? match[1] === "1" : false,
+    status: ommegaSotertaParseJson(lines.join("\n")),
+  };
+}
+
+async function ommegaSotertaRefresh(pending) {
+  const report = document.getElementById("ommega-soterta-report");
+  const box = document.getElementById("ommega-soterta-enabled");
+  if (!report) return;
+  let state;
+  try {
+    state = await ommegaSotertaRead();
+  } catch (error) {
+    report.textContent = "读取 Soter 状态失败 / Could not read the Soter state: " + error;
+    return;
+  }
+  if (box) box.checked = state.enabled;
+  const lines = [ommegaSotertaReport(state.known, state.enabled, state.status)];
+  if (pending) {
+    lines.push("开关已写入，看门狗会在几秒内接管（要先停掉原厂 HAL）/ " +
+      "Switch written; the watchdog applies it within a few seconds (it stops the stock HAL first).");
+  }
+  report.textContent = lines.join("\n\n");
+}
+
+// The flag is the request; the watchdog reacts within its poll interval and the
+// takeover itself takes a few seconds (it stops a live HAL first), so the panel
+// samples twice instead of pretending the switch is instant.
+const OMMEGA_SOTERTA_REFRESH_MS = [3000, 9000];
+
+async function ommegaSotertaApply() {
+  const box = document.getElementById("ommega-soterta-enabled");
+  const report = document.getElementById("ommega-soterta-report");
+  const on = !!(box && box.checked);
+  if (report) report.textContent = "正在写入开关… / Writing the switch…";
+  let errno = 1;
+  let stderr = "";
+  try {
+    const result = await _(ommegaSotertaSwitchCommand(on));
+    errno = Number(result && result.errno);
+    stderr = String((result && result.stderr) || "");
+  } catch (error) {
+    stderr = String(error);
+  }
+  if (errno !== 0) {
+    if (report) {
+      report.textContent = "写入开关失败（errno=" + errno + "）/ Failed to write the switch (errno=" + errno + ")\n" +
+        stderr.trim();
+    }
+    return;
+  }
+  // The flag is only the request; the watchdog publishes the result a moment later.
+  await new Promise(resolve => setTimeout(resolve, OMMEGA_SOTERTA_REFRESH_MS[0]));
+  await ommegaSotertaRefresh(true);
+  const second = OMMEGA_SOTERTA_REFRESH_MS[1] - OMMEGA_SOTERTA_REFRESH_MS[0];
+  await new Promise(resolve => setTimeout(resolve, second));
+  await ommegaSotertaRefresh(false);
+}
+
+function ommegaSotertaDialog() {
+  const existing = document.getElementById("ommega-soterta-dialog");
+  if (existing) return existing;
+  const wrapper = document.querySelector(".dialog-wrapper");
+  if (!wrapper || typeof document.createElement !== "function") return null;
+  const dialog = document.createElement("md-dialog");
+  dialog.id = "ommega-soterta-dialog";
+  dialog.className = "text-field-dialog";
+  dialog.innerHTML =
+    '<div slot="headline">Soter 本地检查 / Soter local check</div>' +
+    '<div slot="content" style="display:flex;flex-direction:column;gap:12px">' +
+      '<div id="ommega-soterta-report" style="font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;opacity:.85"></div>' +
+      '<label class="config-option" style="display:flex;align-items:center;gap:8px">' +
+        '<md-checkbox id="ommega-soterta-enabled" touch-target="wrapper"></md-checkbox>' +
+        '<span>启用软件 TA / Enable software TA</span>' +
+      '</label>' +
+      '<div style="font-size:11px;line-height:1.4;opacity:.7">' +
+        '只覆盖本地检查；服务器校验路径做不到。开关打开后原厂 Soter HAL 会被停止、由软件 TA 接管服务名，关闭即回滚。 / ' +
+        'Local checks only; the server-side check path stays impossible. While the switch is on, the stock Soter HAL is ' +
+        'stopped and the software TA takes its service name over; turning it off rolls back.' +
+      '</div>' +
+    '</div>' +
+    '<div slot="actions">' +
+      '<md-text-button id="ommega-soterta-refresh">刷新 / Refresh</md-text-button>' +
+      '<md-text-button id="ommega-soterta-close">关闭 / Close</md-text-button>' +
+    '</div>';
+  wrapper.appendChild(dialog);
+  const box = dialog.querySelector("#ommega-soterta-enabled");
+  if (box) box.addEventListener("click", () => { ommegaSotertaApply(); });
+  const refresh = dialog.querySelector("#ommega-soterta-refresh");
+  if (refresh) refresh.addEventListener("click", () => { ommegaSotertaRefresh(false); });
+  const close = dialog.querySelector("#ommega-soterta-close");
+  if (close) close.addEventListener("click", () => { dialog.close(); });
+  return dialog;
+}
+
+function ommegaSotertaOpen() {
+  const dialog = ommegaSotertaDialog();
+  if (!dialog) return Promise.resolve();
+  if (typeof dialog.show === "function") dialog.show();
+  return ommegaSotertaRefresh(false);
+}
+
+function ommegaSotertaInstallMenu() {
+  if (document.getElementById("ommega-soterta")) return;
+  const anchor = document.getElementById("remote-config");
+  if (!anchor || typeof anchor.insertAdjacentElement !== "function") return;
+  const item = document.createElement("md-menu-item");
+  item.id = "ommega-soterta";
+  item.className = "automation-menu-item";
+  item.innerHTML = '<div slot="headline">Soter 本地检查 / Soter local check</div>' +
+    '<md-icon slot="end">fingerprint</md-icon>';
+  item.addEventListener("click", () => {
+    // md-menu closes itself when an item is activated; close() is only the nudge
+    // for elements that need one.
+    const menu = document.getElementById("menu-options");
+    if (menu && typeof menu.close === "function") menu.close();
+    ommegaSotertaOpen();
+  });
+  anchor.insertAdjacentElement("afterend", item);
+}
+
+ommegaSotertaInstallMenu();
