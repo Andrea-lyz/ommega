@@ -258,7 +258,11 @@ static int64_t platform_bio_mark(void) {
         LOGE("bio gate: cannot read the fingerprint accept counter");
         return -1;
     }
-    uint32_t tag = boot_tag();
+    /* The tag has to stay inside 31 bits: the Rust half reads a negative hook
+     * answer as "cannot tell", and a tag whose top bit is set would make the
+     * packed mark negative, so the gate would fail open for that whole boot
+     * (seen on a boot whose id started with bb...). */
+    uint32_t tag = boot_tag() & 0x7FFFFFFFu;
     LOGI("bio marker: accepted=%lld boot=%08x", (long long)accepted, (unsigned)tag);
     return ((int64_t)tag << 32) | (accepted & 0xFFFFFFFFLL);
 }

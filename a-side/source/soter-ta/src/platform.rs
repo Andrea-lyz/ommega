@@ -8,7 +8,9 @@
 //!
 //! A mark packs the daemon's per-boot tag in the high [`BOOT_TAG_SHIFT`] bits and
 //! the counter in the low 32, so two marks are only comparable inside one boot:
-//! a counter that restarted with the device must never look like evidence.
+//! a counter that restarted with the device must never look like evidence. The
+//! daemon keeps the packed value non-negative on purpose — a negative answer is
+//! this module's "cannot tell" — so the tag has to fit in 31 bits.
 
 use std::sync::Mutex;
 
