@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::blob;
 use crate::error::{
-    SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_KEY, SOTER_ERR_NO_SESSION, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK,
+    SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_AUTH_KEY, SOTER_ERR_NO_KEY, SOTER_ERR_NO_SESSION,
+    SOTER_ERR_TA_UNAVAILABLE, SOTER_OK,
 };
 
 /// Key size the stock TA uses for ASK and AuthKey.
@@ -323,7 +324,7 @@ impl TaState {
 
     pub fn has_auth(&self, uid: u32, kname: &str) -> i32 {
         if kname.is_empty() || self.auth_of(uid, kname).is_none() {
-            SOTER_ERR_NO_KEY
+            SOTER_ERR_NO_AUTH_KEY
         } else {
             SOTER_OK
         }
@@ -335,7 +336,7 @@ impl TaState {
             return (SOTER_ERR_NO_KEY, Vec::new());
         };
         let Some(auth) = self.auth_of(uid, kname) else {
-            return (SOTER_ERR_NO_KEY, Vec::new());
+            return (SOTER_ERR_NO_AUTH_KEY, Vec::new());
         };
         let Some(ask_key) = ask.private() else {
             return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
@@ -350,12 +351,12 @@ impl TaState {
 
     pub fn remove_auth(&mut self, uid: u32, kname: &str) -> i32 {
         let Some(entry) = self.uids.get_mut(&uid) else {
-            return SOTER_ERR_NO_KEY;
+            return SOTER_ERR_NO_AUTH_KEY;
         };
         if entry.auth.remove(kname).is_some() {
             SOTER_OK
         } else {
-            SOTER_ERR_NO_KEY
+            SOTER_ERR_NO_AUTH_KEY
         }
     }
 
@@ -379,7 +380,7 @@ impl TaState {
             return (SOTER_ERR_BAD_VALUE, 0);
         }
         if self.auth_of(uid, kname).is_none() {
-            return (SOTER_ERR_NO_KEY, 0);
+            return (SOTER_ERR_NO_AUTH_KEY, 0);
         }
         self.next_session = self.next_session.wrapping_add(1).max(1);
         let session = self.next_session;
@@ -401,7 +402,7 @@ impl TaState {
             return (SOTER_ERR_NO_SESSION, Vec::new());
         };
         let Some(key) = self.auth_of(entry.uid, &entry.kname) else {
-            return (SOTER_ERR_NO_KEY, Vec::new());
+            return (SOTER_ERR_NO_AUTH_KEY, Vec::new());
         };
         let Some(private) = key.private() else {
             return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());

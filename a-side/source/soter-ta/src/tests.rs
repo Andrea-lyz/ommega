@@ -6,7 +6,7 @@
 
 use crate::blob;
 use crate::dispatch;
-use crate::error::{SOTER_ERR_NO_KEY, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK};
+use crate::error::{SOTER_ERR_NO_AUTH_KEY, SOTER_ERR_NO_KEY, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK};
 use crate::parcel::{self, Args, Reply};
 use crate::state::TaState;
 
@@ -224,8 +224,20 @@ fn ledger_tracks_presence_and_removal() {
     assert_eq!(state.has_auth(UID, KNAME), SOTER_OK);
 
     assert_eq!(state.remove_auth(UID, KNAME), SOTER_OK);
-    assert_eq!(state.has_auth(UID, KNAME), SOTER_ERR_NO_KEY);
-    assert_eq!(state.remove_auth(UID, KNAME), SOTER_ERR_NO_KEY);
+    // A missing AuthKey answers -6 on a live vendor TA even while the ASK is
+    // still there (PHB110 capture, 2026-09-26); -5 is the dead-TA spelling.
+    assert_eq!(state.has_auth(UID, KNAME), SOTER_ERR_NO_AUTH_KEY);
+    assert_eq!(state.remove_auth(UID, KNAME), SOTER_ERR_NO_AUTH_KEY);
+    assert_eq!(
+        state.remove_auth(999_999, KNAME),
+        SOTER_ERR_NO_AUTH_KEY,
+        "AuthKey-scoped lookups answer -6 even with no ledger entry at all"
+    );
+    assert_eq!(state.export_auth(UID, KNAME).0, SOTER_ERR_NO_AUTH_KEY);
+    assert_eq!(
+        state.init_sign(UID, KNAME, "challenge").0,
+        SOTER_ERR_NO_AUTH_KEY
+    );
 
     assert_eq!(state.remove_all_uid(UID), SOTER_OK);
     assert_eq!(state.has_ask(UID), SOTER_ERR_NO_KEY);
