@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::dispatch::{self, Outcome, Request};
+use crate::platform::{self, Platform};
 use crate::state::TaState;
 
 /// Reply kinds, mirrored by `SOTERTA_KIND_*` in the daemon.
@@ -264,6 +265,20 @@ pub unsafe extern "C" fn soterta_init(state_path: *const c_char) -> i32 {
     }
 }
 
+/// Install the daemon's platform hooks.
+///
+/// `boot_ms` answers milliseconds on a boot-monotone clock and `bio_mark` the
+/// fingerprint evidence mark; either may be null, and a hook that answers a
+/// negative value means "cannot tell" for that transaction. A missing hook
+/// makes the software TA answer like the revision before the biometric gate.
+#[no_mangle]
+pub extern "C" fn soterta_set_platform(
+    boot_ms: Option<platform::Probe>,
+    bio_mark: Option<platform::Probe>,
+) {
+    platform::install(boot_ms, bio_mark);
+}
+
 /// Answer one transaction from arguments the daemon has already parsed.
 ///
 /// Returns [`SOTERTA_HANDLED`] with `reply` filled in, [`SOTERTA_UNHANDLED`] when
@@ -296,13 +311,21 @@ pub unsafe extern "C" fn soterta_handle(
             return SOTERTA_ERROR;
         }
     };
+    // The sign transactions read the platform before the ledger lock is taken:
+    // the hooks spawn a platform dump, and that must not stall every other
+    // transaction the daemon serves.
+    let platform = if dispatch::consults_platform(tx) {
+        platform::current()
+    } else {
+        Platform::default()
+    };
     let outcome = {
         let mut slot = lock(&SHARED);
         let Some(shared) = slot.as_mut() else {
             set_error("state is not initialized");
             return SOTERTA_ERROR;
         };
-        dispatch::handle_request(&mut shared.state, tx, request)
+        dispatch::handle_request(&mut shared.state, tx, request, platform)
     };
     let Some(outcome) = outcome else {
         return SOTERTA_UNHANDLED;

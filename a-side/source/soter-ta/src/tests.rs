@@ -6,9 +6,13 @@
 
 use crate::blob;
 use crate::dispatch;
-use crate::error::{SOTER_ERR_NO_AUTH_KEY, SOTER_ERR_NO_KEY, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK};
+use crate::error::{
+    SOTER_ERR_NO_AUTH_KEY, SOTER_ERR_NO_FINGERPRINT, SOTER_ERR_NO_KEY, SOTER_ERR_TA_UNAVAILABLE,
+    SOTER_OK,
+};
 use crate::parcel::{self, Args, Reply};
-use crate::state::TaState;
+use crate::platform::Platform;
+use crate::state::{TaState, BIO_WINDOW_MS};
 
 const UID: u32 = 10503;
 const KNAME: &str = "ommega_default_key";
@@ -62,7 +66,8 @@ fn state() -> TaState {
 fn call(state: &mut TaState, tx: u32, request: &[u8]) -> Vec<u8> {
     let (token, mut args) = Args::parse_request(request).expect("request parses");
     assert!(Args::is_soter_token(&token), "unexpected token: {token}");
-    dispatch::handle(state, tx, &mut args).expect("transaction belongs to the software TA")
+    dispatch::handle(state, tx, &mut args, Platform::default())
+        .expect("transaction belongs to the software TA")
 }
 
 fn word(bytes: &[u8], index: usize) -> i32 {
@@ -172,11 +177,11 @@ fn auth_blob_and_sign_result_verify_along_the_chain() {
             .expect("ask public key");
     assert!(blob::verify(&ask_public, auth_json, auth_signature));
 
-    let (code, session) = state.init_sign(UID, KNAME, "challenge-1");
+    let (code, session) = state.init_sign(UID, KNAME, "challenge-1", Platform::default());
     assert_eq!(code, SOTER_OK);
     assert!(session > 0);
 
-    let (code, result_blob) = state.finish_sign(session);
+    let (code, result_blob) = state.finish_sign(session, Platform::default());
     assert_eq!(code, SOTER_OK);
     let (result_json, result_signature) = blob::parse(&result_blob).expect("result blob");
     let auth_public =
@@ -235,7 +240,9 @@ fn ledger_tracks_presence_and_removal() {
     );
     assert_eq!(state.export_auth(UID, KNAME).0, SOTER_ERR_NO_AUTH_KEY);
     assert_eq!(
-        state.init_sign(UID, KNAME, "challenge").0,
+        state
+            .init_sign(UID, KNAME, "challenge", Platform::default())
+            .0,
         SOTER_ERR_NO_AUTH_KEY
     );
 
@@ -251,21 +258,111 @@ fn sign_sessions_are_single_use() {
     assert_eq!(state.generate_ask(UID), SOTER_OK);
     assert_eq!(state.generate_auth(UID, KNAME), SOTER_OK);
 
-    let (code, session) = state.init_sign(UID, KNAME, "challenge");
+    let (code, session) = state.init_sign(UID, KNAME, "challenge", Platform::default());
     assert_eq!(code, SOTER_OK);
-    assert_eq!(state.finish_sign(session).0, SOTER_OK);
+    assert_eq!(state.finish_sign(session, Platform::default()).0, SOTER_OK);
     assert_ne!(
-        state.finish_sign(session).0,
+        state.finish_sign(session, Platform::default()).0,
         SOTER_OK,
         "session is consumed"
     );
-    assert_ne!(state.finish_sign(4242).0, SOTER_OK, "unknown session");
-    assert_ne!(state.init_sign(UID, "missing", "challenge").0, SOTER_OK);
+    assert_ne!(
+        state.finish_sign(4242, Platform::default()).0,
+        SOTER_OK,
+        "unknown session"
+    );
+    assert_ne!(
+        state
+            .init_sign(UID, "missing", "challenge", Platform::default())
+            .0,
+        SOTER_OK
+    );
 
     // removing the key invalidates a session that was already opened
-    let (_, session) = state.init_sign(UID, KNAME, "challenge");
+    let (_, session) = state.init_sign(UID, KNAME, "challenge", Platform::default());
     assert_eq!(state.remove_all_uid(UID), SOTER_OK);
-    assert_ne!(state.finish_sign(session).0, SOTER_OK);
+    assert_ne!(state.finish_sign(session, Platform::default()).0, SOTER_OK);
+}
+
+/// A fingerprint mark the gate tests can move: the high bits are one boot tag.
+const BOOT_TAG: u64 = 0x5A17_0000_0000;
+
+fn platform_at(boot_ms: u64, accepted: u64) -> Platform {
+    Platform {
+        boot_ms: Some(boot_ms),
+        bio_mark: Some(BOOT_TAG | accepted),
+    }
+}
+
+fn signable_state() -> TaState {
+    let mut state = state();
+    assert_eq!(state.generate_ask(UID), SOTER_OK);
+    assert_eq!(state.generate_auth(UID, KNAME), SOTER_OK);
+    state
+}
+
+#[test]
+fn finish_sign_without_a_fingerprint_answers_minus_26() {
+    let mut state = signable_state();
+    let (code, session) = state.init_sign(UID, KNAME, "challenge", platform_at(1_000, 7));
+    assert_eq!(code, SOTER_OK);
+
+    // Nothing was accepted since the session opened: the answer is the one a
+    // stock TA gives, and the session stays open for a later press.
+    let (code, data) = state.finish_sign(session, platform_at(1_400, 7));
+    assert_eq!(code, SOTER_ERR_NO_FINGERPRINT);
+    assert!(data.is_empty());
+
+    let (code, data) = state.finish_sign(session, platform_at(1_800, 8));
+    assert_eq!(code, SOTER_OK, "a press after the refusal still signs");
+    assert!(!data.is_empty());
+}
+
+#[test]
+fn one_accepted_fingerprint_pays_for_one_signature() {
+    let mut state = signable_state();
+    let (_, first) = state.init_sign(UID, KNAME, "first", platform_at(1_000, 10));
+    let (_, second) = state.init_sign(UID, KNAME, "second", platform_at(1_100, 10));
+
+    assert_eq!(state.finish_sign(first, platform_at(1_200, 11)).0, SOTER_OK);
+    let (code, data) = state.finish_sign(second, platform_at(1_300, 11));
+    assert_eq!(
+        code, SOTER_ERR_NO_FINGERPRINT,
+        "the match was already spent"
+    );
+    assert!(data.is_empty());
+}
+
+#[test]
+fn stale_and_cross_boot_sessions_have_no_evidence() {
+    let mut state = signable_state();
+
+    let (_, old) = state.init_sign(UID, KNAME, "old", platform_at(1_000, 3));
+    let late = platform_at(1_000 + BIO_WINDOW_MS + 1, 4);
+    assert_eq!(state.finish_sign(old, late).0, SOTER_ERR_NO_FINGERPRINT);
+
+    // The counter restarts with the boot; a mark from the previous boot is not
+    // evidence even when it carries a larger number.
+    let (_, crossed) = state.init_sign(UID, KNAME, "crossed", platform_at(5_000, 9));
+    let next_boot = Platform {
+        boot_ms: Some(6_000),
+        bio_mark: Some((BOOT_TAG + (1 << 40)) | 2),
+    };
+    assert_eq!(
+        state.finish_sign(crossed, next_boot).0,
+        SOTER_ERR_NO_FINGERPRINT
+    );
+}
+
+#[test]
+fn a_missing_platform_hook_keeps_signing() {
+    let mut state = signable_state();
+    let (_, session) = state.init_sign(UID, KNAME, "challenge", Platform::default());
+    assert_eq!(
+        state.finish_sign(session, Platform::default()).0,
+        SOTER_OK,
+        "no hooks: answer like the revision before the biometric gate"
+    );
 }
 
 #[test]

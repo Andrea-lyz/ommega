@@ -13,13 +13,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::blob;
 use crate::error::{
-    SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_AUTH_KEY, SOTER_ERR_NO_KEY, SOTER_ERR_NO_SESSION,
-    SOTER_ERR_TA_UNAVAILABLE, SOTER_OK,
+    SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_AUTH_KEY, SOTER_ERR_NO_FINGERPRINT, SOTER_ERR_NO_KEY,
+    SOTER_ERR_NO_SESSION, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK,
 };
+use crate::platform::{same_boot, Platform};
 
 /// Key size the stock TA uses for ASK and AuthKey.
 const RSA_BITS: usize = 2048;
 const RSA_EXPONENT: u32 = 65537;
+
+/// How long a sign session may stay open before its biometric evidence stops
+/// counting.
+///
+/// The stock TA keeps its own freshness window inside the secure world and this
+/// work never captured it; two minutes is generous with a slow caller and still
+/// refuses a session that sat open long enough for an unrelated fingerprint
+/// match to fall inside it.
+pub const BIO_WINDOW_MS: u64 = 120_000;
 
 /// Suffix of the temporary file the atomic write goes through.
 const SIDECAR_TEMP: &str = ".tmp";
@@ -90,6 +100,15 @@ pub struct Session {
     pub uid: u32,
     pub kname: String,
     pub challenge: String,
+    /// Boot-clock milliseconds when `initSign` opened the session. A session
+    /// from an earlier boot can never carry fresh evidence: the boot clock
+    /// restarted, and so did the counter the marks are read from.
+    #[serde(default)]
+    pub opened_ms: Option<u64>,
+    /// Fingerprint mark when the session opened; the evidence is a mark that
+    /// moved past this one inside the same boot.
+    #[serde(default)]
+    pub bio_mark: Option<u64>,
 }
 
 /// Everything the software TA knows. Serialized as a single JSON document so the
@@ -112,6 +131,11 @@ pub struct TaState {
     /// across signatures (a finger id does not change between payments).
     #[serde(default)]
     pub fingerprints: BTreeMap<u32, String>,
+    /// Highest fingerprint mark a signature has already spent. One accepted
+    /// capture authorises one signature, like the biometric result a stock TA
+    /// consumes with the sign it releases.
+    #[serde(default)]
+    pub bio_watermark: u64,
 }
 
 impl TaState {
@@ -127,6 +151,7 @@ impl TaState {
             sessions: BTreeMap::new(),
             next_session: 0,
             fingerprints: BTreeMap::new(),
+            bio_watermark: 0,
         })
     }
 
@@ -373,9 +398,17 @@ impl TaState {
 
     /// `initSign`: open a session for an existing AuthKey.
     ///
-    /// The stock TA refuses to sign without a fresh fingerprint match; this one
-    /// does not, which is the entire point of the local check path.
-    pub fn init_sign(&mut self, uid: u32, kname: &str, challenge: &str) -> (i32, u64) {
+    /// The platform values become the baseline `finishSign` compares against:
+    /// the moment the session opened and the fingerprint mark that was current
+    /// then. A stock TA refuses to sign without a fresh match, and so does this
+    /// one; see [`TaState::biometric_ok`].
+    pub fn init_sign(
+        &mut self,
+        uid: u32,
+        kname: &str,
+        challenge: &str,
+        platform: Platform,
+    ) -> (i32, u64) {
         if kname.is_empty() {
             return (SOTER_ERR_BAD_VALUE, 0);
         }
@@ -390,17 +423,27 @@ impl TaState {
                 uid,
                 kname: kname.to_string(),
                 challenge: challenge.to_string(),
+                opened_ms: platform.boot_ms,
+                bio_mark: platform.bio_mark,
             },
         );
         (SOTER_OK, session)
     }
 
-    /// `finishSign`: sign the challenge once with the AuthKey and close the
-    /// session, whether or not signing worked.
-    pub fn finish_sign(&mut self, session: u64) -> (i32, Vec<u8>) {
-        let Some(entry) = self.sessions.remove(&session) else {
+    /// `finishSign`: sign the challenge once with the AuthKey.
+    ///
+    /// Without a fingerprint match this answers `-26` and leaves the session
+    /// open, so a client that only gets its press after a first refusal can
+    /// still finish. Every other answer closes the session, whether or not
+    /// signing worked.
+    pub fn finish_sign(&mut self, session: u64, platform: Platform) -> (i32, Vec<u8>) {
+        let Some(entry) = self.sessions.get(&session).cloned() else {
             return (SOTER_ERR_NO_SESSION, Vec::new());
         };
+        if !self.biometric_ok(&entry, platform) {
+            return (SOTER_ERR_NO_FINGERPRINT, Vec::new());
+        }
+        self.sessions.remove(&session);
         let Some(key) = self.auth_of(entry.uid, &entry.kname) else {
             return (SOTER_ERR_NO_AUTH_KEY, Vec::new());
         };
@@ -414,6 +457,42 @@ impl TaState {
             return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
         };
         (SOTER_OK, blob::encode(&json, &signature))
+    }
+
+    /// Whether the platform shows a fingerprint match this session may spend.
+    ///
+    /// Evidence has to be *verifiable* to count: both hooks installed, both
+    /// marks taken in this boot, the session still inside [`BIO_WINDOW_MS`], the
+    /// mark moved past the one the session opened with, and no earlier
+    /// signature having spent it. Missing hooks answer `true` — the software TA
+    /// must not stop signing because a platform dump changed shape, and the
+    /// daemon logs the hook it could not use — while evidence that is merely
+    /// absent answers `false`, the `-26` a stock TA gives without a match.
+    fn biometric_ok(&mut self, entry: &Session, platform: Platform) -> bool {
+        let (Some(opened), Some(before), Some(now), Some(after)) = (
+            entry.opened_ms,
+            entry.bio_mark,
+            platform.boot_ms,
+            platform.bio_mark,
+        ) else {
+            return true;
+        };
+        if !same_boot(before, after) || now < opened || now - opened > BIO_WINDOW_MS {
+            return false;
+        }
+        if after <= before {
+            return false;
+        }
+        let watermark = if same_boot(self.bio_watermark, after) {
+            self.bio_watermark
+        } else {
+            0
+        };
+        if after <= watermark {
+            return false;
+        }
+        self.bio_watermark = after;
+        true
     }
 
     /// `getDeviceId`: ASCII bytes of the same 32-hex-character string that is

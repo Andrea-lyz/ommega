@@ -25,6 +25,13 @@
  *   --mode=log     log every request, answer only the ATTK trio (2/6/14) with
  *                  -20, and leave the rest unanswered
  *   --mode=answer  answer from the software TA
+ *
+ * Biometric gate (--mode=answer):
+ *   --bio-gate=on   (default) sign only inside a fresh fingerprint match, the
+ *                   way the stock TA does; the evidence is the fingerprint
+ *                   provider's accepted-capture counter, read before and after
+ *                   the sign session
+ *   --bio-gate=off  sign without one (the pre-gate behaviour, for debugging)
  */
 
 #include <android/binder_ibinder.h>
@@ -39,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LOG_TAG "soterta-svc"
@@ -70,6 +78,10 @@ extern int32_t soterta_dead_reply(uint32_t tx, struct soterta_reply *reply);
 extern int32_t soterta_save(void);
 extern void soterta_free(struct soterta_reply *reply);
 extern int32_t soterta_last_error(char *buffer, int32_t capacity);
+
+/* Platform hooks the Rust half calls back into (soter-ta/src/platform.rs). */
+typedef int64_t (*platform_probe_fn)(void);
+extern void soterta_set_platform(platform_probe_fn boot_ms, platform_probe_fn bio_mark);
 
 /* The interface this daemon impersonates, from the vendor AIDL stubs. */
 #define SOTER_DESCRIPTOR "vendor.qti.hardware.soter.ISoter"
@@ -105,6 +117,7 @@ extern int32_t soterta_last_error(char *buffer, int32_t capacity);
 enum mode { MODE_DEAD, MODE_LOG, MODE_ANSWER };
 
 static enum mode g_mode = MODE_DEAD;
+static bool g_bio_gate = true;
 
 static const char *mode_name(enum mode mode) {
     switch (mode) {
@@ -126,6 +139,129 @@ typedef void (*mark_vintf_stability_fn)(AIBinder *);
 static add_service_fn g_add_service;
 static start_thread_pool_fn g_start_thread_pool;
 static mark_vintf_stability_fn g_mark_vintf_stability;
+
+/* ----------------------------------------------------------------- platform */
+
+/* CLOCK_BOOTTIME: monotone inside one boot, which is the lifetime a sign
+ * session and its biometric freshness window live in. */
+static int64_t platform_boot_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_BOOTTIME, &now) != 0) {
+        return -1;
+    }
+    return (int64_t)now.tv_sec * 1000 + (int64_t)(now.tv_nsec / 1000000);
+}
+
+static int hex_digit(char value) {
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+/* Changes on every boot, so a mark read in a previous boot can never pass for
+ * evidence in this one. */
+static uint32_t boot_tag(void) {
+    FILE *file = fopen("/proc/sys/kernel/random/boot_id", "r");
+    if (file == NULL) {
+        return 0;
+    }
+    char line[64] = {0};
+    char *read = fgets(line, sizeof(line), file);
+    fclose(file);
+    if (read == NULL) {
+        return 0;
+    }
+    uint32_t tag = 0;
+    int digits = 0;
+    for (const char *cursor = line; *cursor != '\0' && digits < 8; cursor++) {
+        int value = hex_digit(*cursor);
+        if (value < 0) {
+            continue;
+        }
+        tag = (tag << 4) | (uint32_t)value;
+        digits++;
+    }
+    return tag;
+}
+
+/* Add every `"<key>": <number>` in the dump; -1 when the key is absent. */
+static int64_t sum_dump_counter(const char *dump, const char *key) {
+    int64_t total = 0;
+    int found = 0;
+    size_t key_len = strlen(key);
+    const char *cursor = dump;
+    while ((cursor = strstr(cursor, key)) != NULL) {
+        cursor += key_len;
+        const char *value = cursor;
+        while (*value == ' ') {
+            value++;
+        }
+        if (*value != ':') {
+            continue;
+        }
+        value++;
+        while (*value == ' ') {
+            value++;
+        }
+        if (*value < '0' || *value > '9') {
+            continue;
+        }
+        total += strtoll(value, NULL, 10);
+        found++;
+    }
+    return found > 0 ? total : -1;
+}
+
+/* How many fingerprint captures the framework has accepted since boot.
+ *
+ * A stock TA signs only inside a fresh biometric match, and it reads that match
+ * where it lives: in the secure world, from the fingerprint TA. The software TA
+ * cannot; the closest platform-visible trace is this counter, which moves for
+ * any accepted capture no matter which UI drove it. */
+static int64_t fingerprint_accept_count(void) {
+    FILE *stream = popen("/system/bin/dumpsys fingerprint 2>/dev/null", "r");
+    if (stream == NULL) {
+        return -1;
+    }
+    char dump[16384];
+    size_t used = fread(dump, 1, sizeof(dump) - 1, stream);
+    int status = pclose(stream);
+    dump[used] = '\0';
+    if (status != 0) {
+        return -1;
+    }
+    int64_t plain = sum_dump_counter(dump, "\"accept\"");
+    int64_t crypto = sum_dump_counter(dump, "\"acceptCrypto\"");
+    if (plain < 0 && crypto < 0) {
+        return -1;
+    }
+    if (plain < 0) {
+        plain = 0;
+    }
+    if (crypto < 0) {
+        crypto = 0;
+    }
+    return plain + crypto;
+}
+
+/* The mark the Rust half compares before and after a sign session. */
+static int64_t platform_bio_mark(void) {
+    int64_t accepted = fingerprint_accept_count();
+    if (accepted < 0) {
+        LOGE("bio gate: cannot read the fingerprint accept counter");
+        return -1;
+    }
+    uint32_t tag = boot_tag();
+    LOGI("bio marker: accepted=%lld boot=%08x", (long long)accepted, (unsigned)tag);
+    return ((int64_t)tag << 32) | (accepted & 0xFFFFFFFFLL);
+}
 
 struct request {
     uint32_t uid;
@@ -377,7 +513,8 @@ static void on_destroy(void *userdata) {
 
 static void usage(const char *program) {
     fprintf(stderr,
-            "usage: %s [--mode=dead|log|answer] [--state=PATH] [--name=SERVICE]\n",
+            "usage: %s [--mode=dead|log|answer] [--state=PATH] [--name=SERVICE] "
+            "[--bio-gate=on|off]\n",
             program);
 }
 
@@ -404,6 +541,17 @@ int main(int argc, char **argv) {
             state_path = arg + 8;
         } else if (strncmp(arg, "--name=", 7) == 0) {
             service_name = arg + 7;
+        } else if (strncmp(arg, "--bio-gate=", 11) == 0) {
+            const char *value = arg + 11;
+            if (strcmp(value, "on") == 0) {
+                g_bio_gate = true;
+            } else if (strcmp(value, "off") == 0) {
+                g_bio_gate = false;
+            } else {
+                fprintf(stderr, "unknown bio gate: %s\n", value);
+                usage(argv[0]);
+                return 2;
+            }
         } else if (strcmp(arg, "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -458,6 +606,12 @@ int main(int argc, char **argv) {
     } else {
         LOGI("state %s: %s", state_path, state_rc == 1 ? "generated" : "loaded");
     }
+
+    /* Session freshness needs the boot clock in either gate position; the
+     * biometric gate adds the fingerprint counter. --bio-gate=off leaves that
+     * hook unset, which makes the Rust half sign without one. */
+    soterta_set_platform(platform_boot_ms, g_bio_gate ? platform_bio_mark : NULL);
+    LOGI("bio gate=%s", g_bio_gate ? "on" : "off");
 
     /* Without this the transactions only queue up and are never answered. */
     g_start_thread_pool();

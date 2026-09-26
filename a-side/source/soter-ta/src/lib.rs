@@ -19,6 +19,7 @@ pub mod dispatch;
 pub mod error;
 pub mod ffi;
 pub mod parcel;
+pub mod platform;
 pub mod state;
 
 pub use error::{

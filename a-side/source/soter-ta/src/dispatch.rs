@@ -17,6 +17,7 @@ use crate::error::{
     SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_KEY, SOTER_ERR_NO_SESSION, SOTER_ERR_TA_UNAVAILABLE,
 };
 use crate::parcel::{Args, Reply};
+use crate::platform::Platform;
 use crate::state::TaState;
 
 pub const TX_EXPORT_ASK: u32 = 1;
@@ -61,6 +62,12 @@ pub fn handles(tx: u32) -> bool {
             | TX_REMOVE_AUTH
             | TX_VERIFY_ATTK
     )
+}
+
+/// Whether `tx` reads platform facts (the boot clock and the fingerprint mark).
+/// Every other transaction is answered from the ledger alone.
+pub fn consults_platform(tx: u32) -> bool {
+    matches!(tx, TX_INIT_SIGN | TX_FINISH_SIGN)
 }
 
 /// Arguments of one request, as the client wrote them on the wire.
@@ -166,7 +173,12 @@ fn parse_request(tx: u32, args: &mut Args) -> Option<Request> {
 ///
 /// `None` means the transaction is not this TA's business; the caller decides
 /// what to do with it.
-pub fn handle_request(state: &mut TaState, tx: u32, request: Request) -> Option<Outcome> {
+pub fn handle_request(
+    state: &mut TaState,
+    tx: u32,
+    request: Request,
+    platform: Platform,
+) -> Option<Outcome> {
     Some(match (tx, request) {
         (TX_GET_DEVICE_ID, Request::None) => {
             let (code, data) = state.device_id();
@@ -210,11 +222,11 @@ pub fn handle_request(state: &mut TaState, tx: u32, request: Request) -> Option<
                 challenge,
             },
         ) => {
-            let (code, session) = state.init_sign(uid, &kname, &challenge);
+            let (code, session) = state.init_sign(uid, &kname, &challenge, platform);
             Outcome::Init { code, session }
         }
         (TX_FINISH_SIGN, Request::Session(session)) => {
-            let (code, data) = state.finish_sign(session);
+            let (code, data) = state.finish_sign(session, platform);
             Outcome::Buffer {
                 field: data.len() as i32,
                 code,
@@ -237,9 +249,16 @@ pub fn handle_request(state: &mut TaState, tx: u32, request: Request) -> Option<
 
 /// Build the reply for one transaction, or `None` when the transaction belongs
 /// to the stock HAL and must be passed through untouched.
-pub fn handle(state: &mut TaState, tx: u32, args: &mut Args) -> Option<Vec<u8>> {
+pub fn handle(
+    state: &mut TaState,
+    tx: u32,
+    args: &mut Args,
+    platform: Platform,
+) -> Option<Vec<u8>> {
     match parse_request(tx, args) {
-        Some(request) => handle_request(state, tx, request).map(|outcome| outcome.to_reply_bytes()),
+        Some(request) => {
+            handle_request(state, tx, request, platform).map(|outcome| outcome.to_reply_bytes())
+        }
         None if handles(tx) => Some(malformed()),
         None => None,
     }

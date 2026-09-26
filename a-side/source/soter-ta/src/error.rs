@@ -21,6 +21,14 @@ pub const SOTER_ERR_NO_KEY: i32 = -5;
 /// whole TA is dead, so the AuthKey-scoped lookups must not reuse it.
 pub const SOTER_ERR_NO_AUTH_KEY: i32 = -6;
 
+/// No fresh biometric match for this sign session.
+///
+/// A live vendor TA signs only inside a fresh fingerprint match and answers `-26`
+/// to `finishSign` without one: captured on the PHB110 and the MIX 4 on
+/// 2026-09-26, where `finishSign` right after `initSign` (no prompt, no press)
+/// answered `-26` while the same call after a real press answered `0`.
+pub const SOTER_ERR_NO_FINGERPRINT: i32 = -26;
+
 /// Raw `rsp->status` of a TEE command that could not be delivered.
 ///
 /// This is the value every Soter call fails with while the TA is unavailable,
