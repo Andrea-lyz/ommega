@@ -185,14 +185,20 @@ extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-52
 - OS 版本写入 `ro.build.version.release`，决定证明证书里的 OS_VERSION（tag 705）。
   它与 SPL 一样来自系统属性而非硬件，`ro.build.version.sdk` 不随之改变。
 - 属性变化时只重载原生 KeyMint 服务和 `keystore2`，模块本身不请求硬重启。
-- 配置保存在 `/data/adb/ommega/spl.conf`；留空会选择首次记录的基线值。
-  已在较高 SPL 下升级的 keyblob 可能要求保留较高值，首次基线不能直接当作恢复值。
+- 配置保存在 `/data/adb/ommega/spl.conf`；留空即恢复设备原始值。
 - 补丁级别与 OS 版本对硬件 KeyMint 是单向的：在较高值下产生或升级过的 keyblob
   遇到更低的上报值会拒绝升级，此后这些密钥的签名与证明都以 `INVALID_ARGUMENT`（-38）
-  失败，模块侧无法回退。因此 `spl-control.sh` 默认拒绝任何低于当前生效值的写入：
-  启动时的 `apply` 只在 stderr 提示，交互式 `save` 返回非零并由 WebUI 显示原因；
-  确需降级时先创建 `/data/adb/ommega/allow-spl-downgrade`，再执行一次保存。
-- 对齐规则（实机验证）：只向**补丁日期更新的一侧**对齐——把上报值较旧的一端抬到较新的一端，任何一端都不要调低。实测把 B 端上报值降到旧基线（2025-12-01）后，一天内累积 2371 次签名失败（全部 `INVALID_ARGUMENT`/-38），恢复到较高值（2026-08-01）后立即归零；`spl-baseline.conf` 可能是在覆写生效期间记录的，不能当作“原始值”。A 端同理：为了对齐把 A 降到 B 的旧日期会让 Google Wallet 绑卡失败，A 的 `[trust]` 应保持 `auto`（上报自身值），需要两端一致时抬高较旧的一端。
+  失败，模块侧无法回退。因此 `spl-control.sh` 允许升也允许降，只拒绝低于**设备原始值**
+  的写入：原始值从只读固件属性文件（`/system/build.prop`、`/vendor/build.prop` 等）读取，
+  记录在 `/data/adb/ommega/spl-origin.conf`；实时属性可能已被覆写，`spl-baseline.conf`
+  也可能是在覆写生效期间记录的，两者都不能当作原始值。同一属性取读到的最新值，固件升级会
+  抬高该下限，已记录的下限不会因文件暂时不可读而降低。启动时的 `apply` 只在 stderr 提示，
+  交互式 `save` 返回非零并由 WebUI 显示原始值与原因。
+- 对齐规则（实机验证）：把上报值降到已在新日期下升级过 keyblob 的设备之下会打断签名——
+  实测把 B 端上报值降到旧基线（2025-12-01）后，一天内累积 2371 次签名失败（全部
+  `INVALID_ARGUMENT`/-38），恢复到较高值（2026-08-01）后立即归零。跨设备对齐时优先抬高
+  较旧的一端；模块允许降回设备原始值，但不会低于它。A 端同理：为了对齐把 A 降到 B 的旧
+  日期会让 Google Wallet 绑卡失败，A 的 `[trust]` 应保持 `auto`（上报自身值）。
 - B 端故意不提供 `post-fs-data.sh`，只以 `service.sh` 作为生命周期入口；后续
   KernelSU 加载或软重启时由 `service.sh` 重新应用 SPL，再启动 relay。
 - `service.sh` 会按精确模块路径清理旧 relay，避免旧进程继续占用 `relay.lock`。

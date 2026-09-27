@@ -100,12 +100,17 @@ Patch levels and the Android release are one-way ratchets for the hardware
 KeyMint: a key blob minted or upgraded under a newer value refuses to be
 upgraded once the device reports an older one, after which every sign and
 attestation for those keys fails with `INVALID_ARGUMENT` (-38) and nothing on
-the module side can undo it. A baseline recorded while an override was already
-active is equally unsafe to apply downwards. `spl-control.sh` therefore refuses
-any value lower than the one in effect: the boot-time `apply` only warns on
-stderr, while an interactive `save` returns non-zero so the WebUI shows the
-reason. Create `/data/adb/ommega/allow-spl-downgrade` to force one deliberate
-downgrade.
+the module side can undo it. A value may therefore move in either direction,
+but never below the device's own original value. `spl-control.sh` reads that
+original from the read-only firmware property files (`/system/build.prop`,
+`/vendor/build.prop`, ...) and records it in
+`/data/adb/ommega/spl-origin.conf`: the live property may already carry an
+override and `/data/adb/ommega/spl-baseline.conf` may have been captured while
+one was active, so neither of them is authoritative. Of the readings the newest
+wins, a firmware update raises the floor, and a recorded floor is never dropped
+because a file cannot be read. An emptied field restores the device's own
+value. A refused write only warns on stderr at boot time, while an interactive
+`save` returns non-zero so the WebUI shows the original value and the reason.
 
 The B-side module intentionally uses `service.sh` as its only lifecycle entry
 point. It does not ship `post-fs-data.sh` and never requests a hard reboot.

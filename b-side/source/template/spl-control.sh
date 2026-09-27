@@ -5,6 +5,14 @@
 STATE_DIR=${OMMEGA_STATE_DIR:-/data/adb/ommega}
 CONF_FILE=$STATE_DIR/spl.conf
 BASELINE_FILE=$STATE_DIR/spl-baseline.conf
+ORIGIN_FILE=$STATE_DIR/spl-origin.conf
+
+# Read-only property files that still carry the values the installed firmware
+# shipped with. resetprop only rewrites the in-memory property copy, so these
+# files are the device's real original patch levels and release - the values a
+# configured override must never go below. Overridable only so the host-side
+# test can sandbox them.
+PROP_FILES=${OMMEGA_PROP_FILES:-"/system/build.prop /system/system/build.prop /system_ext/build.prop /product/build.prop /vendor/build.prop /odm/build.prop /odm/etc/build.prop /my_product/build.prop /my_heytap/build.prop"}
 
 SYSTEM_SPL=
 BOOT_SPL=
@@ -15,6 +23,11 @@ BASE_BOOT_VENDOR_SPL=
 BASE_BOOT_IMAGE_SPL=
 BASE_VENDOR_SPL=
 BASE_OS_VERSION=
+ORIGIN_SYSTEM_SPL=
+ORIGIN_BOOT_VENDOR_SPL=
+ORIGIN_BOOT_IMAGE_SPL=
+ORIGIN_VENDOR_SPL=
+ORIGIN_OS_VERSION=
 DOWNGRADE_REFUSED=
 SAVE_IN_PROGRESS=
 
@@ -79,15 +92,17 @@ load_baseline() {
   BASE_OS_VERSION=$(read_key_file "$BASELINE_FILE" OS_VERSION)
 }
 
-SPL_DOWNGRADE_MARKER=$STATE_DIR/allow-spl-downgrade
-
 # Security patch levels and the OS release are one-way ratchets for the
 # hardware KeyMint: a key blob minted - or upgraded - while the device reported
 # a newer value refuses to be upgraded once the device reports an older one, so
 # every later sign and attestation for those keys fails with
-# INVALID_ARGUMENT (-38) and nothing on the module side can undo it. A stored
-# baseline is not a safe value either: it may have been recorded while an
-# override was already active.
+# INVALID_ARGUMENT (-38) and nothing on the module side can undo it.
+#
+# The module therefore lets a value move in both directions, but never below
+# the device's own original value. That original value is read from the
+# read-only firmware property files, because the live property may already
+# carry an override and a recorded baseline may have been captured while one
+# was active.
 is_older_value() {
   # $1 = current value, $2 = desired value; both are non-empty.
   case "$1$2" in
@@ -96,12 +111,133 @@ is_older_value() {
   esac
 }
 
+# $1 = recorded value, $2 = freshly read value; true when $2 is strictly newer.
+is_newer_value() {
+  case "$1$2" in
+    *[!0-9]*) [ "$2" \> "$1" ] ;;
+    *) [ "$2" -gt "$1" ] ;;
+  esac
+}
+
+# Echoes the newer of the two values; either may be empty.
+keep_newest() {
+  if [ -z "$1" ] || [ -z "$2" ]; then
+    echo "${1:-$2}"
+  elif is_newer_value "$1" "$2"; then
+    echo "$2"
+  else
+    echo "$1"
+  fi
+}
+
+# Echoes the newest value the firmware files carry for the property named in
+# $1, or nothing when none of them can be read. The newest reading wins, so a
+# stale copy in a lower-priority file cannot weaken the floor.
+prop_file_value() {
+  name=$1
+  best=
+  for file in $PROP_FILES; do
+    [ -r "$file" ] || continue
+    found=$(sed -n "s/^${name}=//p" "$file" 2>/dev/null | tail -n 1)
+    [ -n "$found" ] || continue
+    best=$(keep_newest "$best" "$found")
+  done
+  [ -n "$best" ] || return 1
+  echo "$best"
+}
+
+load_origin() {
+  ORIGIN_SYSTEM_SPL=$(read_key_file "$ORIGIN_FILE" SYSTEM_SPL)
+  ORIGIN_BOOT_VENDOR_SPL=$(read_key_file "$ORIGIN_FILE" BOOT_VENDOR_SPL)
+  ORIGIN_BOOT_IMAGE_SPL=$(read_key_file "$ORIGIN_FILE" BOOT_IMAGE_SPL)
+  ORIGIN_VENDOR_SPL=$(read_key_file "$ORIGIN_FILE" VENDOR_SPL)
+  ORIGIN_OS_VERSION=$(read_key_file "$ORIGIN_FILE" OS_VERSION)
+}
+
+save_origin() {
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  tmp=$ORIGIN_FILE.tmp.$$
+  {
+    echo "SYSTEM_SPL=$ORIGIN_SYSTEM_SPL"
+    echo "BOOT_VENDOR_SPL=$ORIGIN_BOOT_VENDOR_SPL"
+    echo "BOOT_IMAGE_SPL=$ORIGIN_BOOT_IMAGE_SPL"
+    echo "VENDOR_SPL=$ORIGIN_VENDOR_SPL"
+    echo "OS_VERSION=$ORIGIN_OS_VERSION"
+  } > "$tmp" 2>/dev/null || return 0
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$ORIGIN_FILE" 2>/dev/null || rm -f "$tmp"
+}
+
+# Records the device's own values the first time they can be read and never
+# lets a later read lower them: a firmware update raises the floor, while a
+# file that cannot be read right now cannot drop one that is already known.
+refresh_origin() {
+  load_origin
+  changed=0
+  settled=$(keep_newest "$ORIGIN_SYSTEM_SPL" "$(prop_file_value ro.build.version.security_patch)")
+  [ "$settled" = "$ORIGIN_SYSTEM_SPL" ] || { ORIGIN_SYSTEM_SPL=$settled; changed=1; }
+  settled=$(keep_newest "$ORIGIN_BOOT_VENDOR_SPL" "$(prop_file_value ro.vendor.boot_security_patch)")
+  [ "$settled" = "$ORIGIN_BOOT_VENDOR_SPL" ] || { ORIGIN_BOOT_VENDOR_SPL=$settled; changed=1; }
+  settled=$(keep_newest "$ORIGIN_BOOT_IMAGE_SPL" "$(prop_file_value ro.boot.image.build.security_patch)")
+  [ "$settled" = "$ORIGIN_BOOT_IMAGE_SPL" ] || { ORIGIN_BOOT_IMAGE_SPL=$settled; changed=1; }
+  settled=$(keep_newest "$ORIGIN_VENDOR_SPL" "$(prop_file_value ro.vendor.build.security_patch)")
+  [ "$settled" = "$ORIGIN_VENDOR_SPL" ] || { ORIGIN_VENDOR_SPL=$settled; changed=1; }
+  settled=$(keep_newest "$ORIGIN_OS_VERSION" "$(prop_file_value ro.build.version.release)")
+  [ "$settled" = "$ORIGIN_OS_VERSION" ] || { ORIGIN_OS_VERSION=$settled; changed=1; }
+  [ "$changed" -eq 0 ] || save_origin
+  return 0
+}
+
+# The device's own value for one property, used to restore an emptied field.
+device_value() {
+  case "$1" in
+    ro.build.version.release) echo "$ORIGIN_OS_VERSION" ;;
+    ro.vendor.build.security_patch) echo "$ORIGIN_VENDOR_SPL" ;;
+    ro.vendor.boot_security_patch) echo "$ORIGIN_BOOT_VENDOR_SPL" ;;
+    ro.boot.image.build.security_patch) echo "$ORIGIN_BOOT_IMAGE_SPL" ;;
+    *) echo "$ORIGIN_SYSTEM_SPL" ;;
+  esac
+}
+
+baseline_value() {
+  case "$1" in
+    ro.build.version.release) echo "$BASE_OS_VERSION" ;;
+    ro.vendor.build.security_patch) echo "$BASE_VENDOR_SPL" ;;
+    ro.vendor.boot_security_patch) echo "$BASE_BOOT_VENDOR_SPL" ;;
+    ro.boot.image.build.security_patch) echo "$BASE_BOOT_IMAGE_SPL" ;;
+    *) echo "$BASE_SYSTEM_SPL" ;;
+  esac
+}
+
+# What an emptied configuration field restores: the device's own value, or the
+# baseline when the firmware files could not be read at all.
+restore_value() {
+  value=$(device_value "$1")
+  [ -n "$value" ] || value=$(baseline_value "$1")
+  echo "$value"
+}
+
+# The lowest value a write may use for the property named in $1. A patch level
+# without a readable original is held above the device's own system patch
+# level, so a boot or vendor override can never pull the reported date below
+# what the firmware shipped with.
+floor_for() {
+  floor=$(device_value "$1")
+  if [ -z "$floor" ]; then
+    case "$1" in
+      ro.build.version.release) floor=$BASE_OS_VERSION ;;
+      *) floor=${ORIGIN_SYSTEM_SPL:-$BASE_SYSTEM_SPL} ;;
+    esac
+  fi
+  echo "$floor"
+}
+
 refuses_downgrade() {
   # $1 = property name, $2 = desired value.
-  [ -f "$SPL_DOWNGRADE_MARKER" ] && return 1
-  current=$(getprop "$1")
-  [ -n "$current" ] && [ -n "$2" ] || return 1
-  is_older_value "$current" "$2" || return 1
+  [ -n "$2" ] || return 1
+  floor=$(floor_for "$1")
+  [ -n "$floor" ] || return 1
+  is_older_value "$floor" "$2" || return 1
   return 0
 }
 
@@ -109,7 +245,7 @@ write_property() {
   name=$1
   desired=$2
   if refuses_downgrade "$name" "$desired"; then
-    echo "refused to lower $name from $(getprop "$name") to $desired: patch levels and the OS version are one-way for the hardware KeyMint, and lowering them permanently breaks existing key blobs on this device (later signs and attestations fail with INVALID_ARGUMENT/-38). Keep the newer value, or create $SPL_DOWNGRADE_MARKER to force this one change." >&2
+    echo "refused to set $name to $desired: this device's original value is $floor, and an override may not go below it. Patch levels and the OS version are one-way ratchets for the hardware KeyMint, and a key blob minted or upgraded while the device reported a newer value stays unusable once the device reports an older one (later signs and attestations fail with INVALID_ARGUMENT/-38). Set $floor or newer, or leave the field empty to restore $floor." >&2
     DOWNGRADE_REFUSED=1
     return 1
   fi
@@ -154,6 +290,7 @@ restart_keymint_stack() {
 
 apply_config() {
   load_config
+  refresh_origin
   load_baseline || return 1
   DOWNGRADE_REFUSED=
   RESETPROP=$(resetprop_bin) || {
@@ -161,19 +298,11 @@ apply_config() {
     return 1
   }
 
-  desired_system=${SYSTEM_SPL:-$BASE_SYSTEM_SPL}
-  desired_vendor=${VENDOR_SPL:-$BASE_VENDOR_SPL}
-  desired_boot_vendor=${BOOT_SPL:-$BASE_BOOT_VENDOR_SPL}
-  desired_boot_image=${BOOT_SPL:-$BASE_BOOT_IMAGE_SPL}
-  desired_os_version=${OS_VERSION:-$BASE_OS_VERSION}
-  changed=0
-
   # A baseline recorded before OS version support existed has no OS_VERSION
-  # line, so an upgrade has nothing to fall back to. The first time an
-  # override is applied, record the live release as the baseline first: it is
-  # still the device's own value at this point because nothing has replaced
-  # it yet. Without this, clearing the field later would have no value to
-  # restore.
+  # line, so an emptied release field would have nothing to restore when the
+  # firmware files cannot be read either. The first time an override is
+  # applied, record the live release as the baseline: nothing has replaced it
+  # yet at this point.
   if [ -n "$OS_VERSION" ] && [ -z "$BASE_OS_VERSION" ]; then
     current_release=$(getprop ro.build.version.release)
     if [ -n "$current_release" ]; then
@@ -182,11 +311,20 @@ apply_config() {
     fi
   fi
 
+  # An emptied field restores the device's own value, never the live property:
+  # the live value may be this module's own previous override.
+  desired_system=${SYSTEM_SPL:-$(restore_value ro.build.version.security_patch)}
+  desired_vendor=${VENDOR_SPL:-$(restore_value ro.vendor.build.security_patch)}
+  desired_boot_vendor=${BOOT_SPL:-$(restore_value ro.vendor.boot_security_patch)}
+  desired_boot_image=${BOOT_SPL:-$(restore_value ro.boot.image.build.security_patch)}
+  desired_os_version=${OS_VERSION:-$(restore_value ro.build.version.release)}
+  changed=0
+
   # Release first: the KeyMint HAL reads ro.build.version.release when it
   # starts, so the value has to be in place before the restart at the end of
   # this function, and a release change alone must trigger that restart.
-  # Only touch it when a value is known. Unlike the SPL properties, an empty
-  # release here means "no baseline recorded and nothing configured", and
+  # Only touch it when a value is known: unlike the SPL properties, an empty
+  # release here means "nothing configured and nothing recorded", and
   # write_property would delete the property in that case, which no device
   # should have happen.
   if [ -n "$desired_os_version" ]; then
@@ -249,6 +387,12 @@ save_config() {
 
 show_status() {
   load_config
+  # Record the device's own values here as well, so the WebUI can show the
+  # floor before the first save. Reading the recorded baseline directly keeps
+  # status from capturing a live baseline as a side effect.
+  refresh_origin
+  BASE_SYSTEM_SPL=$(read_key_file "$BASELINE_FILE" SYSTEM_SPL)
+  BASE_OS_VERSION=$(read_key_file "$BASELINE_FILE" OS_VERSION)
   echo "SYSTEM_SPL=$SYSTEM_SPL"
   echo "BOOT_SPL=$BOOT_SPL"
   echo "VENDOR_SPL=$VENDOR_SPL"
@@ -258,6 +402,12 @@ show_status() {
   echo "CURRENT_BOOT_IMAGE_SPL=$(getprop ro.boot.image.build.security_patch)"
   echo "CURRENT_VENDOR_SPL=$(getprop ro.vendor.build.security_patch)"
   echo "CURRENT_OS_VERSION=$(getprop ro.build.version.release)"
+  echo "ORIGIN_SYSTEM_SPL=$(device_value ro.build.version.security_patch)"
+  echo "ORIGIN_VENDOR_SPL=$(device_value ro.vendor.build.security_patch)"
+  echo "ORIGIN_OS_VERSION=$(device_value ro.build.version.release)"
+  echo "FLOOR_SYSTEM_SPL=$(floor_for ro.build.version.security_patch)"
+  echo "FLOOR_VENDOR_SPL=$(floor_for ro.vendor.build.security_patch)"
+  echo "FLOOR_OS_VERSION=$(floor_for ro.build.version.release)"
 }
 
 case "$1" in
