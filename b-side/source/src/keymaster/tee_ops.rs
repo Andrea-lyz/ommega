@@ -18,10 +18,12 @@
 //! Attested keys are signed by a relay-minted app attestation key that carries
 //! the same challenge and application id as the key it signs, the way the
 //! platform keystore does it: an attestation key without a challenge is
-//! self-signed by the TEE and contributes no device chain. The relayed chain
-//! therefore carries the same extra `CN=App Attest Key` layer as the one this
-//! device mints natively. A HAL that refuses an explicit attestation key makes
-//! the relay fall back to the HAL default key for the rest of the process.
+//! self-signed by the TEE and contributes no device chain. KeyMint returns only
+//! the new leaf when an attestation key is supplied, so the relay appends the
+//! attestation key's own chain, and the relayed chain carries the same extra
+//! `CN=App Attest Key` layer as the one this device mints natively. A HAL that
+//! refuses an explicit attestation key makes the relay fall back to the HAL
+//! default key for the rest of the process.
 //!
 //! Sessions are cached by alias and persisted atomically. A hardware-requested
 //! keyblob upgrade is saved before begin is retried; it never generates a new key.
@@ -538,6 +540,14 @@ pub fn load_all_sessions() {
 /// Alias prefix of the relay's own app attestation key, one per HAL service.
 const APP_ATTEST_KEY_ALIAS_PREFIX: &str = "ommega-app-attest";
 
+/// DER-encoded X.500 name `CN=App Attest Key`: the subject the platform puts on
+/// its app attestation key certificate, which then becomes the issuer of every
+/// leaf that key signs.
+const APP_ATTEST_KEY_SUBJECT: &[u8] = &[
+    0x30, 0x19, 0x31, 0x17, 0x30, 0x15, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0e, b'A', b'p', b'p',
+    b' ', b'A', b't', b't', b'e', b's', b't', b' ', b'K', b'e', b'y',
+];
+
 fn app_attest_key_alias(service: &str) -> String {
     let level = if service == SYSTEM_KEYMINT_STRONGBOX {
         "strongbox"
@@ -591,6 +601,7 @@ fn build_app_attest_key_params(
         KeyParam::KeySize(KeySizeInBits(256)),
         KeyParam::EcCurve(KmEcCurve::P256),
         KeyParam::Purpose(KmKeyPurpose::AttestKey),
+        KeyParam::CertificateSubject(APP_ATTEST_KEY_SUBJECT.to_vec()),
         KeyParam::AttestationChallenge(challenge.to_vec()),
         KeyParam::AttestationApplicationId(app_id_der.to_vec()),
         KeyParam::NoAuthRequired,
@@ -615,6 +626,16 @@ fn is_attest_key_rejection(code: i32) -> bool {
     ]
     .into_iter()
     .any(|rejection| rejection as i32 == code)
+}
+
+/// KeyMint returns only the new leaf when an attestation key is supplied: the
+/// caller owns the attestation key's chain, exactly as the platform keystore
+/// assembles it. Append it so the relayed chain keeps the native shape
+/// (leaf -> `CN=App Attest Key` -> TEE intermediates -> root).
+fn compose_attested_chain(leaf_chain: Vec<Vec<u8>>, attest_chain: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut chain = leaf_chain;
+    chain.extend(attest_chain.iter().cloned());
+    chain
 }
 
 /// Mints the app attestation key that signs the caller's key on `service`.
@@ -723,6 +744,7 @@ pub fn generate_attest_key_on(
     // refuses the explicit attestation key falls back to its default key, and
     // the refusal is remembered so later keys do not pay it again.
     let mut app_attest_key_used = false;
+    let mut app_attest_chain: Vec<Vec<u8>> = Vec::new();
     let mut generated = None;
     if app_attest_key_available_for(service) {
         match mint_app_attest_key(service, km_version, challenge, app_id_der)
@@ -738,6 +760,7 @@ pub fn generate_attest_key_on(
                 match keymint.generateKey(&params, Some(&attestation_key)) {
                     Ok(result) => {
                         app_attest_key_used = true;
+                        app_attest_chain = attest_key.cert_chain;
                         generated = Some(result);
                     }
                     Err(status) => {
@@ -791,6 +814,11 @@ pub fn generate_attest_key_on(
         .into_iter()
         .map(|cert| cert.encodedCertificate)
         .collect();
+    let cert_chain = if app_attest_key_used {
+        compose_attested_chain(cert_chain, &app_attest_chain)
+    } else {
+        cert_chain
+    };
 
     let session = TeeSession {
         key_blob: result.keyBlob,
@@ -2236,6 +2264,7 @@ mod app_attest_key_tests {
             Tag::ALGORITHM,
             Tag::KEY_SIZE,
             Tag::EC_CURVE,
+            Tag::CERTIFICATE_SUBJECT,
             Tag::ATTESTATION_CHALLENGE,
             Tag::ATTESTATION_APPLICATION_ID,
             Tag::NO_AUTH_REQUIRED,
@@ -2250,6 +2279,23 @@ mod app_attest_key_tests {
         assert!(params
             .iter()
             .all(|param| param.tag != Tag::DIGEST && param.tag != Tag::PADDING));
+    }
+
+    #[test]
+    fn subject_der_is_the_platform_app_attest_key_name() {
+        use x509_cert::{der::Decode as _, name::Name};
+        let name = Name::from_der(APP_ATTEST_KEY_SUBJECT).expect("subject DER parses");
+        assert_eq!(name.to_string(), "CN=App Attest Key");
+    }
+
+    #[test]
+    fn attested_chain_starts_with_the_leaf_and_ends_with_the_attestation_key_chain() {
+        let leaf_chain = vec![vec![1, 2, 3]];
+        let attest_chain = vec![vec![4, 5], vec![6, 7], vec![8, 9], vec![10, 11]];
+        let chain = compose_attested_chain(leaf_chain.clone(), &attest_chain);
+        assert_eq!(chain.len(), 5);
+        assert_eq!(chain.first(), leaf_chain.first());
+        assert_eq!(&chain[1..], attest_chain.as_slice());
     }
 
     #[test]
