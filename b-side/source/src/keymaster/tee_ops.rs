@@ -15,12 +15,13 @@
 //! ATTEST_KEY to SIGN and user-auth requirements to NO_AUTH_REQUIRED; it does
 //! not provide hardware enforcement of the original A user's authentication.
 //!
-//! Attested keys are signed by the relay's own app attestation key, minted and
-//! cached per HAL service. The platform keystore signs application keys the
-//! same way, so a relayed chain carries the same extra `CN=App Attest Key`
-//! layer as the one this device mints natively. A HAL that refuses an explicit
-//! attestation key makes the relay fall back to the HAL default key for the
-//! rest of the process.
+//! Attested keys are signed by a relay-minted app attestation key that carries
+//! the same challenge and application id as the key it signs, the way the
+//! platform keystore does it: an attestation key without a challenge is
+//! self-signed by the TEE and contributes no device chain. The relayed chain
+//! therefore carries the same extra `CN=App Attest Key` layer as the one this
+//! device mints natively. A HAL that refuses an explicit attestation key makes
+//! the relay fall back to the HAL default key for the rest of the process.
 //!
 //! Sessions are cached by alias and persisted atomically. A hardware-requested
 //! keyblob upgrade is saved before begin is retried; it never generates a new key.
@@ -574,23 +575,24 @@ fn remember_app_attest_key_rejection(service: &'static str) {
     }
 }
 
-/// A cached app attestation key is only reusable for the HAL service and
-/// KeyMint version that minted it: another HAL rejects the blob with
-/// `INVALID_KEY_BLOB`.
-fn app_attest_key_reusable(service: &str, km_version: i32, cached: Option<&TeeSession>) -> bool {
-    cached.is_some_and(|session| session.hal_service == service && session.km_version == km_version)
-}
-
 /// Parameters of the relay's app attestation key: a lone `ATTEST_KEY` purpose
 /// on EC P-256, usable without user authentication, with explicit validity
-/// bounds because real TEEs reject key generation without them. It carries no
-/// challenge or application id: one key attests every relayed caller.
-fn build_app_attest_key_params(km_version: i32) -> Result<Vec<KmKeyParameter>> {
+/// bounds because real TEEs reject key generation without them, and with the
+/// challenge and application id of the key it is about to sign. Without those
+/// two tags the TEE self-signs the attestation key, and the key it signs then
+/// carries no device chain at all.
+fn build_app_attest_key_params(
+    km_version: i32,
+    challenge: &[u8],
+    app_id_der: &[u8],
+) -> Result<Vec<KmKeyParameter>> {
     let params = vec![
         KeyParam::Algorithm(KmAlgorithm::Ec),
         KeyParam::KeySize(KeySizeInBits(256)),
         KeyParam::EcCurve(KmEcCurve::P256),
         KeyParam::Purpose(KmKeyPurpose::AttestKey),
+        KeyParam::AttestationChallenge(challenge.to_vec()),
+        KeyParam::AttestationApplicationId(app_id_der.to_vec()),
         KeyParam::NoAuthRequired,
         KeyParam::CertificateNotBefore(now_date_time()),
         KeyParam::CertificateNotAfter(after_date_time()),
@@ -615,17 +617,21 @@ fn is_attest_key_rejection(code: i32) -> bool {
     .any(|rejection| rejection as i32 == code)
 }
 
-/// Mints (or reuses) the app attestation key that signs relayed keys on
-/// `service`.
-fn ensure_app_attest_key(service: &'static str, km_version: i32) -> Result<TeeSession> {
+/// Mints the app attestation key that signs the caller's key on `service`.
+///
+/// The key is minted per attestation, under a per-service alias that the next
+/// attestation overwrites, because it must carry the caller's challenge and
+/// application id to receive a device chain from the TEE.
+fn mint_app_attest_key(
+    service: &'static str,
+    km_version: i32,
+    challenge: &[u8],
+    app_id_der: &[u8],
+) -> Result<TeeSession> {
     let alias = app_attest_key_alias(service);
-    let cached = session_get(&alias).ok();
-    if app_attest_key_reusable(service, km_version, cached.as_ref()) {
-        return Ok(cached.expect("reuse requires a cached session"));
-    }
     let keymint = get_system_keymint(service)
         .with_context(|| ks_err!("real keymint {service} connect failed"))?;
-    let params = build_app_attest_key_params(km_version)?;
+    let params = build_app_attest_key_params(km_version, challenge, app_id_der)?;
     let result = match keymint.generateKey(&params, None) {
         Ok(result) => result,
         Err(status) => {
@@ -719,7 +725,7 @@ pub fn generate_attest_key_on(
     let mut app_attest_key_used = false;
     let mut generated = None;
     if app_attest_key_available_for(service) {
-        match ensure_app_attest_key(service, km_version)
+        match mint_app_attest_key(service, km_version, challenge, app_id_der)
             .and_then(|session| Ok((app_attest_key_issuer_subject(&session)?, session)))
         {
             Ok((issuer_subject, attest_key)) => {
@@ -2203,16 +2209,6 @@ mod app_attest_key_tests {
     use super::*;
     use crate::android::hardware::security::keymint::Tag::Tag;
 
-    fn session(service: &'static str, km_version: i32) -> TeeSession {
-        TeeSession {
-            key_blob: vec![1, 2, 3],
-            cert_chain: vec![vec![4, 5, 6]],
-            algorithm: KeyAlgorithm::EcP256,
-            hal_service: service,
-            km_version,
-        }
-    }
-
     #[test]
     fn alias_is_stable_and_service_specific() {
         assert_eq!(
@@ -2227,7 +2223,8 @@ mod app_attest_key_tests {
 
     #[test]
     fn params_request_a_lone_attest_key_with_validity_bounds() {
-        let params = build_app_attest_key_params(KEY_MINT_V5).unwrap();
+        let params =
+            build_app_attest_key_params(KEY_MINT_V5, b"app-attest-challenge", b"appid").unwrap();
         let purposes: Vec<_> = params
             .iter()
             .filter(|param| param.tag == Tag::PURPOSE)
@@ -2239,6 +2236,8 @@ mod app_attest_key_tests {
             Tag::ALGORITHM,
             Tag::KEY_SIZE,
             Tag::EC_CURVE,
+            Tag::ATTESTATION_CHALLENGE,
+            Tag::ATTESTATION_APPLICATION_ID,
             Tag::NO_AUTH_REQUIRED,
             Tag::CERTIFICATE_NOT_BEFORE,
             Tag::CERTIFICATE_NOT_AFTER,
@@ -2250,31 +2249,7 @@ mod app_attest_key_tests {
         }
         assert!(params
             .iter()
-            .all(|param| param.tag != Tag::ATTESTATION_CHALLENGE
-                && param.tag != Tag::ATTESTATION_APPLICATION_ID
-                && param.tag != Tag::DIGEST
-                && param.tag != Tag::PADDING));
-    }
-
-    #[test]
-    fn reuse_requires_the_same_service_and_version() {
-        let tee = session(SYSTEM_KEYMINT_DEFAULT, 200);
-        assert!(app_attest_key_reusable(
-            SYSTEM_KEYMINT_DEFAULT,
-            200,
-            Some(&tee)
-        ));
-        assert!(!app_attest_key_reusable(
-            SYSTEM_KEYMINT_DEFAULT,
-            300,
-            Some(&tee)
-        ));
-        assert!(!app_attest_key_reusable(
-            SYSTEM_KEYMINT_STRONGBOX,
-            200,
-            Some(&tee)
-        ));
-        assert!(!app_attest_key_reusable(SYSTEM_KEYMINT_DEFAULT, 200, None));
+            .all(|param| param.tag != Tag::DIGEST && param.tag != Tag::PADDING));
     }
 
     #[test]
