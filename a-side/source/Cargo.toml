@@ -74,6 +74,7 @@ members = [
   "wire",
   "watchdog",
   "ommega-injector",
+  "soter-ta",
 ]
 
 [patch.crates-io]

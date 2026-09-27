@@ -22,6 +22,11 @@ pkill -9 -f 'modules/ommega/daemon' 2>/dev/null
 pkill -9 -f 'modules/ommega/libs' 2>/dev/null
 pkill -9 -f "$STATE_DIR/keymint" 2>/dev/null
 pkill -9 -f "$STATE_DIR/ommega-inject" 2>/dev/null
+# Hand the Soter service name back before the module disappears: a leftover
+# software TA would keep the stock HAL stopped with nothing left to fix it.
+"$MODDIR/soterta.sh" disable >/dev/null 2>&1
+pkill -9 -f "$STATE_DIR/soterta/soter-svc" 2>/dev/null
+pkill -9 -f 'soterta.sh' 2>/dev/null
 sleep 1
 
 # Restart keystore2 so it drops any Ommega payload the injector loaded into it.
@@ -56,6 +61,8 @@ rm -f "$STATE_DIR/restart.injector"
 rm -f "$STATE_DIR/restart.all"
 rm -f "$STATE_DIR/keymint-daemon.pid"
 rm -f "$STATE_DIR/injector-daemon.pid"
+rm -rf "$STATE_DIR/soterta"           # software Soter TA ledger, flag, status
+rm -f "$STATE_DIR/soterta-watchdog.pid"
 
 # ---------------------------------------------------------------------------
 # 4. WebUI temp files

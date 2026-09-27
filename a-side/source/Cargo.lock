@@ -3310,6 +3310,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "soter-ta"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rand_core 0.6.4",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

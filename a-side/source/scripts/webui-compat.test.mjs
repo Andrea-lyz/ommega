@@ -161,3 +161,115 @@ test("nothing recorded yet is not the same as a clean bill of health", () => {
   assert.equal(context.ommegaHealthReport({}), "");
   assert.equal(context.ommegaHealthReport({ last_ok_unix: 0, last_error_unix: 0 }), "");
 });
+
+// The software Soter TA switch: the panel writes a flag file and reads the status
+// the module's watchdog publishes. Both are pure file operations, which is why
+// this section can be exercised without the WebUI or a device.
+test("the Soter switch is part of the shipped bundle", () => {
+  assert.ok(
+    source.includes("OMMEGA_SOTERTA_FLAG"),
+    "the glue must own the enable flag",
+  );
+  assert.ok(
+    source.includes("OMMEGA_SOTERTA_STATUS") && source.includes("/status.json"),
+    "the glue must read the published status",
+  );
+  assert.ok(
+    source.includes("ommegaSotertaInstallMenu();"),
+    "the menu entry has to be installed",
+  );
+  const context = loadGlue();
+  for (const name of [
+    "ommegaSotertaSwitchCommand",
+    "ommegaSotertaReport",
+    "ommegaSotertaParseJson",
+    "ommegaSotertaStale",
+  ]) {
+    assert.equal(typeof context[name], "function", name);
+  }
+});
+
+test("disabling only removes the flag, enabling writes it atomically", () => {
+  const context = loadGlue();
+  const off = context.ommegaSotertaSwitchCommand(false);
+  assert.match(off, /^rm -f "/);
+  assert.match(off, /\/data\/adb\/ommega\/soterta\/enabled/);
+  assert.doesNotMatch(off, />/, "disabling must not write anything");
+
+  const on = context.ommegaSotertaSwitchCommand(true);
+  assert.match(on, /mkdir -p/);
+  assert.match(on, /enabled\.tmp/);
+  assert.match(on, /mv /);
+});
+
+test("the switch state is reported honestly", () => {
+  const context = loadGlue();
+  const now = Math.floor(Date.now() / 1000);
+
+  const off = context.ommegaSotertaReport(true, false, {owner: "hal", hal: "running"});
+  assert.match(off, /Switch: off/);
+  assert.match(off, /local checks fail/);
+
+  const pending = context.ommegaSotertaReport(true, true, null);
+  assert.match(pending, /waiting for the watchdog/);
+
+  const running = context.ommegaSotertaReport(true, true, {
+    enabled: 1,
+    running: 1,
+    pid: 1234,
+    mode: "answer",
+    hal: "stopped",
+    owner: "us",
+    device_id: "0000000030ce4217e0ffe879abc0811f",
+    ledger: 1,
+    failures: 0,
+    updated: now,
+    note: "",
+  });
+  assert.match(running, /running \(mode=answer, pid=1234\)/);
+  assert.match(running, /service name taken over/);
+  assert.match(running, /0000000030ce4217e0ffe879abc0811f/);
+  assert.doesNotMatch(running, /may be down/);
+
+  // A watchdog that stopped reporting must not read as healthy.
+  const stale = context.ommegaSotertaReport(true, true, {
+    running: 1,
+    mode: "answer",
+    pid: 1,
+    hal: "stopped",
+    owner: "us",
+    updated: now - 600,
+  });
+  assert.match(stale, /may be down/);
+
+  const failed = context.ommegaSotertaReport(true, true, {
+    running: 0,
+    hal: "running",
+    owner: "hal",
+    failures: 2,
+    updated: now,
+    note: "software TA failed to start",
+  });
+  assert.match(failed, /Start failures: 2/);
+  assert.match(failed, /software TA failed to start/);
+
+  // A moved device id has to be visible: every client that remembers the old
+  // one would treat the device as new.
+  const drifted = context.ommegaSotertaReport(true, true, {
+    running: 1,
+    mode: "answer",
+    pid: 7,
+    hal: "stopped",
+    owner: "us",
+    device_id: "00000000deadbeefdeadbeefdeadbeef",
+    ledger: 1,
+    updated: now,
+    id_changed: 1,
+    id_note: "0000000030ce4217e0ffe879abc0811f -> 00000000deadbeefdeadbeefdeadbeef",
+  });
+  assert.match(drifted, /device id changed/);
+  assert.match(drifted, /deadbeef/);
+
+  const unreadable = context.ommegaSotertaReport(false, false, null);
+  assert.match(unreadable, /Could not read the switch state/);
+});
