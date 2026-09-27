@@ -15,6 +15,16 @@
 //! ATTEST_KEY to SIGN and user-auth requirements to NO_AUTH_REQUIRED; it does
 //! not provide hardware enforcement of the original A user's authentication.
 //!
+//! Attested keys are signed by a relay-minted app attestation key that carries
+//! the same challenge and application id as the key it signs, the way the
+//! platform keystore does it: an attestation key without a challenge is
+//! self-signed by the TEE and contributes no device chain. KeyMint returns only
+//! the new leaf when an attestation key is supplied, so the relay appends the
+//! attestation key's own chain, and the relayed chain carries the same extra
+//! `CN=App Attest Key` layer as the one this device mints natively. A HAL that
+//! refuses an explicit attestation key makes the relay fall back to the HAL
+//! default key for the rest of the process.
+//!
 //! Sessions are cached by alias and persisted atomically. A hardware-requested
 //! keyblob upgrade is saved before begin is retried; it never generates a new key.
 
@@ -527,6 +537,176 @@ pub fn load_all_sessions() {
 // Key generation.
 // ---------------------------------------------------------------------------
 
+/// Alias prefix of the relay's own app attestation key, one per HAL service.
+const APP_ATTEST_KEY_ALIAS_PREFIX: &str = "ommega-app-attest";
+
+/// DER-encoded X.500 name `CN=App Attest Key`: the subject the platform puts on
+/// its app attestation key certificate, which then becomes the issuer of every
+/// leaf that key signs.
+const APP_ATTEST_KEY_SUBJECT: &[u8] = &[
+    0x30, 0x19, 0x31, 0x17, 0x30, 0x15, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0e, b'A', b'p', b'p',
+    b' ', b'A', b't', b't', b'e', b's', b't', b' ', b'K', b'e', b'y',
+];
+
+fn app_attest_key_alias(service: &str) -> String {
+    let level = if service == SYSTEM_KEYMINT_STRONGBOX {
+        "strongbox"
+    } else {
+        "tee"
+    };
+    format!("{APP_ATTEST_KEY_ALIAS_PREFIX}-{level}")
+}
+
+/// HAL services that refused an explicit attestation key. Recorded per process
+/// so a HAL without support pays the failure only once per service.
+fn app_attest_key_rejections() -> &'static Mutex<Vec<&'static str>> {
+    static REJECTED: OnceLock<Mutex<Vec<&'static str>>> = OnceLock::new();
+    REJECTED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn app_attest_key_available_for(service: &str) -> bool {
+    app_attest_key_rejections()
+        .lock()
+        .map(|services| !services.contains(&service))
+        .unwrap_or(true)
+}
+
+fn remember_app_attest_key_rejection(service: &'static str) {
+    let mut services = match app_attest_key_rejections().lock() {
+        Ok(services) => services,
+        Err(_) => return,
+    };
+    if !services.contains(&service) {
+        services.push(service);
+        log::warn!(
+            "event=app_attest_key disabled_for_service service={service}; \
+             the relay keeps signing with the HAL default attestation key"
+        );
+    }
+}
+
+/// Parameters of the relay's app attestation key: a lone `ATTEST_KEY` purpose
+/// on EC P-256, usable without user authentication, with explicit validity
+/// bounds because real TEEs reject key generation without them, and with the
+/// challenge and application id of the key it is about to sign. Without those
+/// two tags the TEE self-signs the attestation key, and the key it signs then
+/// carries no device chain at all.
+fn build_app_attest_key_params(
+    km_version: i32,
+    challenge: &[u8],
+    app_id_der: &[u8],
+) -> Result<Vec<KmKeyParameter>> {
+    let params = vec![
+        KeyParam::Algorithm(KmAlgorithm::Ec),
+        KeyParam::KeySize(KeySizeInBits(256)),
+        KeyParam::EcCurve(KmEcCurve::P256),
+        KeyParam::Purpose(KmKeyPurpose::AttestKey),
+        KeyParam::CertificateSubject(APP_ATTEST_KEY_SUBJECT.to_vec()),
+        KeyParam::AttestationChallenge(challenge.to_vec()),
+        KeyParam::AttestationApplicationId(app_id_der.to_vec()),
+        KeyParam::NoAuthRequired,
+        KeyParam::CertificateNotBefore(now_date_time()),
+        KeyParam::CertificateNotAfter(after_date_time()),
+    ];
+    key_params_to_aidl(&params, km_version)
+        .with_context(|| ks_err!("encode app attestation key parameters"))
+}
+
+/// KeyMint error codes that mean the HAL refuses a supplied attestation key (a
+/// contract or argument problem), as opposed to a transient Binder or resource
+/// failure that must not disable the feature for the rest of the process.
+fn is_attest_key_rejection(code: i32) -> bool {
+    [
+        KmErrorCode::UnsupportedPurpose,
+        KmErrorCode::IncompatiblePurpose,
+        KmErrorCode::UnsupportedAlgorithm,
+        KmErrorCode::UnsupportedKeySize,
+        KmErrorCode::InvalidKeyBlob,
+        KmErrorCode::InvalidArgument,
+    ]
+    .into_iter()
+    .any(|rejection| rejection as i32 == code)
+}
+
+/// KeyMint returns only the new leaf when an attestation key is supplied: the
+/// caller owns the attestation key's chain, exactly as the platform keystore
+/// assembles it. Append it so the relayed chain keeps the native shape
+/// (leaf -> `CN=App Attest Key` -> TEE intermediates -> root).
+fn compose_attested_chain(leaf_chain: Vec<Vec<u8>>, attest_chain: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut chain = leaf_chain;
+    chain.extend(attest_chain.iter().cloned());
+    chain
+}
+
+/// Mints the app attestation key that signs the caller's key on `service`.
+///
+/// The key is minted per attestation, under a per-service alias that the next
+/// attestation overwrites, because it must carry the caller's challenge and
+/// application id to receive a device chain from the TEE.
+fn mint_app_attest_key(
+    service: &'static str,
+    km_version: i32,
+    challenge: &[u8],
+    app_id_der: &[u8],
+) -> Result<TeeSession> {
+    let alias = app_attest_key_alias(service);
+    let keymint = get_system_keymint(service)
+        .with_context(|| ks_err!("real keymint {service} connect failed"))?;
+    let params = build_app_attest_key_params(km_version, challenge, app_id_der)?;
+    let result = match keymint.generateKey(&params, None) {
+        Ok(result) => result,
+        Err(status) => {
+            if is_dead_object_status(&status) {
+                clear_system_keymint(service);
+            }
+            return Err(keymint_status_error(
+                &status,
+                &format!("app attestation key generation on {service} failed"),
+            ));
+        }
+    };
+    let cert_chain: Vec<Vec<u8>> = result
+        .certificateChain
+        .into_iter()
+        .map(|cert| cert.encodedCertificate)
+        .collect();
+    if cert_chain.is_empty() {
+        return Err(anyhow!(
+            "{service} returned an app attestation key without a certificate"
+        ));
+    }
+    let session = TeeSession {
+        key_blob: result.keyBlob,
+        cert_chain,
+        algorithm: KeyAlgorithm::EcP256,
+        hal_service: service,
+        km_version,
+    };
+    session_put(&alias, session.clone())?;
+    log::info!(
+        "event=app_attest_key minted service={service} alias={alias} km_version={km_version} certs={}",
+        session.cert_chain.len()
+    );
+    Ok(session)
+}
+
+/// Subject of the app attestation key certificate, which becomes the
+/// `issuerSubjectName` of every leaf it signs. KeyMint rejects a supplied
+/// attestation key whose subject name is empty.
+fn app_attest_key_issuer_subject(session: &TeeSession) -> Result<Vec<u8>> {
+    use x509_cert::{der::Decode as _, der::Encode as _, Certificate};
+    let leaf = session
+        .cert_chain
+        .first()
+        .ok_or_else(|| anyhow!("app attestation key has no certificate"))?;
+    let cert = Certificate::from_der(leaf)
+        .with_context(|| ks_err!("parse app attestation key certificate"))?;
+    cert.tbs_certificate()
+        .subject()
+        .to_der()
+        .with_context(|| ks_err!("encode app attestation key subject"))
+}
+
 /// Generates a fresh key with the *real* TEE, embedding the A-side requested
 /// `AttestationApplicationId` (tag 709) in the attestation extension of the
 /// returned certificate chain. The key is minted to match the A-side requested
@@ -558,26 +738,87 @@ pub fn generate_attest_key_on(
     let km_version = probe_keymint_version(&keymint);
     let params = build_attestation_params(app_id_der, challenge, spec, km_version)?;
 
-    let result = match keymint.generateKey(&params, None) {
-        Ok(result) => result,
-        Err(status) => {
-            if is_dead_object_status(&status) {
-                clear_system_keymint(service);
+    // Sign the leaf with the relay's own app attestation key, so the chain has
+    // the same shape as the one this device mints for its own applications
+    // (leaf -> CN=App Attest Key -> TEE intermediates -> root). A HAL that
+    // refuses the explicit attestation key falls back to its default key, and
+    // the refusal is remembered so later keys do not pay it again.
+    let mut app_attest_key_used = false;
+    let mut app_attest_chain: Vec<Vec<u8>> = Vec::new();
+    let mut generated = None;
+    if app_attest_key_available_for(service) {
+        match mint_app_attest_key(service, km_version, challenge, app_id_der)
+            .and_then(|session| Ok((app_attest_key_issuer_subject(&session)?, session)))
+        {
+            Ok((issuer_subject, attest_key)) => {
+                let attestation_key =
+                    crate::android::hardware::security::keymint::AttestationKey::AttestationKey {
+                        keyBlob: attest_key.key_blob.clone(),
+                        attestKeyParams: Vec::new(),
+                        issuerSubjectName: issuer_subject,
+                    };
+                match keymint.generateKey(&params, Some(&attestation_key)) {
+                    Ok(result) => {
+                        app_attest_key_used = true;
+                        app_attest_chain = attest_key.cert_chain;
+                        generated = Some(result);
+                    }
+                    Err(status) => {
+                        if let Some(code) = extract_km_error_code(&status) {
+                            if is_attest_key_rejection(code) {
+                                remember_app_attest_key_rejection(service);
+                            }
+                        }
+                        log::warn!(
+                            "event=app_attest_key refused service={service} status={status:?}; \
+                             signing with the HAL default attestation key instead"
+                        );
+                    }
+                }
             }
-            // Extract the KeyMint ErrorCode (e.g., -74, -68) so the caller
-            // can distinguish "HAL not provisioned" from "parameter rejected".
-            return Err(keymint_status_error(
-                &status,
-                &format!("real keymint {service} generateKey failed"),
-            ));
+            Err(error) => {
+                log::warn!(
+                    "event=app_attest_key unavailable service={service} error={error:#}; \
+                     signing with the HAL default attestation key instead"
+                );
+            }
         }
+    }
+
+    let result = match generated {
+        Some(result) => result,
+        None => match keymint.generateKey(&params, None) {
+            Ok(result) => result,
+            Err(status) => {
+                if is_dead_object_status(&status) {
+                    clear_system_keymint(service);
+                }
+                // Extract the KeyMint ErrorCode (e.g., -74, -68) so the caller
+                // can distinguish "HAL not provisioned" from "parameter rejected".
+                return Err(keymint_status_error(
+                    &status,
+                    &format!("real keymint {service} generateKey failed"),
+                ));
+            }
+        },
     };
+    if app_attest_key_used {
+        log::info!(
+            "event=app_attest_key used service={service} km_version={km_version} certs={}",
+            result.certificateChain.len()
+        );
+    }
 
     let cert_chain: Vec<Vec<u8>> = result
         .certificateChain
         .into_iter()
         .map(|cert| cert.encodedCertificate)
         .collect();
+    let cert_chain = if app_attest_key_used {
+        compose_attested_chain(cert_chain, &app_attest_chain)
+    } else {
+        cert_chain
+    };
 
     let session = TeeSession {
         key_blob: result.keyBlob,
@@ -1988,5 +2229,93 @@ mod upgrade_tests {
         });
         assert_eq!(upgrades.load(Ordering::SeqCst), 1);
         assert_eq!(saves.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod app_attest_key_tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::Tag::Tag;
+
+    #[test]
+    fn alias_is_stable_and_service_specific() {
+        assert_eq!(
+            app_attest_key_alias(SYSTEM_KEYMINT_DEFAULT),
+            "ommega-app-attest-tee"
+        );
+        assert_eq!(
+            app_attest_key_alias(SYSTEM_KEYMINT_STRONGBOX),
+            "ommega-app-attest-strongbox"
+        );
+    }
+
+    #[test]
+    fn params_request_a_lone_attest_key_with_validity_bounds() {
+        let params =
+            build_app_attest_key_params(KEY_MINT_V5, b"app-attest-challenge", b"appid").unwrap();
+        let purposes: Vec<_> = params
+            .iter()
+            .filter(|param| param.tag == Tag::PURPOSE)
+            .collect();
+        let expected =
+            key_params_to_aidl(&[KeyParam::Purpose(KmKeyPurpose::AttestKey)], KEY_MINT_V5).unwrap();
+        assert_eq!(purposes, expected.iter().collect::<Vec<_>>());
+        for tag in [
+            Tag::ALGORITHM,
+            Tag::KEY_SIZE,
+            Tag::EC_CURVE,
+            Tag::CERTIFICATE_SUBJECT,
+            Tag::ATTESTATION_CHALLENGE,
+            Tag::ATTESTATION_APPLICATION_ID,
+            Tag::NO_AUTH_REQUIRED,
+            Tag::CERTIFICATE_NOT_BEFORE,
+            Tag::CERTIFICATE_NOT_AFTER,
+        ] {
+            assert!(
+                params.iter().any(|param| param.tag == tag),
+                "missing tag {tag:?}"
+            );
+        }
+        assert!(params
+            .iter()
+            .all(|param| param.tag != Tag::DIGEST && param.tag != Tag::PADDING));
+    }
+
+    #[test]
+    fn subject_der_is_the_platform_app_attest_key_name() {
+        use x509_cert::{der::Decode as _, name::Name};
+        let name = Name::from_der(APP_ATTEST_KEY_SUBJECT).expect("subject DER parses");
+        assert_eq!(name.to_string(), "CN=App Attest Key");
+    }
+
+    #[test]
+    fn attested_chain_starts_with_the_leaf_and_ends_with_the_attestation_key_chain() {
+        let leaf_chain = vec![vec![1, 2, 3]];
+        let attest_chain = vec![vec![4, 5], vec![6, 7], vec![8, 9], vec![10, 11]];
+        let chain = compose_attested_chain(leaf_chain.clone(), &attest_chain);
+        assert_eq!(chain.len(), 5);
+        assert_eq!(chain.first(), leaf_chain.first());
+        assert_eq!(&chain[1..], attest_chain.as_slice());
+    }
+
+    #[test]
+    fn only_contract_failures_disable_the_attestation_key() {
+        for rejection in [
+            KmErrorCode::UnsupportedPurpose,
+            KmErrorCode::IncompatiblePurpose,
+            KmErrorCode::UnsupportedAlgorithm,
+            KmErrorCode::UnsupportedKeySize,
+            KmErrorCode::InvalidKeyBlob,
+            KmErrorCode::InvalidArgument,
+        ] {
+            assert!(is_attest_key_rejection(rejection as i32));
+        }
+        for transient in [
+            KmErrorCode::TooManyOperations,
+            KmErrorCode::MemoryAllocationFailed,
+            KmErrorCode::UnknownError,
+        ] {
+            assert!(!is_attest_key_rejection(transient as i32));
+        }
     }
 }
