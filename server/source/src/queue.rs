@@ -45,6 +45,10 @@ impl Task {
                     .is_some_and(|purposes| purposes.iter().any(|p| p.as_i64() == Some(6))))
     }
 
+    fn must_not_replay(&self) -> bool {
+        self.is_agreement() || self.task_type == "soter"
+    }
+
     pub fn status_str(&self) -> &'static str {
         match self.status {
             TaskStatus::Pending => "pending",
@@ -61,6 +65,47 @@ pub struct DeviceEntry {
     pub machine_id: String,
     pub last_seen_ms: u64,
     pub connected: bool,
+    pub soter: Option<bool>,
+    pub soter_sign: Option<bool>,
+    pub soter_nosign: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceCaps {
+    pub soter: Option<bool>,
+    pub soter_sign: Option<bool>,
+    pub soter_nosign: Option<bool>,
+}
+
+impl DeviceCaps {
+    /// Missing caps means an old relay; an empty field explicitly reports no SOTER.
+    pub fn parse(raw: Option<&str>) -> Self {
+        let Some(raw) = raw else {
+            return Self::default();
+        };
+        let names: Vec<&str> = raw.split(',').map(str::trim).collect();
+        let has = |name| names.contains(&name);
+        Self {
+            soter: Some(has("soter")),
+            soter_sign: Some(has("soter_sign")),
+            soter_nosign: Some(has("soter_nosign")),
+        }
+    }
+
+    fn can_serve(self, task: &Task) -> bool {
+        if task.task_type != "soter" {
+            return true;
+        }
+        self.soter == Some(true)
+            && !(soter_needs_sign(&task.payload) && self.soter_nosign == Some(true))
+    }
+}
+
+fn soter_needs_sign(payload: &Value) -> bool {
+    matches!(
+        payload.get("op").and_then(Value::as_str),
+        Some("init_sign" | "finish_sign")
+    )
 }
 
 #[derive(Debug, Clone, Default)]
@@ -224,6 +269,17 @@ impl TaskStore {
         machine_id: &str,
         timeout: Duration,
     ) -> Option<Task> {
+        self.pop_for_b_with_caps(device_id, machine_id, timeout, DeviceCaps::default())
+            .await
+    }
+
+    pub async fn pop_for_b_with_caps(
+        &self,
+        device_id: &str,
+        machine_id: &str,
+        timeout: Duration,
+        caps: DeviceCaps,
+    ) -> Option<Task> {
         let assignment_timeout = self.assignment_timeout;
         let pending_ttl = self.pending_ttl;
         let completed_ttl = self.completed_ttl;
@@ -236,6 +292,9 @@ impl TaskStore {
                     machine_id: machine_id.to_string(),
                     last_seen_ms: Self::now_ms(),
                     connected: true,
+                    soter: caps.soter,
+                    soter_sign: caps.soter_sign,
+                    soter_nosign: caps.soter_nosign,
                 },
             );
             if !machine_id.is_empty() {
@@ -246,7 +305,7 @@ impl TaskStore {
             }
             Self::reclaim_locked(inner, assignment_timeout);
             Self::expire_locked(inner, pending_ttl, completed_max, completed_ttl);
-            Self::dequeue_locked(inner, device_id).map(|task| {
+            Self::dequeue_locked(inner, device_id, caps).map(|task| {
                 Self::record_event_locked(inner, device_id, 1);
                 task
             })
@@ -289,11 +348,18 @@ impl TaskStore {
 
     /// Try to dequeue a task matching this device from the FIFO.
     /// O(1): checks per-device queue first, then the wildcard queue.
-    fn dequeue_locked(inner: &mut Inner, device_id: &str) -> Option<Task> {
+    fn dequeue_locked(inner: &mut Inner, device_id: &str, caps: DeviceCaps) -> Option<Task> {
         // 1) Try device-specific queue first.
         if let Some(q) = inner.pending_by_device.get_mut(device_id) {
-            while let Some(candidate_id) = q.pop_front() {
+            for _ in 0..q.len() {
+                let Some(candidate_id) = q.pop_front() else {
+                    break;
+                };
                 if let Some(t) = inner.tasks.get_mut(&candidate_id) {
+                    if !caps.can_serve(t) {
+                        q.push_back(candidate_id);
+                        continue;
+                    }
                     t.assigned_device_id = Some(device_id.to_string());
                     t.assigned_at_ms = Self::now_ms();
                     t.status = TaskStatus::Assigned;
@@ -301,13 +367,23 @@ impl TaskStore {
                 }
                 // Stale id (task no longer exists) — drop it.
             }
-            // Queue is empty now — remove the entry to save memory.
-            inner.pending_by_device.remove(device_id);
+            // Keep tasks that this device cannot currently serve. A later
+            // heartbeat may advertise a restored SOTER capability.
+            if q.is_empty() {
+                inner.pending_by_device.remove(device_id);
+            }
         }
 
         // 2) Try wildcard (any-device) queue.
-        while let Some(candidate_id) = inner.pending_any.pop_front() {
+        for _ in 0..inner.pending_any.len() {
+            let Some(candidate_id) = inner.pending_any.pop_front() else {
+                break;
+            };
             if let Some(t) = inner.tasks.get_mut(&candidate_id) {
+                if !caps.can_serve(t) {
+                    inner.pending_any.push_back(candidate_id);
+                    continue;
+                }
                 t.assigned_device_id = Some(device_id.to_string());
                 t.assigned_at_ms = Self::now_ms();
                 t.status = TaskStatus::Assigned;
@@ -419,11 +495,12 @@ impl TaskStore {
         for id in stale {
             if let Some(t) = inner.tasks.get_mut(&id) {
                 // A lost poller does not prove its secure-world call ended.
-                // Never replay an agreement that may still be in flight.
-                if t.is_agreement() {
+                // Never replay an agreement or SOTER operation that may still
+                // be in flight in the real TEE.
+                if t.must_not_replay() {
                     t.status = TaskStatus::Failed;
                     t.result = Some(serde_json::json!({
-                        "error": "agreement assignment lost; execution state unknown; not retried"
+                        "error": "sensitive assignment lost; execution state unknown; not retried"
                     }));
                     t.completed_at_ms = now;
                     inner.failed_queue.push_back((now, id.clone()));
@@ -557,6 +634,27 @@ impl TaskStore {
         }
     }
 
+    /// Withdraw a timed-out SOTER task only if B has not claimed it. An
+    /// assigned task may already be inside the vendor HAL and must be left
+    /// alone; its late result is evidence, not permission to replay it.
+    pub async fn cancel_pending_task(&self, task_id: &str) -> bool {
+        let mut inner = self.inner.lock().await;
+        if !inner
+            .tasks
+            .get(task_id)
+            .is_some_and(|task| task.status == TaskStatus::Pending)
+        {
+            return false;
+        }
+        Self::remove_task_locked(&mut inner, task_id);
+        for queue in inner.pending_by_device.values_mut() {
+            queue.retain(|id| id != task_id);
+        }
+        inner.pending_by_device.retain(|_, queue| !queue.is_empty());
+        inner.pending_any.retain(|id| id != task_id);
+        true
+    }
+
     pub async fn get_active_machine_id(&self, device_id: &str) -> Option<String> {
         let inner = self.inner.lock().await;
         let now = Self::now_ms();
@@ -587,6 +685,18 @@ impl TaskStore {
             .is_some_and(|device| now.saturating_sub(device.last_seen_ms) < 120_000)
     }
 
+    /// A SOTER task must stay on its named device; absent/negative capability
+    /// is not permission to substitute another device or a software identity.
+    pub async fn can_route_soter(&self, device_id: &str, needs_sign: bool) -> bool {
+        let inner = self.inner.lock().await;
+        let now = Self::now_ms();
+        inner.devices.get(device_id).is_some_and(|device| {
+            now.saturating_sub(device.last_seen_ms) < 120_000
+                && device.soter == Some(true)
+                && !(needs_sign && device.soter_nosign == Some(true))
+        })
+    }
+
     pub async fn get_device_load(&self, device_id: &str) -> u64 {
         let inner = self.inner.lock().await;
         inner
@@ -601,6 +711,103 @@ impl TaskStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn soter_caps_distinguish_unreported_from_disabled_and_sign_limited() {
+        assert_eq!(DeviceCaps::parse(None).soter, None);
+        assert_eq!(DeviceCaps::parse(Some("")).soter, Some(false));
+        let caps = DeviceCaps::parse(Some("soter,soter_nosign"));
+        assert_eq!(caps.soter, Some(true));
+        assert_eq!(caps.soter_nosign, Some(true));
+        assert_eq!(caps.soter_sign, Some(false));
+    }
+
+    #[tokio::test]
+    async fn soter_tasks_require_named_device_capability_and_preserve_sign_boundary() {
+        let store = store();
+        let identity = store
+            .create_task("soter", json!({"op": "get_device_id"}), "dev", None)
+            .await;
+        assert!(store
+            .pop_for_b_with_caps(
+                "other",
+                "m2",
+                Duration::ZERO,
+                DeviceCaps::parse(Some("soter,soter_sign")),
+            )
+            .await
+            .is_none());
+        assert!(store
+            .pop_for_b_with_caps("dev", "m1", Duration::ZERO, DeviceCaps::parse(Some("")))
+            .await
+            .is_none());
+        assert!(!store.can_route_soter("dev", false).await);
+        let caps = DeviceCaps::parse(Some("soter,soter_nosign"));
+        let served = store
+            .pop_for_b_with_caps("dev", "m1", Duration::ZERO, caps)
+            .await
+            .unwrap();
+        assert_eq!(served.task_id, identity);
+        assert!(!store.can_route_soter("dev", true).await);
+
+        let sign = store
+            .create_task("soter", json!({"op": "finish_sign"}), "dev", None)
+            .await;
+        assert!(store
+            .pop_for_b_with_caps("dev", "m1", Duration::ZERO, caps)
+            .await
+            .is_none());
+        let eligible = DeviceCaps::parse(Some("soter,soter_sign"));
+        assert!(store.can_route_soter("dev", false).await);
+        let served = store
+            .pop_for_b_with_caps("dev", "m1", Duration::ZERO, eligible)
+            .await
+            .unwrap();
+        assert_eq!(served.task_id, sign);
+    }
+
+    #[tokio::test]
+    async fn lost_soter_assignment_is_never_replayed() {
+        let store = store();
+        let id = store
+            .create_task("soter", json!({"op": "generate_auth_key_pair"}), "dev", None)
+            .await;
+        let caps = DeviceCaps::parse(Some("soter"));
+        store
+            .pop_for_b_with_caps("dev", "m1", Duration::ZERO, caps)
+            .await
+            .unwrap();
+        {
+            let mut inner = store.inner.lock().await;
+            inner.tasks.get_mut(&id).unwrap().assigned_at_ms = 1;
+            inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
+            TaskStore::reclaim_locked(&mut inner, Duration::ZERO);
+        }
+        let result = store.wait_for_result(&id, Duration::ZERO).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("not retried"));
+        assert!(store
+            .pop_for_b_with_caps("dev", "m1", Duration::ZERO, caps)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn timed_out_pending_soter_is_withdrawn_before_a_late_poll() {
+        let store = store();
+        let id = store
+            .create_task("soter", json!({"op": "generate_auth_key_pair"}), "dev", None)
+            .await;
+        assert!(store.cancel_pending_task(&id).await);
+        assert!(store
+            .pop_for_b_with_caps(
+                "dev",
+                "m1",
+                Duration::ZERO,
+                DeviceCaps::parse(Some("soter")),
+            )
+            .await
+            .is_none());
+    }
 
     fn store() -> Arc<TaskStore> {
         TaskStore::new(60, 60, 100, 60)

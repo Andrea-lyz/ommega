@@ -3313,8 +3313,10 @@ dependencies = [
 name = "soter-ta"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "hex",
  "rand_core 0.6.4",
+ "reqwest",
  "rsa",
  "serde",
  "serde_json",

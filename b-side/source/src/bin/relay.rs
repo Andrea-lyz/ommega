@@ -146,6 +146,9 @@ struct RelayConfig {
     device_id: String,
     machine_id: String,
     token: String,
+    soter_enabled: bool,
+    soter_allow_mutation: bool,
+    soter_probe: Option<ommegaclient_b::caps::SignProbeTarget>,
 }
 
 impl RelayConfig {
@@ -174,6 +177,33 @@ fn file_mtime(path: &str) -> Option<u64> {
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
+}
+
+fn parse_bool(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn parse_soter_probe(
+    uid: Option<&str>,
+    alias: Option<&str>,
+) -> Option<ommegaclient_b::caps::SignProbeTarget> {
+    let (uid, alias) = (uid?, alias?.trim());
+    if alias.is_empty() {
+        return None;
+    }
+    match uid.trim().parse::<i32>() {
+        Ok(uid) if uid >= 0 => Some(ommegaclient_b::caps::SignProbeTarget {
+            uid,
+            alias: alias.to_string(),
+        }),
+        _ => {
+            log::warn!("invalid SOTER probe UID; ignoring probe target");
+            None
+        }
+    }
 }
 
 /// Load config from `/data/adb/ommega/relay.conf` (KEY=VALUE lines).
@@ -209,12 +239,25 @@ fn load_config_from_file() -> Result<RelayConfig> {
         .get("OMMEGA_RELAY_MACHINE_ID")
         .cloned()
         .unwrap_or_default();
+    let soter_enabled = m
+        .get("OMMEGA_RELAY_SOTER_ENABLED")
+        .is_some_and(|v| parse_bool(v));
+    let soter_allow_mutation = m
+        .get("OMMEGA_RELAY_SOTER_MUTATION")
+        .is_some_and(|v| parse_bool(v));
+    let soter_probe = parse_soter_probe(
+        m.get("OMMEGA_RELAY_SOTER_PROBE_UID").map(String::as_str),
+        m.get("OMMEGA_RELAY_SOTER_PROBE_ALIAS").map(String::as_str),
+    );
     let server = server.trim_end_matches('/').to_string();
     Ok(RelayConfig {
         server,
         device_id,
         machine_id,
         token,
+        soter_enabled,
+        soter_allow_mutation,
+        soter_probe,
     })
 }
 
@@ -302,12 +345,20 @@ fn load_config() -> Result<(RelayConfig, &'static str)> {
     let token = env("OMMEGA_RELAY_TOKEN")
         .context("OMMEGA_RELAY_TOKEN not set and relay.conf unreadable")?;
     let machine_id = env("OMMEGA_RELAY_MACHINE_ID").unwrap_or_default();
+    let soter_enabled = env("OMMEGA_RELAY_SOTER_ENABLED").is_some_and(|v| parse_bool(&v));
+    let soter_allow_mutation = env("OMMEGA_RELAY_SOTER_MUTATION").is_some_and(|v| parse_bool(&v));
+    let probe_uid = env("OMMEGA_RELAY_SOTER_PROBE_UID");
+    let probe_alias = env("OMMEGA_RELAY_SOTER_PROBE_ALIAS");
+    let soter_probe = parse_soter_probe(probe_uid.as_deref(), probe_alias.as_deref());
     let server = server.trim_end_matches('/').to_string();
     let cfg = RelayConfig {
         server,
         device_id,
         machine_id,
         token,
+        soter_enabled,
+        soter_allow_mutation,
+        soter_probe,
     };
     cfg.validate()?;
     Ok((cfg, "env"))
@@ -468,12 +519,21 @@ impl PollError {
     }
 }
 
+fn reported_caps(cfg: &RelayConfig) -> String {
+    if cfg.soter_enabled {
+        ommegaclient_b::caps::report(cfg.soter_probe.as_ref())
+    } else {
+        String::new()
+    }
+}
+
 fn poll_tasks(
     cfg: &RelayConfig,
 ) -> std::result::Result<Option<(String, String, Value)>, PollError> {
+    let caps = reported_caps(cfg);
     let url = format!(
-        "{}/api/b/poll/?device_id={}&machine_id={}&timeout={}",
-        cfg.server, cfg.device_id, cfg.machine_id, POLL_TIMEOUT_SEC
+        "{}/api/b/poll/?device_id={}&machine_id={}&timeout={}&caps={}",
+        cfg.server, cfg.device_id, cfg.machine_id, POLL_TIMEOUT_SEC, caps
     );
     let headers = vec![("X-Relay-Token".to_string(), cfg.token.clone())];
     let response = http_request("GET", &url, &headers, None)
@@ -1002,12 +1062,18 @@ fn handle_agree(_task_type: &str, payload: &Value) -> Result<Value> {
 }
 
 fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Value) -> Result<()> {
-    let handler: fn(&str, &Value) -> Result<Value> = match task_type {
-        "profile" => handle_profile,
-        "attest" => handle_generate_attest,
-        "sign" => handle_sign,
-        "decrypt" => handle_decrypt,
-        "agree" => handle_agree,
+    let handler: fn(&RelayConfig, &str, &Value) -> Result<Value> = match task_type {
+        "profile" => |_cfg, task_type, payload| handle_profile(task_type, payload),
+        "attest" => |_cfg, task_type, payload| handle_generate_attest(task_type, payload),
+        "sign" => |_cfg, task_type, payload| handle_sign(task_type, payload),
+        "decrypt" => |_cfg, task_type, payload| handle_decrypt(task_type, payload),
+        "agree" => |_cfg, task_type, payload| handle_agree(task_type, payload),
+        "soter" => |cfg, _task_type, payload| {
+            if !cfg.soter_enabled {
+                return Err(anyhow!("B-side SOTER forwarding is disabled"));
+            }
+            ommegaclient_b::soter::handle(payload, cfg.soter_allow_mutation)
+        },
         other => {
             log::warn!("task {task_id} type={other} not supported, reporting failure");
             post_result(
@@ -1021,7 +1087,7 @@ fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Valu
 
     let start = std::time::Instant::now();
     log::info!("processing task {task_id} type={task_type}");
-    let result = match handler(task_type, payload) {
+    let result = match handler(cfg, task_type, payload) {
         Ok(v) => v,
         Err(e) => {
             log::error!("task {task_id} type={task_type} failed: {e:#}");
@@ -1226,6 +1292,9 @@ fn main() {
             device_id: String::new(),
             machine_id: String::new(),
             token: String::new(),
+            soter_enabled: false,
+            soter_allow_mutation: false,
+            soter_probe: None,
         });
         log::info!(
             "relay daemon starting (config from {source}) server={} device={} machine={}",
@@ -1250,6 +1319,37 @@ fn main() {
 mod tests {
     use super::*;
     use ommegaclient_b::keymaster::relay_tee::relay_error_result;
+
+    #[test]
+    fn soter_mutation_is_explicit_and_probe_slot_needs_both_fields() {
+        assert!(!parse_bool("0"));
+        assert!(!parse_bool("false"));
+        assert!(parse_bool(" TRUE "));
+        assert!(parse_soter_probe(Some("10001"), None).is_none());
+        assert!(parse_soter_probe(None, Some("AuthKey")).is_none());
+        assert!(parse_soter_probe(Some("-1"), Some("AuthKey")).is_none());
+        assert!(parse_soter_probe(Some("10001"), Some(" ")).is_none());
+        let slot = parse_soter_probe(Some("10001"), Some(" AuthKey ")).unwrap();
+        assert_eq!(slot.uid, 10001);
+        assert_eq!(slot.alias, "AuthKey");
+    }
+
+    #[test]
+    fn disabled_soter_never_probes_or_advertises_caps() {
+        let cfg = RelayConfig {
+            server: String::new(),
+            device_id: String::new(),
+            machine_id: String::new(),
+            token: String::new(),
+            soter_enabled: false,
+            soter_allow_mutation: false,
+            soter_probe: Some(ommegaclient_b::caps::SignProbeTarget {
+                uid: 10001,
+                alias: "AuthKey".to_string(),
+            }),
+        };
+        assert_eq!(reported_caps(&cfg), "");
+    }
 
     fn assert_mgf_error(value: Value) {
         let error = parse_mgf_digest(Some(&value)).unwrap_err();

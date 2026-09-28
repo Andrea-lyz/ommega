@@ -552,6 +552,69 @@ pub async fn agree(
     run_a_side_task(&state, "agree", &body).await
 }
 
+/// Forward SOTER to the explicitly named physical B device. Never substitute
+/// another device or mint a server-side identity for an existing key slot.
+pub async fn soter(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(r) = check_auth_class(&state, &headers, Some("a"), RateClass::Relay) {
+        return r;
+    }
+    if !state.cfg.soter_enabled {
+        return json_err(StatusCode::SERVICE_UNAVAILABLE, "remote SOTER is disabled");
+    }
+    if !body.is_object() {
+        return json_err(StatusCode::BAD_REQUEST, "json object body required");
+    }
+    let device_id = body.get("device_id").and_then(Value::as_str).unwrap_or("");
+    let op = body.get("op").and_then(Value::as_str).unwrap_or("");
+    if device_id.is_empty() || op.is_empty() || op.len() > 64 {
+        return json_err(StatusCode::BAD_REQUEST, "device_id and valid op required");
+    }
+    if !state
+        .store
+        .can_route_soter(device_id, matches!(op, "init_sign" | "finish_sign"))
+        .await
+    {
+        return json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "named B device is offline or has not reported SOTER support for this operation",
+        );
+    }
+    let task_id = state
+        .store
+        .create_task("soter", body.clone(), device_id, None)
+        .await;
+    let timeout = Duration::from_secs(state.cfg.soter_wait_result_timeout_secs);
+    match state.store.wait_for_result(&task_id, timeout).await {
+        Some(result) if result.is_object() && result.get("error").is_none() => {
+            // Negative SOTER error_code values (including -26) belong to the
+            // vendor TA and must reach A unchanged; they are not layer faults.
+            Json(result).into_response()
+        }
+        Some(result) => json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            result
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("invalid B-side SOTER result"),
+        ),
+        None => {
+            let pending = state.store.cancel_pending_task(&task_id).await;
+            json_err(
+                StatusCode::GATEWAY_TIMEOUT,
+                if pending {
+                    "SOTER task timed out before B accepted it"
+                } else {
+                    "SOTER task timed out; B execution state is unknown"
+                },
+            )
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client report (A-side diagnostics)
 // ---------------------------------------------------------------------------
@@ -620,6 +683,7 @@ pub struct PollQuery {
     pub device_id: String,
     pub machine_id: Option<String>,
     pub timeout: Option<u64>,
+    pub caps: Option<String>,
 }
 
 pub async fn b_poll(
@@ -650,7 +714,12 @@ pub async fn b_poll(
 
     match state
         .store
-        .pop_for_b(&q.device_id, &machine_id, timeout)
+        .pop_for_b_with_caps(
+            &q.device_id,
+            &machine_id,
+            timeout,
+            crate::queue::DeviceCaps::parse(q.caps.as_deref()),
+        )
         .await
     {
         Some(task) => Json(json!({
@@ -800,6 +869,78 @@ pub async fn admin_cancel_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn soter_state(enabled: bool) -> AppState {
+        AppState {
+            cfg: Arc::new(Config {
+                soter_enabled: enabled,
+                soter_wait_result_timeout_secs: 2,
+                ..Config::default()
+            }),
+            auth: Arc::new(AuthState::new("synthetic-token".into(), 100, 60, true)),
+            store: TaskStore::new(60, 60, 100, 60),
+            fulfill: Fulfill::new(false, None),
+            db: None,
+            geo: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn soter_is_disabled_by_default_and_preserves_vendor_minus_26() {
+        let body = json!({"device_id": "synthetic-b", "op": "finish_sign", "session": 42});
+        let disabled = soter_state(false);
+        let denied = soter(
+            State(disabled.clone()),
+            agreement_headers(),
+            Json(body.clone()),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(disabled.store.counts().await.pending, 0);
+
+        let state = soter_state(true);
+        state
+            .store
+            .pop_for_b_with_caps(
+                "synthetic-b",
+                "mock",
+                Duration::ZERO,
+                crate::queue::DeviceCaps::parse(Some("soter")),
+            )
+            .await;
+        let worker = async {
+            let task = state
+                .store
+                .pop_for_b_with_caps(
+                    "synthetic-b",
+                    "mock",
+                    Duration::from_secs(1),
+                    crate::queue::DeviceCaps::parse(Some("soter")),
+                )
+                .await
+                .unwrap();
+            assert_eq!(task.payload, body);
+            state
+                .store
+                .complete_task(
+                    &task.task_id,
+                    json!({"op": "finish_sign", "error_code": -26, "data": ""}),
+                    "synthetic-b",
+                )
+                .await
+                .unwrap();
+        };
+        let (response, ()) = tokio::join!(
+            soter(State(state.clone()), agreement_headers(), Json(body.clone())),
+            worker
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["error_code"], -26);
+    }
 
     fn agreement_state(server_keybox: bool) -> AppState {
         AppState {

@@ -37,7 +37,7 @@ OUTPUT_ROOT = TARGET_DIR / "soterta-svc"
 
 # binder_ndk for the C API, log for the daemon log lines and the Rust panic
 # path, dl for the platform symbol lookup.
-PLATFORM_LIBS = ("binder_ndk", "log", "dl")
+PLATFORM_LIBS = ("binder_ndk", "log", "dl", "m")
 
 
 def run(command: list[str]) -> None:

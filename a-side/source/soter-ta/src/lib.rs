@@ -11,15 +11,17 @@
 //! Applications that go through the Java `SoterService` then see a healthy,
 //! self-consistent Soter.
 //!
-//! Scope: local checks only. The ASK blob's own signature is produced by the
-//! device ATTK inside the secure world; that signature cannot be reproduced here,
-//! so material minted by this crate is rejected by any server that checks it.
+//! With remote.conf absent or disabled, the local ASK/AuthKey ledger remains
+//! self-consistent across calls and restarts. An optional, separately configured
+//! SOTER relay forwards through the same native HAL service to a remote B-side
+//! TEE. Remote failures do not switch an active slot to this local ledger.
 pub mod blob;
 pub mod dispatch;
 pub mod error;
 pub mod ffi;
 pub mod parcel;
 pub mod platform;
+pub mod remote;
 pub mod state;
 
 pub use error::{

@@ -32,6 +32,9 @@ pub struct Config {
     pub assignment_timeout_secs: u64,
     /// Default A-side wait-for-result timeout, seconds.
     pub wait_result_timeout_secs: u64,
+    /// Remote SOTER is opt-in and uses only the named physical B device.
+    pub soter_enabled: bool,
+    pub soter_wait_result_timeout_secs: u64,
     /// Long-poll default timeout, seconds.
     pub poll_timeout_secs: u64,
     /// MySQL connection URL: `mysql://user:pass@host:port/dbname`
@@ -94,6 +97,8 @@ impl Default for Config {
             attest_source: "physical".to_string(),
             assignment_timeout_secs: 60,
             wait_result_timeout_secs: 120,
+            soter_enabled: false,
+            soter_wait_result_timeout_secs: 15,
             poll_timeout_secs: 30,
             mysql_url: String::new(),
             mysql_time_zone: "+08:00".to_string(),
@@ -226,6 +231,12 @@ impl Config {
         }
         cfg.assignment_timeout_secs = env_u64("RELAY_ASSIGNMENT_TIMEOUT", 60);
         cfg.wait_result_timeout_secs = env_u64("RELAY_WAIT_RESULT_TIMEOUT", 120);
+        cfg.soter_enabled = env_or_dotenv(&dotenv, "RELAY_SOTER_ENABLED")
+            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+        cfg.soter_wait_result_timeout_secs = env_or_dotenv(&dotenv, "RELAY_SOTER_WAIT_RESULT_TIMEOUT")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(15)
+            .clamp(1, 120);
         cfg.poll_timeout_secs = env_u64("RELAY_POLL_TIMEOUT", 30);
         if let Some(v) = env_or_dotenv(&dotenv, "RELAY_MYSQL_URL") {
             cfg.mysql_url = v;

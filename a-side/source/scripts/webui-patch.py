@@ -26,9 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "template" / "webroot" / "assets"
 GLUE = ROOT / "scripts" / "webui-compat.js"
 MARKER = "OMMEGA_TARGET_COMPAT"
+GLUE_HEADER = "\n// ── Ommega detector compatibility policy"
 
 # sha256 of the unpatched bundle this glue was written against.
-BASELINE = "003bf0d913c98dbfc607434865fd9b5bc478a6f18e023d36cadd6bf057e1ad85"
+BASELINE = "88e369b9dcc6176c50dcc2666e0e49c568d966ab9400f4a817f57227d39a9309"
 
 
 def sha256(path: Path) -> str:
@@ -99,6 +100,19 @@ def main() -> int:
         print(path.name + " is already patched")
         return 0
 
+    if patched:
+        start = text.find(GLUE_HEADER)
+        if start < 0:
+            print("ERROR: cannot locate the existing glue boundary", file=sys.stderr)
+            return 1
+        original = text[:start]
+        original_digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        if original_digest != BASELINE:
+            print("ERROR: patched bundle base differs from the recorded baseline", file=sys.stderr)
+            return 1
+        text = original
+        digest = original_digest
+
     if digest != BASELINE:
         if not args.rebaseline:
             print(
@@ -109,10 +123,6 @@ def main() -> int:
             )
             return 1
         rebaseline(path, digest)
-
-    if patched:
-        print("ERROR: " + path.name + " is patched with a different glue", file=sys.stderr)
-        return 1
 
     path.write_text(text + glue, encoding="utf-8")
     if not path.read_text(encoding="utf-8").endswith(glue):
