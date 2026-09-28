@@ -446,10 +446,12 @@ function ommegaSotertaDialog() {
   const dialog = document.createElement("md-dialog");
   dialog.id = "ommega-soterta-dialog";
   dialog.className = "text-field-dialog";
+  dialog.style.cssText = "max-width:min(560px,calc(100vw - 24px));max-height:calc(100dvh - 24px)";
   dialog.innerHTML =
-    '<div slot="headline">Soter 原生 HAL 与远程中继 / Native Soter HAL and relay</div>' +
-    '<div slot="content" style="display:flex;flex-direction:column;gap:12px">' +
+    '<div slot="headline">Soter HAL</div>' +
+    '<div slot="content" style="display:flex;flex-direction:column;gap:12px;max-height:min(60dvh,520px);min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-bottom:8px">' +
       '<div id="ommega-soterta-report" style="font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;opacity:.85"></div>' +
+      '<md-text-button id="ommega-soterta-refresh" style="align-self:flex-end">刷新 / Refresh</md-text-button>' +
       '<label class="config-option" style="display:flex;align-items:center;gap:8px">' +
         '<md-checkbox id="ommega-soterta-enabled" touch-target="wrapper"></md-checkbox>' +
         '<span>启用软件 TA / Enable software TA</span>' +
@@ -473,8 +475,7 @@ function ommegaSotertaDialog() {
       '<div id="ommega-soter-remote-result" style="font-size:12px;white-space:pre-wrap;word-break:break-word"></div>' +
     '</div>' +
     '<div slot="actions">' +
-      '<md-text-button id="ommega-soter-remote-save">保存 Soter 远程配置 / Save relay</md-text-button>' +
-      '<md-text-button id="ommega-soterta-refresh">刷新 / Refresh</md-text-button>' +
+      '<md-text-button id="ommega-soter-remote-save">保存 / Save</md-text-button>' +
       '<md-text-button id="ommega-soterta-close">关闭 / Close</md-text-button>' +
     '</div>';
   wrapper.appendChild(dialog);
