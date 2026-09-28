@@ -119,10 +119,13 @@ fn request_body(config: &Config, tx: u32, request: &Request) -> Result<Value, St
         TX_INIT_SIGN => "init_sign",
         TX_REMOVE_ALL_UID_KEY => "remove_all_uid_key",
         TX_REMOVE_AUTH => "remove_auth_key",
-        // The QTI B-side HAL does not expose a verified ATTK trio. Never
-        // silently answer these with the local TA while using a remote ASK.
+        // The ATTK trio is this device's own factory key pair and has no relay
+        // operation: the QTI B-side HAL exposes no verified ATTK, and `ffi`
+        // answers these three codes from the local ledger before it ever
+        // consults the relay. Reaching this point means the caller skipped that
+        // split, so refuse instead of inventing a remote ATTK.
         TX_EXPORT_ATTK | TX_GENERATE_ATTK | TX_VERIFY_ATTK => {
-            return Err("remote ATTK operation is unsupported".to_string())
+            return Err("ATTK transactions are answered locally, not relayed".to_string())
         }
         _ => return Err("unknown SOTER transaction".to_string()),
     };
@@ -146,7 +149,9 @@ fn request_body(config: &Config, tx: u32, request: &Request) -> Result<Value, St
         Request::Session(session) => {
             body["session"] = json!(*session as i64);
         }
-        Request::Magic(_) => return Err("remote ATTK operation is unsupported".to_string()),
+        Request::Magic(_) => {
+            return Err("ATTK transactions are answered locally, not relayed".to_string())
+        }
     }
     Ok(body)
 }
@@ -165,12 +170,26 @@ fn decode_reply(tx: u32, body: &Value) -> Result<Outcome, String> {
             .ok_or("remote SOTER init_sign reply has no valid session")?;
         return Ok(Outcome::Init { code, session });
     }
+    if tx == dispatch::TX_GET_DEVICE_ID {
+        let payload = match body.get("data").and_then(Value::as_str) {
+            Some(encoded) => base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| "remote SOTER reply has invalid base64")?,
+            None if code != 0 => Vec::new(),
+            None => return Err("remote SOTER success reply is missing data".to_string()),
+        };
+        let data = device_id_bytes(&payload);
+        return Ok(Outcome::Buffer {
+            code,
+            field: data.len() as i32,
+            data,
+        });
+    }
     if matches!(
         tx,
         dispatch::TX_EXPORT_ASK
             | dispatch::TX_EXPORT_AUTH
             | dispatch::TX_FINISH_SIGN
-            | dispatch::TX_GET_DEVICE_ID
     ) {
         let data = match body.get("data").and_then(Value::as_str) {
             Some(encoded) => base64::engine::general_purpose::STANDARD
@@ -187,6 +206,29 @@ fn decode_reply(tx: u32, body: &Value) -> Result<Outcome, String> {
         return Ok(Outcome::Buffer { code, data, field });
     }
     Ok(Outcome::Code(code))
+}
+
+/// The relay answers `get_device_id` the way the Java face spells it: 32 ASCII
+/// hex characters with a trailing NUL (captured from the public relay,
+/// 2026-09-28: 33 bytes for `090000005171734c42866bea148b21f5`). This TA replaces
+/// the HAL underneath that Java layer, and a live HAL answers the transaction
+/// with the 16 raw bytes whose hex is that string - the same bytes
+/// [`crate::state::TaState::device_id`] hands out locally, and the same hex
+/// every blob carries as `cpu_id`. Handing the spelling up instead would let one
+/// device report two different ids.
+fn device_id_bytes(payload: &[u8]) -> Vec<u8> {
+    let kept = payload
+        .iter()
+        .rev()
+        .skip_while(|byte| **byte == 0 || byte.is_ascii_whitespace())
+        .count();
+    let trimmed = &payload[..kept];
+    match std::str::from_utf8(trimmed) {
+        Ok(text) if text.len() == 32 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            hex::decode(text).unwrap_or_else(|_| payload.to_vec())
+        }
+        _ => payload.to_vec(),
+    }
 }
 
 fn http_client(tls_insecure: bool) -> Result<reqwest::blocking::Client, String> {
@@ -292,8 +334,13 @@ mod tests {
                 field: 0,
             }
         );
+        // The ATTK trio is answered from the local ledger (ffi never forwards
+        // it), so the relay mapping must not invent a remote ATTK operation.
         assert!(
             request_body(&Config::default(), dispatch::TX_EXPORT_ATTK, &Request::None).is_err()
+        );
+        assert!(
+            request_body(&Config::default(), dispatch::TX_VERIFY_ATTK, &Request::None).is_err()
         );
         let signed = decode_reply(
             dispatch::TX_INIT_SIGN,
@@ -305,6 +352,45 @@ mod tests {
             Outcome::Init {
                 code: 0,
                 session: (-2i64) as u64
+            }
+        );
+    }
+
+    #[test]
+    fn the_relayed_device_id_is_handed_up_as_the_raw_hal_bytes() {
+        // The relay spells the id the way the Java face does: 32 hex characters
+        // plus a NUL, base64-wrapped (public relay capture, 2026-09-28).
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(b"090000005171734c42866bea148b21f5\0");
+        assert_eq!(
+            decode_reply(
+                dispatch::TX_GET_DEVICE_ID,
+                &json!({
+                    "error_code": 0,
+                    "data": encoded,
+                    "length": 33,
+                    "text": "090000005171734c42866bea148b21f5"
+                }),
+            )
+            .unwrap(),
+            Outcome::Buffer {
+                code: 0,
+                data: hex::decode("090000005171734c42866bea148b21f5").unwrap(),
+                field: 16,
+            }
+        );
+        // A reply that already carries raw bytes is passed through untouched.
+        let raw = base64::engine::general_purpose::STANDARD.encode([0x0au8, 0xff, 0x00]);
+        assert_eq!(
+            decode_reply(
+                dispatch::TX_GET_DEVICE_ID,
+                &json!({"error_code": 0, "data": raw, "length": 3}),
+            )
+            .unwrap(),
+            Outcome::Buffer {
+                code: 0,
+                data: vec![0x0a, 0xff, 0x00],
+                field: 3,
             }
         );
     }

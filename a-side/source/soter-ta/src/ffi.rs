@@ -322,7 +322,7 @@ pub unsafe extern "C" fn soterta_handle(
         return SOTERTA_ERROR;
     }
     let remote_config = remote::Config::load();
-    let use_remote = match &remote_config {
+    let relay_active = match &remote_config {
         Ok(config) if config.enabled => {
             REMOTE_WAS_ACTIVE.store(true, Ordering::Release);
             true
@@ -334,6 +334,13 @@ pub unsafe extern "C" fn soterta_handle(
         Ok(_) => REMOTE_WAS_ACTIVE.load(Ordering::Acquire),
         Err(_) => true,
     };
+    // The ATTK trio is this device's own factory key pair, not a relayed
+    // operation: the relay protocol has no ATTK operation (the QTI B-side HAL
+    // exposes no verified ATTK), while the vendor engineering-mode key check
+    // reads `verifyAttkKeyPair` on *this* device through cryptoeng. Answer those
+    // three codes from the local ledger even while the relay is active, so the
+    // engineering mode sees a present device key instead of a relayed failure.
+    let use_remote = relays(relay_active, tx);
     if use_remote {
         let answer = match remote_config {
             Ok(config) if config.enabled => remote::forward(&config, tx, &request),
@@ -458,4 +465,37 @@ pub unsafe extern "C" fn soterta_last_error(buffer: *mut c_char, capacity: i32) 
     std::ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buffer, limit);
     *buffer.add(limit) = 0;
     limit as i32
+}
+
+/// Whether `tx` goes to the relay instead of the local ledger.
+///
+/// The ATTK trio stays local even while the relay is on: it is this device's own
+/// factory key pair, the relay protocol has no ATTK operation (the QTI B-side
+/// HAL exposes no verified ATTK), and the vendor engineering-mode key check
+/// reads `verifyAttkKeyPair` on this device through cryptoeng. Routing those
+/// three codes to a relay whose protocol cannot carry them is what left the
+/// engineering-mode SOTER key red while the software TA was otherwise live.
+fn relays(relay_active: bool, tx: u32) -> bool {
+    relay_active && !dispatch::ATTK_TRANSACTIONS.contains(&tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_relay_never_takes_the_attk_trio_off_device() {
+        for tx in dispatch::ATTK_TRANSACTIONS {
+            assert!(!relays(true, tx), "ATTK tx {tx} must stay local");
+            assert!(!relays(false, tx));
+        }
+        for tx in [
+            dispatch::TX_EXPORT_ASK,
+            dispatch::TX_GET_DEVICE_ID,
+            dispatch::TX_FINISH_SIGN,
+        ] {
+            assert!(relays(true, tx));
+            assert!(!relays(false, tx));
+        }
+    }
 }
