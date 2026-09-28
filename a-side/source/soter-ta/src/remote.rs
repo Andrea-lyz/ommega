@@ -187,9 +187,7 @@ fn decode_reply(tx: u32, body: &Value) -> Result<Outcome, String> {
     }
     if matches!(
         tx,
-        dispatch::TX_EXPORT_ASK
-            | dispatch::TX_EXPORT_AUTH
-            | dispatch::TX_FINISH_SIGN
+        dispatch::TX_EXPORT_ASK | dispatch::TX_EXPORT_AUTH | dispatch::TX_FINISH_SIGN
     ) {
         let data = match body.get("data").and_then(Value::as_str) {
             Some(encoded) => base64::engine::general_purpose::STANDARD
@@ -360,8 +358,8 @@ mod tests {
     fn the_relayed_device_id_is_handed_up_as_the_raw_hal_bytes() {
         // The relay spells the id the way the Java face does: 32 hex characters
         // plus a NUL, base64-wrapped (public relay capture, 2026-09-28).
-        let encoded = base64::engine::general_purpose::STANDARD
-            .encode(b"090000005171734c42866bea148b21f5\0");
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(b"090000005171734c42866bea148b21f5\0");
         assert_eq!(
             decode_reply(
                 dispatch::TX_GET_DEVICE_ID,
