@@ -26,6 +26,9 @@ function loadGlue() {
   const element = { checked: false, onclick: undefined, addEventListener() {} };
   const context = {
     console,
+    TextEncoder,
+    btoa,
+    URL,
     setTimeout,
     Mi: async () => undefined,
     _: async () => ({ stdout: "" }),
@@ -272,4 +275,42 @@ test("the switch state is reported honestly", () => {
 
   const unreadable = context.ommegaSotertaReport(false, false, null);
   assert.match(unreadable, /Could not read the switch state/);
+});
+
+test("Soter relay settings are separate from the Integrity config", async () => {
+  const context = loadGlue();
+  assert.equal(vm.runInContext("OMMEGA_SOTER_REMOTE_CONFIG", context),
+    "/data/adb/ommega/soterta/remote.conf");
+  const parsed = context.ommegaSoterRemoteParse(
+    "enabled=true\nurl=https://soter.example\ntoken=soter-only\ndevice_id=b-two\nuid_map=10001=10002",
+  );
+  assert.equal(parsed.url, "https://soter.example");
+  assert.equal(parsed.device_id, "b-two");
+  assert.equal(parsed.enabled, true);
+
+  const values = {
+    "ommega-soter-remote-enabled": {checked: true},
+    "ommega-soter-remote-tls-insecure": {checked: false},
+    "ommega-soter-remote-url": {value: "https://soter.example"},
+    "ommega-soter-remote-token": {value: "soter-only"},
+    "ommega-soter-remote-device": {value: "b-two"},
+    "ommega-soter-remote-uid-map": {value: "10001=10002"},
+    "ommega-soter-remote-result": {textContent: ""},
+  };
+  context.document.getElementById = id => values[id] || null;
+  let command = "";
+  context._ = async value => {
+    command = value;
+    return {errno: 0};
+  };
+  await context.ommegaSoterRemoteSave();
+  assert.match(command, /remote\.conf\.tmp/);
+  assert.doesNotMatch(command, /soter-only/, "the token must not become shell syntax");
+  assert.doesNotMatch(command, /ommegadata\/config/, "Integrity config must stay separate");
+  const encoded = command.match(/printf '%s' '([^']+)'/)[1];
+  const body = Buffer.from(encoded, "base64").toString("utf8");
+  assert.match(body, /^enabled=true$/m);
+  assert.match(body, /^token=soter-only$/m);
+  assert.match(body, /^uid_map=10001=10002$/m);
+  assert.doesNotMatch(body, /^remote:/m);
 });

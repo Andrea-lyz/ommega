@@ -223,9 +223,9 @@ async function ommegaRefreshHealth() {
     report = "无法读取中继状态（remote-health.json 解析失败） / " +
       "Could not read the relay status (remote-health.json is unreadable).";
   }
-  panel.textContent = report === ""
+  panel.textContent = "Integrity / KeyMint 远程中继\n" + (report === ""
     ? "中继状态：暂无失败记录 / Relay status: no failures recorded yet."
-    : report;
+    : report);
 }
 
 // Refresh whenever the remote config dialog opens. typeof keeps the glue safe
@@ -245,13 +245,13 @@ if (typeof loadRemoteConfig === "function") {
 // read the device as tampered with. The module's soterta.sh watchdog answers
 // those calls from a software TA while the stock HAL is stopped.
 //
-// This panel owns the switch and nothing else: the enable flag and the published
-// status are plain files, so the UI needs no module path, no shell quoting and no
-// privileged command of its own. Local checks only; the server-side check path
-// stays impossible, and turning the switch off rolls the stock HAL back.
+// The software TA owns the native HAL name in both modes. Its own remote.conf
+// selects local material or a separate SOTER relay without changing the
+// Integrity relay configuration managed by the other dialog.
 const OMMEGA_SOTERTA_DIR = "/data/adb/ommega/soterta";
 const OMMEGA_SOTERTA_FLAG = OMMEGA_SOTERTA_DIR + "/enabled";
 const OMMEGA_SOTERTA_STATUS = OMMEGA_SOTERTA_DIR + "/status.json";
+const OMMEGA_SOTER_REMOTE_CONFIG = OMMEGA_SOTERTA_DIR + "/remote.conf";
 // The watchdog rewrites status.json on every change and otherwise every 30 s, so
 // an old stamp means the watchdog is gone, not that nothing happened.
 const OMMEGA_SOTERTA_STALE = 120;
@@ -342,8 +342,8 @@ function ommegaSotertaReport(known, enabled, status) {
     lines.push("原厂 HAL：" + (status.hal || "unknown") + " / Stock HAL: " + (status.hal || "unknown"));
   }
   if (status.device_id && status.device_id !== "-") {
-    lines.push("设备 ID：" + status.device_id + "（账本：" +
-      (status.ledger ? "已就绪" : "缺失，下次启动会重建") + "）/ Device id: " +
+    lines.push("本地账本设备 ID：" + status.device_id + "（账本：" +
+      (status.ledger ? "已就绪" : "缺失，下次启动会重建") + "）/ Local ledger device id: " +
       status.device_id + " (ledger: " +
       (status.ledger ? "ready" : "missing; it is regenerated on the next start") + ")");
   }
@@ -446,22 +446,36 @@ function ommegaSotertaDialog() {
   const dialog = document.createElement("md-dialog");
   dialog.id = "ommega-soterta-dialog";
   dialog.className = "text-field-dialog";
+  dialog.style.cssText = "max-width:min(560px,calc(100vw - 24px));max-height:calc(100dvh - 24px)";
   dialog.innerHTML =
-    '<div slot="headline">Soter 本地检查 / Soter local check</div>' +
-    '<div slot="content" style="display:flex;flex-direction:column;gap:12px">' +
+    '<div slot="headline">Soter HAL</div>' +
+    '<div slot="content" style="display:flex;flex-direction:column;gap:12px;max-height:min(60dvh,520px);min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-bottom:8px">' +
       '<div id="ommega-soterta-report" style="font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;opacity:.85"></div>' +
+      '<md-text-button id="ommega-soterta-refresh" style="align-self:flex-end">刷新 / Refresh</md-text-button>' +
       '<label class="config-option" style="display:flex;align-items:center;gap:8px">' +
         '<md-checkbox id="ommega-soterta-enabled" touch-target="wrapper"></md-checkbox>' +
         '<span>启用软件 TA / Enable software TA</span>' +
       '</label>' +
       '<div style="font-size:11px;line-height:1.4;opacity:.7">' +
-        '只覆盖本地检查；服务器校验路径做不到。开关打开后原厂 Soter HAL 会被停止、由软件 TA 接管服务名，关闭即回滚。 / ' +
-        'Local checks only; the server-side check path stays impossible. While the switch is on, the stock Soter HAL is ' +
-        'stopped and the software TA takes its service name over; turning it off rolls back.' +
+        '软件 TA 接管原生 Soter HAL。远程关闭时使用本地自洽账本；远程开启后使用下方独立服务器，远程失败不会混用本地密钥。 / ' +
+        'The software TA owns the native HAL. Remote off uses its local ledger; remote on uses the separate server below and fails closed if that relay fails.' +
       '</div>' +
+      '<label class="config-option" style="display:flex;align-items:center;gap:8px">' +
+        '<md-checkbox id="ommega-soter-remote-enabled" touch-target="wrapper"></md-checkbox>' +
+        '<span>Soter 远程中继 / Remote Soter relay</span>' +
+      '</label>' +
+      '<md-outlined-text-field id="ommega-soter-remote-url" label="Soter 服务器 URL" type="url"></md-outlined-text-field>' +
+      '<md-outlined-text-field id="ommega-soter-remote-device" label="Soter B 设备 ID"></md-outlined-text-field>' +
+      '<md-outlined-text-field id="ommega-soter-remote-token" label="Soter Token" type="password"></md-outlined-text-field>' +
+      '<md-outlined-text-field id="ommega-soter-remote-uid-map" label="UID 映射（A=B，可留空）"></md-outlined-text-field>' +
+      '<label class="config-option" style="display:flex;align-items:center;gap:8px">' +
+        '<md-checkbox id="ommega-soter-remote-tls-insecure" touch-target="wrapper"></md-checkbox>' +
+        '<span>允许自签 TLS 证书 / Accept self-signed TLS</span>' +
+      '</label>' +
+      '<div id="ommega-soter-remote-result" style="font-size:12px;white-space:pre-wrap;word-break:break-word"></div>' +
     '</div>' +
     '<div slot="actions">' +
-      '<md-text-button id="ommega-soterta-refresh">刷新 / Refresh</md-text-button>' +
+      '<md-text-button id="ommega-soter-remote-save">保存 / Save</md-text-button>' +
       '<md-text-button id="ommega-soterta-close">关闭 / Close</md-text-button>' +
     '</div>';
   wrapper.appendChild(dialog);
@@ -469,6 +483,8 @@ function ommegaSotertaDialog() {
   if (box) box.addEventListener("click", () => { ommegaSotertaApply(); });
   const refresh = dialog.querySelector("#ommega-soterta-refresh");
   if (refresh) refresh.addEventListener("click", () => { ommegaSotertaRefresh(false); });
+  const saveRemote = dialog.querySelector("#ommega-soter-remote-save");
+  if (saveRemote) saveRemote.addEventListener("click", () => { ommegaSoterRemoteSave(); });
   const close = dialog.querySelector("#ommega-soterta-close");
   if (close) close.addEventListener("click", () => { dialog.close(); });
   return dialog;
@@ -478,7 +494,7 @@ function ommegaSotertaOpen() {
   const dialog = ommegaSotertaDialog();
   if (!dialog) return Promise.resolve();
   if (typeof dialog.show === "function") dialog.show();
-  return ommegaSotertaRefresh(false);
+  return Promise.all([ommegaSotertaRefresh(false), ommegaSoterRemoteLoad()]);
 }
 
 function ommegaSotertaInstallMenu() {
@@ -488,7 +504,7 @@ function ommegaSotertaInstallMenu() {
   const item = document.createElement("md-menu-item");
   item.id = "ommega-soterta";
   item.className = "automation-menu-item";
-  item.innerHTML = '<div slot="headline">Soter 本地检查 / Soter local check</div>' +
+  item.innerHTML = '<div slot="headline">Soter 原生 HAL 与远程中继 / Native Soter HAL and relay</div>' +
     '<md-icon slot="end">fingerprint</md-icon>';
   item.addEventListener("click", () => {
     // md-menu closes itself when an item is activated; close() is only the nudge
@@ -501,3 +517,110 @@ function ommegaSotertaInstallMenu() {
 }
 
 ommegaSotertaInstallMenu();
+
+function ommegaSoterRemoteParse(raw) {
+  const out = {enabled: false, url: "", token: "", device_id: "", uid_map: "", tls_insecure: false};
+  for (const line of String(raw || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const at = trimmed.indexOf("=");
+    if (at < 0) continue;
+    const key = trimmed.slice(0, at).trim();
+    const value = trimmed.slice(at + 1).trim();
+    if (!(key in out)) continue;
+    if (key === "enabled" || key === "tls_insecure") out[key] = /^(1|true|yes|on)$/i.test(value);
+    else out[key] = value;
+  }
+  return out;
+}
+
+function ommegaSoterRemoteField(id) {
+  const element = document.getElementById("ommega-soter-remote-" + id);
+  return element ? element.value.trim() : "";
+}
+
+async function ommegaSoterRemoteLoad() {
+  const result = document.getElementById("ommega-soter-remote-result");
+  try {
+    const {stdout} = await _('cat "' + OMMEGA_SOTER_REMOTE_CONFIG + '" 2>/dev/null || true');
+    const cfg = ommegaSoterRemoteParse(stdout);
+    for (const key of ["url", "token", "uid_map"]) {
+      const element = document.getElementById("ommega-soter-remote-" + key.replaceAll("_", "-"));
+      if (element) element.value = cfg[key];
+    }
+    const device = document.getElementById("ommega-soter-remote-device");
+    if (device) device.value = cfg.device_id;
+    for (const key of ["enabled", "tls_insecure"]) {
+      const element = document.getElementById("ommega-soter-remote-" + key.replaceAll("_", "-"));
+      if (element) element.checked = cfg[key];
+    }
+    if (result) result.textContent = cfg.enabled
+      ? "Soter 使用独立远程服务器；原生 HAL 仍由软件 TA 接管。"
+      : "Soter 远程已关闭；软件 TA 使用本地账本。";
+  } catch (error) {
+    if (result) result.textContent = "读取 Soter 远程配置失败 / Could not read Soter relay config: " + error;
+  }
+}
+
+function ommegaSoterRemoteBase64(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function ommegaSoterRemoteSave() {
+  const result = document.getElementById("ommega-soter-remote-result");
+  const enabled = !!document.getElementById("ommega-soter-remote-enabled")?.checked;
+  const tls = !!document.getElementById("ommega-soter-remote-tls-insecure")?.checked;
+  const url = ommegaSoterRemoteField("url");
+  const token = ommegaSoterRemoteField("token");
+  const device = ommegaSoterRemoteField("device");
+  const uidMap = ommegaSoterRemoteField("uid-map");
+  const values = [url, token, device, uidMap];
+  if (values.some(value => /[\r\n]/.test(value))) {
+    if (result) result.textContent = "配置中不能有换行 / Newlines are not allowed.";
+    return;
+  }
+  if (enabled) {
+    let validUrl = false;
+    try {
+      const parsed = new URL(url);
+      validUrl = ["http:", "https:"].includes(parsed.protocol) && !!parsed.hostname && !parsed.username && !parsed.password;
+    } catch (error) { /* invalid URL */ }
+    if (!validUrl || !token || !device) {
+      if (result) result.textContent = "启用前请填写 HTTP(S) URL、Token 和 B 设备 ID。";
+      return;
+    }
+  }
+  const contents = [
+    "enabled=" + enabled,
+    "url=" + url,
+    "token=" + token,
+    "device_id=" + device,
+    "tls_insecure=" + tls,
+    "uid_map=" + uidMap,
+    "",
+  ].join("\n");
+  // Only base64 characters enter the shell command; no token or URL is ever
+  // interpolated as shell syntax. Same-directory rename makes reads atomic.
+  const encoded = ommegaSoterRemoteBase64(contents);
+  const command = [
+    "set -e",
+    "umask 077",
+    'mkdir -p "' + OMMEGA_SOTERTA_DIR + '"',
+    "printf '%s' '" + encoded + "' | base64 -d > '" + OMMEGA_SOTER_REMOTE_CONFIG + ".tmp'",
+    'chmod 0600 "' + OMMEGA_SOTER_REMOTE_CONFIG + '.tmp"',
+    'mv -f "' + OMMEGA_SOTER_REMOTE_CONFIG + '.tmp" "' + OMMEGA_SOTER_REMOTE_CONFIG + '"',
+  ].join("\n");
+  if (result) result.textContent = "正在保存 Soter 远程配置… / Saving Soter relay config…";
+  try {
+    const response = await _(command);
+    if (Number(response.errno) !== 0) throw new Error(String(response.stderr || "write failed"));
+    if (result) result.textContent = enabled
+      ? "Soter 远程配置已保存；软件 TA 下一笔调用起生效。Integrity 服务器设置未改动。"
+      : "Soter 远程已关闭；软件 TA 下一笔调用起使用本地账本。";
+  } catch (error) {
+    if (result) result.textContent = "保存失败 / Save failed: " + error;
+  }
+}

@@ -11,10 +11,12 @@
 
 use std::ffi::{c_char, CStr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::dispatch::{self, Outcome, Request};
 use crate::platform::{self, Platform};
+use crate::remote;
 use crate::state::TaState;
 
 /// Reply kinds, mirrored by `SOTERTA_KIND_*` in the daemon.
@@ -61,6 +63,9 @@ struct Shared {
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// A missing config after remote mode was active must not silently switch the
+/// native HAL to a different local key identity.
+static REMOTE_WAS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Lock a global, ignoring poisoning: a panic in one transaction must not turn
 /// every later transaction into a failure while the daemon keeps serving.
@@ -257,6 +262,7 @@ pub unsafe extern "C" fn soterta_init(state_path: *const c_char) -> i32 {
         }
     }
     *lock(&SHARED) = Some(Shared { path, state });
+    REMOTE_WAS_ACTIVE.store(false, Ordering::Release);
     clear_error();
     if created {
         1
@@ -311,6 +317,53 @@ pub unsafe extern "C" fn soterta_handle(
             return SOTERTA_ERROR;
         }
     };
+    if lock(&SHARED).is_none() {
+        set_error("state is not initialized");
+        return SOTERTA_ERROR;
+    }
+    let remote_config = remote::Config::load();
+    let relay_active = match &remote_config {
+        Ok(config) if config.enabled => {
+            REMOTE_WAS_ACTIVE.store(true, Ordering::Release);
+            true
+        }
+        Ok(_) if std::path::Path::new(remote::CONFIG_PATH).is_file() => {
+            REMOTE_WAS_ACTIVE.store(false, Ordering::Release);
+            false
+        }
+        Ok(_) => REMOTE_WAS_ACTIVE.load(Ordering::Acquire),
+        Err(_) => true,
+    };
+    // The ATTK trio is this device's own factory key pair, not a relayed
+    // operation: the relay protocol has no ATTK operation (the QTI B-side HAL
+    // exposes no verified ATTK), while the vendor engineering-mode key check
+    // reads `verifyAttkKeyPair` on *this* device through cryptoeng. Answer those
+    // three codes from the local ledger even while the relay is active, so the
+    // engineering mode sees a present device key instead of a relayed failure.
+    let use_remote = relays(relay_active, tx);
+    if use_remote {
+        let answer = match remote_config {
+            Ok(config) if config.enabled => remote::forward(&config, tx, &request),
+            Ok(_) => Err("SOTER remote config disappeared while active".to_string()),
+            Err(error) => Err(error),
+        };
+        let outcome = match answer {
+            Ok(outcome) => {
+                clear_error();
+                outcome
+            }
+            Err(error) => {
+                eprintln!("soterta remote: {error}");
+                set_error(error);
+                let Some(dead) = dispatch::dead_reply(tx) else {
+                    return SOTERTA_UNHANDLED;
+                };
+                dead
+            }
+        };
+        fill(&mut *reply, outcome);
+        return SOTERTA_HANDLED;
+    }
     // The sign transactions read the platform before the ledger lock is taken:
     // the hooks spawn a platform dump, and that must not stall every other
     // transaction the daemon serves.
@@ -412,4 +465,37 @@ pub unsafe extern "C" fn soterta_last_error(buffer: *mut c_char, capacity: i32) 
     std::ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buffer, limit);
     *buffer.add(limit) = 0;
     limit as i32
+}
+
+/// Whether `tx` goes to the relay instead of the local ledger.
+///
+/// The ATTK trio stays local even while the relay is on: it is this device's own
+/// factory key pair, the relay protocol has no ATTK operation (the QTI B-side
+/// HAL exposes no verified ATTK), and the vendor engineering-mode key check
+/// reads `verifyAttkKeyPair` on this device through cryptoeng. Routing those
+/// three codes to a relay whose protocol cannot carry them is what left the
+/// engineering-mode SOTER key red while the software TA was otherwise live.
+fn relays(relay_active: bool, tx: u32) -> bool {
+    relay_active && !dispatch::ATTK_TRANSACTIONS.contains(&tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_relay_never_takes_the_attk_trio_off_device() {
+        for tx in dispatch::ATTK_TRANSACTIONS {
+            assert!(!relays(true, tx), "ATTK tx {tx} must stay local");
+            assert!(!relays(false, tx));
+        }
+        for tx in [
+            dispatch::TX_EXPORT_ASK,
+            dispatch::TX_GET_DEVICE_ID,
+            dispatch::TX_FINISH_SIGN,
+        ] {
+            assert!(relays(true, tx));
+            assert!(!relays(false, tx));
+        }
+    }
 }

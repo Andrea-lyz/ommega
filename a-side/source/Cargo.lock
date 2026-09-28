@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "ommega"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -2178,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "ommega-injector"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3313,8 +3313,10 @@ dependencies = [
 name = "soter-ta"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "hex",
  "rand_core 0.6.4",
+ "reqwest",
  "rsa",
  "serde",
  "serde_json",

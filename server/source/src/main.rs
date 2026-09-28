@@ -164,6 +164,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
         .route("/api/sign/", post(handlers::sign))
         .route("/api/decrypt/", post(handlers::decrypt))
         .route("/api/agree/", post(handlers::agree))
+        .route("/api/soter/", post(handlers::soter))
         .route("/api/client_report/", post(handlers::client_report))
         .route("/api/b/poll/", get(handlers::b_poll))
         .route("/api/b/result/", post(handlers::b_result))

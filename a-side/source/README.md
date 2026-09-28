@@ -21,6 +21,17 @@ relay_server.
   mismatched local profile. Profile or certificate mismatches fail closed unless
   explicit local fallback is enabled.
 
+The native Soter HAL has an independent relay. Enable the software Soter TA in
+the WebUI to take over `vendor.qti.hardware.soter.ISoter/default`; then configure
+its own server, token, B device ID and optional `A=B` UID mapping in the Soter
+dialog. These settings are stored in `/data/adb/ommega/soterta/remote.conf`,
+separate from the KeyMint/Integrity relay config. With Soter remote disabled
+(the default), the same HAL service uses its persistent local ASK/AuthKey ledger.
+With Soter remote enabled, it forwards native HAL calls to `/api/soter/`; a
+transport or server failure returns a failed HAL result rather than silently
+switching that key slot to local material. The stock Soter HAL is restored when
+the software TA switch is turned off.
+
 ## Install and configure
 
 **Android 12 or above required.**
