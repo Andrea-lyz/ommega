@@ -10,21 +10,9 @@
 //!
 //! Auth: `X-Relay-Token` header must match RELAY_TOKEN.
 
-mod admin;
-mod auth;
-mod autokeybox;
-mod card;
-mod cert;
-mod config;
-mod crypto;
-mod db;
-mod fulfill;
-mod geo;
-mod handlers;
-mod keybox;
-mod pay;
-mod queue;
-mod util;
+// The module tree lives in `lib.rs`; the binary reuses it instead of declaring
+// every module a second time. Compiling the same sources twice also made
+// `dead_code` fire on `pub` items that are only unused in the bin target.
 
 use std::sync::Arc;
 
@@ -35,10 +23,13 @@ use axum::Router;
 use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Config;
-use crate::db::Db;
-use crate::fulfill::Fulfill;
-use crate::queue::TaskStore;
+use relay_rs::admin;
+use relay_rs::card;
+use relay_rs::config::Config;
+use relay_rs::db::Db;
+use relay_rs::fulfill::Fulfill;
+use relay_rs::handlers;
+use relay_rs::queue::TaskStore;
 
 /// Serve the embedded background image (compiled into the binary).
 async fn serve_bg() -> impl axum::response::IntoResponse {
@@ -79,7 +70,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
         cfg.completed_ttl_secs,
     );
     // Initialize the Fernet cipher used to encrypt stored private keys.
-    crate::crypto::init_fernet(&cfg.secret_key);
+    relay_rs::crypto::init_fernet(&cfg.secret_key);
     // A configured database is always attached, even when it is unreachable
     // right now. The pool is built lazily and rebuilt after an outage, so MySQL
     // starting later than the relay (or restarting under it) no longer strands
@@ -99,7 +90,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
         Some(db)
     };
     let auth = Arc::new(
-        crate::auth::AuthState::new(
+        relay_rs::auth::AuthState::new(
             cfg.relay_token.clone(),
             cfg.rate_limit_requests,
             cfg.rate_limit_window_secs,
@@ -113,7 +104,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
     let fulfill = Fulfill::new(cfg.server_keybox_enabled(), db.clone());
 
     // Load the offline IP-to-region database (non-fatal if missing).
-    let geo = crate::geo::Ip2Region::load(&cfg.geo_db_path).map(Arc::new);
+    let geo = relay_rs::geo::Ip2Region::load(&cfg.geo_db_path).map(Arc::new);
     if geo.is_none() {
         tracing::warn!(
             "ip2region database not found at '{}'; IP region lookup disabled",
@@ -124,8 +115,8 @@ fn build_router(cfg: &Arc<Config>) -> Router {
     // Start the auto keybox refresh loop (background thread) when enabled.
     if cfg.keybox_refresh_enabled {
         if let Some(db_ref) = db.clone() {
-            crate::autokeybox::set_enabled(true);
-            crate::autokeybox::start_background(
+            relay_rs::autokeybox::set_enabled(true);
+            relay_rs::autokeybox::start_background(
                 db_ref,
                 std::time::Duration::from_secs(cfg.keybox_refresh_interval_secs),
             );
