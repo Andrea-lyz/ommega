@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{watch, Mutex, Notify};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -116,9 +116,18 @@ pub struct TaskCounts {
     pub failed: usize,
 }
 
+/// How far back device activity is summed for load estimation. The queue in
+/// `record_event_locked` is only pruned when a *new* event arrives, so a
+/// device that went quiet keeps stale entries and the read side has to filter
+/// them out.
+const ACTIVITY_WINDOW_MS: u64 = 60_000;
+
 #[derive(Default)]
 struct Inner {
     tasks: HashMap<String, Task>,
+    /// Only open tasks own senders. A published result stays readable in the
+    /// receivers even when the terminal task is pruned before a waiter runs.
+    result_senders: HashMap<String, watch::Sender<Option<Value>>>,
     /// A-side idempotency key (`task_type:request_id`) -> task id.
     request_index: HashMap<String, String>,
     /// Per-device pending queues: device_id -> FIFO of task_ids targeting it.
@@ -218,6 +227,9 @@ impl TaskStore {
         if let Some(key) = request_key {
             inner.request_index.insert(key, task_id.clone());
         }
+        inner
+            .result_senders
+            .insert(task_id.clone(), watch::channel(None).0);
         // Enqueue into the per-device bucket or the wildcard queue.
         if target_device_id.is_empty() {
             inner.pending_any.push_back(task_id.clone());
@@ -235,6 +247,11 @@ impl TaskStore {
 
     fn remove_task_locked(inner: &mut Inner, task_id: &str) -> Option<Task> {
         let task = inner.tasks.remove(task_id)?;
+        // The task left the table, so no result can be published for it any
+        // more: close the waiter's channel instead of leaving it to the full
+        // timeout. A cancelled task keeps the old "no early return" semantics
+        // - see `wait_for_result`.
+        inner.result_senders.remove(task_id);
         if let Some(request_id) = task.request_id.as_ref() {
             inner.request_index.remove(&format!(
                 "{}:{}:{request_id}",
@@ -242,6 +259,20 @@ impl TaskStore {
             ));
         }
         Some(task)
+    }
+
+    /// Publish a task's terminal result under the transition lock, then drop
+    /// the sender. `watch` keeps the value for receivers, so a waiter that
+    /// subscribed before the transition sees it, and one that subscribes after
+    /// sees it through [`TaskStore::wait_for_result`]'s initial check.
+    fn publish_result_locked(inner: &mut Inner, task_id: &str) {
+        if let Some(sender) = inner.result_senders.remove(task_id) {
+            let result = inner
+                .tasks
+                .get(task_id)
+                .and_then(|task| task.result.clone());
+            sender.send_replace(result);
+        }
     }
 
     /// Record a device event (must be called while holding `inner`).
@@ -253,7 +284,7 @@ impl TaskStore {
             .or_default();
         q.push_back((now, weight));
         while let Some((ts, _)) = q.front() {
-            if now.saturating_sub(*ts) > 60_000 {
+            if now.saturating_sub(*ts) > ACTIVITY_WINDOW_MS {
                 q.pop_front();
             } else {
                 break;
@@ -426,6 +457,7 @@ impl TaskStore {
                 t.completed_at_ms = now;
                 inner.failed_queue.push_back((now, id.clone()));
             }
+            Self::publish_result_locked(inner, id);
         }
         // Remove expired tasks from per-device and wildcard queues.
         if !expired_pending.is_empty() {
@@ -493,6 +525,7 @@ impl TaskStore {
             .map(|(id, _)| id.clone())
             .collect();
         for id in stale {
+            let mut ended = false;
             if let Some(t) = inner.tasks.get_mut(&id) {
                 // A lost poller does not prove its secure-world call ended.
                 // Never replay an agreement or SOTER operation that may still
@@ -504,20 +537,24 @@ impl TaskStore {
                     }));
                     t.completed_at_ms = now;
                     inner.failed_queue.push_back((now, id.clone()));
-                    continue;
-                }
-                t.status = TaskStatus::Pending;
-                t.assigned_device_id = None;
-                // Put back into the appropriate bucket.
-                if t.target_device_id.is_empty() {
-                    inner.pending_any.push_back(id.clone());
+                    ended = true;
                 } else {
-                    inner
-                        .pending_by_device
-                        .entry(t.target_device_id.clone())
-                        .or_default()
-                        .push_back(id.clone());
+                    t.status = TaskStatus::Pending;
+                    t.assigned_device_id = None;
+                    // Put back into the appropriate bucket.
+                    if t.target_device_id.is_empty() {
+                        inner.pending_any.push_back(id.clone());
+                    } else {
+                        inner
+                            .pending_by_device
+                            .entry(t.target_device_id.clone())
+                            .or_default()
+                            .push_back(id.clone());
+                    }
                 }
+            }
+            if ended {
+                Self::publish_result_locked(inner, &id);
             }
         }
     }
@@ -569,6 +606,9 @@ impl TaskStore {
             inner.completed_queue.push_back((now, task_id.to_string()));
         }
         Self::record_event_locked(&mut inner, device_id, 1);
+        // Publish before pruning: a waiter must see what B reported even when
+        // this completion is trimmed immediately by the capacity/TTL sweep.
+        Self::publish_result_locked(&mut inner, task_id);
         // Prune completed/failed tasks to stay within capacity/TTL limits.
         Self::expire_locked(
             &mut inner,
@@ -582,17 +622,56 @@ impl TaskStore {
     }
 
     /// Wait until the task is completed or failed. Returns None on timeout.
+    ///
+    /// Every open task owns a `watch` sender, so a completion wakes only the
+    /// waiters of that task - the shared `notify` belongs to the B-side long
+    /// poll and no longer wakes every A-side waiter on any change. A result
+    /// published just before the task is pruned stays readable in the
+    /// receivers.
     pub async fn wait_for_result(&self, task_id: &str, timeout: Duration) -> Option<Value> {
-        self.wait_until(timeout, |inner| {
-            inner.tasks.get(task_id).and_then(|t| {
-                if t.status == TaskStatus::Completed || t.status == TaskStatus::Failed {
-                    t.result.clone()
-                } else {
-                    None
+        let deadline = Instant::now() + timeout;
+        let rx = {
+            let inner = self.inner.lock().await;
+            if let Some(task) = inner.tasks.get(task_id) {
+                if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed) {
+                    return task.result.clone();
+                }
+            }
+            // Subscribe while holding the transition lock: there is no
+            // check-then-subscribe gap in which a completion could be lost.
+            inner
+                .result_senders
+                .get(task_id)
+                .map(|sender| sender.subscribe())
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Some(mut rx) = rx {
+            let result = tokio::time::timeout(remaining, async {
+                loop {
+                    if let Some(result) = rx.borrow_and_update().clone() {
+                        return Some(result);
+                    }
+                    if rx.changed().await.is_err() {
+                        // Cancelled task: the channel closes without a result.
+                        return None;
+                    }
                 }
             })
+            .await;
+            if let Ok(Some(result)) = result {
+                return Some(result);
+            }
+        }
+        // No result yet: keep the previous semantics (the caller sees the
+        // deadline, not an early return) and re-check once at the deadline,
+        // because a completion can race it.
+        tokio::time::sleep(deadline.saturating_duration_since(Instant::now())).await;
+        let inner = self.inner.lock().await;
+        inner.tasks.get(task_id).and_then(|task| {
+            matches!(task.status, TaskStatus::Completed | TaskStatus::Failed)
+                .then(|| task.result.clone())
+                .flatten()
         })
-        .await
     }
 
     pub async fn list_tasks(&self, limit: usize) -> Vec<Task> {
@@ -699,10 +778,24 @@ impl TaskStore {
 
     pub async fn get_device_load(&self, device_id: &str) -> u64 {
         let inner = self.inner.lock().await;
+        Self::window_activity_at(&inner, device_id, Self::now_ms())
+    }
+
+    /// Sum only the events inside [`ACTIVITY_WINDOW_MS`]. Without the filter a
+    /// device that went quiet keeps its old events (the queue is only pruned
+    /// when a new event arrives) and reads as busy forever, losing the
+    /// tie-break to a machine that is actually idle.
+    fn window_activity_at(inner: &Inner, device_id: &str, now: u64) -> u64 {
         inner
             .device_events
             .get(device_id)
-            .map(|q| q.iter().map(|(_, w)| *w).sum())
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|(ts, _)| now.saturating_sub(*ts) <= ACTIVITY_WINDOW_MS)
+                    .map(|(_, weight)| *weight)
+                    .sum()
+            })
             .unwrap_or(0)
     }
 }
@@ -1037,5 +1130,96 @@ mod tests {
             .complete_task(&task_id, json!({"ok": true}), "dev")
             .await
             .is_err());
+    }
+
+    /// An unrelated completion or enqueue must not wake a waiter: each open
+    /// task owns its own channel, and the shared `notify` is only for the
+    /// B-side long poll.
+    #[tokio::test]
+    async fn independent_tasks_do_not_wake_or_poll_each_other() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let store = store();
+        let a = create_assigned(&store).await;
+        let b = create_assigned(&store).await;
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(count.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut wait = Box::pin(store.wait_for_result(&a, Duration::from_secs(5)));
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        store
+            .complete_task(&b, json!({"ok": "b"}), "dev")
+            .await
+            .expect("complete b");
+        store.create_task("attest", json!({}), "dev", None).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            0,
+            "an unrelated completion must not wake this waiter"
+        );
+        let result = json!({"ok": "a"});
+        store
+            .complete_task(&a, result.clone(), "dev")
+            .await
+            .expect("complete a");
+        assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(Some(result)));
+    }
+
+    /// A result published before the task is pruned stays readable for a
+    /// waiter that has not been scheduled yet.
+    #[tokio::test]
+    async fn a_published_result_survives_pruning() {
+        let store = store();
+        let id = create_assigned(&store).await;
+        let waiter = store.clone();
+        let task_id = id.clone();
+        let join = tokio::spawn(async move {
+            waiter
+                .wait_for_result(&task_id, Duration::from_secs(2))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        store
+            .complete_task(&id, json!({"ok": true}), "dev")
+            .await
+            .expect("complete");
+        {
+            // Prune the completed task out of the table before the waiter runs.
+            let mut inner = store.inner.lock().await;
+            inner.completed_queue.clear();
+            TaskStore::remove_task_locked(&mut inner, &id);
+        }
+        let result = join.await.expect("join").expect("result");
+        assert_eq!(result.get("ok"), Some(&json!(true)));
+    }
+
+    /// Load is summed over the activity window only: the queue itself is
+    /// pruned lazily, so a device that went quiet must not read as busy.
+    #[tokio::test]
+    async fn device_load_ignores_events_outside_the_activity_window() {
+        let store = store();
+        {
+            let mut inner = store.inner.lock().await;
+            let now = TaskStore::now_ms();
+            let events = inner.device_events.entry("dev".to_string()).or_default();
+            events.push_back((now.saturating_sub(ACTIVITY_WINDOW_MS + 1_000), 5));
+            events.push_back((now.saturating_sub(1_000), 3));
+        }
+        assert_eq!(store.get_device_load("dev").await, 3);
+        assert_eq!(store.get_device_load("other").await, 0);
     }
 }
