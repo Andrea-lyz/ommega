@@ -7,7 +7,7 @@
 
 use std::io::Read;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -17,6 +17,23 @@ use crate::dispatch::{self, Outcome, Request};
 pub const CONFIG_PATH: &str = "/data/adb/ommega/soterta/remote.conf";
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 static CLIENT: OnceLock<Mutex<Option<(bool, reqwest::blocking::Client)>>> = OnceLock::new();
+
+/// Field the relay server reads to classify the call: the comma-joined names of
+/// the packages installed for the calling uid, when there are any.
+pub const CALLER_PKG_FIELD: &str = "caller_pkg";
+/// Field the relay server reads to mint its built-in fallback answers with this
+/// device's identity instead of one derived from the moment it answered.
+pub const CPU_ID_FIELD: &str = "cpu_id";
+
+/// Android's uid -> package mapping. The SOTER host passes the calling
+/// application's uid as a request parameter; this file turns it back into
+/// package names.
+const PACKAGES_LIST: &str = "/data/system/packages.list";
+/// The mapping only moves when applications are installed or removed; a minute
+/// follows that closely enough while keeping the relay path cheap.
+const CALLER_CACHE_TTL: Duration = Duration::from_secs(60);
+const CALLER_CACHE_MAX: usize = 256;
+static CALLER_NAMES: Mutex<Vec<(u32, Instant, Option<String>)>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
@@ -105,7 +122,82 @@ fn mapped_uid(uid: u32, mapping: &str) -> u32 {
         .unwrap_or(uid)
 }
 
-fn request_body(config: &Config, tx: u32, request: &Request) -> Result<Value, String> {
+/// Whether `text` is a well-formed SOTER device id: 32 hex characters, the
+/// shape a real vendor TA reports and this ledger persists.
+fn is_soter_cpu_id(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The uid the SOTER host passed for this call, when the transaction carries
+/// one.
+///
+/// It is a request parameter, not the kernel's sender uid: this HAL service
+/// sits below the SOTER host, which fills the parameter from the calling
+/// application. The relay server therefore treats the resolved packages as a
+/// label for who is calling - used to keep real SOTER applications on the real
+/// device while probes and test traffic are answered from built-in material.
+fn request_uid(request: &Request) -> Option<u32> {
+    match request {
+        Request::Uid(uid) => Some(*uid),
+        Request::UidKey { uid, .. } => Some(*uid),
+        Request::InitSign { uid, .. } => Some(*uid),
+        _ => None,
+    }
+}
+
+/// Package names installed for `uid`, in listing order.
+fn packages_for_uid(listing: &str, uid: u32) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?;
+            let file_uid = fields.next()?.parse::<u32>().ok()?;
+            (!name.is_empty() && file_uid == uid).then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Comma-joined package names for `uid`, cached for [`CALLER_CACHE_TTL`].
+///
+/// `None` when the uid owns no package (system uids) or the mapping cannot be
+/// read; the relay request then carries no `caller_pkg` and the server falls
+/// back to its own alias heuristics.
+fn caller_package_for_uid(uid: u32) -> Option<String> {
+    if let Ok(entries) = CALLER_NAMES.lock() {
+        if let Some((_, at, hit)) = entries.iter().find(|(cached, _, _)| *cached == uid) {
+            if at.elapsed() < CALLER_CACHE_TTL {
+                return hit.clone();
+            }
+        }
+    }
+    let hit = match std::fs::read_to_string(PACKAGES_LIST) {
+        Ok(listing) => {
+            let joined = packages_for_uid(&listing, uid).join(",");
+            (!joined.is_empty()).then_some(joined)
+        }
+        Err(error) => {
+            eprintln!("soterta remote: cannot read {PACKAGES_LIST}: {error}");
+            None
+        }
+    };
+    if let Ok(mut entries) = CALLER_NAMES.lock() {
+        if entries.len() >= CALLER_CACHE_MAX {
+            entries.clear();
+        }
+        entries.retain(|(cached, _, _)| *cached != uid);
+        entries.push((uid, Instant::now(), hit.clone()));
+    }
+    hit
+}
+
+fn request_body(
+    config: &Config,
+    tx: u32,
+    request: &Request,
+    cpu_id: &str,
+    caller_pkg: Option<&str>,
+) -> Result<Value, String> {
     use dispatch::*;
     let op = match tx {
         TX_EXPORT_ASK => "export_ask_public_key",
@@ -130,6 +222,16 @@ fn request_body(config: &Config, tx: u32, request: &Request) -> Result<Value, St
         _ => return Err("unknown SOTER transaction".to_string()),
     };
     let mut body = json!({"op": op, "device_id": config.device_id});
+    // The relay server mints its built-in fallback answers with `cpu_id` and
+    // routes real SOTER applications by `caller_pkg` (see `forward`). Both are
+    // read only by the server tier: it strips `cpu_id` before handing a request
+    // to the real device, and the device ignores either field anyway.
+    if is_soter_cpu_id(cpu_id) {
+        body[CPU_ID_FIELD] = json!(cpu_id);
+    }
+    if let Some(pkg) = caller_pkg.map(str::trim).filter(|pkg| !pkg.is_empty()) {
+        body[CALLER_PKG_FIELD] = json!(pkg);
+    }
     match request {
         Request::None => {}
         Request::Uid(uid) => body["uid"] = json!(mapped_uid(*uid, &config.uid_map)),
@@ -247,8 +349,20 @@ fn http_client(tls_insecure: bool) -> Result<reqwest::blocking::Client, String> 
     Ok(client)
 }
 
-pub fn forward(config: &Config, tx: u32, request: &Request) -> Result<Outcome, String> {
-    let body = request_body(config, tx, request)?;
+pub fn forward(
+    config: &Config,
+    tx: u32,
+    request: &Request,
+    cpu_id: &str,
+) -> Result<Outcome, String> {
+    // The caller's package names let the relay server keep real SOTER
+    // applications on the real device, and the device id lets it mint its
+    // built-in answers with one stable identity. Without them an application
+    // whose alias is not in the server's list is answered from built-in
+    // material that carries a moment-derived id, and both show up as device
+    // changes to whatever inspects the replies.
+    let caller_pkg = request_uid(request).and_then(caller_package_for_uid);
+    let body = request_body(config, tx, request, cpu_id, caller_pkg.as_deref())?;
     let url = format!("{}/api/soter/", config.url.trim_end_matches('/'));
     let client = http_client(config.tls_insecure)?;
     let response = client
@@ -300,11 +414,15 @@ mod tests {
                 kname: "AuthKey".into(),
                 challenge: "nonce".into(),
             },
+            "",
+            None,
         )
         .unwrap();
         assert_eq!(body["uid"], 10002);
         assert_eq!(body["device_id"], "synthetic-b");
         assert_eq!(body["challenge"], "nonce");
+        assert!(body.get("cpu_id").is_none());
+        assert!(body.get("caller_pkg").is_none());
     }
 
     #[test]
@@ -334,12 +452,22 @@ mod tests {
         );
         // The ATTK trio is answered from the local ledger (ffi never forwards
         // it), so the relay mapping must not invent a remote ATTK operation.
-        assert!(
-            request_body(&Config::default(), dispatch::TX_EXPORT_ATTK, &Request::None).is_err()
-        );
-        assert!(
-            request_body(&Config::default(), dispatch::TX_VERIFY_ATTK, &Request::None).is_err()
-        );
+        assert!(request_body(
+            &Config::default(),
+            dispatch::TX_EXPORT_ATTK,
+            &Request::None,
+            "",
+            None
+        )
+        .is_err());
+        assert!(request_body(
+            &Config::default(),
+            dispatch::TX_VERIFY_ATTK,
+            &Request::None,
+            "",
+            None
+        )
+        .is_err());
         let signed = decode_reply(
             dispatch::TX_INIT_SIGN,
             &json!({"error_code": 0, "session": -2}),
@@ -451,6 +579,7 @@ mod tests {
                 kname: "AuthKey".into(),
                 challenge: "nonce".into(),
             },
+            "09000000aabbccddeeff001122334455",
         )
         .unwrap();
         assert_eq!(
@@ -467,5 +596,97 @@ mod tests {
             .contains("x-relay-token: soter-token"));
         assert!(request.contains("\"device_id\":\"soter-b\""));
         assert!(request.contains("\"uid\":10002"));
+        assert!(request.contains("\"cpu_id\":\"09000000aabbccddeeff001122334455\""));
+    }
+
+    /// The identity fields only go out when they carry something the server can
+    /// use: a well-formed device id, and at least one package name.
+    #[test]
+    fn identity_fields_are_only_sent_when_they_carry_a_value() {
+        let cfg = Config::default();
+        let request = Request::InitSign {
+            uid: 10373,
+            kname: "AuthKey".into(),
+            challenge: "nonce".into(),
+        };
+        let body = request_body(
+            &cfg,
+            dispatch::TX_INIT_SIGN,
+            &request,
+            "09000000aabbccddeeff001122334455",
+            Some("com.tencent.mm,com.tencent.mm:tools"),
+        )
+        .unwrap();
+        assert_eq!(body["cpu_id"], "09000000aabbccddeeff001122334455");
+        assert_eq!(body["caller_pkg"], "com.tencent.mm,com.tencent.mm:tools");
+
+        for bad in [
+            "",
+            "ledger",
+            "09000000aabbccddeeff0011223344",
+            "zz000000aabbccddeeff001122334455",
+        ] {
+            let body = request_body(&cfg, dispatch::TX_INIT_SIGN, &request, bad, None).unwrap();
+            assert!(body.get("cpu_id").is_none(), "{bad:?} must not be sent");
+        }
+        for blank in [None, Some(""), Some("   ")] {
+            let body = request_body(
+                &cfg,
+                dispatch::TX_INIT_SIGN,
+                &request,
+                "09000000aabbccddeeff001122334455",
+                blank,
+            )
+            .unwrap();
+            assert!(
+                body.get("caller_pkg").is_none(),
+                "{blank:?} must not be sent"
+            );
+        }
+    }
+
+    /// The uid only labels transactions that actually carry one: `getDeviceId`
+    /// and the session-based reads cannot be resolved this way.
+    #[test]
+    fn the_uid_only_labels_calls_that_carry_one() {
+        assert_eq!(request_uid(&Request::Uid(7)), Some(7));
+        assert_eq!(
+            request_uid(&Request::UidKey {
+                uid: 8,
+                kname: "k".into()
+            }),
+            Some(8)
+        );
+        assert_eq!(
+            request_uid(&Request::InitSign {
+                uid: 9,
+                kname: "k".into(),
+                challenge: "c".into()
+            }),
+            Some(9)
+        );
+        assert_eq!(request_uid(&Request::None), None);
+        assert_eq!(request_uid(&Request::Session(1)), None);
+    }
+
+    /// A uid can own several packages (shared uids); every name rides along so
+    /// the server's whitelist sees the application, and a malformed line is
+    /// skipped instead of failing the whole listing.
+    #[test]
+    fn packages_list_resolves_a_uid_to_its_package_names() {
+        let listing = "\
+com.tencent.mm 10373 1 /data/user/0/com.tencent.mm default:targetSdkVersion=34 3003,1015
+com.eltavine.duckdetector 10401 0 /data/user/0/com.eltavine.duckdetector default:targetSdkVersion=35 3003
+com.google.android.gms 10123 0 /data/user/0/com.google.android.gms default:targetSdkVersion=35 3003
+com.google.android.gms.setup 10123 0 /data/user/0/com.google.android.gms default:targetSdkVersion=35 3003
+";
+        assert_eq!(packages_for_uid(listing, 10373), ["com.tencent.mm"]);
+        assert_eq!(
+            packages_for_uid(listing, 10123),
+            ["com.google.android.gms", "com.google.android.gms.setup"]
+        );
+        assert!(packages_for_uid(listing, 1000).is_empty());
+        assert!(packages_for_uid("", 1).is_empty());
+        assert!(packages_for_uid("broken\nname not-a-uid /data/user/0/x default\n", 1).is_empty());
     }
 }

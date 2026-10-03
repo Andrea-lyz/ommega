@@ -27,10 +27,14 @@ its own server, token, B device ID and optional `A=B` UID mapping in the Soter
 dialog. These settings are stored in `/data/adb/ommega/soterta/remote.conf`,
 separate from the KeyMint/Integrity relay config. With Soter remote disabled
 (the default), the same HAL service uses its persistent local ASK/AuthKey ledger.
-With Soter remote enabled, it forwards native HAL calls to `/api/soter/`; a
-transport or server failure returns a failed HAL result rather than silently
-switching that key slot to local material. The stock Soter HAL is restored when
-the software TA switch is turned off.
+With Soter remote enabled, it forwards native HAL calls to `/api/soter/`, tagging
+each request with the local ledger's `cpu_id` and, when the calling uid resolves
+to installed packages, the caller's `caller_pkg` list; the relay server mints
+its built-in fallback answers with that id and keeps real SOTER applications on
+the real device by the package list. A transport or server failure returns a
+failed HAL result rather than silently switching that key slot to local
+material. The stock Soter HAL is restored when the software TA switch is turned
+off.
 
 ## Install and configure
 

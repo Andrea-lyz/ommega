@@ -342,8 +342,17 @@ pub unsafe extern "C" fn soterta_handle(
     // engineering mode sees a present device key instead of a relayed failure.
     let use_remote = relays(relay_active, tx);
     if use_remote {
+        // The relay server mints its built-in fallback answers with this
+        // ledger's `cpu_id` and routes real SOTER applications to the real
+        // device by the caller's package names (`remote::forward` resolves
+        // them). Passing both keeps probe answers on one stable identity and
+        // keeps real applications off the server's built-in material.
+        let cpu_id = lock(&SHARED)
+            .as_ref()
+            .map(|shared| shared.state.cpu_id.clone())
+            .unwrap_or_default();
         let answer = match remote_config {
-            Ok(config) if config.enabled => remote::forward(&config, tx, &request),
+            Ok(config) if config.enabled => remote::forward(&config, tx, &request, &cpu_id),
             Ok(_) => Err("SOTER remote config disappeared while active".to_string()),
             Err(error) => Err(error),
         };
