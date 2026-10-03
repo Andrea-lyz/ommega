@@ -21,7 +21,8 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     sync::atomic::{AtomicU64, Ordering},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -51,15 +52,147 @@ pub const KEY_MINT_V5: i32 = 500;
 /// Performs a single `getService` lookup for the named binder service without
 /// inheriting version-dependent wait behaviour.  Mirrors the implementation in
 /// `keymaster/utils.rs` so the relay path does not depend on it.
+///
+/// A transport or permission failure keeps its own `StatusCode` instead of
+/// being collapsed into `NameNotFound`: this text is the only diagnostic the
+/// server ever sees (it is stored verbatim as the device's `tee_error`), so
+/// "service manager unreachable" and "SELinux denied find" must stay
+/// distinguishable from "no such service registered".
 pub(crate) fn get_interface_once<T: FromIBinder + ?Sized>(
     name: &str,
 ) -> Result<Strong<T>, StatusCode> {
-    let binder = hub::default()?
-        .try_get_service(name)
-        .ok()
-        .flatten()
-        .ok_or(StatusCode::NameNotFound)?;
-    FromIBinder::try_from(binder)
+    match hub::try_get_service(name) {
+        Ok(Some(binder)) => FromIBinder::try_from(binder),
+        Ok(None) => Err(StatusCode::NameNotFound),
+        Err(code) => {
+            log::warn!("getService('{name}') failed: {code:?}");
+            Err(code)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics: what does this device actually expose?
+// ---------------------------------------------------------------------------
+
+/// Service names of the AIDL KeyMint/Keymaster interfaces currently registered
+/// with the system service manager, as `ShortInterface/instance` pairs
+/// (for example `IKeyMintDevice/default`).
+fn keymint_aidl_instances() -> Vec<String> {
+    // `listServices(dumpPriority)` filters by a dump-priority bitmask on some
+    // releases (where 0 means "everything") and returns all of them on others;
+    // retry with all three priority bits so neither behaviour yields an empty
+    // and therefore misleading list.
+    let mut all = hub::list_services(0);
+    if all.is_empty() {
+        all = hub::list_services(0x7);
+    }
+    let mut out: Vec<String> = all
+        .into_iter()
+        .filter_map(|full| {
+            let (iface, instance) = full.split_once('/')?;
+            let short = iface.rsplit('.').next()?;
+            if short.contains("IKeyMint") || short.contains("IKeymaster") {
+                Some(format!("{short}/{instance}"))
+            } else {
+                None
+            }
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// HIDL keymaster versions whose *client* library is present on the device
+/// (`android.hardware.keymaster@4.1.so` and friends). A device that predates
+/// AIDL KeyMint ships only these, in which case no amount of `getService`
+/// retrying will ever find `IKeyMintDevice` - it simply does not exist there.
+fn hidl_keymaster_versions() -> Vec<String> {
+    const DIRS: [&str; 4] = [
+        "/vendor/lib64",
+        "/vendor/lib",
+        "/system/lib64",
+        "/system/lib",
+    ];
+    let mut out = Vec::new();
+    for dir in DIRS {
+        // Unreadable directories (SELinux, missing partition) are expected on
+        // some devices and simply contribute nothing.
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(version) = name
+                .strip_prefix("android.hardware.keymaster@")
+                .and_then(|rest| rest.strip_suffix(".so"))
+            {
+                out.push(version.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Joins at most `max` entries, keeping the result short enough to survive the
+/// server's truncation of the failure text.
+fn join_capped(items: &[String], max: usize, max_chars: usize) -> String {
+    if items.is_empty() {
+        return "-".to_string();
+    }
+    let mut text: String = items
+        .iter()
+        .take(max)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    if items.len() > max {
+        text.push_str(",+");
+    }
+    if text.chars().count() > max_chars {
+        text = text.chars().take(max_chars).collect();
+        text.push('~');
+    }
+    text
+}
+
+/// One-line description of the KeyMint/Keymaster situation on this device,
+/// appended to lookup failures: is the service declared in the VINTF manifest,
+/// which AIDL instances are actually registered, and does the device ship HIDL
+/// keymaster client libraries (an AIDL-KeyMint-less legacy device).
+///
+/// The probe issues service-manager queries, lists services and scans four
+/// HIDL directories; a device's failure reason does not change from request to
+/// request, so the result is cached for ten seconds.
+const DIAGNOSIS_TTL: Duration = Duration::from_secs(10);
+
+pub fn keymint_diagnosis(service: &str) -> String {
+    static CACHE: Mutex<Option<(Instant, String, String)>> = Mutex::new(None);
+    {
+        let guard = CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((stamp, cached_service, text)) = guard.as_ref() {
+            if cached_service == service && stamp.elapsed() < DIAGNOSIS_TTL {
+                return text.clone();
+            }
+        }
+    }
+    let text = format!(
+        "decl={} aidl={} hidl_km={}",
+        hub::is_declared(service),
+        join_capped(&keymint_aidl_instances(), 2, 60),
+        join_capped(&hidl_keymaster_versions(), 2, 24),
+    );
+    let mut guard = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some((Instant::now(), service.to_string(), text.clone()));
+    text
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +253,8 @@ pub fn get_system_keymint(service: &'static str) -> Result<Strong<dyn IKeyMintDe
             return Ok(keymint);
         }
 
-        let keymint: Strong<dyn IKeyMintDevice> =
-            get_interface_once(service).with_context(|| format!("connect {service}"))?;
+        let keymint: Strong<dyn IKeyMintDevice> = get_interface_once(service)
+            .with_context(|| format!("connect {service} ({})", keymint_diagnosis(service)))?;
         let recipient: Arc<dyn DeathRecipient> = Arc::new(SystemKeymintDeath { service });
         keymint
             .as_binder()
