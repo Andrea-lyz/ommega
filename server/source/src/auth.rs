@@ -138,11 +138,18 @@ impl AuthState {
 
     /// Verify admin credentials. Returns true when user/password match either
     /// the primary account or one of the `user:pass` entries in `admin_extra`.
+    ///
+    /// An account configured without a password never authenticates: the WebUI
+    /// can leave the password empty, and an empty string would otherwise match
+    /// every request and hand out an admin session.
     pub fn verify_admin(&self, user: &str, password: &str) -> bool {
         if self.admin_user.is_empty() {
             return false;
         }
-        if user == self.admin_user && password == self.admin_password {
+        if !self.admin_password.is_empty()
+            && user == self.admin_user
+            && password == self.admin_password
+        {
             return true;
         }
         for entry in self.admin_extra.split(',') {
@@ -151,7 +158,8 @@ impl AuthState {
                 continue;
             }
             if let Some((u, p)) = entry.split_once(':') {
-                if user == u.trim() && password == p.trim() {
+                let p = p.trim();
+                if !p.is_empty() && user == u.trim() && password == p {
                     return true;
                 }
             }
@@ -621,5 +629,20 @@ mod tests {
             auth.should_record_token_use("tok", "2.2.2.2"),
             "a new client address must always be recorded"
         );
+    }
+
+    #[test]
+    fn an_empty_admin_password_never_authenticates() {
+        let state =
+            AuthState::new("t".into(), 100, 60, true).with_admin_credentials("admin", "", "");
+        assert!(!state.verify_admin("admin", ""));
+        assert!(!state.verify_admin("admin", "anything"));
+
+        let extra = AuthState::new("t".into(), 100, 60, true)
+            .with_admin_credentials("admin", "secret", "ops:,x:");
+        assert!(extra.verify_admin("admin", "secret"));
+        assert!(!extra.verify_admin("admin", ""));
+        assert!(!extra.verify_admin("ops", ""));
+        assert!(!extra.verify_admin("x", ""));
     }
 }

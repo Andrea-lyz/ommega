@@ -91,6 +91,10 @@ const AUTH_BACKOFF_MIN_MS: u64 = 5_000;
 const AUTH_BACKOFF_MAX_MS: u64 = 300_000;
 /// Fallback when a throttling response carries no `Retry-After`.
 const THROTTLE_BACKOFF_MS: u64 = 30_000;
+/// Never re-poll faster than this after an immediate 204: a server or proxy
+/// that returns without holding the long poll must not turn the loop into a
+/// tight loop against the server.
+const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MODULE_PROP: &str = "/data/adb/modules/ommegaclient_b/module.prop";
 
 fn acquire_instance_lock() -> Result<File> {
@@ -1215,6 +1219,7 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
             transient_ms = POLL_BACKOFF_MIN_MS;
             rejected_ms = AUTH_BACKOFF_MIN_MS;
         }
+        let poll_started = std::time::Instant::now();
         match poll_tasks(&cfg) {
             Ok(Some((task_id, task_type, payload))) => {
                 transient_ms = POLL_BACKOFF_MIN_MS;
@@ -1236,6 +1241,13 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
                 // Long poll timed out cleanly: the link is healthy.
                 transient_ms = POLL_BACKOFF_MIN_MS;
                 rejected_ms = AUTH_BACKOFF_MIN_MS;
+                // A 204 that came back quickly means the long poll did not
+                // actually hold (older server, proxy closing early); re-polling
+                // at once would hammer the server.
+                let waited = poll_started.elapsed();
+                if waited < MIN_POLL_INTERVAL {
+                    thread::sleep(MIN_POLL_INTERVAL - waited);
+                }
             }
             Err(PollError { error, failure }) => {
                 let (wait, next_transient, next_rejected) =
