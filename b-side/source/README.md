@@ -180,3 +180,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+## Screen-off relay availability
+
+`OMMEGA_RELAY_WAKELOCK=true` keeps the CPU available for relay traffic while the
+screen is off. It increases battery use and requires the kernel's
+`CONFIG_PM_WAKELOCKS` sysfs interface. The relay renews a 90-second named lease
+every 30 seconds. A stopped or aborted process cannot leave this lease active
+indefinitely. Setting the option to false releases the relay's lock within
+30 seconds; other wake locks are untouched. Unsupported or denied interfaces
+produce a warning, so screen-off availability is not claimed in that case.
+
+Updates add missing supported settings to `relay.conf`, preserving existing
+values, credentials, device identities and any network binding preference.
+SOTER mutation and capability probes remain opt-in. A refused sign attempt does
+not advertise permanent inability; successful signing is the positive evidence.

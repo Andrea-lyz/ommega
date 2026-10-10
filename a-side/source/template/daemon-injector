@@ -67,6 +67,7 @@ get_keystore_pid() {
 }
 
 is_injected() {
+  local pid maps
   pid=$1
   maps=/proc/$pid/maps
   [ -r "$maps" ] || return 1
@@ -96,6 +97,7 @@ is_injected() {
 }
 
 restart_keystore() {
+  local pid
   pid=$1
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     echo "[injector-daemon] restart requested; stopping keystore2 pid=$pid"
@@ -113,13 +115,24 @@ last_attempt_pid=
 last_attempt_at=0
 retry_cooldown=15
 
+started_at=$(date +%s 2>/dev/null || echo 0)
+poll_sleep() {
+  local now
+  now=$(date +%s 2>/dev/null || echo 0)
+  if [ "$started_at" -gt 0 ] && [ $((now - started_at)) -lt 90 ]; then
+    sleep 3
+  else
+    sleep 5
+  fi
+}
+
 while true; do
   # Config and target list live in the single data location
   # (/data/misc/keystore/ommega/); the webroot UI writes them through the
   # ommegadata symlink, so no copy/sync is needed here.
 
   if ! prepare_injector; then
-    sleep 5
+    poll_sleep
     continue
   fi
 
@@ -127,7 +140,7 @@ while true; do
     pending_restart=1
     restart_keystore "$(get_keystore_pid)"
     if ! prepare_injector; then
-      sleep 5
+      poll_sleep
       continue
     fi
   fi
@@ -142,14 +155,14 @@ while true; do
   if is_injected "$pid"; then
     pending_restart=0
     last_attempt_pid=
-    sleep 5
+    poll_sleep
     continue
   fi
 
   if [ "$last_attempt_pid" = "$pid" ] && [ "$pending_restart" -eq 0 ]; then
     now=$(date +%s 2>/dev/null)
     if [ -n "$now" ] && [ "$now" -lt $((last_attempt_at + retry_cooldown)) ]; then
-      sleep 5
+      poll_sleep
       continue
     fi
   fi

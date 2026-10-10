@@ -21,7 +21,7 @@ use kmr_common::{
 };
 use kmr_wire::{keymint, rpc, secureclock::TimeStampToken, CborError};
 use log::error;
-use std::{boxed::Box, vec::Vec};
+use std::{boxed::Box, sync::Arc, vec::Vec};
 
 use crate::rkp::serialize_cbor;
 
@@ -43,7 +43,7 @@ pub struct Implementation {
     /// Optional remote TEE backend (A-side remote relay).  When present and
     /// enabled, attestation chains are minted by a B-side real TEE through the
     /// relay_server, and sign/decrypt for remote keys are forwarded there.
-    pub remote: Option<Box<dyn RemoteBackend>>,
+    pub remote: Option<Arc<dyn RemoteBackend>>,
 
     /// Retrieval of attestation ID information.
     pub attest_ids: Option<Box<dyn RetrieveAttestationIds>>,
@@ -239,7 +239,7 @@ pub struct RemoteAttestation {
 
 /// there.  Each method returns `Ok(None)` when the remote is unavailable or not
 /// configured, letting the TA fall back to the local software keybox.
-pub trait RemoteBackend: Send {
+pub trait RemoteBackend: Send + Sync {
     /// Forward an attestation request.  Returns the B-side certificate chain
     /// (DER, leaf first) on success, or `None` if the remote is unavailable.
     fn attest(

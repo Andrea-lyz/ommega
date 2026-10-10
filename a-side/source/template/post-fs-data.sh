@@ -239,3 +239,54 @@ fi
 if [ -f "$MODDIR/webui-trust.sh" ] && [ -f "$TARGET_DIR/config.toml" ]; then
   sh "$MODDIR/webui-trust.sh" sync
 fi
+
+# Start the existing daemons before first unlock; service.sh reuses them.
+pid_matches_script() {
+  local p s
+  p=$1
+  s=$2
+  [ -r "/proc/$p/cmdline" ] || return 1
+  tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -F "$s" >/dev/null 2>&1
+}
+
+start_daemon_early() {
+  local script pidfile pid
+  script=$1
+  pidfile=$2
+  if [ -f "$pidfile" ]; then
+    pid=$(cat "$pidfile" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && pid_matches_script "$pid" "$script"; then
+      return 0
+    fi
+    rm -f "$pidfile"
+  fi
+  # 离开 post-fs-data 阶段后子进程可能被收走，所以用 setsid 脱开（没有就退回普通后台）。
+  if command -v setsid >/dev/null 2>&1; then
+    setsid sh "$script" >/dev/null 2>&1 &
+  else
+    sh "$script" >/dev/null 2>&1 &
+  fi
+  pid=$!
+  echo $pid > "$pidfile"
+  sleep 1
+  if ! kill -0 "$pid" 2>/dev/null || ! pid_matches_script "$pid" "$script"; then
+    rm -f "$pidfile"
+    return 1
+  fi
+  return 0
+}
+
+if [ -f "$MODDIR/daemon" ]; then
+  if start_daemon_early "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid"; then
+    log_line "ommega: keymint daemon started early in post-fs-data"
+  else
+    log_line "ommega: keymint daemon early start failed; service.sh will retry"
+  fi
+fi
+if [ -f "$MODDIR/daemon-injector" ]; then
+  if start_daemon_early "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid"; then
+    log_line "ommega: injector daemon started early in post-fs-data"
+  else
+    log_line "ommega: injector daemon early start failed; service.sh will retry"
+  fi
+fi

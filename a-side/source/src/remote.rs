@@ -33,7 +33,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
@@ -46,6 +46,7 @@ use crate::config;
 
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
+const SIGN_REQUEST_BUDGET: Duration = Duration::from_secs(10);
 /// Upper bound honoured from a server `Retry-After`. A keystore call is
 /// blocking an app, so we cap the wait well below the HAL watchdog rather than
 /// obeying an arbitrarily large value.
@@ -341,18 +342,27 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     Some(Duration::from_secs(secs.clamp(1, MAX_RETRY_AFTER_SECS)))
 }
 
+fn attempt_timeout(deadline: Instant, now: Instant) -> Result<Duration> {
+    let remaining = deadline.saturating_duration_since(now);
+    if remaining.is_zero() {
+        return Err(anyhow!("remote request budget exhausted"));
+    }
+    Ok(remaining.min(Duration::from_millis(READ_TIMEOUT_MS)))
+}
+
 fn http_request(
     method: &str,
     url: &str,
     headers: &[(String, String)],
     body: Option<&[u8]>,
+    timeout: Duration,
 ) -> Result<(u16, Vec<u8>, Option<Duration>)> {
     let client = get_client()?;
     let method = method
         .parse::<Method>()
         .map_err(|e| anyhow!("invalid HTTP method {method}: {e}"))?;
 
-    let mut req = client.request(method, url);
+    let mut req = client.request(method, url).timeout(timeout);
     for (k, v) in headers {
         req = req.header(k, v);
     }
@@ -422,6 +432,23 @@ impl RemoteRelay {
             ("Content-Type".to_string(), "application/json".to_string()),
             ("X-Relay-Token".to_string(), Self::token()?),
         ];
+        // All attempts and backoff share one budget. A signature is on an
+        // app's request path; attestation retains its longer existing budget.
+        let budget = if path == "/api/sign/" {
+            SIGN_REQUEST_BUDGET
+        } else {
+            Duration::from_millis(2 * READ_TIMEOUT_MS) + Duration::from_secs(MAX_RETRY_AFTER_SECS)
+        };
+        let deadline = Instant::now() + budget;
+        let send = || {
+            http_request(
+                "POST",
+                &url,
+                &headers,
+                Some(body_str.as_bytes()),
+                attempt_timeout(deadline, Instant::now())?,
+            )
+        };
         // Transient transport failures (connect timeout, network jitter, TLS
         // handshake) are retried once before giving up. Without the retry a
         // single dropped attempt falls back to the local software keybox and
@@ -432,18 +459,26 @@ impl RemoteRelay {
         // "slow down" (429/503): the request was never processed, so resending
         // it once after the server's own `Retry-After` recovers the call
         // instead of failing an attestation over a moment of throttling.
-        let (status, resp) = match http_request("POST", &url, &headers, Some(body_str.as_bytes())) {
+        let (status, resp) = match send() {
             Ok((status, body, retry_after)) => match RemoteRejection::classify(status) {
                 Some(rejection) if rejection.is_retryable() => {
                     let wait = retry_after
                         .unwrap_or(Duration::from_millis(500))
                         .min(Duration::from_secs(MAX_RETRY_AFTER_SECS));
+                    if wait >= deadline.saturating_duration_since(Instant::now()) {
+                        record_remote_failure(
+                            Some(status),
+                            rejection.as_str(),
+                            "request budget exhausted during backoff",
+                        );
+                        return decode_relay_response(path, status, &body).map(Some);
+                    }
                     log::warn!(
                         "remote {path} throttled (HTTP {status}); retrying once in {}ms",
                         wait.as_millis()
                     );
                     std::thread::sleep(wait);
-                    match http_request("POST", &url, &headers, Some(body_str.as_bytes())) {
+                    match send() {
                         Ok((status, body, _)) => (status, body),
                         Err(second) => {
                             log::warn!("remote {path} unavailable after retry: {second:#}");
@@ -456,7 +491,7 @@ impl RemoteRelay {
             },
             Err(first) => {
                 log::warn!("remote {path} transport error, retrying once: {first:#}");
-                match http_request("POST", &url, &headers, Some(body_str.as_bytes())) {
+                match send() {
                     Ok((status, body, _)) => (status, body),
                     Err(second) => {
                         log::warn!("remote {path} unavailable after retry: {second:#}");
@@ -1145,6 +1180,27 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
 mod tests {
     use super::*;
     use kmr_wire::keymint::SecurityLevel;
+
+    #[test]
+    fn signature_retry_and_backoff_cannot_reset_the_total_budget() {
+        let started = Instant::now();
+        let deadline = started + SIGN_REQUEST_BUDGET;
+        assert_eq!(
+            attempt_timeout(deadline, started).unwrap(),
+            Duration::from_secs(10)
+        );
+        // Three seconds of transport plus three seconds of backoff leave
+        // four seconds for the next attempt, not another complete timeout.
+        assert_eq!(
+            attempt_timeout(deadline, started + Duration::from_secs(6)).unwrap(),
+            Duration::from_secs(4)
+        );
+        assert!(attempt_timeout(deadline, started + Duration::from_secs(10)).is_err());
+        assert_eq!(
+            attempt_timeout(started + Duration::from_secs(63), started).unwrap(),
+            Duration::from_secs(30)
+        );
+    }
 
     fn response_error_code(
         path: &str,

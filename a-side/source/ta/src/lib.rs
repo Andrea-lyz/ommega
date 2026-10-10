@@ -52,7 +52,17 @@ pub mod rkp;
 mod secret;
 
 use keys::KeyImport;
+pub use operation::RemoteSignTask;
 use operation::{OpHandle, Operation};
+
+/// Preserve the ordinary finish response and KeyMint error mapping for work
+/// completed outside the TA lock.
+pub fn finish_response(result: Result<Vec<u8>, Error>) -> PerformOpResponse {
+    match result {
+        Ok(ret) => op_ok_rsp(PerformOpRsp::OperationFinish(FinishResponse { ret })),
+        Err(error) => op_error_rsp(FinishRequest::CODE, error),
+    }
+}
 
 #[cfg(test)]
 mod tests;

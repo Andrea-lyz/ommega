@@ -168,26 +168,17 @@ pub fn learned_probe_target() -> Option<(i32, String)> {
         .clone()
 }
 
-/// 连续几次真派下来的签名 op 都被 -26 顶回来（TA 说“没有新鲜指纹”），就认这台
-/// 不接签名。只用**真活**计数，不用探针：探针撞上指纹窗口关着只是「这次没量
-/// 出来」，拿它当证据会把一台明明能签的机器踢出签名链路（PLC110 上真踩过）。
-const SIGN_REFUSAL_LIMIT: u32 = 3;
-
-/// 这台机器签名到底行不行。三个值对应上报给服务端的三件事。
+/// Positive capability evidence only. A per-attempt authentication failure
+/// does not prove that a device cannot sign.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignState {
     /// 真签出来过（真实 op 或探针）：报 `soter_sign`。
     Proven,
-    /// 连续几次真签名 op 都被 -26 顶回来：报 `soter_nosign`，服务端不再把签名
-    /// op 派过来。材料重建后会清掉，重新学。
-    Refused,
     /// 还没量出来：什么都不报，服务端照旧会试。
     Unknown,
 }
 
 static SIGN_STATE: Mutex<SignState> = Mutex::new(SignState::Unknown);
-/// 连续 -26 次数（碰上一次成功就清零）。
-static SIGN_REFUSALS: Mutex<u32> = Mutex::new(0);
 
 pub fn sign_state() -> SignState {
     *SIGN_STATE
@@ -203,44 +194,13 @@ fn mark_sign_proven() {
         log::info!("soter: signed once, this device can sign (keeping the verdict)");
         *state = SignState::Proven;
     }
-    *SIGN_REFUSALS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = 0;
 }
 
-/// 一个真签名 op 的结果。`-26` 累加，够了就改口说签不了；成功就把之前那条
-/// 否定的结论推翻（真签出来过比什么都硬）。
+/// Record a real successful signature; refused attempts remain unknown.
 fn note_sign_result(error_code: i64) {
+    // A refused attempt does not establish a permanent device capability.
     if error_code == 0 {
         mark_sign_proven();
-        return;
-    }
-    if error_code != SOTER_VERIFICATION_FAILED {
-        return;
-    }
-    // 已经签出来过的机器，不会因为「这会儿没人按指纹」被改口 —— 它明明能签，
-    // 服务端该继续把签名 op 派过来，人回来按一下就成。
-    if sign_state() == SignState::Proven {
-        return;
-    }
-    let mut refusals = SIGN_REFUSALS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *refusals += 1;
-    let count = *refusals;
-    drop(refusals);
-    if count < SIGN_REFUSAL_LIMIT {
-        return;
-    }
-    let mut state = SIGN_STATE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if *state != SignState::Refused {
-        log::warn!(
-            "soter: {count} sign ops in a row came back -26 (no fresh fingerprint); \
-             reporting this device as unable to sign"
-        );
-        *state = SignState::Refused;
     }
 }
 
@@ -250,9 +210,6 @@ pub fn clear_sign_state() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *state = SignState::Unknown;
-    *SIGN_REFUSALS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = 0;
 }
 
 /// `init_sign` 回了 0 说明这个槽位真有材料，记下来给探针用（探针只用现成材料，
@@ -660,6 +617,7 @@ fn string_arg(payload: &Value, key: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static SIGN_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn unknown_op_is_rejected() {
@@ -723,7 +681,8 @@ mod tests {
     /// 签出来过一次就咬死；之后 -26 再多也不翻。反过来，连续几次真活都回 -26
     /// 才会改口说签不了，而且再来一次成功就推翻。
     #[test]
-    fn a_signature_is_proof_and_three_refusals_are_the_opposite() {
+    fn failed_attempts_never_demote_signing_capability() {
+        let _guard = SIGN_STATE_TEST_LOCK.lock().unwrap();
         clear_sign_state();
         assert_eq!(sign_state(), SignState::Unknown);
 
@@ -732,9 +691,9 @@ mod tests {
         note_sign_result(-26);
         assert_eq!(sign_state(), SignState::Unknown);
 
-        // 第三次真活又被顶回来：这台就不接签名了。
+        // Repeated verification failures still describe attempts, not device capability.
         note_sign_result(-26);
-        assert_eq!(sign_state(), SignState::Refused);
+        assert_eq!(sign_state(), SignState::Unknown);
 
         // 真签出来一次比什么都硬，否定结论直接丢。
         note_sign_result(0);
@@ -757,6 +716,7 @@ mod tests {
 
     #[test]
     fn rebuilding_the_slot_clears_the_verdict() {
+        let _guard = SIGN_STATE_TEST_LOCK.lock().unwrap();
         for op in SLOT_REBUILD_OPS {
             assert!(
                 MUTATING_OPS.contains(op),

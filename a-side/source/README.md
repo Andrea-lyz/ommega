@@ -247,3 +247,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+## Request latency
+
+Remote signatures share a 10-second HTTP budget across both attempts and any
+Retry-After delay. Attestation retains its longer budget. The injector uses up
+to four connections in one RPC session, preserving Binder identities. Ordinary
+remote signatures without pending authentication, trusted presence, confirmation
+or single-use key deletion execute network work outside the TA lock. Restricted
+operations retain the serialized finish path and existing authorization checks.

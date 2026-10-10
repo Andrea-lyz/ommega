@@ -9,17 +9,9 @@
 //!
 //! - `soter` — the HAL answers `getDeviceId`: identity / export ops can be
 //!   served.  Cheap to prove, and it is what the old relays reported.
-//! - `soter_sign` — a signature was really produced once (`init_sign` +
-//!   `finish_sign` both answered 0).  This is the only honest way to claim it:
-//!   the TA signs only inside a fresh fingerprint match, so on a headless
-//!   device the answer is `-26` and there is nothing to advertise.
-//! - `soter_nosign` — the OPPOSITE, stated out loud, and only on evidence:
-//!   several real sign ops in a row came back `-26` (the TA wants a fresh
-//!   fingerprint and nobody is there to press).  Anything we merely could not
-//!   measure (no slot to try, no material, one refused probe) reports nothing
-//!   extra — claiming `soter_nosign` there would make the server route sign ops
-//!   away from a device that can sign perfectly well (a phone whose owner is
-//!   simply not touching it right now).
+//! - `soter_sign` is reported only after a real signature succeeds.
+//! - A refused attempt is not a permanent device capability. This relay
+//!   never emits `soter_nosign`; old peers remain understood by the server.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -63,7 +55,6 @@ pub fn report(sign_target: Option<&SignProbeTarget>) -> String {
         // 的签名 op 全被 -26 顶回来（没人按指纹）。没量出来就只报 `soter`。
         match soter::sign_state() {
             soter::SignState::Proven => caps.push("soter_sign"),
-            soter::SignState::Refused => caps.push("soter_nosign"),
             soter::SignState::Unknown => {}
         }
     }
@@ -115,12 +106,7 @@ fn soter_usable() -> bool {
     usable
 }
 
-/// 探针只能挣到正面结论（真签出来过），永远不能拿它去下「签不了」的断言。
-///
-/// 探针撞上「指纹窗口关着」会回 -26，但同一台机器指纹刚按过的时候是签得出来
-/// 的（PLC110 上实测过）。拿一次 -26 当证据报 `soter_nosign`，服务端就会把一台
-/// 明明能签的机器从签名链路上踢掉 —— 比不报还糟。「签不了」只认别的证据：连续
-/// 几次真派下来的签名 op 都被 -26 顶回来（见 `soter::sign_state`）。
+/// Probes can establish successful signing, but never permanent inability.
 fn probe_sign_capability(target: Option<&SignProbeTarget>) {
     let mut cache = SIGN_PROBED_AT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, cached)) = cache.as_ref() {

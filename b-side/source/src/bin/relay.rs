@@ -63,6 +63,7 @@ use serde_json::{json, Value};
 use ommegaclient_b::keymaster::attest_proxy::{check_app_id_der, SYSTEM_KEYMINT_STRONGBOX};
 use ommegaclient_b::keymaster::relay_tee::keymint_error;
 use ommegaclient_b::keymaster::tee_ops::{self, KeyAlgorithm, KeySpec};
+use ommegaclient_b::wakelock;
 
 const POLL_TIMEOUT_SEC: u32 = 20;
 const TEE_WORKERS: usize = 3;
@@ -73,6 +74,7 @@ const STATE_DIR: &str = "/data/adb/ommega";
 const INSTANCE_LOCK_PATH: &str = "/data/adb/ommega/relay.lock";
 const RESTART_MARKER: &str = "/data/adb/ommega/restart.all";
 const RELOAD_POLL_MS: u64 = 1000;
+const WAKELOCK_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// Backoff floor and ceiling after a failed poll.
 ///
 /// The old loop retried every poll failure after a flat 1s. Against an HTTP 401
@@ -153,6 +155,7 @@ struct RelayConfig {
     soter_enabled: bool,
     soter_allow_mutation: bool,
     soter_probe: Option<ommegaclient_b::caps::SignProbeTarget>,
+    wakelock: bool,
 }
 
 impl RelayConfig {
@@ -262,6 +265,10 @@ fn load_config_from_file() -> Result<RelayConfig> {
         soter_enabled,
         soter_allow_mutation,
         soter_probe,
+        wakelock: m
+            .get("OMMEGA_RELAY_WAKELOCK")
+            .map(|v| parse_bool(v))
+            .unwrap_or(true),
     })
 }
 
@@ -363,6 +370,9 @@ fn load_config() -> Result<(RelayConfig, &'static str)> {
         soter_enabled,
         soter_allow_mutation,
         soter_probe,
+        wakelock: env("OMMEGA_RELAY_WAKELOCK")
+            .map(|v| parse_bool(&v))
+            .unwrap_or(true),
     };
     cfg.validate()?;
     Ok((cfg, "env"))
@@ -1274,6 +1284,49 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
     }
 }
 
+fn spawn_wakelock_keeper(shared: Arc<RwLock<RelayConfig>>) {
+    fn acquire() -> Option<wakelock::WakeLock> {
+        match wakelock::WakeLock::acquire(wakelock::DEFAULT_NAME) {
+            Ok(lock) if lock.held_now() => {
+                log::info!("relay CPU wakelock acquired (90s lease)");
+                Some(lock)
+            }
+            Ok(_) => {
+                log::warn!("relay wakelock was not accepted by the kernel; screen-off availability is not guaranteed");
+                None
+            }
+            Err(error) => {
+                log::warn!("relay CPU wakelock unavailable: {error}; screen-off availability is not guaranteed");
+                None
+            }
+        }
+    }
+    let enabled = shared.read().map(|cfg| cfg.wakelock).unwrap_or(true);
+    let mut lock = if enabled {
+        acquire()
+    } else {
+        wakelock::clear_stale(wakelock::DEFAULT_NAME);
+        None
+    };
+    thread::spawn(move || loop {
+        thread::sleep(WAKELOCK_CHECK_INTERVAL);
+        let enabled = shared.read().map(|cfg| cfg.wakelock).unwrap_or(true);
+        if !enabled {
+            drop(lock.take());
+            wakelock::clear_stale(wakelock::DEFAULT_NAME);
+            continue;
+        }
+        if let Some(held) = &lock {
+            if let Err(error) = held.refresh() {
+                log::warn!("relay wakelock renewal failed: {error}");
+                drop(lock.take());
+            }
+        } else {
+            lock = acquire();
+        }
+    });
+}
+
 fn main() {
     let (log_enabled, log_level, logcat_enabled, logcat_level) = preload_log_config();
     ommegaclient_b::logging::init_logger(log_enabled, log_level, logcat_enabled, logcat_level);
@@ -1293,6 +1346,7 @@ fn main() {
         }
     };
     let shared: Arc<RwLock<RelayConfig>> = Arc::new(RwLock::new(cfg));
+    spawn_wakelock_keeper(shared.clone());
     let last_mtime = file_mtime(CONF_PATH).unwrap_or(0);
     spawn_config_watcher(shared.clone(), last_mtime);
     // We drive the real hardware keymint (a binder HAL) directly, so a binder
@@ -1307,6 +1361,7 @@ fn main() {
             soter_enabled: false,
             soter_allow_mutation: false,
             soter_probe: None,
+            wakelock: true,
         });
         log::info!(
             "relay daemon starting (config from {source}) server={} device={} machine={}",
@@ -1355,6 +1410,7 @@ mod tests {
             token: String::new(),
             soter_enabled: false,
             soter_allow_mutation: false,
+            wakelock: true,
             soter_probe: Some(ommegaclient_b::caps::SignProbeTarget {
                 uid: 10001,
                 alias: "AuthKey".to_string(),

@@ -123,8 +123,12 @@ fn connect_rpc_session(connect_context: &'static str) -> Result<RpcCache> {
 }
 
 fn connect_rpc_session_once(connect_context: &'static str) -> Result<RpcCache> {
-    let session = RpcSession::setup_unix_client_android13plus(rpc::SOCKET, rpc::WIRE_MAX_VERSION)
-        .context(connect_context)?;
+    let session = RpcSession::setup_unix_client_android13plus_fan_out(
+        rpc::SOCKET,
+        rpc::WIRE_MAX_VERSION,
+        rpc::MAX_OUTGOING_CONNECTIONS,
+    )
+    .context(connect_context)?;
     let service = session.get_service(rpc::SERVICE).context(connect_context)?;
     Ok(RpcCache {
         session,

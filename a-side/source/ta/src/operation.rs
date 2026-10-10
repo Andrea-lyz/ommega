@@ -23,9 +23,30 @@ use kmr_wire::{
     secureclock::{TimeStampToken, Timestamp},
 };
 use log::{error, warn};
-use std::{boxed::Box, vec::Vec};
+use std::{boxed::Box, sync::Arc, vec::Vec};
 
 mod begin;
+
+/// An already consumed, unrestricted signing operation. No TA state or key
+/// cleanup is pending; its network wait need not block other TA operations.
+pub struct RemoteSignTask {
+    backend: Arc<dyn crate::device::RemoteBackend>,
+    alias: String,
+    algorithm: String,
+    data: Vec<u8>,
+}
+
+impl RemoteSignTask {
+    pub fn execute(self) -> kmr_wire::PerformOpResponse {
+        crate::finish_response(
+            self.backend
+                .sign(&self.alias, &self.data, &self.algorithm)
+                .and_then(|signature| {
+                    signature.ok_or_else(|| km_err!(UnknownError, "remote sign failed"))
+                }),
+        )
+    }
+}
 
 /// A trusted confirmation token should be the size of HMAC-SHA256 output.
 const CONFIRMATION_TOKEN_SIZE: usize = 32;
@@ -338,6 +359,55 @@ impl crate::KeyMintTa {
                 }
             }
         })
+    }
+
+    pub fn take_unrestricted_remote_sign(
+        &mut self,
+        req: &kmr_wire::FinishRequest,
+    ) -> Result<Option<RemoteSignTask>, Error> {
+        let handle = OpHandle(req.op_handle);
+        let index = self.op_index(handle)?;
+        let op = self.operations[index].as_ref().expect("op_index checked");
+        // Keep authorization/confirmation/single-use deletion and trusted
+        // presence on the existing serialized path. Never split agreement.
+        if !matches!(op.crypto_op, CryptoOperation::RemoteSign { .. })
+            || op.auth_info.is_some()
+            || op.trusted_conf_data.is_some()
+            || op.slot_to_delete.is_some()
+            || self.presence_required_op == Some(handle)
+        {
+            return Ok(None);
+        }
+        let mut op = self.take_operation(handle)?;
+        self.check_subsequent_auth(&op, req.auth_token.clone(), req.timestamp_token.clone())?;
+        op.check_size(req.input.as_ref().map_or(0, |data| data.len()))?;
+        let CryptoOperation::RemoteSign {
+            alias,
+            algorithm,
+            mut data,
+        } = op.crypto_op
+        else {
+            unreachable!("remote sign was checked before consumption");
+        };
+        if let Some(input) = &req.input {
+            data.try_extend_from_slice(input)
+                .map_err(|_| km_err!(MemoryAllocationFailed, "remote sign buffer overflow"))?;
+        }
+        let backend = self.dev.remote.as_ref().ok_or_else(|| {
+            km_err!(
+                UnknownError,
+                "remote key used but no remote backend configured"
+            )
+        })?;
+        if !backend.enabled() {
+            return Err(km_err!(UnknownError, "remote backend disabled"));
+        }
+        Ok(Some(RemoteSignTask {
+            backend: Arc::clone(backend),
+            alias,
+            algorithm,
+            data,
+        }))
     }
 
     pub(crate) fn op_finish(

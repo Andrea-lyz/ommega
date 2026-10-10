@@ -98,7 +98,7 @@ impl Default for Config {
             assignment_timeout_secs: 60,
             wait_result_timeout_secs: 120,
             soter_enabled: false,
-            soter_wait_result_timeout_secs: 15,
+            soter_wait_result_timeout_secs: 2,
             poll_timeout_secs: 30,
             mysql_url: String::new(),
             mysql_time_zone: "+08:00".to_string(),

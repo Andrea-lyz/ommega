@@ -36,11 +36,12 @@ test('reads existing config with daemon defaults and equals characters', () => {
   assert.equal(parseConfig('OMMEGA_RELAY_LOGCAT_ENABLED=1\nOMMEGA_RELAY_LOG_LEVEL=WARNING')[KEYS[5]], 'warn');
 });
 test('preserves comments and unknown lines while consolidating duplicates', () => {
-  const input = fixture + 'OMMEGA_RELAY_TOKEN=last-value\r\n';
+  const input = fixture + 'OMMEGA_RELAY_TOKEN=last-value\r\nOMMEGA_RELAY_WAKELOCK=false\r\n';
   const values = validateConfig(parseConfig(input));
   const saved = serializeConfig(input, values);
   assert.match(saved, /# 保留注释\n/);
   assert.match(saved, /EXTRA_KEY=kept\n/);
+  assert.match(saved, /^OMMEGA_RELAY_WAKELOCK=false$/m);
   assert.equal(saved.match(/^OMMEGA_RELAY_TOKEN=/gm).length, 1);
   assert.deepEqual(parseConfig(saved), values);
 });
