@@ -196,7 +196,11 @@ async fn try_b_device_layer(
         .store
         .create_task(task_type, body.clone(), device_id, request_id)
         .await;
-    let timeout = Duration::from_secs(state.cfg.wait_result_timeout_secs);
+    let timeout = if task_type == "sign" {
+        Duration::from_secs(state.cfg.wait_result_timeout_secs.min(10))
+    } else {
+        Duration::from_secs(state.cfg.wait_result_timeout_secs)
+    };
     match state.store.wait_for_result(&task_id, timeout).await {
         Some(mut result) => {
             if let Some(obj) = result.as_object_mut() {
@@ -204,10 +208,17 @@ async fn try_b_device_layer(
             }
             Some(result)
         }
-        None => Some(json!({
-            "error": "task timeout: no B-side result",
-            "task_id": task_id,
-        })),
+        None => {
+            // Cancel only work that has not reached B. An assigned HAL call
+            // must finish normally; timing out HTTP must never interrupt it.
+            if task_type == "sign" {
+                state.store.cancel_pending_task(&task_id).await;
+            }
+            Some(json!({
+                "error": "task timeout: no B-side result",
+                "task_id": task_id,
+            }))
+        }
     }
 }
 
@@ -870,6 +881,68 @@ pub async fn admin_cancel_task(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn timed_out_signature_cancels_only_unassigned_work() {
+        let mut state = soter_state(false);
+        state.cfg = Arc::new(Config {
+            wait_result_timeout_secs: 0,
+            ..Config::default()
+        });
+        state
+            .store
+            .pop_for_b("synthetic-b", "mock", Duration::ZERO)
+            .await;
+        let response = try_b_device_layer(
+            &state,
+            "sign",
+            &json!({"request_id":"pending-sign"}),
+            "synthetic-b",
+        )
+        .await
+        .unwrap();
+        assert!(response.get("error").is_some());
+        assert_eq!(state.store.counts().await.pending, 0);
+
+        let mut state = soter_state(false);
+        state.cfg = Arc::new(Config {
+            wait_result_timeout_secs: 1,
+            ..Config::default()
+        });
+        state
+            .store
+            .pop_for_b("synthetic-b", "mock", Duration::ZERO)
+            .await;
+        let body = json!({"request_id":"assigned-sign"});
+        let worker = async {
+            let task = state
+                .store
+                .pop_for_b("synthetic-b", "mock", Duration::from_secs(1))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            assert_eq!(
+                state.store.counts().await.assigned,
+                1,
+                "HTTP timeout must not cancel a claimed task"
+            );
+            state
+                .store
+                .complete_task(
+                    &task.task_id,
+                    json!({"signature":"synthetic"}),
+                    "synthetic-b",
+                )
+                .await
+                .unwrap();
+        };
+        let (response, ()) = tokio::join!(
+            try_b_device_layer(&state, "sign", &body, "synthetic-b"),
+            worker
+        );
+        assert!(response.unwrap().get("error").is_some());
+        assert_eq!(state.store.counts().await.completed, 1);
+    }
+
     fn soter_state(enabled: bool) -> AppState {
         AppState {
             cfg: Arc::new(Config {
@@ -931,7 +1004,11 @@ mod tests {
                 .unwrap();
         };
         let (response, ()) = tokio::join!(
-            soter(State(state.clone()), agreement_headers(), Json(body.clone())),
+            soter(
+                State(state.clone()),
+                agreement_headers(),
+                Json(body.clone())
+            ),
             worker
         );
         assert_eq!(response.status(), StatusCode::OK);

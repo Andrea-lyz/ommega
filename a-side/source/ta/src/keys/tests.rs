@@ -32,7 +32,11 @@ impl device::RemoteBackend for TestRemote {
     ) -> Result<Option<device::RemoteAttestation>, Error> {
         panic!("child generation must not request a remote key")
     }
-    fn sign(&self, _: &str, _: &[u8], _: &str) -> Result<Option<Vec<u8>>, Error> {
+    fn sign(&self, alias: &str, data: &[u8], algorithm: &str) -> Result<Option<Vec<u8>>, Error> {
+        if alias == "test-only" {
+            assert_eq!(algorithm, "SHA256withECDSA");
+            assert_eq!(data, [1, 2, 3]);
+        }
         // Only certificate encoding/metadata are under test, not the signature.
         Ok(Some(vec![1; 64]))
     }
@@ -45,6 +49,81 @@ impl device::RemoteBackend for TestRemote {
     fn enabled(&self) -> bool {
         true
     }
+}
+
+fn install_remote_sign(ta: &mut KeyMintTa) -> kmr_wire::FinishRequest {
+    ta.operations[0] = Some(crate::operation::Operation {
+        handle: crate::operation::OpHandle(17),
+        aad_allowed: false,
+        slot_to_delete: None,
+        trusted_conf_data: None,
+        auth_info: None,
+        crypto_op: crate::operation::CryptoOperation::RemoteSign {
+            alias: "test-only".into(),
+            algorithm: "SHA256withECDSA".into(),
+            data: vec![1, 2],
+        },
+        input_size: 2,
+    });
+    kmr_wire::FinishRequest {
+        op_handle: 17,
+        input: Some(vec![3]),
+        signature: None,
+        auth_token: None,
+        timestamp_token: None,
+        confirmation_token: None,
+    }
+}
+
+#[test]
+fn detached_sign_consumes_the_handle_and_does_not_hold_the_ta() {
+    let ta = std::sync::Arc::new(std::sync::Mutex::new(test_ta()));
+    let task = {
+        let mut guard = ta.lock().unwrap();
+        let req = install_remote_sign(&mut guard);
+        let task = guard.take_unrestricted_remote_sign(&req).unwrap().unwrap();
+        assert!(guard.operations[0].is_none());
+        assert!(guard.take_unrestricted_remote_sign(&req).is_err());
+        task
+    };
+    let guard = ta
+        .try_lock()
+        .expect("detached work must not retain TA state");
+    // The remote backend is an in-process stub. Completing while the TA is
+    // locked proves it does not reacquire that lock to send its request.
+    let reply = task.execute();
+    assert_eq!(reply.error_code, 0);
+    assert!(guard.operations[0].is_none());
+}
+
+#[test]
+fn trusted_confirmation_sign_retains_the_existing_finish_path() {
+    let mut ta = test_ta();
+    let req = install_remote_sign(&mut ta);
+    ta.operations[0].as_mut().unwrap().trusted_conf_data = Some(vec![]);
+    assert!(ta.take_unrestricted_remote_sign(&req).unwrap().is_none());
+    assert!(
+        ta.operations[0].is_some(),
+        "serialized finish still owns its handle"
+    );
+}
+
+#[test]
+fn single_use_remote_sign_retains_deletion_ordering() {
+    let mut ta = test_ta();
+    let req = install_remote_sign(&mut ta);
+    ta.operations[0].as_mut().unwrap().slot_to_delete = Some(keyblob::SecureDeletionSlot(0));
+    assert!(ta.take_unrestricted_remote_sign(&req).unwrap().is_none());
+    assert!(ta.operations[0].is_some());
+}
+
+#[test]
+fn oversized_detached_sign_consumes_the_handle_and_rejects_before_io() {
+    let mut ta = test_ta();
+    let mut req = install_remote_sign(&mut ta);
+    req.input = Some(vec![0; 1 << 20]);
+    assert!(ta.take_unrestricted_remote_sign(&req).is_err());
+    assert!(ta.operations[0].is_none());
 }
 
 fn test_ta() -> KeyMintTa {
@@ -69,7 +148,7 @@ fn test_ta() -> KeyMintTa {
         device::Implementation {
             keys: Box::new(TestKeys),
             sign_info: None,
-            remote: Some(Box::new(TestRemote)),
+            remote: Some(std::sync::Arc::new(TestRemote)),
             attest_ids: None,
             sdd_mgr: None,
             bootloader: Box::new(device::BootloaderDone),

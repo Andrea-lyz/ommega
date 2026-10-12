@@ -325,3 +325,20 @@ algorithm or network compatibility is promised.
 
 Existing AGPL-3.0-or-later, Apache-2.0 and other component licenses still apply.
 This documentation does not change upstream or third-party ownership or licenses.
+
+## Remote request latency and screen-off availability
+
+The B relay defaults to `OMMEGA_RELAY_WAKELOCK=true`. It keeps the CPU available
+with the screen off and increases battery use. On kernels providing
+`CONFIG_PM_WAKELOCKS`, a 90-second lease is renewed every 30 seconds and expires
+if the process stops. Disabling it releases only the relay lock within 30
+seconds. Missing or denied interfaces produce a warning; screen-off availability
+is not guaranteed in that case. Updates add missing configuration keys while
+preserving existing values, credentials and device identity.
+
+A-side remote signatures share a 10-second HTTP budget across attempts and
+backoff; attestation retains a separate longer budget. The injector uses up to
+four connections in one RPC session. Ordinary remote signatures release the TA
+lock during network work. Pending authentication, trusted confirmation/presence
+and single-use deletion retain the serialized path. Server signature waits are
+capped at 10 seconds and cancel only unassigned work, never an in-flight HAL call.

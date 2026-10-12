@@ -1,4 +1,6 @@
 pub const SOCKET: &str = "/data/misc/keystore/ommega/rpc.sock";
+/// Bounded connections within one session; Binder identities stay shared.
+pub const MAX_OUTGOING_CONNECTIONS: u32 = 4;
 pub const WIRE_MAX_VERSION: u32 = 2;
 
 pub const SERVICE: &str = "ommega";

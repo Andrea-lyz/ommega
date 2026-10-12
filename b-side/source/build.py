@@ -42,6 +42,7 @@ BINARY_SPECS = (
 REQUIRED_TEMPLATE_FILES = (
     "customize.sh",
     "module.prop",
+    "post-fs-data.sh",
     "relay.conf",
     "service.sh",
     "spl-control.sh",
@@ -53,6 +54,7 @@ MODULE_TEXT_FILES = (
     "README.md",
     "customize.sh",
     "module.prop",
+    "post-fs-data.sh",
     "relay.conf",
     "sepolicy.rule",
     "service.sh",

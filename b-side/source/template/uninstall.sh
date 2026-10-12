@@ -16,6 +16,12 @@ pkill -9 -x relay 2>/dev/null
 pkill -9 -f 'daemon-relay' 2>/dev/null
 sleep 1
 
+# Release only this relay's named CPU lock. A crashed relay's lease also
+# expires automatically; unrelated wake locks are never changed.
+if [ -w /sys/power/wake_unlock ]; then
+  echo ommega_relay > /sys/power/wake_unlock 2>/dev/null
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Remove B-side files under the shared state dir. A-side files
 #    (ommegadata symlink, keymint/inject, pid files, restart.*) are kept.

@@ -13,6 +13,7 @@ update_status() {
 }
 
 pid_matches_script() {
+  local pid script cmdline
   pid=$1
   script=$2
   [ -r "/proc/$pid/cmdline" ] || return 1
@@ -21,6 +22,7 @@ pid_matches_script() {
 }
 
 start_daemon() {
+  local script pidfile pid
   script=$1
   pidfile=$2
 
@@ -61,12 +63,26 @@ kill_all() {
   sleep 1
 }
 
-kill_all
+daemons_alive() {
+  local spec pf sp p
+  for spec in "$STATE_DIR/keymint-daemon.pid:$MODDIR/daemon" "$STATE_DIR/injector-daemon.pid:$MODDIR/daemon-injector"; do
+    pf=${spec%%:*}
+    sp=${spec#*:}
+    [ -f "$pf" ] || return 1
+    p=$(cat "$pf" 2>/dev/null)
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && pid_matches_script "$p" "$sp" || return 1
+  done
+  return 0
+}
 
-update_status "Ommega ⏳ 启动中"
-
-start_daemon "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid"
-start_daemon "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid"
+if daemons_alive; then
+  update_status "Ommega ✅ 运行中"
+else
+  kill_all
+  update_status "Ommega ⏳ 启动中"
+  start_daemon "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid"
+  start_daemon "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid"
+fi
 # The Soter watchdog runs whether or not the software TA is enabled: the enable
 # flag is a file the WebUI writes, so something has to notice it, and the same
 # loop is what restores the stock HAL after a daemon crash instead of leaving

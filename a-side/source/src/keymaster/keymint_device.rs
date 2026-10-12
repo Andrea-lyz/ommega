@@ -1069,16 +1069,26 @@ impl KeyMintWrapper {
         let signature = signature.map(|s| s.to_vec());
         let confirmation_token = confirmation_token.map(|c| c.to_vec());
 
-        let req = PerformOpReq::OperationFinish(FinishRequest {
+        let req = FinishRequest {
             op_handle,
             input,
             signature,
             auth_token: hardware_auth_token,
             timestamp_token,
             confirmation_token,
-        });
+        };
         charge(TaOp::Operation);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = {
+            let mut ta = self.inner.keymint.lock().unwrap();
+            match ta.take_unrestricted_remote_sign(&req) {
+                Ok(Some(task)) => {
+                    drop(ta);
+                    task.execute()
+                }
+                Ok(None) => ta.process_req(PerformOpReq::OperationFinish(req)),
+                Err(error) => kmr_ta::finish_response(Err(error)),
+            }
+        };
         let error_code = result.error_code;
         let result: FinishResponse = match result.rsp {
             Some(PerformOpRsp::OperationFinish(rsp)) => rsp,
@@ -1281,11 +1291,11 @@ fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<Key
     // routed through a dedicated backend — driving the real `/strongbox` HAL
     // from the keystore context failed on devices where that HAL is declared
     // but not servable, so it is not wired in.
-    let remote: Option<Box<dyn kmr_ta::device::RemoteBackend>> = {
+    let remote: Option<Arc<dyn kmr_ta::device::RemoteBackend>> = {
         if config.remote.enabled {
             log::info!("remote TEE relay backend enabled");
         }
-        Some(Box::new(crate::remote::RemoteRelayBackend))
+        Some(Arc::new(crate::remote::RemoteRelayBackend))
     };
 
     let dev = kmr_ta::device::Implementation {
