@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.andrealyz.strongboxcapabilitymask"
         minSdk = 29
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.7.0"
+        versionCode = 12
+        versionName = "1.8.0"
         testInstrumentationRunner =
             "io.github.andrealyz.strongboxcapabilitymask.FeatureProbeInstrumentation"
     }
