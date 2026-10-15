@@ -7,11 +7,21 @@ read the StrongBoxCapabilityMask section in the project documentation above.
 The tested B does not advertise StrongBox and does not need this APK.
 
 Minimal libxposed API 102 module that runs only in `system_server` and removes
-`android.hardware.strongbox_keystore` from Android's global `SystemConfig`
-feature map.
+`android.hardware.strongbox_keystore` and `android.software.device_id_attestation`
+from Android's global `SystemConfig` feature map.
 
-The module does not load into application processes. Version 1.4.6 is
-intentionally global; package-specific filtering is not implemented.
+The module does not load into application processes. The mask is intentionally
+global; package-specific filtering is not implemented.
+
+## Why device ID attestation is masked too
+
+An Ommega-routed caller's attestation chain is minted by the remote real KeyMint.
+That TA rejects every `ATTESTATION_ID_*` tag with `CANNOT_ATTEST_IDS` (verified on
+the B device), and injecting the remote device's identifiers or local substitutes
+into the chain would break the caller's own integrity verdicts. Since no usable ID
+attestation exists on that path, the honest declaration is "not supported": probes
+and applications then skip it instead of every identifier request failing. The mask
+only changes feature declarations; it touches no certificate, key or route.
 
 ## Why this hook point
 
@@ -56,6 +66,7 @@ This module shares the product version; its runtime feature-mask behavior stays 
 
 ```text
 adb shell pm has-feature android.hardware.strongbox_keystore
+adb shell pm has-feature android.software.device_id_attestation
 adb shell pm list features
 adb logcat -d -s StrongBoxCapabilityMask
 ```
