@@ -802,6 +802,44 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
         cert_serial: get("certificate_serial")
             .map(|v| b64_decode(v).with_context(|| "decode certificate_serial"))
             .transpose()?,
+        // User-authentication / authorization-list entries forwarded by the
+        // A-side as `[tag, value]` pairs (502 USER_SECURE_ID, 503
+        // NO_AUTH_REQUIRED, 504 USER_AUTH_TYPE, 505 AUTH_TIMEOUT, 506
+        // ALLOW_WHILE_ON_BODY, 507 TRUSTED_USER_PRESENCE_REQUIRED, 508
+        // TRUSTED_CONFIRMATION_REQUIRED, 509 UNLOCKED_DEVICE_REQUIRED). These go
+        // straight into the real TEE request: the TEE keeps USER_SECURE_ID inside
+        // the key blob, enforces USER_AUTH_TYPE/AUTH_TIMEOUT, and stamps them
+        // (but not NO_AUTH_REQUIRED) into the leaf. Duplicated tags are dropped,
+        // and NO_AUTH_REQUIRED is dropped whenever a real auth requirement came
+        // along — KeyMint rejects that contradictory combination, and the A-side
+        // fallback (the server keybox layer) drops it the same way.
+        user_auth: {
+            let mut tags = Vec::new();
+            for pair in get("user_auth")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(pair) = pair.as_array() else {
+                    continue;
+                };
+                let Some(tag) = pair.first().and_then(Value::as_i64) else {
+                    continue;
+                };
+                let Ok(tag) = u32::try_from(tag) else {
+                    continue;
+                };
+                if !(502..=509).contains(&tag) || tags.iter().any(|(t, _)| *t == tag) {
+                    continue;
+                }
+                let value = pair.get(1).and_then(Value::as_i64).unwrap_or(1);
+                tags.push((tag, value));
+            }
+            if tags.iter().any(|(tag, _)| *tag != 503) {
+                tags.retain(|(tag, _)| *tag != 503);
+            }
+            tags
+        },
     })
 }
 
