@@ -63,8 +63,15 @@ A 安装器的最低门槛是 API 29，Mask 的 `minSdk` 也是 29；这只代�
 
 模块仅加载到 `system_server`，在启动阶段 hook
 `com.android.server.SystemConfig.getAvailableFeatures()`，从返回的功能表中删除
-`android.hardware.strongbox_keystore`，保留 `android.hardware.keystore.app_attest_key`。
+`android.hardware.strongbox_keystore` 和 `android.software.device_id_attestation`，
+保留 `android.hardware.keystore.app_attest_key`。
 它是全局操作，影响包括未勾选 Ommega 的应用在内的所有使用该功能表的调用者；没有按包名开关。
+
+设备 ID 证明一并按“未声明”处理是有意的：经 Ommega 路由的调用者，其证明链由远端真实
+KeyMint 铸造，而对方的 TA 会拒绝所有 `ATTESTATION_ID_*` 标签；把远端设备的身份
+标识或本地替代值注入该链，都会破坏调用者自身的完整性判定。这条链路不存在可用的 ID 证明，
+声明必须与事实一致，而不是让每次标识请求都以失败告终。该改动只影响功能表声明，不修改
+任何证书、密钥或路由，原生硬件证明与 A 端的强等级判定不受影响。
 
 适配前提是 ROM 沿用 AOSP 的上述方法和可修改的 Map，以及功能发布/缓存路径，且没有
 绕过此表的厂商实现或硬编码结果。Android 16 的进程功能缓存也是选择该启动 hook 的原因，
@@ -76,7 +83,8 @@ A 安装器的最低门槛是 API 29，Mask 的 `minSdk` 也是 29；这只代�
 1. 在 A 安装 `StrongBoxCapabilityMask-1.4.6-debug-signed.apk`。
 2. 在兼容 libxposed API 102 的 LSPosed 实现中启用，保持静态作用域仅 `system`（系统框架），不要勾选应用。
 3. 在允许正常重启的 A 上重启并解锁，让系统功能表及进程缓存重新建立；仅划掉应用不能启用/撤销此 hook。
-4. 检查 `pm has-feature android.hardware.strongbox_keystore` 为 false、原有 `app_attest_key` 仍为 true，
+4. 检查 `pm has-feature android.hardware.strongbox_keystore` 与
+   `pm has-feature android.software.device_id_attestation` 均为 false、原有 `app_attest_key` 仍为 true，
    并检查 Mask 日志的 `event=hook_registered` / `event=feature_removed`；必要时用正常测试 App 核对应用进程查询。
 5. 撤销时在 LSPosed 禁用模块，再重启 A。APK 使用调试签名，升级前核对签名；签名不同不能直接覆盖安装。
 
@@ -152,7 +160,8 @@ touch /data/adb/ommega/restart.keymint
 `target.txt` 的 `!`、`?` 后缀也不再是正式配置格式。
 
 独立的 StrongBoxCapabilityMask 模块从系统功能表隐藏
-`android.hardware.strongbox_keystore`，保留 `android.hardware.keystore.app_attest_key`。
+`android.hardware.strongbox_keystore` 和 `android.software.device_id_attestation`，
+保留 `android.hardware.keystore.app_attest_key`。
 它不停止 StrongBox HAL，也不替代上述请求路由。应用忽略功能表仍显式请求 StrongBox 时，
 全局默认加禁用开关会返回 `HARDWARE_TYPE_UNAVAILABLE`；显式 TEE 则改写请求。
 
@@ -262,7 +271,7 @@ B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
 | A 端（`a-side`） | 拦截目标应用 Keystore；远程 TEE；可选 A 端原生 StrongBox | root 模块，CI 提供 arm64-v8a；安装器检查 KernelSU/Magisk 环境 |
 | B 端（`b-side`） | 调用真实硬件 KeyMint，处理 profile/attest/sign/decrypt/agree | root 模块，CI 提供 arm64-v8a；管理器兼容性需单独确认 |
 | B 端 App（`b-app`） | 可选的独立 B 端客户端与连接配置界面 | Android APK |
-| StrongBoxCapabilityMask | 全局隐藏 StrongBox capability；仅加载到 system_server | libxposed API 102 APK |
+| StrongBoxCapabilityMask | 全局隐藏 StrongBox 与设备 ID 证明 capability；仅加载到 system_server | libxposed API 102 APK |
 | Server（`server`） | 鉴权、任务队列、A/B 调度、设备与后台管理 | Linux x86_64 musl 二进制 |
 
 `remote-only` 表示符合远程生成条件时不允许隐式回退；它不表示所有密钥或方法都在 B 执行。

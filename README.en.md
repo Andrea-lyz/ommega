@@ -70,9 +70,19 @@ normally do not need it. It is not a general Paytm fix.
 
 The module loads only in `system_server`, hooks
 `com.android.server.SystemConfig.getAvailableFeatures()` at startup, and removes
-`android.hardware.strongbox_keystore` from its returned map. It preserves
-`android.hardware.keystore.app_attest_key`. This is global, including apps outside
-Ommega's target list. Package-specific masking is not implemented.
+`android.hardware.strongbox_keystore` and `android.software.device_id_attestation`
+from its returned map. It preserves `android.hardware.keystore.app_attest_key`.
+This is global, including apps outside Ommega's target list. Package-specific
+masking is not implemented.
+
+Masking device ID attestation is deliberate: an Ommega-routed caller's chain is
+minted by the remote real KeyMint, whose TA rejects every `ATTESTATION_ID_*` tag,
+and injecting either the remote device's identifiers or local substitutes into that
+chain would break the caller's own integrity verdicts. No usable ID attestation
+exists on that path, so the declaration matches the fact instead of letting every
+identifier request fail. The change only alters feature declarations; it touches no
+certificate, key or route, and leaves native hardware attestation and the strong
+verdicts on A unaffected.
 
 Compatibility requires the ROM to retain the AOSP method, a mutable Map and the
 feature publication/cache path, without vendor bypasses or hard-coded answers.
@@ -86,8 +96,9 @@ for every AOSP-based ROM. Only the A firmware above has device evidence.
    static scope at `system` (System Framework) only, without application scopes.
 3. Reboot and unlock A where normal reboot is permitted, rebuilding the feature
    caches. Closing an application cannot activate or remove this hook.
-4. Check `pm has-feature android.hardware.strongbox_keystore` returns false and the
-   previously available app-attest-key remains true. Check Mask logs for
+4. Check `pm has-feature android.hardware.strongbox_keystore` and
+   `pm has-feature android.software.device_id_attestation` both return false and
+   the previously available app-attest-key remains true. Check Mask logs for
    `event=hook_registered` and `event=feature_removed`; a normal test app can also
    verify process-local queries.
 5. To undo, disable in LSPosed and reboot A. APKs are debug-signed; check certificates
@@ -224,7 +235,7 @@ eviction can change the signing identity.
 | A (`a-side`) | Target-app interception, software TA, remote TEE, optional native StrongBox; root module |
 | B (`b-side`) | Real hardware `profile/attest/sign/decrypt/agree`; root module |
 | B-app (`b-app`) | Optional Android client, not a native-B replacement |
-| StrongBoxCapabilityMask | Global feature hook, libxposed API 102 APK |
+| StrongBoxCapabilityMask | Global StrongBox and device-ID-attestation capability mask, libxposed API 102 APK |
 | Server (`server`) | Authentication, scheduling and administration; Linux x86_64 musl |
 
 Remote-only forbids implicit fallback for eligible generation, not every local
