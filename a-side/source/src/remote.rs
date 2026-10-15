@@ -650,6 +650,27 @@ impl RemoteRelay {
                 Value::from(i64::from(security_level)),
             );
         }
+        // User-authentication / authorization-list entries the app asked for,
+        // as `[tag, value]` pairs (502/503/504/505/506/507/508/509). The A-side
+        // software KeyMint does enforce the policy locally, but the
+        // *attestation* is minted remotely: a leaf that says
+        // `NO_AUTH_REQUIRED` for a key created with
+        // `setUserAuthenticationRequired(true)` contradicts itself, and one
+        // without `USER_AUTH_TYPE` / `AUTH_TIMEOUT` drops the policy — both
+        // are detectable from an app (TrustAttestor:
+        // `hardware.attestation.user_auth_metadata` / `user_auth_policy`).
+        if !params.user_auth.is_empty() {
+            ctx.insert(
+                "user_auth".to_string(),
+                Value::Array(
+                    params
+                        .user_auth
+                        .iter()
+                        .map(|(tag, value)| json!([*tag, *value]))
+                        .collect(),
+                ),
+            );
+        }
         let profile = remote_identity_profile()?;
         ctx.insert(
             "attest_record_version".to_string(),
