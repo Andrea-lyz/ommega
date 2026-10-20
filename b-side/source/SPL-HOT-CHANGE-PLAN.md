@@ -186,6 +186,14 @@ status 0. This empirically rules out the earlier device-wide outage being caused
 by the TA date alone; the long-lived Keystore2 freeze was the confounding factor.
 It does not prove exclusion of other KeyMint/QSEECom clients.
 
+However, a later password-unlock attempt showed a post-restore credential
+anomaly. The user reported that a keyblob appears to have been upgraded under the
+target date and the restored baseline no longer accepted it. This is a stop
+condition and confirms that the no-freeze design is unsafe. It does not yet prove
+that freezing the KeyMint HAL alone is sufficient: Gatekeeper/Keystore2/CE and
+direct QSEECom callers must be covered as well. No credential reset, downgrade,
+reboot, or further target probe should be attempted on B.
+
 Two implementation candidates should be evaluated in this order.
 
 #### Candidate A: bounded micro-window admission (minimum viable path)
