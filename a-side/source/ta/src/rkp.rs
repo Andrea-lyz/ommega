@@ -325,11 +325,14 @@ impl KeyMintTa {
             )?;
         }
         // Construct the `CsrPayload`
-        let rpc_device_info = self.rpc_device_info_cbor()?;
+        // CDDL: `device_info: bstr`. Wrap the CBOR map in a byte string; a
+        // bare map makes the parser read its 0xae header as a 14-byte string
+        // and the whole RKP provisioning fails.
+        let rpc_device_info = serialize_cbor(&self.rpc_device_info_cbor()?)?;
         let csr_payload = Value::Array(vec![
             Value::Integer(self.rpc_info.get_version().into()),
             Value::Text(String::from(CERT_TYPE_KEYMINT)),
-            rpc_device_info,
+            Value::Bytes(rpc_device_info),
             Value::Array(pub_cose_keys),
         ]);
         let csr_payload_data = serialize_cbor(&csr_payload)?;

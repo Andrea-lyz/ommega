@@ -34,6 +34,7 @@ percent-encoding = "2"
 http = "1"
 anyhow = "1"
 # Pure-Rust crypto (no system OpenSSL needed)
+p224 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 p384 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 p521 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }

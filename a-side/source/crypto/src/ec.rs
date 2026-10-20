@@ -13,8 +13,10 @@
 // limitations under the License.
 
 //! Pure-Rust implementation of elliptic curve functionality (replaces BoringSSL;
-//! RustCrypto `p256`/`p384`/`p521`, `ed25519-dalek`, `x25519-dalek`).
-//! P-224 is not supported by RustCrypto; it returns `UnsupportedEcCurve`.
+//! RustCrypto `p224`/`p256`/`p384`/`p521`, `ed25519-dalek`, `x25519-dalek`).
+//! P-224 covers key generation, public-key derivation and ECDSA signing
+//! (secp224r1 is what the engineering-mode self test asks for). ECDH still
+//! returns `UnsupportedEcCurve`.
 
 use der::Decode as _;
 use der::Encode as _;
@@ -27,9 +29,11 @@ use kmr_common::{
     explicit, km_err, Error, FallibleAllocExt,
 };
 use kmr_wire::keymint::{self, Digest, EcCurve};
+use p224::ecdsa::Signature as SigP224;
 use p256::ecdsa::Signature as SigP256;
 use p384::ecdsa::Signature as SigP384;
 
+use elliptic_curve::sec1::ToEncodedPoint as _;
 use sec1::EcPrivateKey;
 use std::boxed::Box;
 use std::vec::Vec;
@@ -49,7 +53,10 @@ impl crypto::Ec for OmmegaEc {
     ) -> Result<crypto::KeyMaterial, Error> {
         let nist_key = ec::NistKey(generate_nist_der(curve)?);
         let key = match curve {
-            ec::NistCurve::P224 => return Err(km_err!(UnsupportedEcCurve, "P-224 unsupported")),
+            // P-224 only shows up in the engineering-mode self test. RustCrypto's
+            // p224 can generate the key and derive its public point; the key pair
+            // is stored in the same SEC1 DER shape as P-256.
+            ec::NistCurve::P224 => Key::P224(nist_key),
             ec::NistCurve::P256 => Key::P256(nist_key),
             ec::NistCurve::P384 => Key::P384(nist_key),
             ec::NistCurve::P521 => Key::P521(nist_key),
@@ -96,7 +103,11 @@ impl crypto::Ec for OmmegaEc {
     fn nist_public_key(&self, key: &ec::NistKey, curve: ec::NistCurve) -> Result<Vec<u8>, Error> {
         let priv_bytes = nist_priv_bytes(&key_from_nist(key.clone(), curve))?;
         let pub_key = match curve {
-            ec::NistCurve::P224 => return Err(km_err!(UnsupportedEcCurve, "P-224 unsupported")),
+            ec::NistCurve::P224 => {
+                let sk = p224::SecretKey::from_slice(&priv_bytes)
+                    .map_err(|e| km_err!(UnknownError, "P-224 key: {e:?}"))?;
+                sk.public_key().to_encoded_point(false).as_bytes().to_vec()
+            }
             ec::NistCurve::P256 => {
                 let sk = EcdsaSigningKey::<p256::NistP256>::from_slice(&priv_bytes)
                     .map_err(|e| km_err!(UnknownError, "P-256 key: {e:?}"))?;
@@ -183,7 +194,10 @@ fn key_from_nist(key: ec::NistKey, curve: ec::NistCurve) -> Key {
 fn generate_nist_der(curve: ec::NistCurve) -> Result<Vec<u8>, Error> {
     let mut rng = rand_core::OsRng;
     match curve {
-        ec::NistCurve::P224 => Err(km_err!(UnsupportedEcCurve, "P-224 unsupported")),
+        ec::NistCurve::P224 => {
+            let sk = p224::SecretKey::random(&mut rng);
+            sec1_der(sk.to_bytes().as_slice())
+        }
         ec::NistCurve::P256 => {
             let sk = EcdsaSigningKey::<p256::NistP256>::random(&mut rng);
             sec1_der(sk.to_bytes().as_slice())
@@ -387,7 +401,14 @@ impl crypto::AccumulatingOperation for OmmegaEcUndigestSignOperation {
 fn sign_ecdsa_prehash(key: &Key, curve: ec::NistCurve, prehash: &[u8]) -> Result<Vec<u8>, Error> {
     let priv_bytes = nist_priv_bytes(key)?;
     let sig = match curve {
-        ec::NistCurve::P224 => return Err(km_err!(UnsupportedEcCurve, "P-224 ECDSA unsupported")),
+        ec::NistCurve::P224 => {
+            let sk = EcdsaSigningKey::<p224::NistP224>::from_slice(&priv_bytes)
+                .map_err(|e| km_err!(UnknownError, "P-224 key: {e:?}"))?;
+            let s: SigP224 = sk
+                .sign_prehash(prehash)
+                .map_err(|e| km_err!(UnknownError, "P-224 ECDSA sign failed: {e:?}"))?;
+            s.to_der().to_vec()
+        }
         ec::NistCurve::P256 => {
             let sk = EcdsaSigningKey::<p256::NistP256>::from_slice(&priv_bytes)
                 .map_err(|e| km_err!(UnknownError, "P-256 key: {e:?}"))?;
