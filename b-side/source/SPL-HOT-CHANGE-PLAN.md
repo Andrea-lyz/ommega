@@ -240,6 +240,28 @@ milestone until direct holders can be inventoried or an additional kernel/vendor
 admission gate exists. A second HAL process or a new process loading the same TA
 is not an independent secure-world context.
 
+### First existing-key probe result
+
+A controlled probe on 2026-10-20 used an existing OS `160000` baseline KeyBlob
+and a temporary OS `170000` target. `0x2115` reached the TA but returned `-62`
+(`KEY_REQUIRES_UPGRADE`) before issuing certificates. `0x2116` baseline restore
+then returned status 0, and the HAL was recovered to `frozen=0` after a local
+postflight bug left it frozen briefly. KeyMint/Keystore2/Gatekeeper/Vold PIDs,
+boot ID, unlock state and System/Vendor properties remained unchanged.
+
+This is a hard constraint for the reattestation candidate: a KeyBlob created
+under an older OS version cannot be reattested under a newer OS target without
+an upgrade. An upgrade would make the Blob newer than the restored baseline and
+reintroduce the reuse problem. The next useful experiment is on a disposable
+device, testing the version matrix without treating B as the matrix host:
+
+- OS16 KeyBlob + OS16 target + newer patch levels;
+- OS17 KeyBlob + OS17 target + restore;
+- whether the OS17 Blob remains usable at OS16 baseline or must remain in an
+  active target window.
+
+The probe must not be repeated on B without a new explicit request.
+
 The lab excluded Keystore2 and the already-frozen RKPD app. A production design
 must enumerate and cover every live caller able to read the changed SPL or
 mutate a keyblob during the window, including:
