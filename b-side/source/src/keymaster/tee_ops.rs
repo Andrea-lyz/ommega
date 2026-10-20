@@ -111,6 +111,23 @@ pub struct KeySpec {
     pub cert_not_after: Option<DateTime>,
     /// Certificate serial (A-side CERTIFICATE_SERIAL tag); optional.
     pub cert_serial: Option<Vec<u8>>,
+    /// User-authentication / authorization-list entries requested by the app, as
+    /// `(KeyMint tag, value)` pairs (502 `USER_SECURE_ID`, 503
+    /// `NO_AUTH_REQUIRED`, 504 `USER_AUTH_TYPE`, 505
+    /// `AUTH_TIMEOUT`, 506 `ALLOW_WHILE_ON_BODY`, 507
+    /// `TRUSTED_USER_PRESENCE_REQUIRED`, 508
+    /// `TRUSTED_CONFIRMATION_REQUIRED`, 509
+    /// `UNLOCKED_DEVICE_REQUIRED`).
+    ///
+    /// The A-side forwards these so the real TEE mints an auth-bound key with
+    /// the SAME policy the app asked for. The TEE enforces
+    /// `USER_AUTH_TYPE` / `AUTH_TIMEOUT` itself and stamps them into the
+    /// leaf, which is also what keeps the minted chain's authorization list
+    /// matching the request (TrustAttestor:
+    /// `hardware.attestation.user_auth_metadata` / `user_auth_policy`).
+    /// `USER_SECURE_ID` is required here even though it is never attested:
+    /// without it the TEE cannot bind the key to the user.
+    pub user_auth: Vec<(u32, i64)>,
 }
 
 /// A single generated key, held for the lifetime of the relay process.
@@ -637,8 +654,12 @@ fn build_attestation_params(
     // A-side's auth token cannot reach the B-side real TEE.  Without
     // NO_AUTH_REQUIRED the TEE mints a user-auth-gated key and every relay
     // begin(SIGN) fails with KEY_USER_NOT_AUTHENTICATED (-26).  The relay
-    // always signs without a token, so the key must be usable without auth.
-    params.push(KeyParam::NoAuthRequired);
+    // always signs without a token, so the key must be usable without auth —
+    // but only as long as the app's own authorization list has not already
+    // answered the question (see `needs_relay_no_auth_required`).
+    if needs_relay_no_auth_required(&spec.user_auth) {
+        params.push(KeyParam::NoAuthRequired);
+    }
 
     match algo {
         KmAlgorithm::Rsa => {
@@ -684,6 +705,16 @@ fn build_attestation_params(
         _ => {}
     }
 
+    // User-authentication / authorization-list entries. A real TEE is the
+    // authority on these: it validates `USER_AUTH_TYPE`/`AUTH_TIMEOUT`,
+    // retains `USER_SECURE_ID` inside the key blob (never in the
+    // attestation) and stamps 504/505 into the leaf. Without them the minted
+    // chain contradicts an auth-bound request (TrustAttestor:
+    // `hardware.attestation.user_auth_metadata` / `user_auth_policy`).
+    for (tag, value) in &spec.user_auth {
+        params.push(user_auth_param(*tag, *value)?);
+    }
+
     // Certificate validity bounds (app-specified or default now / now+10y);
     // real TEEs require NOT_BEFORE/NOT_AFTER (else MISSING_NOT_BEFORE -80).
     params.push(KeyParam::CertificateNotBefore(
@@ -705,6 +736,37 @@ fn build_attestation_params(
     }
     key_params_to_aidl(&params, km_version)
         .with_context(|| ks_err!("encode real TEE attestation parameters"))
+}
+
+/// Rebuild the `KeyParam` variant for a user-auth tag the A-side forwarded
+/// inside `device_attest_context.user_auth`. A tag that is not part of the
+/// authorization list is rejected loudly instead of being silently dropped (the
+/// A-side only ever sends 502..=509, so this is a wire-format guard).
+fn user_auth_param(tag: u32, value: i64) -> Result<KeyParam> {
+    Ok(match tag {
+        502 => KeyParam::UserSecureId(value as u64),
+        503 => KeyParam::NoAuthRequired,
+        504 => KeyParam::UserAuthType(value as u32),
+        505 => KeyParam::AuthTimeout(value as u32),
+        506 => KeyParam::AllowWhileOnBody,
+        507 => KeyParam::TrustedUserPresenceRequired,
+        508 => KeyParam::TrustedConfirmationRequired,
+        509 => KeyParam::UnlockedDeviceRequired,
+        other => return Err(anyhow!("unsupported user-auth tag {other}")),
+    })
+}
+
+/// Whether the relay still has to add `NO_AUTH_REQUIRED` itself.
+///
+/// The A-side forwards `NO_AUTH_REQUIRED` (503) for every ordinary key, so
+/// the relay adding a second one is a *duplicate tag*; and
+/// `USER_SECURE_ID` (502) is the opposite requirement, so
+/// `NO_AUTH_REQUIRED` next to it is a *contradiction*. The qti TEE answers
+/// `ServiceSpecific(-40)` for both, which makes such a request fail on the
+/// B side and fall through to the server keybox layer instead of getting a
+/// real-TEE chain.
+fn needs_relay_no_auth_required(user_auth: &[(u32, i64)]) -> bool {
+    !user_auth.iter().any(|(tag, _)| *tag == 502 || *tag == 503)
 }
 
 // ---------------------------------------------------------------------------
@@ -1988,5 +2050,82 @@ mod upgrade_tests {
         });
         assert_eq!(upgrades.load(Ordering::SeqCst), 1);
         assert_eq!(saves.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod user_auth_forwarding_tests {
+    use super::*;
+
+    /// A key the app never said anything about user auth for still has to be
+    /// usable without a token, so the relay adds the tag itself.
+    #[test]
+    fn relay_adds_no_auth_required_when_app_is_silent() {
+        assert!(needs_relay_no_auth_required(&[]));
+        assert!(needs_relay_no_auth_required(&[(504, 2)]));
+        assert!(needs_relay_no_auth_required(&[(504, 2), (505, 30_000)]));
+        assert!(needs_relay_no_auth_required(&[(506, 1)]));
+        assert!(needs_relay_no_auth_required(&[(509, 1)]));
+    }
+
+    /// The A-side forwards `NO_AUTH_REQUIRED` (503) for every ordinary key. A
+    /// second copy is a duplicate tag, which the qti TEE answers with
+    /// `ServiceSpecific(-40)`.
+    #[test]
+    fn relay_does_not_duplicate_app_no_auth_required() {
+        assert!(!needs_relay_no_auth_required(&[(503, 1)]));
+        assert!(!needs_relay_no_auth_required(&[
+            (503, 1),
+            (504, 2),
+            (505, 30_000)
+        ]));
+        assert!(!needs_relay_no_auth_required(&[(509, 1), (503, 1)]));
+    }
+
+    /// `USER_SECURE_ID` asks for the opposite of NO_AUTH_REQUIRED; the pair
+    /// is contradictory, so the relay leaves the auth binding to the app.
+    #[test]
+    fn relay_does_not_contradict_user_secure_id() {
+        assert!(!needs_relay_no_auth_required(&[(502, 4242)]));
+        assert!(!needs_relay_no_auth_required(&[(502, 4242), (504, 2)]));
+    }
+
+    /// Forwarded tags land in the real-TEE request with the app's values, and an
+    /// unknown tag is refused instead of being silently dropped.
+    #[test]
+    fn forwarded_user_auth_tags_map_to_key_params() {
+        assert!(matches!(
+            user_auth_param(502, 4242),
+            Ok(KeyParam::UserSecureId(4242))
+        ));
+        assert!(matches!(
+            user_auth_param(503, 1),
+            Ok(KeyParam::NoAuthRequired)
+        ));
+        assert!(matches!(
+            user_auth_param(504, 2),
+            Ok(KeyParam::UserAuthType(2))
+        ));
+        assert!(matches!(
+            user_auth_param(505, 30_000),
+            Ok(KeyParam::AuthTimeout(30_000))
+        ));
+        assert!(matches!(
+            user_auth_param(506, 1),
+            Ok(KeyParam::AllowWhileOnBody)
+        ));
+        assert!(matches!(
+            user_auth_param(507, 1),
+            Ok(KeyParam::TrustedUserPresenceRequired)
+        ));
+        assert!(matches!(
+            user_auth_param(508, 1),
+            Ok(KeyParam::TrustedConfirmationRequired)
+        ));
+        assert!(matches!(
+            user_auth_param(509, 1),
+            Ok(KeyParam::UnlockedDeviceRequired)
+        ));
+        assert!(user_auth_param(510, 1).is_err());
     }
 }

@@ -11,6 +11,8 @@ public final class FeatureProbeInstrumentation extends Instrumentation {
             "android.hardware.strongbox_keystore";
     private static final String APP_ATTEST_FEATURE =
             "android.hardware.keystore.app_attest_key";
+    private static final String DEVICE_ID_ATTESTATION_FEATURE =
+            "android.software.device_id_attestation";
 
     @Override
     public void onCreate(Bundle arguments) {
@@ -24,11 +26,15 @@ public final class FeatureProbeInstrumentation extends Instrumentation {
         PackageManager packageManager = context.getPackageManager();
         boolean strongBox = packageManager.hasSystemFeature(STRONGBOX_FEATURE);
         boolean appAttest = packageManager.hasSystemFeature(APP_ATTEST_FEATURE);
+        boolean deviceIdAttestation =
+                packageManager.hasSystemFeature(DEVICE_ID_ATTESTATION_FEATURE);
 
         Bundle results = new Bundle();
         results.putString("strongbox", Boolean.toString(strongBox));
         results.putString("app_attest_key", Boolean.toString(appAttest));
-        results.putString("verdict", !strongBox && appAttest ? "PASS" : "FAIL");
-        finish(!strongBox && appAttest ? Activity.RESULT_OK : Activity.RESULT_CANCELED, results);
+        results.putString("device_id_attestation", Boolean.toString(deviceIdAttestation));
+        boolean pass = !strongBox && appAttest && !deviceIdAttestation;
+        results.putString("verdict", pass ? "PASS" : "FAIL");
+        finish(pass ? Activity.RESULT_OK : Activity.RESULT_CANCELED, results);
     }
 }

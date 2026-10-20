@@ -195,12 +195,28 @@ pub fn into_logged_binder(e: anyhow::Error) -> BinderStatus {
     into_binder(e)
 }
 
+/// Rewrite source paths in client-visible error text to AOSP keystore2 relative
+/// paths.
+///
+/// This shadow tree is derived from keystore2 and the `file:line` entries in
+/// an error chain come from those files, but the build host is Windows, so they
+/// render as `src\keymaster\security_level.rs`. Integrity detectors
+/// fingerprint exactly that string: TrustAttestor's `parameter_fingerprint` /
+/// `backend_provenance` match `src/keymaster/security_level.rs` as a
+/// software forwarder and `system/security/keystore2/src/security_level.rs`
+/// as AOSP. Rewriting keeps the text identical to a real device's and stops
+/// exposing our own derivation chain to callers.
+fn normalize_source_path(text: &str) -> String {
+    text.replace("src\\keymaster\\", "system/security/keystore2/src/")
+        .replace("src/keymaster/", "system/security/keystore2/src/")
+}
+
 /// This function turns an anyhow error into an optional CString.
 /// This is especially useful to add a message string to a service specific error.
 /// If the formatted string was not convertible because it contained a nul byte,
 /// None is returned and a warning is logged.
 pub fn anyhow_error_to_cstring(e: &anyhow::Error) -> Option<String> {
-    let formatted = format!("{e:?}");
+    let formatted = normalize_source_path(&format!("{e:?}"));
     if formatted.contains('\0') {
         warn!("Cannot convert error message to String. It contained a nul byte.");
         None

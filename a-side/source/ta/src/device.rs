@@ -206,6 +206,27 @@ pub struct RemoteAttestParams {
     /// extension (`attestationSecurityLevel`/`keymasterSecurityLevel`) with the
     /// same level the A-side reported. Defaults to TEE when absent.
     pub security_level: Option<i32>,
+    /// User-authentication / authorization-list entries the app asked for, as
+    /// `(KeyMint tag, value)` pairs:
+    ///
+    /// * `502` `USER_SECURE_ID` — the value the real TEE needs to bind the key
+    ///   to a user; it is never written into the *attestation*,
+    /// * `503` `NO_AUTH_REQUIRED`, `506` `ALLOW_WHILE_ON_BODY`,
+    ///   `507` `TRUSTED_USER_PRESENCE_REQUIRED`,
+    ///   `508` `TRUSTED_CONFIRMATION_REQUIRED`,
+    ///   `509` `UNLOCKED_DEVICE_REQUIRED` — NULL-valued tags, the value is
+    ///   only a presence marker,
+    /// * `504` `USER_AUTH_TYPE` and `505` `AUTH_TIMEOUT` — integers.
+    ///
+    /// The local software path enforces the policy from the key blob and derives
+    /// the leaf's `AuthorizationList` from the *key params*, so the remote
+    /// path has to carry them too: a leaf that says `NO_AUTH_REQUIRED` for a
+    /// key the app created with `setUserAuthenticationRequired(true)`
+    /// contradicts itself, and one without `USER_AUTH_TYPE` /
+    /// `AUTH_TIMEOUT` drops the policy entirely (TrustAttestor reports
+    /// `hardware.attestation.user_auth_metadata` /
+    /// `user_auth_policy`).
+    pub user_auth: Vec<(u32, i64)>,
 }
 
 /// Identity of the physical KeyMint HAL that minted a remote result.

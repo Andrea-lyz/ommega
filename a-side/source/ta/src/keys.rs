@@ -1437,6 +1437,26 @@ fn extract_remote_attest_params(params: &[KeyParam]) -> device::RemoteAttestPara
             KeyParam::CertificateNotAfter(date) => {
                 out.certificate_not_after_ms = Some(date.ms_since_epoch)
             }
+            // User-authentication / authorization-list tags. These are copy-only
+            // in the leaf: the local software path enforces the policy from the
+            // key blob and derives the AuthorizationList from the *key params*
+            // (`cert::AuthorizationList::new`), so the remote path has to carry
+            // them too — otherwise a remotely minted leaf claims
+            // `NO_AUTH_REQUIRED` for an auth-bound key (TrustAttestor:
+            // `hardware.attestation.user_auth_metadata` /
+            // `hardware.attestation.user_auth_policy`).
+            //
+            // `UserSecureId` (502) *is* forwarded: the B-side real TEE needs
+            // it to bind the key to a user, and it is the only auth tag a leaf
+            // does not carry (AOSP emits the SID for `importWrappedKey()` only).
+            KeyParam::UserSecureId(sid) => out.user_auth.push((502, *sid as i64)),
+            KeyParam::NoAuthRequired => out.user_auth.push((503, 1)),
+            KeyParam::UserAuthType(v) => out.user_auth.push((504, i64::from(*v))),
+            KeyParam::AuthTimeout(v) => out.user_auth.push((505, i64::from(*v))),
+            KeyParam::AllowWhileOnBody => out.user_auth.push((506, 1)),
+            KeyParam::TrustedUserPresenceRequired => out.user_auth.push((507, 1)),
+            KeyParam::TrustedConfirmationRequired => out.user_auth.push((508, 1)),
+            KeyParam::UnlockedDeviceRequired => out.user_auth.push((509, 1)),
             _ => {}
         }
     }

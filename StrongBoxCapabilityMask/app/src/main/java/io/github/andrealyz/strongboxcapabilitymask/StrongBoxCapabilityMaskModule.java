@@ -4,6 +4,8 @@ import android.annotation.SuppressLint;
 import android.util.Log;
 
 import java.lang.reflect.Method;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedInterface;
@@ -16,7 +18,7 @@ public final class StrongBoxCapabilityMaskModule extends XposedModule {
     private static final String GET_AVAILABLE_FEATURES_METHOD = "getAvailableFeatures";
 
     private final AtomicBoolean hookInstalled = new AtomicBoolean();
-    private final AtomicBoolean removalLogged = new AtomicBoolean();
+    private final Set<String> loggedRemovals = ConcurrentHashMap.newKeySet();
     private volatile boolean loadedInSystemServer;
 
     @Override
@@ -47,17 +49,16 @@ public final class StrongBoxCapabilityMaskModule extends XposedModule {
             getAvailableFeatures.setAccessible(true);
 
             hook(getAvailableFeatures)
-                    .setId("mask_strongbox_system_feature")
+                    .setId("mask_system_features")
                     .setPriority(XposedInterface.PRIORITY_HIGHEST)
                     .setExceptionMode(XposedInterface.ExceptionMode.DEFAULT)
                     .intercept(chain -> {
                         Object result = chain.proceed();
                         try {
-                            if (FeatureMask.removeStrongBoxFeature(result)
-                                    && removalLogged.compareAndSet(false, true)) {
-                                log(Log.INFO, TAG,
-                                        "event=feature_removed name="
-                                                + FeatureMask.STRONGBOX_FEATURE);
+                            for (String feature : FeatureMask.removeMaskedFeatures(result)) {
+                                if (loggedRemovals.add(feature)) {
+                                    log(Log.INFO, TAG, "event=feature_removed name=" + feature);
+                                }
                             }
                         } catch (Throwable error) {
                             log(Log.ERROR, TAG, "event=feature_remove_failed", error);
