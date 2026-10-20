@@ -29,6 +29,7 @@ FLAG=$TA_DIR/enabled
 STATUS=$TA_DIR/status.json
 PIDFILE=$TA_DIR/daemon.pid
 MARKER=$TA_DIR/hal-taken-over
+HOST_KICKED=$TA_DIR/host-kicked-ta
 LOCK=$TA_DIR/lock
 LAST_ID=$TA_DIR/last-id
 ID_CHANGED=$TA_DIR/id-changed
@@ -245,6 +246,9 @@ stop_daemon() {
 spawn_daemon_and_wait() {
   binary=$(find_binary) || return 1
   mkdir -p "$TA_DIR"
+  # A new TA instance must get its own host kick; a pid left in the marker from
+  # an earlier boot could otherwise match the reused pid and skip it.
+  rm -f "$HOST_KICKED"
   "$binary" --mode=answer >>"$ERRLOG" 2>&1 &
   pid=$!
   # Atomic: a half-written pidfile would read as "no daemon" to a concurrent pass.
@@ -320,6 +324,26 @@ restore_hal() {
     i=$((i + 1))
   done
   rm -f "$MARKER"
+}
+
+# soterserver caches the vendor HAL proxy in a static field and does not re-query
+# it. Whenever the TA instance changes (takeover, watchdog restart, module update),
+# the cached proxy points at a dead binder and every app call fails with
+# DeadObjectException — the "system error" with no HAL request in the log.
+#
+# Record which TA pid was kicked, not "kicked once": the old host-kicked flag
+# only ever kicked the first instance, so a restarted TA left every client blind.
+kick_host() {
+  host_pid=$(pidof com.tencent.soter.soterserver 2>/dev/null | awk '{print $1}')
+  [ -n "$host_pid" ] || host_pid=$(pgrep -f 'com.tencent.soter.soterserver' 2>/dev/null | head -n 1)
+  ta_pid=$(cat "$PIDFILE" 2>/dev/null)
+  kicked_ta=$(cat "$HOST_KICKED" 2>/dev/null)
+  if [ -n "$host_pid" ] && [ -n "$ta_pid" ] && [ "$kicked_ta" != "$ta_pid" ]; then
+    log "restarting soter host pid=$host_pid so it rebinds our service (ta=$ta_pid)"
+    kill -9 "$host_pid" 2>/dev/null
+    echo "$ta_pid" > "$HOST_KICKED" 2>/dev/null
+  fi
+  return 0
 }
 
 # Read-only snapshot; also safe to run while another converge holds the lock.
@@ -403,6 +427,7 @@ converge() {
   fi
 
   snapshot_state
+  [ "$g_owner" = us ] && kick_host
   debug "done: enabled=$g_enabled running=$g_running owner=$g_owner hal=$g_hal"
   release_lock
   return 0
