@@ -225,12 +225,20 @@ hold:
    has completed all in-flight TA work; and
 2. no other process can open `keymaster64` directly during the window.
 
-The missing implementation is a complete KeyMint generate request/response
-codec over QSEECom. The existing lab harness proves the QSEECom transport and
-`0x2116`, but deliberately used the stock HAL for certificate generation. This
-candidate therefore remains a research milestone until direct generation has
-been implemented and tested on a disposable device. A second HAL process or a
-new process loading the same TA is not an independent secure-world context.
+The direct generation command is now identified as `0x3108`. QTI serializes a
+CBOR map with key parameters, optional attestation-key data and certificate-time
+tuples, then parses key 23 (keyblob), key 32 (certificate count) and repeated
+key 33 (certificate bytes). A host-only model and tests have been written under
+the local lab archive. The remaining gap is implementation validation on Android
+and the client-exclusion proof, not discovery of an unknown command.
+
+The SELinux policy allows `/dev/smcinvoke` (`tee_device`) to many HAL domains in
+addition to the KeyMint HAL. Freezing the KeyMint HAL therefore closes its
+Binder path but does not, without runtime evidence, prove that every possible
+direct `keymaster64` caller is excluded. Candidate B remains a research
+milestone until direct holders can be inventoried or an additional kernel/vendor
+admission gate exists. A second HAL process or a new process loading the same TA
+is not an independent secure-world context.
 
 The lab excluded Keystore2 and the already-frozen RKPD app. A production design
 must enumerate and cover every live caller able to read the changed SPL or
@@ -325,8 +333,10 @@ These checks are mandatory before calling the feature deployable:
 
 ### M2: resident direct-TA client, disabled
 
-- Implement the bounded QSEECom client behind a build/runtime feature flag.
-- Unit-test request bytes and response decoding.
+- The static command and CBOR response paths are now recovered; implement the
+  bounded QSEEcom client behind a build/runtime feature flag using that model.
+- Unit-test request bytes, version handshake, TEE-only SPU bypass and response
+  decoding against the host vectors.
 - Keep the production call path unreachable until the exclusion gate passes.
 
 ### M3: read-only admission inventory
