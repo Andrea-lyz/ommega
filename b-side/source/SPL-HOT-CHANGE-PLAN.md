@@ -178,6 +178,14 @@ The following rules follow from that observation:
   acceptable only if calls resume automatically after baseline restore, do not
   cross existing Binder deadlines, and unlock/fingerprint success is unchanged.
 
+The no-freeze follow-up on 2026-10-20 held OS17 / System 20260901 / Vendor
+20260901 for approximately 165 seconds with HAL `freeze=0`. Password, fingerprint
+and ordinary application use all remained normal on B, while A received a
+2026-09 certificate and reported Strong security level. Baseline restore returned
+status 0. This empirically rules out the earlier device-wide outage being caused
+by the TA date alone; the long-lived Keystore2 freeze was the confounding factor.
+It does not prove exclusion of other KeyMint/QSEECom clients.
+
 Two implementation candidates should be evaluated in this order.
 
 #### Candidate A: bounded micro-window admission (minimum viable path)
