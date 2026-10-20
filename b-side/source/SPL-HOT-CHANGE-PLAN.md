@@ -154,6 +154,84 @@ b-side/source/template/p0-lifecycle.sh       startup recovery ordering
 
 This is the first hard gate and cannot be replaced by an assertion in Rust.
 
+### Observed UI outage: separate Keystore2 freezing from the SPL change
+
+During the five-minute manual window, the operator observed that the lock screen,
+fingerprint authentication and normal application startup were unavailable until
+the window ended. The hold script froze Keystore2 (`pid 1292`) for the entire
+window and unfroze it only after restoring baseline. The SPL value and the
+Keystore2 freezer were therefore changed together in both directions. That test
+does not establish that the TA date alone broke those services; the frozen
+Keystore2 is already a sufficient explanation for app startup and credential
+authentication failures.
+
+The following rules follow from that observation:
+
+- A five-minute, request-visible hold is diagnostic-only and must never become
+  the production design.
+- Freezing Keystore2 for an unbounded period is a stop condition: it can make
+  the device look broken even while its UI process is alive.
+- Production must separate and measure the two effects before release: a short
+  KeyMint stall caused by admission control, and the certificate date actually
+  observed by A.
+- No full-app lockout is acceptable. Temporary KeyMint call queuing may be
+  acceptable only if calls resume automatically after baseline restore, do not
+  cross existing Binder deadlines, and unlock/fingerprint success is unchanged.
+
+Two implementation candidates should be evaluated in this order.
+
+#### Candidate A: bounded micro-window admission (minimum viable path)
+
+Keep the existing stock-HAL generation path, but make the exclusive window a
+single bounded transaction rather than a held profile:
+
+```text
+freeze verified client set
+  -> apply target
+  -> one stock-HAL generateKey
+  -> restore baseline
+  -> verify baseline
+  -> unfreeze clients
+  -> post result
+```
+
+The resident TA client and event-driven freezer confirmation should reduce the
+normal window from seconds to roughly the measured tens of milliseconds plus
+scheduler noise. Keystore2-dependent calls queue during that interval and then
+resume. This is viable only if a disposable device proves the window remains
+inside all caller deadlines and that no direct caller bypasses the frozen set.
+It also still has the catastrophic case where a secure-world call never
+completes while the clients remain frozen; that path must quarantine the relay
+without killing the call.
+
+#### Candidate B: freeze the stock KeyMint HAL and use a direct-TA transaction
+
+This can avoid freezing Keystore2 and the application UID cgroups. Instead:
+
+```text
+quiesce and freeze the stock KeyMint HAL process
+  -> direct QSEECom apply target
+  -> direct QSEECom KeyMint generateKey
+  -> direct QSEECom restore baseline
+  -> unfreeze the stock HAL
+```
+
+The relay's direct TA session is the only KeyMint producer during the window.
+Keystore2 remains alive; application requests block at the frozen HAL and are
+handled after it resumes. This is preferable for UI continuity if two proofs
+hold:
+
+1. freezing and observing `cgroup.events=frozen 1` guarantees that the stock HAL
+   has completed all in-flight TA work; and
+2. no other process can open `keymaster64` directly during the window.
+
+The missing implementation is a complete KeyMint generate request/response
+codec over QSEECom. The existing lab harness proves the QSEECom transport and
+`0x2116`, but deliberately used the stock HAL for certificate generation. This
+candidate therefore remains a research milestone until direct generation has
+been implemented and tested on a disposable device. A second HAL process or a
+new process loading the same TA is not an independent secure-world context.
+
 The lab excluded Keystore2 and the already-frozen RKPD app. A production design
 must enumerate and cover every live caller able to read the changed SPL or
 mutate a keyblob during the window, including:
@@ -169,8 +247,8 @@ Before implementation is enabled, produce a read-only client inventory and an
 admission proof. Acceptable mechanisms must have an atomic close-and-wait
 contract and preserve in-flight secure calls. cgroup freezing is acceptable
 only for a complete, verified set of clients and cgroup paths recomputed from
-PIDs, not hardcoded. An additional HAL process is not independent secure-world
-state and is not a substitute for exclusion.
+PIDs, not hardcoded. A long-held Keystore2 freeze fails the user-experience
+acceptance even when it is technically effective.
 
 If the complete set cannot be proven on the current B-only environment, the
 feature remains compiled out and delivered as lab tooling only. The next safe
@@ -255,6 +333,11 @@ These checks are mandatory before calling the feature deployable:
 
 - Enumerate KeyMint/Keystore/RKP/SecureClock/SharedSecret clients and their
   cgroup paths on an approved non-disposable environment.
+- Measure a no-op short freeze of each candidate cgroup to distinguish caller
+  timeout sensitivity from destruction caused by the frozen dependency.
+- Decide between Candidate A (bounded full-client window) and Candidate B
+  (KeyMint HAL freeze plus direct-TA generation) using evidence, not wishful
+  reasoning about concurrency.
 - Produce a coverage matrix with one of: admitted by the same gate, proven
   inactive, or unresolved.
 - Treat any unresolved row as a deployment blocker.
@@ -291,6 +374,9 @@ These checks are mandatory before calling the feature deployable:
   cannot mint again.
 - All relevant KeyMint clients are either covered by the admission contract or
   proven unable to call the TA during the window.
+- Lock-screen and fingerprint behavior remain usable, or any synchronous
+  KeyMint call pauses only for a measured bounded interval and resumes without
+  an authentication failure or app restart.
 - Baseline restoration is observed and journaled before the result leaves B.
 - Existing keyblobs, credentials, unlock state and relay health remain valid.
 - Crash and lost-response tests never require a reboot or interruption of an
@@ -306,3 +392,5 @@ These checks are mandatory before calling the feature deployable:
 - Repairing the device's pre-existing unavailable RKP service.
 - Editing certificates, extracting or reusing factory private keys.
 - Deploying HAL reload, framework restart or hard reboot as recovery.
+- Freezing Keystore2 for the entire lifetime of a profile or presenting the
+  resulting device-wide outage as an acceptable production tradeoff.
