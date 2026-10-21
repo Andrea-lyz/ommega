@@ -49,7 +49,7 @@ Set `ANDROID_HOME` or create `local.properties`, then run:
 ```
 
 The Ommega root CI also runs `:app:testDebugUnitTest :app:assembleRelease` and
-bundles `StrongBoxCapabilityMask-1.4.6-debug-signed.apk` with A/B/Server artifacts.
+bundles `StrongBoxCapabilityMask-1.9.0-debug-signed.apk` with A/B/Server artifacts.
 The Release build uses the standard Android debug signing configuration.
 This module shares the product version; its runtime feature-mask behavior stays global.
 
@@ -98,7 +98,7 @@ Validated on PJZ110, Android API 36, LSPosed 2.2.0 on 2026-09-04:
 
 Later testing also observed intermittent Paytm `00000` warnings. The earlier pass
 does not establish a permanent fix or prove subsequent warnings are false positives.
-The current firmware and remote TEE acceptance configuration are recorded in the
+The historical firmware and remote TEE acceptance configuration are recorded in the
 root README; native A StrongBox/RKP tests were a separate configuration.
 
 The APK's API 29 installation floor is not a compatibility guarantee. Its hook

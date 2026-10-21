@@ -2,8 +2,8 @@
 
 Custom keystore implementation for remote TEE attestation relay (A-side).
 
-This is a full keystore implementation that fully implements the AOSP AIDL
-interface. It runs on the A-side device and, when remote mode is enabled,
+This provides Ommega's Keystore2/KeyMint implementation through AOSP AIDL
+interfaces. It runs on the A-side device and, when remote mode is enabled,
 forwards attestation / sign / decrypt to a B-side real hardware TEE through the
 relay_server.
 
@@ -18,8 +18,8 @@ relay_server.
   version, security level, and StrongBox availability. Every attestation result
   must match that profile. If the relay is temporarily unavailable during boot,
   startup retries until the remote profile is available instead of freezing a
-  mismatched local profile. Profile or certificate mismatches fail closed unless
-  explicit local fallback is enabled.
+  mismatched local profile. Profile or certificate mismatches fail closed;
+  enabling local fallback does not bypass identity checks.
 
 The native Soter HAL has an independent relay. Enable the software Soter TA in
 the WebUI to take over `vendor.qti.hardware.soter.ISoter/default`; then configure
@@ -42,19 +42,22 @@ off.
 
 1. Install this module (KernelSU/APatch, or Magisk).
 
-2. Configure `/data/adb/ommega/config` (the single shared A-side config dir):
+2. Open **Settings → Remote configuration** in the WebUI. The config file is
+   `/data/misc/keystore/ommega/config`; the WebUI accesses the same file through
+   `/data/adb/ommega/ommegadata/config`. Do not create a separate legacy
+   `/data/adb/ommega/config`:
 
    ```
    url: http://<relay-server>:<port>
    device_id: <b-side-device-id>
    token: <relay-token>
    remote: true
-   local_hw: true
+   local_hw: false
    tls_insecure: true
    debug_logging: false
    ```
 
-3. Add the apps you want to intercept to `/data/adb/ommega/target.txt`, one
+3. Add the apps you want to intercept to `/data/misc/keystore/ommega/target.txt`, one
    plain package name per line. The WebUI (`webroot/`) manages this and the
    optional per-package `global_default` / `strongbox` / `tee` policy stored in
    `/data/misc/keystore/ommega/target-security.toml`.
@@ -79,10 +82,11 @@ off.
 
    The detector compatibility switch in
    `/data/misc/keystore/ommega/target-compat.toml` (`[positive_key_id]`) is
-   global as well: while it is on, every app routed through Ommega gets positive
+   global as well: while it is on, newly created app keys in Ommega get positive
    key ids, for clients that treat a non-positive namespace as an unspecified
    key id. It is off by default, and a policy written before the switch became
-   global (a `packages` list) still enables it.
+   global (a nonempty `packages` list) still enables it. Existing key IDs are
+   not migrated.
 
 4. Replace the template `keybox.xml` if you want local-mode attestation with
    your own keys.
