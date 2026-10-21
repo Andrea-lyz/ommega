@@ -188,6 +188,22 @@ rm -f "$STATE_DIR/restart.keymint" "$STATE_DIR/restart.injector" "$STATE_DIR/res
 # Make the shared A-side config directory traversable and expose the data dir.
 mkdir -p "$CLIENTA_DIR"
 chmod 0755 "$CLIENTA_DIR"
+# Older layouts left a real directory here, so WebUI writes landed beside the
+# keystore data and never reached it. Migrate the files (never overwriting the
+# live ones) and keep the old directory as a dated backup.
+if [ -e "$CLIENTA_DIR/ommegadata" ] && [ ! -L "$CLIENTA_DIR/ommegadata" ]; then
+  for legacy in "$CLIENTA_DIR/ommegadata"/*; do
+    [ -e "$legacy" ] || continue
+    name=${legacy##*/}
+    [ -e "$TARGET_DIR/$name" ] || cp -a "$legacy" "$TARGET_DIR/$name" 2>/dev/null
+  done
+  mv "$CLIENTA_DIR/ommegadata" "$CLIENTA_DIR/ommegadata.legacy-$(date +%Y%m%d-%H%M%S)" 2>/dev/null
+fi
+# A link that points somewhere else hides the data just as effectively; replace
+# the link itself, never the directory it points at.
+if [ -L "$CLIENTA_DIR/ommegadata" ] && [ "$(readlink "$CLIENTA_DIR/ommegadata")" != "$TARGET_DIR" ]; then
+  rm -f "$CLIENTA_DIR/ommegadata"
+fi
 if [ ! -e "$CLIENTA_DIR/ommegadata" ]; then
   ln -s "$TARGET_DIR" "$CLIENTA_DIR/ommegadata" 2>/dev/null
 fi
