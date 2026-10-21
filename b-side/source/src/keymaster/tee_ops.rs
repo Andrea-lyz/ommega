@@ -119,14 +119,14 @@ pub struct KeySpec {
     /// `TRUSTED_CONFIRMATION_REQUIRED`, 509
     /// `UNLOCKED_DEVICE_REQUIRED`).
     ///
-    /// The A-side forwards these so the real TEE mints an auth-bound key with
-    /// the SAME policy the app asked for. The TEE enforces
-    /// `USER_AUTH_TYPE` / `AUTH_TIMEOUT` itself and stamps them into the
-    /// leaf, which is also what keeps the minted chain's authorization list
-    /// matching the request (TrustAttestor:
-    /// `hardware.attestation.user_auth_metadata` / `user_auth_policy`).
-    /// `USER_SECURE_ID` is required here even though it is never attested:
-    /// without it the TEE cannot bind the key to the user.
+    /// The A-side forwards the app's requested authorization list. The relay
+    /// keeps the metadata-only entries so the minted leaf reflects the request
+    /// (TrustAttestor: `hardware.attestation.user_auth_metadata` /
+    /// `user_auth_policy`), but it does not bind the real TEE key to
+    /// `USER_SECURE_ID` (502), `TRUSTED_USER_PRESENCE_REQUIRED` (507) or
+    /// `TRUSTED_CONFIRMATION_REQUIRED` (508): those tokens are minted by the
+    /// A-side Gatekeeper/ConfirmationUI and cannot be validated by the
+    /// B-side TEE, which signs with no token (see `relay_user_auth_params`).
     pub user_auth: Vec<(u32, i64)>,
 }
 
@@ -581,12 +581,48 @@ pub fn generate_attest_key_on(
             if is_dead_object_status(&status) {
                 clear_system_keymint(service);
             }
-            // Extract the KeyMint ErrorCode (e.g., -74, -68) so the caller
-            // can distinguish "HAL not provisioned" from "parameter rejected".
-            return Err(keymint_status_error(
-                &status,
-                &format!("real keymint {service} generateKey failed"),
-            ));
+            let code = extract_km_error_code(&status);
+            let metadata_rejected = matches!(
+                code,
+                Some(value)
+                    if value == KmErrorCode::InvalidTag as i32
+                        || value == KmErrorCode::UnsupportedTag as i32
+            );
+            if metadata_rejected {
+                // Some vendor TEEs reject USER_AUTH_TYPE/AUTH_TIMEOUT without
+                // USER_SECURE_ID even though the KeyMint reference accepts the
+                // metadata-only list. Retry once with the pre-1.9.0 no-auth
+                // policy so key registration still succeeds; the leaf then
+                // omits the auth metadata.
+                log::warn!(
+                    "event=user_auth_metadata_fallback hal={service} code={code:?} reason=real TEE rejected the metadata-only authorization list"
+                );
+                let mut fallback_spec = spec.clone();
+                fallback_spec.user_auth.clear();
+                let fallback =
+                    build_attestation_params(app_id_der, challenge, &fallback_spec, km_version)?;
+                match keymint.generateKey(&fallback, None) {
+                    Ok(result) => result,
+                    Err(fallback_status) => {
+                        if is_dead_object_status(&fallback_status) {
+                            clear_system_keymint(service);
+                        }
+                        return Err(keymint_status_error(
+                            &fallback_status,
+                            &format!(
+                                "real keymint {service} generateKey failed (no-auth fallback)"
+                            ),
+                        ));
+                    }
+                }
+            } else {
+                // Extract the KeyMint ErrorCode (e.g., -74, -68) so the caller
+                // can distinguish "HAL not provisioned" from "parameter rejected".
+                return Err(keymint_status_error(
+                    &status,
+                    &format!("real keymint {service} generateKey failed"),
+                ));
+            }
         }
     };
 
@@ -705,14 +741,12 @@ fn build_attestation_params(
         _ => {}
     }
 
-    // User-authentication / authorization-list entries. A real TEE is the
-    // authority on these: it validates `USER_AUTH_TYPE`/`AUTH_TIMEOUT`,
-    // retains `USER_SECURE_ID` inside the key blob (never in the
-    // attestation) and stamps 504/505 into the leaf. Without them the minted
-    // chain contradicts an auth-bound request (TrustAttestor:
-    // `hardware.attestation.user_auth_metadata` / `user_auth_policy`).
-    for (tag, value) in &spec.user_auth {
-        params.push(user_auth_param(*tag, *value)?);
+    // User-authentication / authorization-list entries. Keep the entries that
+    // only describe the requested policy (504/505/506/509), so the TEE stamps
+    // them into the leaf; drop the ones that require a token the relay cannot
+    // present (see `relay_user_auth_params`).
+    for param in relay_user_auth_params(&spec.user_auth)? {
+        params.push(param);
     }
 
     // Certificate validity bounds (app-specified or default now / now+10y);
@@ -756,17 +790,41 @@ fn user_auth_param(tag: u32, value: i64) -> Result<KeyParam> {
     })
 }
 
+/// Authorization-list entries that can safely reach the real B-side TEE.
+///
+/// `USER_SECURE_ID` (502) makes the TEE require a `HardwareAuthToken` at
+/// `begin`/`update`/`finish`; `TRUSTED_USER_PRESENCE_REQUIRED` (507) and
+/// `TRUSTED_CONFIRMATION_REQUIRED` (508) similarly require proof/approval
+/// tokens. Those tokens are produced by the A-side Gatekeeper or
+/// ConfirmationUI and cannot validate against the B-side TEE, while the relay
+/// always calls `begin`/`update`/`finish` with `None` (see
+/// `run_single_input_op`). A key carrying 502 fails every relay `begin(SIGN)`
+/// with `KeyUserNotAuthenticated` (-26), which is the 1.9.0 regression.
+///
+/// The remaining tags are metadata-only for the relay's key: 504/505 make the
+/// minted leaf match the app's requested policy, 506 relaxes nothing that the
+/// relay needs, and 509 is not hardware-enforced on current Android.
+fn relay_user_auth_params(user_auth: &[(u32, i64)]) -> Result<Vec<KeyParam>> {
+    let mut params = Vec::new();
+    for (tag, value) in user_auth {
+        if matches!(*tag, 502 | 507 | 508) {
+            continue;
+        }
+        params.push(user_auth_param(*tag, *value)?);
+    }
+    Ok(params)
+}
+
 /// Whether the relay still has to add `NO_AUTH_REQUIRED` itself.
 ///
 /// The A-side forwards `NO_AUTH_REQUIRED` (503) for every ordinary key, so
-/// the relay adding a second one is a *duplicate tag*; and
-/// `USER_SECURE_ID` (502) is the opposite requirement, so
-/// `NO_AUTH_REQUIRED` next to it is a *contradiction*. The qti TEE answers
-/// `ServiceSpecific(-40)` for both, which makes such a request fail on the
-/// B side and fall through to the server keybox layer instead of getting a
-/// real-TEE chain.
+/// the relay adding a second one is a *duplicate tag*. `NO_AUTH_REQUIRED`
+/// next to `USER_AUTH_TYPE` (504) is also rejected by the tag validator, so
+/// a key whose policy is described by 504 must not get 503. `USER_SECURE_ID`
+/// (502) is dropped before the TEE call, so a request that only carried 502
+/// (plus token-bound tags) still needs the relay's own 503.
 fn needs_relay_no_auth_required(user_auth: &[(u32, i64)]) -> bool {
-    !user_auth.iter().any(|(tag, _)| *tag == 502 || *tag == 503)
+    !user_auth.iter().any(|(tag, _)| *tag == 503 || *tag == 504)
 }
 
 // ---------------------------------------------------------------------------
@@ -2062,32 +2120,48 @@ mod user_auth_forwarding_tests {
     #[test]
     fn relay_adds_no_auth_required_when_app_is_silent() {
         assert!(needs_relay_no_auth_required(&[]));
-        assert!(needs_relay_no_auth_required(&[(504, 2)]));
-        assert!(needs_relay_no_auth_required(&[(504, 2), (505, 30_000)]));
         assert!(needs_relay_no_auth_required(&[(506, 1)]));
         assert!(needs_relay_no_auth_required(&[(509, 1)]));
+        assert!(needs_relay_no_auth_required(&[(502, 4242)]));
+        assert!(needs_relay_no_auth_required(&[(502, 4242), (507, 1)]));
     }
 
     /// The A-side forwards `NO_AUTH_REQUIRED` (503) for every ordinary key. A
     /// second copy is a duplicate tag, which the qti TEE answers with
-    /// `ServiceSpecific(-40)`.
+    /// `ServiceSpecific(-40)`; 503 next to 504 is likewise contradictory.
     #[test]
-    fn relay_does_not_duplicate_app_no_auth_required() {
+    fn relay_does_not_duplicate_or_contradict_no_auth_required() {
         assert!(!needs_relay_no_auth_required(&[(503, 1)]));
-        assert!(!needs_relay_no_auth_required(&[
-            (503, 1),
-            (504, 2),
-            (505, 30_000)
-        ]));
+        assert!(!needs_relay_no_auth_required(&[(503, 1), (504, 2)]));
         assert!(!needs_relay_no_auth_required(&[(509, 1), (503, 1)]));
+        assert!(!needs_relay_no_auth_required(&[(504, 2)]));
+        assert!(!needs_relay_no_auth_required(&[(504, 2), (505, 30_000)]));
     }
 
-    /// `USER_SECURE_ID` asks for the opposite of NO_AUTH_REQUIRED; the pair
-    /// is contradictory, so the relay leaves the auth binding to the app.
+    /// `USER_SECURE_ID` and the proof/approval tags cannot be satisfied by the
+    /// relay (the A-side token is signed by A's Gatekeeper), so the real TEE
+    /// request must not carry them. The metadata-only entries stay.
     #[test]
-    fn relay_does_not_contradict_user_secure_id() {
-        assert!(!needs_relay_no_auth_required(&[(502, 4242)]));
-        assert!(!needs_relay_no_auth_required(&[(502, 4242), (504, 2)]));
+    fn relay_strips_token_bound_auth_tags_but_keeps_metadata() {
+        let kept = relay_user_auth_params(&[
+            (502, 4242),
+            (504, 2),
+            (505, 30_000),
+            (506, 1),
+            (507, 1),
+            (508, 1),
+            (509, 1),
+        ])
+        .expect("filter user auth");
+        assert_eq!(
+            kept,
+            vec![
+                KeyParam::UserAuthType(2),
+                KeyParam::AuthTimeout(30_000),
+                KeyParam::AllowWhileOnBody,
+                KeyParam::UnlockedDeviceRequired,
+            ]
+        );
     }
 
     /// Forwarded tags land in the real-TEE request with the app's values, and an
