@@ -23,6 +23,12 @@
    they must not carry a background of their own. */
 .om-modern .search-bg { background:transparent; color:var(--om-ink); }
 .om-modern .search-input { background:var(--om-raised); border:1px solid var(--om-line); border-radius:16px; color:var(--om-ink); }
+/* The legacy field is positioned for the fixed header. This header is in flow
+   and already offset by the safe-area inset, so applying that inset again
+   pushes the field over the first app card. Keep it inside the header's 12px
+   padding and leave a small gap before the list. */
+.om-modern .search-input { top:12px; left:12px; }
+.om-modern #apps-list { padding-top:8px; }
 .om-modern .floating-btn { z-index:89; }
 /* The packaged header uses tonal icon buttons. They take their colour from the
    secondary container of the theme, so they have to follow this panel. */
