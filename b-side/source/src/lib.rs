@@ -16,6 +16,7 @@ pub mod logging;
 pub mod macros;
 pub mod plat;
 pub mod soter;
+pub mod uplink;
 pub mod wakelock;
 
 #[cfg(test)]

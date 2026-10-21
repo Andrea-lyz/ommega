@@ -68,6 +68,8 @@ pub struct DeviceEntry {
     pub soter: Option<bool>,
     pub soter_sign: Option<bool>,
     pub soter_nosign: Option<bool>,
+    /// Relay version from the heartbeat. `None` means an older relay.
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -311,11 +313,27 @@ impl TaskStore {
         timeout: Duration,
         caps: DeviceCaps,
     ) -> Option<Task> {
+        self.pop_for_b_with_caps_and_version(device_id, machine_id, timeout, caps, None)
+            .await
+    }
+
+    pub async fn pop_for_b_with_caps_and_version(
+        &self,
+        device_id: &str,
+        machine_id: &str,
+        timeout: Duration,
+        caps: DeviceCaps,
+        version: Option<&str>,
+    ) -> Option<Task> {
         let assignment_timeout = self.assignment_timeout;
         let pending_ttl = self.pending_ttl;
         let completed_ttl = self.completed_ttl;
         let completed_max = self.completed_max;
         self.wait_until(timeout, |inner| {
+            let known_version = inner
+                .devices
+                .get(device_id)
+                .and_then(|entry| entry.version.clone());
             inner.devices.insert(
                 device_id.to_string(),
                 DeviceEntry {
@@ -326,6 +344,7 @@ impl TaskStore {
                     soter: caps.soter,
                     soter_sign: caps.soter_sign,
                     soter_nosign: caps.soter_nosign,
+                    version: version.map(str::to_string).or(known_version),
                 },
             );
             if !machine_id.is_empty() {
@@ -857,6 +876,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(served.task_id, sign);
+    }
+
+    #[tokio::test]
+    async fn relay_version_is_recorded_and_kept_when_a_later_poll_omits_it() {
+        let store = store();
+        store
+            .pop_for_b_with_caps_and_version(
+                "dev",
+                "m1",
+                Duration::ZERO,
+                DeviceCaps::default(),
+                Some("1.8.0"),
+            )
+            .await;
+        {
+            let inner = store.inner.lock().await;
+            assert_eq!(
+                inner.devices.get("dev").and_then(|d| d.version.as_deref()),
+                Some("1.8.0")
+            );
+        }
+        store
+            .pop_for_b_with_caps_and_version(
+                "dev",
+                "m1",
+                Duration::ZERO,
+                DeviceCaps::default(),
+                None,
+            )
+            .await;
+        let inner = store.inner.lock().await;
+        assert_eq!(
+            inner.devices.get("dev").and_then(|d| d.version.as_deref()),
+            Some("1.8.0")
+        );
     }
 
     #[tokio::test]

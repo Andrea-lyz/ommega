@@ -724,6 +724,8 @@ pub struct PollQuery {
     pub machine_id: Option<String>,
     pub timeout: Option<u64>,
     pub caps: Option<String>,
+    /// Relay version (module version). Missing on older relays.
+    pub ver: Option<String>,
 }
 
 pub async fn b_poll(
@@ -754,11 +756,12 @@ pub async fn b_poll(
 
     match state
         .store
-        .pop_for_b_with_caps(
+        .pop_for_b_with_caps_and_version(
             &q.device_id,
             &machine_id,
             timeout,
             crate::queue::DeviceCaps::parse(q.caps.as_deref()),
+            q.ver.as_deref(),
         )
         .await
     {
