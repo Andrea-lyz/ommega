@@ -126,36 +126,54 @@ export function healthMessage(health) {
 // to be routed to them: a back press closes the topmost dialog instead of
 // switching the dashboard view behind it.
 export function installDialogGuard(onChange = () => {}) {
-  const tracked = new Set();
+  const tracked = [];
+  let sequence = 0, rewinding = false;
   const openDialogs = () => [...document.querySelectorAll('md-dialog[open]')];
   const sync = () => {
     const open = openDialogs();
-    for (const dialog of open) {
-      if (!tracked.has(dialog)) {
-        tracked.add(dialog);
-        history.pushState({om: 'dialog'}, '');
-      }
-    }
-    for (const dialog of [...tracked]) {
-      if (!dialog.open) {
-        tracked.delete(dialog);
-        // The dialog closed itself: drop the history entry that was added for
-        // it, but only while that entry is still the current one. A back press
-        // that already consumed it must not take the dashboard view with it.
-        if (history.state?.om === 'dialog') history.back();
-        break;
-      }
-    }
     onChange(open.length > 0);
+    if (rewinding) return;
+    // Closing a dialog with its own button consumes only its own history
+    // entry. The resulting popstate must not close the parent as well.
+    while (tracked.length && !tracked.at(-1).dialog.open) {
+      const entry = tracked.pop();
+      if (!entry.consumed && history.state?.omDialog === entry.token) {
+        rewinding = true;
+        history.back();
+        return;
+      }
+    }
+    for (const dialog of open) {
+      if (!tracked.some(entry => entry.dialog === dialog)) {
+        const entry = {dialog, token: ++sequence, consumed: false, closing: false};
+        tracked.push(entry);
+        history.pushState({...history.state, omDialog: entry.token}, '');
+      }
+    }
+  };
+  const closeTop = consumed => {
+    const entry = [...tracked].reverse().find(item => item.dialog.open && !item.closing);
+    if (!entry) return false;
+    entry.consumed = consumed;
+    entry.closing = true;
+    // md-dialog.close() completes after its closing animation. Keep the entry
+    // until then so an observer cannot register the closing dialog again.
+    Promise.resolve(entry.dialog.close()).finally(() => { entry.closing = false; sync(); });
+    return true;
   };
   window.addEventListener('popstate', () => {
-    const open = openDialogs();
-    if (!open.length) return;
-    const dialog = open[open.length - 1];
-    tracked.delete(dialog);
-    dialog.close();
+    if (rewinding) { rewinding = false; sync(); return; }
+    closeTop(true);
   });
+  // KernelSU-style WebViews also dispatch a native back event. Handle it
+  // before the packaged handler, which searches dialogs in DOM order.
+  window.addEventListener('back', event => {
+    if (!closeTop(false)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
   const observer = new MutationObserver(sync);
   observer.observe(document.documentElement, {attributes: true, subtree: true, attributeFilter: ['open']});
+  sync();
   return sync;
 }

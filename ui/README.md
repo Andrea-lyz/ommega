@@ -57,9 +57,9 @@ The preview has application ID `org.ommega.deviceb.preview`. Relay service and b
 
 Local validation on 2026-10-21:
 
-- 47 host JavaScript tests passed: presentation 5, B configuration 10, A compatibility 11, stubbed B SPL controller 21. No real HAL/device calls were used.
+- 50 host JavaScript tests passed: presentation 8, B configuration 10, A compatibility 11, stubbed B SPL controller 21. No real HAL/device calls were used.
 - B Android Release assembled, lintVital passed, two native unit tests passed. Preview Debug assembled.
-- Five browser smoke cases passed without JavaScript runtime errors, including a real OpenUI component render.
+- Five browser smoke cases passed without JavaScript runtime errors, including a real OpenUI component render and nested-dialog closure through buttons, browser back and native WebView back.
 - Mobile MCP on A (`PJZ110`) verified the separate native preview, Chinese system adaptation, manual English switching, and dark theme. Production A/B modules and the real relay/TEE paths were not deployed or exercised as part of this UI change.
 - Compose compiler: 10/10 named restartable composables skippable; all composables 67/76 (88.2%), Strong Skipping enabled. See [Compose audit](../b-app/source/COMPOSE-AUDIT-REPORT.md).
 

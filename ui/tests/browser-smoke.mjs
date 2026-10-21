@@ -109,6 +109,26 @@ try {
         await page.locator(`#close-${action}`).click();
         await page.locator(`#${action}-dialog`).waitFor({state:'hidden'});
       }
+      // The child precedes the parent in DOM order. Closing it must keep the
+      // parent open, both through its button and through browser/native back.
+      await page.locator('[data-om-action=about]').click();
+      await page.locator('#about-dialog').waitFor({state:'visible'});
+      const parentToken = await page.evaluate(()=>history.state.omDialog);
+      for (const close of ['button','history','native']) {
+        await page.locator('#help-dialog').evaluate(dialog=>dialog.show());
+        await page.locator('#help-dialog').waitFor({state:'visible'});
+        if (close === 'button') await page.locator('#close-help').click();
+        else if (close === 'history') await page.goBack().catch(()=>{});
+        else await page.evaluate(()=>window.dispatchEvent(new Event('back',{cancelable:true})));
+        await page.locator('#help-dialog').waitFor({state:'hidden'});
+        await page.waitForFunction(token=>history.state?.omDialog===token,parentToken);
+        assert.equal(await page.locator('#about-dialog').isVisible(),true,`${close} must close only the child`);
+        assert.equal(await page.evaluate(()=>document.body.classList.contains('om-dialog-open')),true);
+        assert.equal(await page.evaluate(()=>document.body.dataset.omView),'settings');
+      }
+      await page.locator('#close-about').click();
+      await page.locator('#about-dialog').waitFor({state:'hidden'});
+      await page.waitForFunction(()=>!history.state?.omDialog);
       await page.locator('[data-om-action=remote-config]').click();
       await page.locator('#remote-config-dialog').waitFor({state:'visible'});
       await page.locator('#cancel-remote-config').click();
