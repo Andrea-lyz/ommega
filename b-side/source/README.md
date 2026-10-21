@@ -2,21 +2,21 @@
 
 B-side relay agent for the ommega remote-TEE attestation setup.
 
-This build has been stripped down to the **new B-side relay agent** only. It no
-longer ships the software keystore body (`keymint` daemon), the `injector`
-(keystore2 hook), software keybox attestation, or any A-side components. It
-exists for one purpose: receive a task from the relay_server, call the **real
-on-device hardware TEE** to mint an attestation certificate chain embedding a
-caller-supplied application id (tag 709), and forward the result back.
+This module contains the **native B-side relay agent**, for a dedicated one-A /
+one-B deployment. It does not ship A's software keystore or injector. It receives
+tasks from Server, calls the real KeyMint/SOTER hardware path and returns results,
+including attestation chains embedding the caller-supplied app ID (tag 709).
 
 ## What is this?
 
 The device this module is installed on acts as the **B-side** of a remote TEE
-attestation setup. A companion A-side device (whose own TEE no longer serves
-after unlocking the bootloader) asks the relay_server for valid, hardware-TEE
+attestation setup. A companion A-side device routes selected app requests through
+the relay_server for hardware-TEE
 attestation. The server pushes the request as a task to this device; the `relay`
 daemon executes it against the real TEE and returns the certificate chain so the
-A-side device can pass Google Play Integrity.
+A-side device can validate and return them. Unlocking A's bootloader does not
+disable its TEE, and receiving a chain does not guarantee a Play Integrity or
+payment-application verdict.
 
 The relay also serves a `profile` task. It reads the real default KeyMint HAL's
 stable-AIDL version/hash and `getHardwareInfo()` values, reports StrongBox
@@ -28,7 +28,7 @@ results carry the same profile so A can reject mixed A/B identities.
 **Android 12 or above required.**
 
 1. Install this module.
-2. Open the module WebUI and fill in **Relay configuration** (server URL, device
+2. Open the module WebUI's **Connection** page (server URL, device
    ID, optional machine ID, token, and file/logcat settings). Editing
    `/data/adb/ommega/relay.conf` directly is also supported:
 
@@ -115,10 +115,10 @@ currently reports and the target the module already applied, which is recorded
 in `/data/adb/ommega/spl-applied.conf`. A date that was ever reported is never
 taken back, and an emptied field keeps what the device reports instead of
 restoring the device's own value: lowering the reported date is what makes the
-key blobs minted under it unusable. Returning to the device's own date needs a
-factory reset. A device that boots without the module reports its own value
-again, and the next `apply` puts the recorded target back, so the key blobs
-that depend on it work again. A refused write only warns on stderr at boot
+key blobs minted under it unusable. Preserve `spl-applied.conf` across module
+upgrades and rollbacks. If properties fall back, the next `apply` reapplies the
+recorded target; this is not a guarantee of recovery if root is unavailable or
+unlock fails before application. A refused write only warns on stderr at boot
 time, while an interactive `save` returns non-zero so the WebUI shows the
 floor and the reason.
 
@@ -135,7 +135,8 @@ The module ships one daemon, `relay`. It is started directly by
 `service.sh` (which kills stale instances first, then spawns a fresh one). The
 `relay` process itself monitors `/data/adb/ommega/relay.conf` and reloads on
 change; the wrapper never kills it, so the two never conflict. One thread
-long-polls the server; three worker threads run TEE `generateKey` / sign /
+short-polls the server with an 80ms floor and a three-second request budget;
+three worker threads run TEE `generateKey` / sign /
 decrypt so a new task can be claimed while another is still in the hardware
 TEE.
 
@@ -145,7 +146,10 @@ Each poll, config reload, task receipt, task outcome (with duration), and
 
 B-side protocol implemented: `GET /api/b/poll/` + `POST /api/b/result/`.
 
-Task types handled: `attest`, `sign`, and `decrypt`.
+Task types handled: `profile`, `attest`, `sign`, `decrypt`, `agree` and `soter`.
+SOTER calls are serialized. Protocol entries are not a guarantee that every
+algorithm/firmware combination has device acceptance; new direct attested
+`AGREE_KEY` experiments and wrapped import are outside the supported validation scope.
 
 ## License
 

@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > Community fork of [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega),
-> not an official upstream release or hosted service. Source version: **1.4.6**.
+> not an official upstream release or hosted service. Product version: **1.9.0**.
 > Module authors: `jiyin004, Andrea-lyz`.
 
 > [!WARNING]
@@ -18,7 +18,7 @@
 > If root disappears after a restart (power loss, a wrong step, or the module not loading
 > at boot), the SPL override is not reapplied, and the device can end up with **a correct
 > password that no longer unlocks and credential-encrypted data that is unavailable**,
-> leaving a factory reset as the only way out.
+> with no guarantee of recovery without data loss.
 > Treat the B device as disposable: keep no primary or irreplaceable data on it, and do
 > not assume root will be available. The current boot-time reapply and script guards do
 > not guarantee native unlock once root is lost.
@@ -27,6 +27,48 @@ Ommega connects A, Server and B for remote KeyMint operations. A intercepts Andr
 Keystore requests for selected applications. Eligible generation and subsequent
 remote signing, decryption and agreement use B hardware through Server.
 A also provides the software TA, local storage and application authentication checks.
+This fork targets a dedicated **one-A / one-B** deployment; adapting one B for
+multiple A devices is outside its maintenance target.
+
+## 1.9.0 downloads and interface
+
+[Download and bilingual release notes](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-1.9.0) ·
+[Release CI](https://github.com/Andrea-lyz/ommega/actions/runs/39620299331)
+
+| Release asset | Purpose |
+|---|---|
+| `ommega-a-release-arm64-v8a-1.9.0-<commit>.zip` | A root module, including WebUI |
+| `ommegaclient-b-release-arm64-v8a-1.9.0-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
+| `relay_rs-linux-x86_64-musl` | Self-hosted Linux Server; updated separately |
+| `Ommega-B-app-1.9.0-debug-signed.apk` | Optional B client, separate from both A and the native B module |
+| `StrongBoxCapabilityMask-1.9.0-debug-signed.apk` | Optional A-side LSPosed module |
+| `SHA256SUMS` / `build-info.json` | Download checksums, version, source commit and signing information |
+
+GitHub's generated Source code archives are not installable modules. Both APKs
+are debug-signed; compare certificates before upgrading. Updating A/B module ZIPs
+does not update the running Server or install optional APKs.
+
+The WebUIs offer simplified Chinese and English, system-aware language selection,
+and light/dark themes. OpenUI is used for development previews; device UIs use
+bundled local resources without online UI generation.
+
+| Side | View | Contents |
+|---|---|---|
+| A | Overview | Last relay result, KeyMint process, SOTER software TA and ledger status |
+| A | Apps | Select target apps, set security policies and save |
+| A | Settings | Remote configuration, SOTER, automation, attestation parameters, language, theme, help and about |
+| B | Overview | Local relay process, connection evidence and current properties |
+| B | Connection | Server, device ID, token and logging |
+| B | Settings | SPL / OS version, language and theme |
+
+A's refresh reloads status files; **it neither runs hardware attestation nor clears
+failure history**. The last request result has a timestamp and is not a live
+connectivity probe. A running B process alone does not prove a Server connection.
+1.9.0 fixes stale same-second results, control icons/colors, save-button/list
+occlusion, and dialog dimming/back behavior.
+
+The TXT guides linked above retain older setup examples. Current configuration
+paths, navigation and SPL behavior are defined by this README and current source.
 
 ## Test environment and support boundaries
 
@@ -76,13 +118,13 @@ This is global, including apps outside Ommega's target list. Package-specific
 masking is not implemented.
 
 Masking device ID attestation is deliberate: an Ommega-routed caller's chain is
-minted by the remote real KeyMint, whose TA rejects every `ATTESTATION_ID_*` tag,
+minted by the remote real KeyMint. The tested B TA rejects `ATTESTATION_ID_*` tags,
 and injecting either the remote device's identifiers or local substitutes into that
 chain would break the caller's own integrity verdicts. No usable ID attestation
-exists on that path, so the declaration matches the fact instead of letting every
+was available on the tested B path, so the declaration matches that limitation instead of letting every
 identifier request fail. The change only alters feature declarations; it touches no
-certificate, key or route, and leaves native hardware attestation and the strong
-verdicts on A unaffected.
+certificate, key or route. Masking alone does not guarantee an application's
+integrity verdict.
 
 Compatibility requires the ROM to retain the AOSP method, a mutable Map and the
 feature publication/cache path, without vendor bypasses or hard-coded answers.
@@ -91,7 +133,7 @@ Android 16's application feature cache motivates this early hook; see
 Following AOSP is an implementation prerequisite, not certification or a guarantee
 for every AOSP-based ROM. Only the A firmware above has device evidence.
 
-1. Install `StrongBoxCapabilityMask-1.4.6-debug-signed.apk` on A.
+1. Install `StrongBoxCapabilityMask-1.9.0-debug-signed.apk` on A.
 2. Enable it in an LSPosed implementation supporting libxposed API 102; keep the
    static scope at `system` (System Framework) only, without application scopes.
 3. Reboot and unlock A where normal reboot is permitted, rebuilding the feature
@@ -120,7 +162,7 @@ The authors accept no liability for data loss, device problems, account restrict
 business or financial loss, to the extent permitted by applicable law. Do not use
 them if you do not accept these risks.**
 
-## Main differences from upstream
+## Main features and behavior
 
 ### 1. A/B KeyMint identity
 
@@ -160,7 +202,10 @@ An explicit StrongBox request with GlobalDefault plus disable returns
 ### 4. Live A configuration
 
 Targets, policies and the disable switch are read live. Connection, Token, TLS,
-logging and ordinary routing changes need no device reboot. WebUI synchronizes
+logging and ordinary routing changes need no device reboot.
+The remote profile is frozen at keymint startup: selecting a different B identity
+requires restarting A's Ommega keymint to obtain its profile. Hot reload does not
+bypass identity checks. WebUI synchronizes
 Hash, Boot Key and SPL into `[trust]`. SPL updates the running TA; Hash/Key recycle
 only Ommega keymint and wait for RPC recovery. UTF-8 Base64 protects config writes
 from shell heredoc termination. Module upgrades preserve saved WebUI trust parameters.
@@ -178,8 +223,9 @@ existing P-521 write format.
 
 WebUI edits System/Boot/Vendor SPL and the OS version in
 `/data/adb/ommega/spl.conf`; changes reload
-native KeyMint and keystore2. Empty fields choose the first saved baseline, which
-may be too low for already-upgraded keyblobs. `service.sh`, not `post-fs-data.sh`,
+native KeyMint and keystore2. **Values only increase; empty fields keep the current
+effective value.** The minimum is the highest of the original device value,
+current reported value and recorded applied target. `service.sh`, not `post-fs-data.sh`,
 reapplies SPL and starts relay, cleaning old processes by exact path. Properties
 alone do not prove hardware acceptance; check fresh attestation through a safe,
 established application path. SPL affects credential encryption: verify unlocked
@@ -193,7 +239,18 @@ The OS version writes `ro.build.version.release`, which decides OS_VERSION
 property rather than the hardware, and `ro.build.version.sdk` is left unchanged,
 so the two values can disagree under a strict verifier.
 
-Do not align a patch level downwards past the value the device's own keys were minted under. A key blob minted or upgraded under a newer value refuses to be upgraded once the device reports an older one: every later sign and attestation for those keys fails with `INVALID_ARGUMENT` (-38), and nothing on the module side can undo it. Measured on a B device whose reported value had been lowered: 2371 failed signatures in one day, zero after the value was restored. `spl-control.sh` therefore lets a value move in either direction but refuses writes below the device's own original value, which it reads from the read-only firmware property files (`/system/build.prop`, `/vendor/build.prop`, ...) and records in `/data/adb/ommega/spl-origin.conf`: the live property may already carry an override and a saved baseline may have been recorded while one was active, so neither is authoritative, the newest reading wins, a firmware update raises the floor, and a recorded floor is not dropped when the files cannot be read. An emptied field restores the device's own value; the boot-time `apply` warns on stderr and an interactive `save` fails so the WebUI shows the original value and the reason. When two devices must agree, prefer raising the older one towards the newer patch date; keep A's `[trust]` on `auto` and do not lower A to an older B date (measured: Google Wallet card binding fails, and works again once A reports its own values).
+`spl-origin.conf` records originals from read-only firmware property files;
+`spl-baseline.conf` is a runtime snapshot and may already contain overrides.
+**Preserve `/data/adb/ommega/spl-applied.conf` across upgrades and rollbacks**:
+it records applied targets for reapplication after property fallback. That does
+not guarantee unlock if root is lost or credentials are needed before reapplication.
+The interface shows originals, minimums and applied targets separately
+(`ORIGIN_*` / `FLOOR_*` / `APPLIED_*`). Firmware updates can raise originals;
+temporarily unreadable files do not lower recorded values.
+
+Keep A's real OS/SPL and `[trust]` on `auto`; do not lower A to match an older B.
+Historical reductions caused `INVALID_ARGUMENT` (-38) and Wallet card-binding
+failures. Passing Integrity checks does not replace application/card testing.
 
 ### 7. Relay and Server
 
@@ -204,9 +261,14 @@ original HAL, with atomic durable storage. Failed persistence blocks operation a
 keeps the upgraded blob in memory for another save; this is not power-loss protection.
 Alias, chain, algorithm and HAL ownership are retained.
 
-Polling and TEE work are separate. Queue fixes cover waiter races, timeouts, repeated
+Short polling and TEE work are separate, with an 80ms polling floor and a
+three-second per-request budget. Relay reports its product version, supports
+physical uplink binding and reselects a disappeared/switched interface.
+Queue fixes cover waiter races, timeouts, repeated
 request IDs and disconnected tasks. Server checks result structure, nonempty chain
-fields, profiles and ownership, not certificate cryptography. Hardware service-specific
+fields, profiles and ownership, not certificate cryptography. Automatic-keybox and
+serverbox switches persist independently in `data/runtime-state.json` across
+Server restarts. Hardware service-specific
 errors may carry integer `keymint_error_code` beside `error`; Server keeps HTTP 500,
 A restores recognized negative codes. Unknown/old errors and HTTP auth/rate-limit
 errors stay generic; error strings do not infer HAL errors or enable new fallback.
@@ -216,12 +278,25 @@ the relay's downgrade marker with `HARDWARE_TYPE_UNAVAILABLE` and Server forward
 the B-side capability error unchanged. This differs from A's native backend,
 disable switch, per-app policies and Mask.
 
-### 8. CI and versions
+### 8. SOTER and the local ledger
+
+Software SOTER and KeyMint have independent configuration. After enabling the
+software TA in Settings, choose the local ledger or remote relay. SOTER remote
+parameters live in `/data/adb/ommega/soterta/remote.conf` and do not automatically
+follow KeyMint settings. Its local ledger is
+`/data/adb/ommega/soterta/state.json`; software keys are not equivalent to real
+B-side SOTER hardware keys.
+
+Remote failures do not silently substitute local keys. Software-TA takeover or
+restart rebinds the SOTER host, and B serializes SOTER TA calls. 1.9.0 supports
+Java/native replies and different transaction-number layouts.
+
+### 9. CI and versions
 
 CI builds A, B, Linux musl Server and APKs in parallel, with A/B workspace, Server,
 B ELF, WebUI, version-sync and Mask unit checks. Rust is pinned to
 `nightly-2026-09-01`, with committed Cargo.lock and component Rust/Gradle caches.
-Version is **1.4.6**, with no automatic bump commits; manual `release_version`
+Version is **1.9.0**, with no automatic bump commits; manual `release_version`
 only overrides that build. Currently only Markdown-only changes are ignored; TXT
 changes trigger CI. Artifacts include both ZIPs, Server, B-app, Mask,
 `SHA256SUMS` and `build-info.json`. Both APKs use a cached Android debug signing
@@ -242,8 +317,10 @@ Remote-only forbids implicit fallback for eligible generation, not every local
 operation. Remote generation needs remote enabled, an attestation challenge and
 no caller-provided attestation key. Other generation may remain local.
 B handles remote signing/decryption/agreement; A stores state and enforces user
-authentication. B translates auth requirements to `NO_AUTH_REQUIRED` and
-`ATTEST_KEY` to `SIGN`: B hardware does not authenticate A's user token.
+authentication. A forwards user-auth authorization tags; B removes duplicates and
+conflicting `NO_AUTH_REQUIRED` so certificate authorizations match the request.
+`ATTEST_KEY` maps to `SIGN`. Forwarding tags does not mean B hardware authenticates
+A's user token.
 B-app supports only `attest/sign/decrypt`, lacks `profile/agree`, and uses its own
 AndroidKeyStore identity. It cannot replace native B in the same acceptance suite.
 
@@ -254,25 +331,31 @@ Use your own Server and credentials; no public Token is distributed. The
 
 | File / setting | Activation |
 |---|---|
-| A `target.txt`, `target-security.toml`, `/data/adb/ommega/config` | Live reads |
+| A `target.txt`, `target-security.toml` | Live reads |
+| A `target-compat.toml` | Global positive-key-ID switch, hot-reloaded for new keys |
+| A `/data/misc/keystore/ommega/config` | WebUI accesses it through `/data/adb/ommega/ommegadata/config`; enabled remote settings are persisted at startup |
+| A `/data/adb/ommega/soterta/remote.conf` | Independent SOTER relay settings |
 | A `webui-props.sh` / `config.toml [trust]` | Live SPL; Hash/Key may recycle Ommega keymint |
 | A `[main].use_native_strongbox` | Restart Ommega keymint |
 | B `relay.conf` connections | Hot reload; optional `touch /data/adb/ommega/restart.all` |
 | B `relay.conf` logging | Next relay start; marker does not reinitialize logging |
 | B `spl.conf` | SPL and OS version; applies on save, reapplied by `service.sh` |
+| B `spl-applied.conf` | Script-maintained applied targets; preserve across upgrades/rollbacks |
 
-Use matching A/B device IDs and appropriate role Tokens. Unselected apps keep
-original Keystore routing. A `tls_insecure=true` skips TLS verification; B currently
+Use matching A/B device IDs and appropriate role Tokens. Apps outside both
+`target.txt` and the injector's `scoop` scope keep original Keystore routing.
+A `tls_insecure=true` skips TLS verification; B currently
 accepts invalid certificates. HTTPS alone does not authenticate Server identity.
 Before changing B `spl.conf`, read the **B data risk warning** at the top of this file:
 keep the B device free of personal data and back it up off-device.
 
-The mode dialog of a long-pressed app also offers a **Detector compat** switch: keys that the
-selected package creates through the A-side Keystore implementation are allocated positive key
-ids only (written to `/data/misc/keystore/ommega/target-compat.toml` when the WebUI saves, empty
-by default). Leaving it unchecked keeps the stock random 64 bit ids, about half of which are
-negative. The switch only changes the key id range; it changes no other behaviour and provides no
-hardware security.
+**Detector compatibility is global**, not a per-package policy. When enabled,
+all apps creating keys through Ommega's local Keystore implementation receive
+positive key IDs. `/data/misc/keystore/ommega/target-compat.toml` stores
+`[positive_key_id].enabled`, off by default; an old nonempty `packages` list
+is read as enabling the global switch. Disabled means the default random 64-bit
+IDs remain. Existing keys are not migrated; algorithms and chains do not change,
+and this provides no hardware security.
 
 Server reads working-directory `.env`; HTTP defaults to 10886, HTTPS to 8443.
 Missing certificates fall back to HTTP. Endpoints: `/api/health/`, `/status/`,
@@ -309,6 +392,15 @@ Complete distributions: [Build workflow](https://github.com/Andrea-lyz/ommega/ac
 
 ## Validation limits
 
+1.9.0 passed 50 host JavaScript tests, five browser cases and the
+[release CI](https://github.com/Andrea-lyz/ommega/actions/runs/39620299331).
+Release assets were checked for SHA-256, module versions, bundled UI resources,
+APK signatures and source commit. These are build/presentation checks; device
+gestures, network behavior and application flows still require device acceptance.
+
+<details>
+<summary>Historical implementation and test records; not 1.9.0 device acceptance</summary>
+
 1.6.0 fixes three A-side KeyMint implementation problems that broke applications outright: an ommega-routed call is no longer answered with `SYSTEM_ERROR` while a mirror replay is in flight (the gate now waits, bounded, and stays fail-closed only for poisoned lanes); EC key generation restores AOSP semantics (EC plus ENCRYPT warns instead of failing with `INCOMPATIBLE_PURPOSE`); and RSA and ECDSA select their signature scheme from the digest the key was created for (the PKCS#1/PSS scheme was hardcoded to SHA-256 and ECDSA signed with the curve default digest, so a non-SHA-256 RSA key could not sign at all and a mismatched digest produced a silently wrong signature). The B side refuses SPL and OS version downgrades, and the A side logs `event=local_sign` with the padding and digest of every local signing operation. Verified on devices: HDFC RSA-SHA512 biometric login, Google Pay EC key generation and fingerprint flows interrupted by a lock-state replay all work again; A-side mirror 12/12, tag 12/12 and crypto 7/7 unit tests plus 13 B-side spl-control cases pass and CI is green. The Server differs from 1.5.3 by the version string only; the B module additionally ships the downgrade guard.
 
 1.4.6 turns the error-E detector compatibility into an explicit per-package switch: A-side KeyMint keeps the stock key-id shape by default (random 64 bit ids, about half of them negative) and allocates positive ids only for packages listed in `target-compat.toml` when they create keys through the on-device Keystore implementation; the policy is hot-reloaded on mtime, and a missing, empty or malformed file disables it entirely at no extra cost. The WebUI exposes it as a Detector compat checkbox in the mode dialog of a long-pressed app and writes the file atomically on save. Compatibility affects only keys created afterwards; existing negative-id keys stay unchanged. The B module, the Server binary and both APKs differ from 1.4.5 by the version string only.
@@ -320,22 +412,12 @@ NoPadding/SHA-224/NONE/OAEP MGF had targeted tests, not exhaustive algorithm cov
 Batch six passed 516 A Android workspace tests plus normal-app remote checks.
 B SPL and native A StrongBox/RKP were separate historical windows. CI success,
 Server deployment and final-package app acceptance cannot substitute for each other.
+
+</details>
+
 Wrapped import is outside accepted support; full certificate trust-chain verification
 and other unfinished work remain limited. No universal device, firmware, app,
 algorithm or network compatibility is promised.
-
-## Attribution and licenses
-
-- Upstream: [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega), original author jiyin004.
-- Fork: [Andrea-lyz/ommega](https://github.com/Andrea-lyz/ommega), maintenance and 1.4.x work by Andrea-lyz.
-- References: [Tricky Store](https://github.com/5ec1cff/TrickyStore) by 5ec1cff;
-  [Tricky Addon](https://github.com/KOWX712/Tricky-Addon-Update-Target-List) by KOWX712;
-  [OhMyKeymint](https://github.com/qwq233/OhMyKeymint) by James Clef (qwq233);
-  [KeyAttestation](https://github.com/vvb2060/KeyAttestation) by vvb2060;
-  [TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS) by Enginex0; AOSP.
-
-Existing AGPL-3.0-or-later, Apache-2.0 and other component licenses still apply.
-This documentation does not change upstream or third-party ownership or licenses.
 
 ## Remote request latency and screen-off availability
 
@@ -353,3 +435,16 @@ four connections in one RPC session. Ordinary remote signatures release the TA
 lock during network work. Pending authentication, trusted confirmation/presence
 and single-use deletion retain the serialized path. Server signature waits are
 capped at 10 seconds and cancel only unassigned work, never an in-flight HAL call.
+
+## Attribution and licenses
+
+- Upstream: [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega), original author jiyin004.
+- Fork: [Andrea-lyz/ommega](https://github.com/Andrea-lyz/ommega), maintained by Andrea-lyz.
+- References: [Tricky Store](https://github.com/5ec1cff/TrickyStore) by 5ec1cff;
+  [Tricky Addon](https://github.com/KOWX712/Tricky-Addon-Update-Target-List) by KOWX712;
+  [OhMyKeymint](https://github.com/qwq233/OhMyKeymint) by James Clef (qwq233);
+  [KeyAttestation](https://github.com/vvb2060/KeyAttestation) by vvb2060;
+  [TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS) by Enginex0; AOSP.
+
+Existing AGPL-3.0-or-later, Apache-2.0 and other component licenses still apply.
+This documentation does not change upstream or third-party ownership or licenses.
