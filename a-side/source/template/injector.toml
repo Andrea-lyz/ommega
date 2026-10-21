@@ -10,6 +10,9 @@ scoop = [
   "com.google.android.gms",
   "com.android.vending",
   "com.eltavine.duckdetector",
+  # OnePlus engineering mode calls KeyMint directly to inspect the chain; without
+  # this it only sees the stock implementation.
+  "com.oplus.engineermode",
 ]
 
 [main]

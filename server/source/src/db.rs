@@ -367,7 +367,8 @@ impl Db {
         let rows: Vec<mysql::Row> = conn.exec(
             "SELECT device_id, algorithm, certificate_chain_pem, private_key_pem_cipher,
                     active, machine_id, created_at
-             FROM device_server_identity WHERE device_id = :device_id AND active = 1 LIMIT 1",
+             FROM device_server_identity WHERE device_id = :device_id AND active = 1
+             ORDER BY algorithm, created_at LIMIT 1",
             params! { "device_id" => device_id },
         )?;
         match rows.into_iter().next() {
@@ -455,13 +456,16 @@ impl Db {
     ) -> anyhow::Result<()> {
         let mut conn = self.conn()?;
         conn.exec_drop(
-            "INSERT INTO api_token (token, role, duration_seconds, note)
-             VALUES (:token, :role, :duration_seconds, :note)",
+            "INSERT INTO api_token (token, role, duration_seconds, note, enabled, created_at)
+             VALUES (:token, :role, :duration_seconds, :note, :enabled, NOW())",
             params! {
                 "token" => token,
                 "role" => role,
                 "duration_seconds" => duration_seconds,
                 "note" => note,
+                // enabled / created_at are NOT NULL without defaults on the
+                // production schema; omitting them fails MySQL strict mode.
+                "enabled" => 1i64,
             },
         )?;
         Ok(())
@@ -775,8 +779,8 @@ impl Db {
         };
         let note = format!("card:{card_type}");
         if let Err(e) = conn.exec_drop(
-            "INSERT INTO api_token (token, role, duration_seconds, note)
-             VALUES (:t, :r, :d, :n)",
+            "INSERT INTO api_token (token, role, duration_seconds, note, enabled, created_at)
+             VALUES (:t, :r, :d, :n, 1, NOW())",
             params! { "t" => &token, "r" => role, "d" => duration, "n" => &note },
         ) {
             let _ = conn.query_drop("ROLLBACK");

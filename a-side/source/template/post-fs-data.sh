@@ -48,6 +48,16 @@ prop_set_verified() {
   [ "$got" = "$want" ] || echo "ommega: failed to set $name='$want' (got '$got')" >&2
 }
 
+# `persist.*` must be written with `-p`, otherwise only the in-memory property
+# area changes and init's copy under /data/property keeps the old value. The
+# mismatch is a detection signal (device.property.persistent_suspicious).
+prop_set_persistent_verified() {
+  local name=$1 want=$2 got
+  "$RESETPROP_BIN" -p "$name" "$want" 2>/dev/null || true
+  got=$(prop_get "$name")
+  [ "$got" = "$want" ] || echo "ommega: failed to set $name='$want' (got '$got')" >&2
+}
+
 prop_delete_verified() {
   local name=$1 got
   "$RESETPROP_BIN" --delete "$name" 2>/dev/null || true
@@ -158,10 +168,10 @@ apply_boot_state_props() {
   delete_prop_if_present sys.oem_unlock_allowed
 }
 
-prop_set_verified persist.logd.size ""
-prop_set_verified persist.logd.size.crash ""
-prop_set_verified persist.logd.size.system ""
-prop_set_verified persist.logd.size.main ""
+prop_set_persistent_verified persist.logd.size ""
+prop_set_persistent_verified persist.logd.size.crash ""
+prop_set_persistent_verified persist.logd.size.system ""
+prop_set_persistent_verified persist.logd.size.main ""
 # The fingerprint HAL has to be up before the lock state is rewritten.
 start_fingerprint_hal_early
 apply_boot_state_props

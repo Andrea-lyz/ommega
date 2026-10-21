@@ -9,6 +9,8 @@
 //! no system OpenSSL required.
 
 use ecdsa::signature::Signer;
+use p224::ecdsa::{DerSignature as P224DerSignature, Signature as P224Signature};
+use p224::SecretKey as P224SecretKey;
 use p256::ecdsa::{DerSignature as P256DerSignature, Signature as P256Signature};
 use p256::SecretKey as P256SecretKey;
 use p384::ecdsa::{DerSignature as P384DerSignature, Signature as P384Signature};
@@ -39,6 +41,7 @@ pub const KM_ALG_RSA: i64 = 1;
 pub const KM_PURPOSE_SIGN: i64 = 2;
 pub const KM_PURPOSE_ATTEST_KEY: i64 = 7;
 pub const KM_DIGEST_SHA_256: i64 = 4; // AOSP KmDigest::SHA256 = 4
+pub const KM_EC_CURVE_P_224: i64 = 0; // AOSP KmEcCurve::P_224 = 0
 pub const KM_EC_CURVE_P_256: i64 = 1; // AOSP KmEcCurve::P_256 = 1
 pub const KM_EC_CURVE_P_384: i64 = 2; // AOSP KmEcCurve::P_384 = 2
 pub const KM_EC_CURVE_P_521: i64 = 3; // AOSP KmEcCurve::P_521 = 3
@@ -395,6 +398,7 @@ fn alg_id(oid: &[u64], with_null: bool) -> Vec<u8> {
 fn sig_alg_for_key(key: &KeyMaterial) -> Vec<u8> {
     match key {
         // ECDSA-with-SHA256: parameters must be ABSENT (matches Google certs).
+        KeyMaterial::Ec(EcKey::P224(_)) => alg_id(OID_ECDSA_SHA256, false),
         KeyMaterial::Ec(EcKey::P256(_)) => alg_id(OID_ECDSA_SHA256, false),
         KeyMaterial::Ec(EcKey::P384(_)) => alg_id(OID_ECDSA_SHA384, false),
         KeyMaterial::Ec(EcKey::P521(_)) => alg_id(OID_ECDSA_SHA512, false),
@@ -417,6 +421,7 @@ fn ext_entry(oid: &[u64], critical: bool, octet: &[u8]) -> Vec<u8> {
 
 /// EC key material for any supported NIST curve.
 pub enum EcKey {
+    P224(P224SecretKey),
     P256(P256SecretKey),
     P384(P384SecretKey),
     P521(P521SecretKey),
@@ -429,6 +434,12 @@ pub enum KeyMaterial {
 
 pub fn parse_private_key(pem_data: &[u8]) -> anyhow::Result<KeyMaterial> {
     let s = std::str::from_utf8(pem_data)?;
+    if let Ok(sk) = P224SecretKey::from_sec1_pem(s) {
+        return Ok(KeyMaterial::Ec(EcKey::P224(sk)));
+    }
+    if let Ok(sk) = P224SecretKey::from_pkcs8_pem(s) {
+        return Ok(KeyMaterial::Ec(EcKey::P224(sk)));
+    }
     if let Ok(sk) = P256SecretKey::from_sec1_pem(s) {
         return Ok(KeyMaterial::Ec(EcKey::P256(sk)));
     }
@@ -461,6 +472,7 @@ pub fn parse_private_key(pem_data: &[u8]) -> anyhow::Result<KeyMaterial> {
 fn public_key_der(key: &KeyMaterial) -> anyhow::Result<Vec<u8>> {
     use pkcs8::EncodePublicKey;
     match key {
+        KeyMaterial::Ec(EcKey::P224(sk)) => Ok(sk.public_key().to_public_key_der()?.as_bytes().to_vec()),
         KeyMaterial::Ec(EcKey::P256(sk)) => Ok(sk.public_key().to_public_key_der()?.as_bytes().to_vec()),
         KeyMaterial::Ec(EcKey::P384(sk)) => Ok(sk.public_key().to_public_key_der()?.as_bytes().to_vec()),
         KeyMaterial::Ec(EcKey::P521(sk)) => Ok(sk.public_key().to_public_key_der()?.as_bytes().to_vec()),
@@ -510,6 +522,14 @@ pub fn validate_identity_pem(private_key_pem: &str, chain_pem: &str) -> Option<S
 
 fn sign_tbs(key: &KeyMaterial, tbs: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     match key {
+        KeyMaterial::Ec(EcKey::P224(sk)) => {
+            // P-224 certificates use ECDSA-with-SHA256; the curve lives in the
+            // SPKI (secp224r1 = 1.3.132.0.33), independent of the signature OID.
+            let signing_key = p224::ecdsa::SigningKey::from(sk);
+            let sig: P224Signature = signing_key.sign(tbs);
+            let der_sig = P224DerSignature::from(sig);
+            Ok((alg_id(OID_ECDSA_SHA256, false), der_sig.as_bytes().to_vec()))
+        }
         KeyMaterial::Ec(EcKey::P256(sk)) => {
             let signing_key = p256::ecdsa::SigningKey::from(sk);
             let sig: P256Signature = signing_key.sign(tbs);
@@ -729,7 +749,9 @@ pub fn generate_leaf_key(p: &AttestationParams) -> anyhow::Result<(KeyMaterial, 
 
     if p.algorithm == KM_ALG_RSA {
         let mut rng = rand::rngs::OsRng;
-        let size = if p.key_size >= 1024 && p.key_size <= 8192 {
+        // 一加/OPPO 工程模式的 KeyAttestationTest 用 512 位 RSA 自检；以前
+        // <1024 会被静默改成 2048，证书与声明的 key size 对不上。
+        let size = if (512..=8192).contains(&p.key_size) {
             p.key_size as usize
         } else {
             2048
@@ -739,6 +761,12 @@ pub fn generate_leaf_key(p: &AttestationParams) -> anyhow::Result<(KeyMaterial, 
         Ok((KeyMaterial::Rsa(private), pem.to_string()))
     } else {
         match p.ec_curve {
+            Some(KM_EC_CURVE_P_224) => {
+                use p224::elliptic_curve::rand_core::OsRng;
+                let secret = P224SecretKey::random(&mut OsRng);
+                let pem = secret.to_sec1_pem(pkcs8::LineEnding::LF)?;
+                Ok((KeyMaterial::Ec(EcKey::P224(secret)), pem.to_string()))
+            }
             Some(KM_EC_CURVE_P_384) => {
                 use p384::elliptic_curve::rand_core::OsRng;
                 let secret = P384SecretKey::random(&mut OsRng);
@@ -1016,6 +1044,49 @@ pub fn parse_chain_pem(pem: &str) -> anyhow::Result<Vec<Vec<u8>>> {
 
 pub fn rsa_exponent() -> i64 {
     65537
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsa::traits::PublicKeyParts;
+
+    #[test]
+    fn p224_leaf_key_uses_secp224r1_and_signs() {
+        let params = AttestationParams {
+            algorithm: KM_ALG_EC,
+            ec_curve: Some(KM_EC_CURVE_P_224),
+            ..Default::default()
+        };
+        let (key, pem) = generate_leaf_key(&params).expect("P-224 leaf");
+        assert!(matches!(key, KeyMaterial::Ec(EcKey::P224(_))));
+
+        let parsed = parse_private_key(pem.as_bytes()).expect("P-224 PEM");
+        assert!(matches!(parsed, KeyMaterial::Ec(EcKey::P224(_))));
+        let spki = public_key_der(&parsed).expect("P-224 SPKI");
+        // secp224r1: 1.3.132.0.33
+        assert!(spki
+            .windows(7)
+            .any(|w| w == [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21]));
+
+        let (alg, sig) = sign_tbs(&parsed, b"P-224 test").expect("P-224 sign");
+        assert!(!alg.is_empty());
+        assert!(!sig.is_empty());
+    }
+
+    #[test]
+    fn rsa_leaf_keeps_a_512_bit_request() {
+        let params = AttestationParams {
+            algorithm: KM_ALG_RSA,
+            key_size: 512,
+            ..Default::default()
+        };
+        let (key, _pem) = generate_leaf_key(&params).expect("512-bit RSA leaf");
+        match key {
+            KeyMaterial::Rsa(rk) => assert_eq!(rk.n().bits(), 512),
+            _ => panic!("expected an RSA leaf"),
+        }
+    }
 }
 
 #[cfg(test)]

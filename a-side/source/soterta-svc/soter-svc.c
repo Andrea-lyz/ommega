@@ -38,6 +38,7 @@
 #include <android/binder_parcel.h>
 #include <android/binder_status.h>
 #include <android/log.h>
+#include <ctype.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
@@ -135,10 +136,16 @@ typedef binder_status_t (*add_service_fn)(AIBinder *, const char *);
 typedef void (*start_thread_pool_fn)(void);
 /* The VINTF-stable HAL binder can be called from both system and vendor. */
 typedef void (*mark_vintf_stability_fn)(AIBinder *);
+/* API 31+, loaded with dlsym so the daemon still starts on API 29/30. */
+typedef int32_t (*parcel_size_fn)(const AParcel *);
+/* API 29+; dlsym keeps the daemon loadable on older system images too. */
+typedef pid_t (*calling_pid_fn)(void);
 
 static add_service_fn g_add_service;
 static start_thread_pool_fn g_start_thread_pool;
 static mark_vintf_stability_fn g_mark_vintf_stability;
+static parcel_size_fn g_parcel_size;
+static calling_pid_fn g_calling_pid;
 
 /* ----------------------------------------------------------------- platform */
 
@@ -308,7 +315,19 @@ static bool is_soter_token(const char *token) {
  * binder framework may already have consumed the first two blocks before the
  * callback runs and the C API does not say which, so look for a token and rewind
  * when there is none. */
-static const char *read_layout(const AParcel *in) {
+static int32_t parcel_remaining(const AParcel *in) {
+    if (g_parcel_size == NULL) {
+        return -1;
+    }
+    int32_t size = g_parcel_size(in);
+    int32_t position = AParcel_getDataPosition(in);
+    if (size < 0 || position < 0 || size < position) {
+        return -1;
+    }
+    return size - position;
+}
+
+static const char *read_layout(const AParcel *in, int32_t *avail) {
     int32_t start = AParcel_getDataPosition(in);
     int32_t policy = 0;
     char *token = NULL;
@@ -317,10 +336,66 @@ static const char *read_layout(const AParcel *in) {
                  is_soter_token(token);
     free(token);
     if (found) {
+        *avail = parcel_remaining(in);
         return "token";
     }
     AParcel_setDataPosition(in, start);
+    *avail = parcel_remaining(in);
     return "arguments";
+}
+
+/* Some SoterService builds use the APK's 1-11 code order instead of the vendor
+ * HAL's 14-slot table (2/6/14 are empty). The two orders disagree on 7/9/11, so
+ * infer the layout from the first single-int call and rewrite every transaction
+ * into the 14-slot canonical numbers below. */
+#define LAYOUT_UNKNOWN 0
+#define LAYOUT_14 1
+#define LAYOUT_11 2
+
+static uint8_t g_layout = LAYOUT_UNKNOWN;
+static uint8_t g_layout_fallback_logged = 0;
+
+static uint32_t canonical_code(uint32_t tx, int32_t avail) {
+    uint8_t layout = __atomic_load_n(&g_layout, __ATOMIC_RELAXED);
+    if (layout == LAYOUT_UNKNOWN) {
+        if (avail < 0 &&
+            !__atomic_exchange_n(&g_layout_fallback_logged, 1, __ATOMIC_RELAXED)) {
+            LOGI("parcel size API unavailable; assuming the 14-slot SOTER layout");
+        }
+        if ((tx == TX_HAS_ASK || tx == TX_GENERATE_ASK) && avail == 4) {
+            layout = LAYOUT_14;
+        } else if ((tx == 7 || tx == 4) && avail == 4) {
+            layout = LAYOUT_11;
+        } else if ((tx == TX_HAS_ASK || tx == TX_GENERATE_ASK) && avail > 4) {
+            /* In the 1-11 order these numbers are initSign / generateAuthKeyPair,
+             * which carry a UID plus a string; the 14-slot order carries only a UID. */
+            layout = LAYOUT_11;
+        } else if (tx == TX_HAS_AUTH && avail == 4) {
+            /* 14-slot hasAuthKey takes UID+alias; 1-11 removeAllUidKey takes a UID. */
+            layout = LAYOUT_11;
+        }
+        if (layout != LAYOUT_UNKNOWN) {
+            __atomic_store_n(&g_layout, layout, __ATOMIC_RELAXED);
+            LOGI("SOTER transaction layout=%s (first tx=%u avail=%d)",
+                 layout == LAYOUT_11 ? "1-11" : "14-slot", tx, (int)avail);
+        }
+    }
+    if (layout != LAYOUT_11) {
+        return tx;
+    }
+    switch (tx) {
+        case 2: return TX_EXPORT_AUTH;
+        case 3: return TX_FINISH_SIGN;
+        case 4: return TX_GENERATE_ASK;
+        case 5: return TX_GENERATE_AUTH;
+        case 6: return TX_GET_DEVICE_ID;
+        case 7: return TX_HAS_ASK;
+        case 8: return TX_HAS_AUTH;
+        case 9: return TX_INIT_SIGN;
+        case 10: return TX_REMOVE_ALL_UID_KEY;
+        case 11: return TX_REMOVE_AUTH;
+        default: return tx;
+    }
 }
 
 static void request_clear(struct request *request) {
@@ -396,6 +471,64 @@ static int32_t align4(int32_t value) {
     return (value + 3) & ~3;
 }
 
+/* Most Soter clients are Java and read a SoterBufferReturn parcelable. The
+ * vendor's cryptoeng (factory/engineering tooling) is C++ and reads the plain
+ * AIDL `out byte[]`: [code][length][bytes]. Sending the parcelable shape to it
+ * makes its parser run off the end. Default to the Java shape and only switch
+ * for callers named in OMMEGA_SOTER_NATIVE_CALLERS (cryptoeng by default). */
+#define DEFAULT_NATIVE_CALLERS "cryptoeng"
+
+static bool cmdline_matches(const char *name, const char *list) {
+    const char *cursor = list;
+    while (*cursor != 0) {
+        while (*cursor == ',' || isspace((unsigned char)*cursor)) {
+            cursor++;
+        }
+        const char *start = cursor;
+        while (*cursor != 0 && *cursor != ',') {
+            cursor++;
+        }
+        const char *end = cursor;
+        while (end > start && isspace((unsigned char)end[-1])) {
+            end--;
+        }
+        size_t length = (size_t)(end - start);
+        if (length > 0) {
+            for (const char *at = name; *at != 0; at++) {
+                if (strncmp(at, start, length) == 0) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static bool caller_wants_parcelable(void) {
+    if (g_calling_pid == NULL) {
+        return true;
+    }
+    pid_t pid = g_calling_pid();
+    if (pid <= 0) {
+        return true;
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)pid);
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        return true;
+    }
+    char name[256] = {0};
+    size_t read = fread(name, 1, sizeof(name) - 1, file);
+    fclose(file);
+    name[read] = 0;
+    const char *list = getenv("OMMEGA_SOTER_NATIVE_CALLERS");
+    if (list == NULL) {
+        list = DEFAULT_NATIVE_CALLERS;
+    }
+    return !cmdline_matches(name, list);
+}
+
 /* The AIDL reply: the status header (0 = no exception) is written by the server
  * implementation, then the return value and the out parameters follow. */
 static binder_status_t write_reply(AParcel *out, const struct soterta_reply *reply) {
@@ -405,8 +538,17 @@ static binder_status_t write_reply(AParcel *out, const struct soterta_reply *rep
     }
     switch (reply->kind) {
         case SOTERTA_KIND_BUFFER: {
-            int32_t size = 4 + 4 + align4((int32_t)reply->buffer_len) + 4;
             status = AParcel_writeInt32(out, reply->code);
+            if (status != STATUS_OK) {
+                return status;
+            }
+            if (!caller_wants_parcelable()) {
+                LOGI("native byte[] reply for a factory caller (code=%d)",
+                     reply->code);
+                return AParcel_writeByteArray(out, (const int8_t *)reply->buffer,
+                                              (int32_t)reply->buffer_len);
+            }
+            int32_t size = 4 + 4 + align4((int32_t)reply->buffer_len) + 4;
             if (status == STATUS_OK) {
                 status = AParcel_writeInt32(out, 1); /* the out parameter is present */
             }
@@ -456,7 +598,7 @@ static binder_status_t write_metadata_reply(AParcel *out, uint32_t tx) {
 static binder_status_t on_transact(AIBinder *binder, transaction_code_t code,
                                    const AParcel *in, AParcel *out) {
     (void)binder;
-    const uint32_t tx = (uint32_t)code;
+    uint32_t tx = (uint32_t)code;
 
     if (tx == CODE_GET_INTERFACE_VERSION || tx == CODE_GET_INTERFACE_HASH) {
         binder_status_t status = write_metadata_reply(out, tx);
@@ -466,7 +608,13 @@ static binder_status_t on_transact(AIBinder *binder, transaction_code_t code,
     }
 
     struct request request;
-    const char *layout = read_layout(in);
+    int32_t avail = 0;
+    const char *layout = read_layout(in, &avail);
+    tx = canonical_code(tx, avail);
+    if (tx != (uint32_t)code) {
+        LOGI("tx %u mapped to canonical %u (layout=%s)",
+             (uint32_t)code, tx, layout);
+    }
     if (!read_request(tx, in, &request)) {
         LOGE("tx=%u layout=%s: the request could not be read", tx, layout);
         request_clear(&request);
@@ -590,6 +738,8 @@ int main(int argc, char **argv) {
         (start_thread_pool_fn)dlsym(library, "ABinderProcess_startThreadPool");
     g_mark_vintf_stability =
         (mark_vintf_stability_fn)dlsym(library, "AIBinder_markVintfStability");
+    g_parcel_size = (parcel_size_fn)dlsym(library, "AParcel_getDataSize");
+    g_calling_pid = (calling_pid_fn)dlsym(library, "AIBinder_getCallingPid");
     if (g_add_service == NULL || g_start_thread_pool == NULL) {
         LOGE("libbinder_ndk.so is missing a platform symbol");
         return 5;

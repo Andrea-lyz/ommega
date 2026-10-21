@@ -113,7 +113,10 @@ fn build_router(cfg: &Arc<Config>) -> Router {
     }
 
     // Start the auto keybox refresh loop (background thread) when enabled.
-    if cfg.keybox_refresh_enabled {
+    // The persisted admin switch wins over the startup configuration.
+    let keybox_refresh =
+        relay_rs::autokeybox::desired_from_state(cfg.keybox_refresh_enabled);
+    if keybox_refresh {
         if let Some(db_ref) = db.clone() {
             relay_rs::autokeybox::set_enabled(true);
             relay_rs::autokeybox::start_background(

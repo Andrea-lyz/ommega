@@ -235,6 +235,7 @@ pub async fn admin_devices(State(state): State<AppState>, headers: HeaderMap) ->
                 "soter": d.soter,
                 "soter_sign": d.soter_sign,
                 "soter_nosign": d.soter_nosign,
+                "version": d.version,
                 "load": load,
             }),
             load,
@@ -940,6 +941,7 @@ pub async fn public_status(State(state): State<AppState>) -> Response {
                 "soter": d.soter,
                 "soter_sign": d.soter_sign,
                 "soter_nosign": d.soter_nosign,
+                "version": d.version,
             }),
             load,
         ));

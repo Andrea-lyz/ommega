@@ -58,6 +58,29 @@ pub(crate) fn client_ip(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Package name inside the tag 709 value, for logs only. The AAID is DER and
+/// the package is one OCTET STRING in it; the signature digest is binary and
+/// gets filtered out. Undecodable input just yields an empty string.
+fn aaid_package(b64: &str) -> String {
+    use base64::Engine;
+    let Ok(der) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+        return String::new();
+    };
+    let mut best = String::new();
+    let mut cur = String::new();
+    for b in der.iter().chain(std::iter::once(&0u8)) {
+        if (0x20..0x7f).contains(b) {
+            cur.push(*b as char);
+            continue;
+        }
+        if cur.len() > best.len() && cur.contains('.') {
+            best = std::mem::take(&mut cur);
+        }
+        cur.clear();
+    }
+    best
+}
+
 fn json_err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
@@ -343,8 +366,14 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
             let mut s = String::new();
             for (k, v) in m {
                 if k == "attestation_application_id" {
+                    let pkg = v
+                        .as_str()
+                        .map(aaid_package)
+                        .filter(|p| !p.is_empty())
+                        .map(|p| format!(" pkg:{p}"))
+                        .unwrap_or_default();
                     s.push_str(&format!(
-                        "{k}=<appid-len:{}> ",
+                        "{k}=<appid-len:{}{pkg}> ",
                         v.as_str().map(|x| x.len()).unwrap_or(0)
                     ));
                 } else if k == "certificate_subject" {
@@ -695,6 +724,8 @@ pub struct PollQuery {
     pub machine_id: Option<String>,
     pub timeout: Option<u64>,
     pub caps: Option<String>,
+    /// Relay version (module version). Missing on older relays.
+    pub ver: Option<String>,
 }
 
 pub async fn b_poll(
@@ -725,11 +756,12 @@ pub async fn b_poll(
 
     match state
         .store
-        .pop_for_b_with_caps(
+        .pop_for_b_with_caps_and_version(
             &q.device_id,
             &machine_id,
             timeout,
             crate::queue::DeviceCaps::parse(q.caps.as_deref()),
+            q.ver.as_deref(),
         )
         .await
     {
@@ -880,6 +912,16 @@ pub async fn admin_cancel_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aaid_package_extracts_the_package_name() {
+        use base64::Engine as _;
+        let mut der = vec![0x30, 0x0b, 0x04, 0x09];
+        der.extend_from_slice(b"com.tencent.mm");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&der);
+        assert_eq!(aaid_package(&encoded), "com.tencent.mm");
+        assert_eq!(aaid_package("not base64"), "");
+    }
 
     #[tokio::test]
     async fn timed_out_signature_cancels_only_unassigned_work() {

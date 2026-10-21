@@ -179,6 +179,10 @@ pub enum SignState {
 }
 
 static SIGN_STATE: Mutex<SignState> = Mutex::new(SignState::Unknown);
+/// The vendor TA owns an exclusive RPMB session. The relay runs several TEE
+/// workers, so concurrent init_sign / generate calls can clobber each other;
+/// serialize the whole HAL state machine.
+static HAL_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn sign_state() -> SignState {
     *SIGN_STATE
@@ -246,6 +250,7 @@ fn is_hard_slot_failure(op: &str, result: &Value) -> bool {
 /// `allow_mutation` comes from the relay config; it gates the ops that create
 /// or delete keys.
 pub fn handle(payload: &Value, allow_mutation: bool) -> Result<Value> {
+    let _guard = HAL_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let op = payload
         .get("op")
         .and_then(Value::as_str)

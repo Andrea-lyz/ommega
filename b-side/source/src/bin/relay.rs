@@ -65,10 +65,15 @@ use ommegaclient_b::keymaster::relay_tee::keymint_error;
 use ommegaclient_b::keymaster::tee_ops::{self, KeyAlgorithm, KeySpec};
 use ommegaclient_b::wakelock;
 
-const POLL_TIMEOUT_SEC: u32 = 20;
+/// Long-poll timeout. 0 = short poll: the server answers immediately and the
+/// interval below controls the worst-case task pickup latency.
+const POLL_TIMEOUT_SEC: u32 = 0;
 const TEE_WORKERS: usize = 3;
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
+/// Wall-clock cap for one short poll. The reqwest client's 30s total timeout is
+/// too long for an 80ms cadence; this bounds a dead proxy without a watchdog.
+const POLL_WALL_LIMIT: Duration = Duration::from_secs(3);
 const CONF_PATH: &str = "/data/adb/ommega/relay.conf";
 const STATE_DIR: &str = "/data/adb/ommega";
 const INSTANCE_LOCK_PATH: &str = "/data/adb/ommega/relay.lock";
@@ -96,7 +101,9 @@ const THROTTLE_BACKOFF_MS: u64 = 30_000;
 /// Never re-poll faster than this after an immediate 204: a server or proxy
 /// that returns without holding the long poll must not turn the loop into a
 /// tight loop against the server.
-const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Short polling: 80ms (12 requests/s) is the latency/load knee. Without a
+/// floor an immediate 204 from an older server becomes a tight loop.
+const MIN_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const MODULE_PROP: &str = "/data/adb/modules/ommegaclient_b/module.prop";
 
 fn acquire_instance_lock() -> Result<File> {
@@ -156,6 +163,8 @@ struct RelayConfig {
     soter_allow_mutation: bool,
     soter_probe: Option<ommegaclient_b::caps::SignProbeTarget>,
     wakelock: bool,
+    /// Outgoing interface policy: auto | none | always | <ifname>.
+    bind_iface: String,
 }
 
 impl RelayConfig {
@@ -269,6 +278,10 @@ fn load_config_from_file() -> Result<RelayConfig> {
             .get("OMMEGA_RELAY_WAKELOCK")
             .map(|v| parse_bool(v))
             .unwrap_or(true),
+        bind_iface: m
+            .get("OMMEGA_RELAY_BIND_IFACE")
+            .cloned()
+            .unwrap_or_else(|| "auto".to_string()),
     })
 }
 
@@ -373,6 +386,7 @@ fn load_config() -> Result<(RelayConfig, &'static str)> {
         wakelock: env("OMMEGA_RELAY_WAKELOCK")
             .map(|v| parse_bool(&v))
             .unwrap_or(true),
+        bind_iface: env("OMMEGA_RELAY_BIND_IFACE").unwrap_or_else(|| "auto".to_string()),
     };
     cfg.validate()?;
     Ok((cfg, "env"))
@@ -393,34 +407,65 @@ fn load_config() -> Result<(RelayConfig, &'static str)> {
 /// Shared reqwest blocking client.  Wrapped in `RwLock<Option<Arc<...>>>` so
 /// the config watcher can drop it (forcing a rebuild) without blocking
 /// in-flight requests (the old `Arc` stays alive until its last user drops it).
-static HTTP_CLIENT: RwLock<Option<Arc<Client>>> = RwLock::new(None);
+static HTTP_CLIENT: RwLock<Option<(Option<String>, Arc<Client>)>> = RwLock::new(None);
+/// (bind_iface, server URL) for the shared client. Set on startup and on reload.
+static UPLINK_CONFIG: RwLock<Option<(String, String)>> = RwLock::new(None);
 
-fn build_http_client() -> Result<Client> {
-    Client::builder()
+fn set_uplink_config(cfg: &RelayConfig) {
+    if let Ok(mut guard) = UPLINK_CONFIG.write() {
+        *guard = Some((cfg.bind_iface.clone(), cfg.server.clone()));
+    }
+}
+
+fn uplink_config() -> (String, String) {
+    UPLINK_CONFIG
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(|| ("auto".to_string(), String::new()))
+}
+
+fn build_http_client(iface: Option<&str>) -> Result<Client> {
+    let mut builder = Client::builder()
         .danger_accept_invalid_certs(true)
         .connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS))
-        .timeout(Duration::from_millis(READ_TIMEOUT_MS))
-        .build()
-        .context("build reqwest client")
+        .timeout(Duration::from_millis(READ_TIMEOUT_MS));
+    if let Some(name) = iface {
+        builder = builder.interface(name);
+    }
+    builder.build().context("build reqwest client")
 }
 
 /// Returns the shared HTTP client, building it on first use.
 fn get_http_client() -> Result<Arc<Client>> {
+    let (bind_iface, server) = uplink_config();
+    let mut iface = ommegaclient_b::uplink::desired_iface(&bind_iface, &server);
+    if let Some(name) = iface.as_deref() {
+        if !std::path::Path::new(&format!("/sys/class/net/{name}")).exists() {
+            log::warn!("selected uplink {name} disappeared; not binding this client");
+            ommegaclient_b::uplink::invalidate_pick();
+            iface = None;
+        }
+    }
     // Fast path: read lock, return if present.
     if let Ok(guard) = HTTP_CLIENT.read() {
-        if let Some(client) = guard.as_ref() {
-            return Ok(client.clone());
+        if let Some((cached, client)) = guard.as_ref() {
+            if cached.as_deref() == iface.as_deref() {
+                return Ok(client.clone());
+            }
         }
     }
     // Slow path: write lock, build if still absent.
     let mut guard = HTTP_CLIENT
         .write()
         .map_err(|_| anyhow!("HTTP client lock poisoned"))?;
-    if let Some(client) = guard.as_ref() {
-        return Ok(client.clone());
+    if let Some((cached, client)) = guard.as_ref() {
+        if cached.as_deref() == iface.as_deref() {
+            return Ok(client.clone());
+        }
     }
-    let client = Arc::new(build_http_client()?);
-    *guard = Some(client.clone());
+    let client = Arc::new(build_http_client(iface.as_deref())?);
+    *guard = Some((iface, client.clone()));
     Ok(client)
 }
 
@@ -453,11 +498,12 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     Some(Duration::from_secs(secs.clamp(1, 300)))
 }
 
-fn http_request(
+fn http_request_with_timeout(
     method: &str,
     url: &str,
     headers: &[(String, String)],
     body: Option<&[u8]>,
+    timeout: Option<Duration>,
 ) -> Result<HttpResponse> {
     let client = get_http_client()?;
     let mut req = match method {
@@ -477,10 +523,20 @@ fn http_request(
     if let Some(b) = body {
         req = req.body(b.to_vec());
     }
+    if let Some(limit) = timeout {
+        req = req.timeout(limit);
+    }
     let t0 = std::time::Instant::now();
-    let resp = req
-        .send()
-        .with_context(|| format!("http {method} {url} failed"))?;
+    let resp = match req.send() {
+        Ok(resp) => resp,
+        Err(error) => {
+            // A failed connect may be a stale uplink choice. Drop the cached
+            // pick and the pooled client so the next poll resolves again.
+            ommegaclient_b::uplink::invalidate_pick();
+            reset_http_client();
+            return Err(error).with_context(|| format!("http {method} {url} failed"));
+        }
+    };
     let status = resp.status().as_u16();
     let retry_after = parse_retry_after(resp.headers());
     let bytes = resp
@@ -501,6 +557,15 @@ fn http_request(
         body: bytes.to_vec(),
         retry_after,
     })
+}
+
+fn http_request(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&[u8]>,
+) -> Result<HttpResponse> {
+    http_request_with_timeout(method, url, headers, body, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -546,11 +611,16 @@ fn poll_tasks(
 ) -> std::result::Result<Option<(String, String, Value)>, PollError> {
     let caps = reported_caps(cfg);
     let url = format!(
-        "{}/api/b/poll/?device_id={}&machine_id={}&timeout={}&caps={}",
-        cfg.server, cfg.device_id, cfg.machine_id, POLL_TIMEOUT_SEC, caps
+        "{}/api/b/poll/?device_id={}&machine_id={}&timeout={}&caps={}&ver={}",
+        cfg.server,
+        cfg.device_id,
+        cfg.machine_id,
+        POLL_TIMEOUT_SEC,
+        caps,
+        env!("CARGO_PKG_VERSION")
     );
     let headers = vec![("X-Relay-Token".to_string(), cfg.token.clone())];
-    let response = http_request("GET", &url, &headers, None)
+    let response = http_request_with_timeout("GET", &url, &headers, None, Some(POLL_WALL_LIMIT))
         .with_context(|| "b/poll failed")
         .map_err(PollError::transient)?;
     let HttpResponse {
@@ -1189,6 +1259,7 @@ fn spawn_config_watcher(shared: Arc<RwLock<RelayConfig>>, last_mtime: u64) {
                         cfg.server,
                         cfg.device_id
                     );
+                    set_uplink_config(&cfg);
                     *guard = cfg;
                     // Drop the HTTP client so the next request rebuilds it
                     // with fresh connections to the (possibly new) server.
@@ -1383,6 +1454,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    set_uplink_config(&cfg);
     let shared: Arc<RwLock<RelayConfig>> = Arc::new(RwLock::new(cfg));
     spawn_wakelock_keeper(shared.clone());
     let last_mtime = file_mtime(CONF_PATH).unwrap_or(0);
@@ -1400,6 +1472,7 @@ fn main() {
             soter_allow_mutation: false,
             soter_probe: None,
             wakelock: true,
+            bind_iface: "auto".to_string(),
         });
         log::info!(
             "relay daemon starting (config from {source}) server={} device={} machine={}",
@@ -1449,6 +1522,7 @@ mod tests {
             soter_enabled: false,
             soter_allow_mutation: false,
             wakelock: true,
+            bind_iface: "auto".to_string(),
             soter_probe: Some(ommegaclient_b::caps::SignProbeTarget {
                 uid: 10001,
                 alias: "AuthKey".to_string(),

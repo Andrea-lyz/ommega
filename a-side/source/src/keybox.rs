@@ -268,8 +268,12 @@ impl KeyBox {
         }
 
         let info = match (strongbox, key_type.algo_hint) {
-            (false, SigningAlgorithm::Rsa) => self.rsa_info.as_ref(),
-            (false, SigningAlgorithm::Ec) => self.ec_info.as_ref(),
+            // The issuer key type and the leaf key type are independent: an RSA
+            // leaf can be signed by an EC key. Most distributed keyboxes carry
+            // only an EC entry, so fall back to the other algorithm instead of
+            // failing every RSA attestation. StrongBox material stays separate.
+            (false, SigningAlgorithm::Rsa) => self.rsa_info.as_ref().or(self.ec_info.as_ref()),
+            (false, SigningAlgorithm::Ec) => self.ec_info.as_ref().or(self.rsa_info.as_ref()),
             (true, SigningAlgorithm::Rsa) => self.strongbox_rsa_info.as_ref(),
             (true, SigningAlgorithm::Ec) => self.strongbox_ec_info.as_ref(),
         };

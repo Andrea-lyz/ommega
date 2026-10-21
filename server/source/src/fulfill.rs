@@ -101,6 +101,7 @@ pub struct Fulfill {
 
 impl Fulfill {
     pub fn new(enabled: bool, db: Option<Arc<Db>>) -> Arc<Self> {
+        let enabled = crate::runtime_state::desired(crate::runtime_state::SERVERBOX, enabled);
         let f = Arc::new(Self {
             inner: Mutex::new(Inner::default()),
             enabled: AtomicBool::new(enabled),
@@ -118,6 +119,7 @@ impl Fulfill {
 
     pub fn set_enabled(&self, on: bool) {
         self.enabled.store(on, Ordering::Relaxed);
+        crate::runtime_state::set(crate::runtime_state::SERVERBOX, on);
     }
 
     fn session_expired(s: &Session) -> bool {
@@ -746,6 +748,12 @@ fn parse_leaf_key(pem_data: &str) -> anyhow::Result<LeafKey> {
 
 fn sign_data(key: &LeafKey, data: &[u8]) -> anyhow::Result<Vec<u8>> {
     match key {
+        LeafKey::Ec(cert::EcKey::P224(sk)) => {
+            let signing_key = p224::ecdsa::SigningKey::from(sk);
+            let sig: p224::ecdsa::Signature = signing_key.sign(data);
+            let der_sig = p224::ecdsa::DerSignature::from(sig);
+            Ok(der_sig.as_bytes().to_vec())
+        }
         LeafKey::Ec(cert::EcKey::P256(sk)) => {
             let signing_key = p256::ecdsa::SigningKey::from(sk);
             let sig: P256Signature = signing_key.sign(data);
