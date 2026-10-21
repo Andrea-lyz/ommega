@@ -18,6 +18,10 @@ A's Apps overflow menu contains only app operations. Global configuration, langu
 
 The A/B refresh buttons show a busy state while reading status and reject duplicate clicks until the read finishes. A failed read releases the button for retry. Refresh motion follows the system's reduced-motion preference.
 
+A's relay badge reports the recorded outcome of the last request with its time. Only a recent failure raises an alarm; an older one stays visible as a record, and a recovered relay is not reported as a failure. The daemon publishes the verdict of the last request next to the timestamps, because a failure and a success inside the same second cannot be ordered by time. The reason the relay gave is shown below the result.
+
+While a dialog is open the navigation and the save button fade with the covered page and stop looking actionable. The back gesture closes the topmost dialog instead of switching the dashboard view. The save button stays above the navigation dock, and the app list keeps enough room to scroll its last card clear of both.
+
 B SPL and OS values can only increase. Their minimum is the highest of the device original, currently reported value and recorded applied target; blank fields keep the current effective value. The settings panel separately displays original values, `FLOOR_*` minimums and `APPLIED_*` targets. Recorded dates are retained. Restoring factory dates requires a factory reset; see [B date controls](../b-side/source/SPL-PERMANENT-DATE-IDENTITY.md).
 
 ## Build and previews

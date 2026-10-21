@@ -1,13 +1,22 @@
-import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, icon, parseJson, pollWhenVisible, setText, text} from './ui-kit.js';
+import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js';
 
-export function relayVerdict(health) {
+export function relayVerdict(health, now = Date.now()) {
   const ok = Number(health?.last_ok_unix) || 0;
   const error = Number(health?.last_error_unix) || 0;
-  if (!ok && !error) return {tone:'unknown', label:text('等待首个请求', 'Awaiting first request'), at:0};
-  // The snapshot timestamps have one-second precision. On a tie retain the
-  // failure verdict, matching the daemon's existing report semantics.
-  if (error && error >= ok) return {tone:'error', label:text('最近请求失败', 'Last request failed'), at:error};
-  return {tone:'ok', label:text('最近请求成功', 'Last request succeeded'), at:ok};
+  if (!ok && !error) return {tone:'unknown', label:text('尚无请求记录', 'No request recorded'), at:0, age:Infinity, failed:false};
+  // The daemon publishes the verdict of the last request. Older snapshots only
+  // carry timestamps, and those have one-second precision: a failure and a
+  // success inside the same second cannot be ordered by time.
+  const verdict = health?.last_verdict;
+  const failed = verdict ? verdict === 'error' : Boolean(error) && error >= ok;
+  const at = failed ? error : ok;
+  const age = now / 1000 - at;
+  // A recorded outcome is an event, not a live connection state. Only a recent
+  // one may raise an alarm; an older one stays visible with its time.
+  const fresh = age >= -60 && age <= 600;
+  const clock = new Intl.DateTimeFormat(language, {hour:'2-digit', minute:'2-digit'}).format(new Date(at * 1000));
+  if (failed) return {tone: fresh ? 'error' : 'warn', label:`${fresh ? text('最近请求失败', 'Recent request failed') : text('上次请求失败', 'Last request failed')} · ${clock}`, at, age, failed:true};
+  return {tone: fresh ? 'ok' : 'muted', label:`${fresh ? text('最近请求成功', 'Recent request succeeded') : text('上次请求成功', 'Last request succeeded')} · ${clock}`, at, age, failed:false};
 }
 const exec = createBridge('a_dashboard');
 function action(id, zh, en, detailZh, detailEn) {
@@ -30,7 +39,7 @@ function install() {
           <article class="om-card"><div class="om-eyebrow">SOTER</div><div class="om-stat om-stat-small" id="om-soter">—</div><p class="om-description" id="om-soter-detail">${text('软件 TA 状态','Software TA status')}</p></article>
           <article class="om-card"><div class="om-eyebrow">${text('模块版本','MODULE VERSION')}</div><div class="om-stat om-stat-small" id="om-version">—</div><p class="om-description">${text('当前安装','Installed build')}</p></article>
         </div>
-        <article class="om-card"><h2>${text('最近链路记录','Last relay result')}</h2><div id="om-health-time" class="om-caption">—</div><p class="om-description" id="om-health-detail">—</p><p class="om-note">${text('来自守护进程保存的最近结果；读取状态不会发起 TEE 调用。','The last result recorded by the daemon. Reading status does not invoke the TEE.')}</p></article>
+        <article class="om-card"><h2>${text('最近链路记录','Last relay result')}</h2><div id="om-health-time" class="om-caption">—</div><p class="om-description" id="om-health-detail">—</p><p class="om-note" id="om-health-message"></p><p class="om-note">${text('来自守护进程保存的最近结果；读取状态不会发起 TEE 调用。','The last result recorded by the daemon. Reading status does not invoke the TEE.')}</p></article>
         <p id="om-updated" class="om-updated" role="status" aria-live="polite"></p>
       </section>
       <section id="om-settings" class="om-view" hidden><h1 class="om-section-title">${text('设置','Settings')}</h1>
@@ -56,7 +65,7 @@ function install() {
     if (focus) (view === 'apps' ? document.getElementById('search-button') : document.getElementById('om-main'))?.focus({preventScroll:true});
   }
   document.querySelectorAll('[data-om-view]').forEach(button => button.onclick = () => { location.hash = 'om-' + button.dataset.omView; });
-  window.addEventListener('hashchange', () => { if (location.hash.startsWith('#om-')) navigate(location.hash.slice(4), true); });
+  window.addEventListener('hashchange', () => { navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview', true); });
   navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview');
   for (const button of document.querySelectorAll('[data-om-action]')) button.onclick = () => {
     const target = document.getElementById(button.dataset.omAction);
@@ -68,7 +77,11 @@ function install() {
     return !save || save.classList.contains('hide') || window.confirm(text('尚有未保存的应用设置，切换语言会重新加载。继续？','You have unsaved app changes. Changing language reloads the page. Continue?'));
   });
   const refreshButton = document.getElementById('om-refresh');
-  refreshButton.onclick = pollWhenVisible(readStatus, 10000, refreshButton);
+  const refresh = pollWhenVisible(readStatus, 10000, refreshButton);
+  refreshButton.onclick = refresh;
+  // A dialog covers the page, so the navigation must not look actionable while
+  // it is open. The back gesture closes the dialog instead of the view.
+  installDialogGuard(open => document.body.classList.toggle('om-dialog-open', open));
 }
 async function readStatus() {
   const result = await exec(`printf '\\n[HEALTH]\\n'
@@ -101,7 +114,8 @@ printf '\\n[END]\\n'`);
   setText('om-health-time',formatTime(verdict.at));
   // The snapshot is event driven, not a heartbeat. Never infer a live connection from its age.
   const advice = {unauthorized:text('服务器拒绝凭据，请检查 Token。','The server rejected the credentials. Check the token.'),throttled:text('服务器限流或暂时不可用。','The server is busy or rate limiting.'),transport:text('最近一次网络请求失败。','The last network request failed.')};
-  setText('om-health-detail',verdict.tone === 'error' ? `${health?.last_status || '—'} · ${advice[health?.last_kind] || text('请查看诊断详情。','See diagnostic details.')}` : text('这是最近结果，不代表当前连接心跳。','This is a recorded result, not a live connection heartbeat.'));
+  setText('om-health-detail',verdict.failed ? `${health?.last_status || '—'} · ${advice[health?.last_kind] || text('请查看诊断详情。','See diagnostic details.')}` : text('这是最近一次请求的结果，不代表当前连接心跳。','This is the result of the last request, not a live connection heartbeat.'));
+  setText('om-health-message',verdict.failed ? healthMessage(health) : '');
   setText('om-updated',`${text('状态读取于','Status read at')} ${new Intl.DateTimeFormat(document.documentElement.lang,{timeStyle:'medium'}).format(new Date())}`);
 }
 if (typeof document !== 'undefined') install();

@@ -233,18 +233,22 @@ fn read_remote_health() -> Option<Value> {
     let mut health: Value = serde_json::from_str(&raw).ok()?;
     // Add a ready-made explanation so the panel does not have to know the
     // protocol to say something useful.
-    let summary = match health.get("last_kind").and_then(Value::as_str) {
-        Some("unauthorized") => {
-            "The server rejected this token (HTTP 401/403). Check the relay token and card expiry; \
-             toggling remote mode will not change this."
-        }
-        Some("throttled") => {
-            "The server is rate limiting or temporarily unavailable (HTTP 429/503). \
-             It recovers on its own; no action needed."
-        }
-        Some("transport") => "Could not reach the server. Check the URL and network.",
-        Some("error") => "The server returned an error. See last_status and last_message.",
-        _ => "",
+    // A recovered relay must not keep naming the failure that is over.
+    let summary = match health.get("last_verdict").and_then(Value::as_str) {
+        Some("ok") => "",
+        _ => match health.get("last_kind").and_then(Value::as_str) {
+            Some("unauthorized") => {
+                "The server rejected this token (HTTP 401/403). Check the relay token and card expiry; \
+                 toggling remote mode will not change this."
+            }
+            Some("throttled") => {
+                "The server is rate limiting or temporarily unavailable (HTTP 429/503). \
+                 It recovers on its own; no action needed."
+            }
+            Some("transport") => "Could not reach the server. Check the URL and network.",
+            Some("error") => "The server returned an error. See last_status and last_message.",
+            _ => "",
+        },
     };
     if !summary.is_empty() {
         health["summary"] = Value::String(summary.to_string());

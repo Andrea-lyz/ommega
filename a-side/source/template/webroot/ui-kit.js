@@ -70,7 +70,7 @@ export function createBridge(scope) {
   });
 }
 export function pollWhenVisible(refresh, delay = 10000, button = null) {
-  let busy = false, stopped = false;
+  let busy = false, stopped = false, queued = false;
   const label = button?.getAttribute('aria-label') || text('刷新状态', 'Refresh status');
   const setBusy = value => {
     if (!button) return;
@@ -81,16 +81,81 @@ export function pollWhenVisible(refresh, delay = 10000, button = null) {
     button.title = description;
   };
   setBusy(false);
-  const run = async () => {
-    if (busy || stopped || document.hidden) return;
+  const run = async (forced = false) => {
+    if (stopped) return;
+    if (busy) {
+      // A tap during a running read is queued, never dropped: the panel has to
+      // show the result of the request the user actually asked for.
+      if (forced) queued = true;
+      return;
+    }
+    if (document.hidden && !forced) return;
     busy = true;
     setBusy(true);
-    try { await refresh(); } finally { busy = false; setBusy(false); }
+    try { await refresh(); }
+    finally {
+      busy = false;
+      setBusy(false);
+      if (queued) { queued = false; run(true); }
+    }
   };
-  const timer = setInterval(run, delay);
-  document.addEventListener('visibilitychange', run);
-  window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); document.removeEventListener('visibilitychange', run); }, {once:true});
+  const timer = setInterval(() => run(false), delay);
+  const onVisibility = () => run(false);
+  document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVisibility); }, {once:true});
   window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
-  run();
-  return run;
+  run(false);
+  // The returned function is the button action: it always produces a fresh
+  // read, and the panel is never left with a button that does nothing.
+  return () => run(true);
+}
+
+// The relay reports why a request failed as a JSON object. The text inside is
+// what an operator needs; the wrapper only adds noise.
+export function healthMessage(health) {
+  const raw = String(health?.last_message || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) return parsed.error.trim();
+  } catch { /* not JSON: show the text as it is */ }
+  return raw;
+}
+
+// The packaged A bundle opens its own dialogs, so the WebView back gesture has
+// to be routed to them: a back press closes the topmost dialog instead of
+// switching the dashboard view behind it.
+export function installDialogGuard(onChange = () => {}) {
+  const tracked = new Set();
+  const openDialogs = () => [...document.querySelectorAll('md-dialog[open]')];
+  const sync = () => {
+    const open = openDialogs();
+    for (const dialog of open) {
+      if (!tracked.has(dialog)) {
+        tracked.add(dialog);
+        history.pushState({om: 'dialog'}, '');
+      }
+    }
+    for (const dialog of [...tracked]) {
+      if (!dialog.open) {
+        tracked.delete(dialog);
+        // The dialog closed itself: drop the history entry that was added for
+        // it, but only while that entry is still the current one. A back press
+        // that already consumed it must not take the dashboard view with it.
+        if (history.state?.om === 'dialog') history.back();
+        break;
+      }
+    }
+    onChange(open.length > 0);
+  };
+  window.addEventListener('popstate', () => {
+    const open = openDialogs();
+    if (!open.length) return;
+    const dialog = open[open.length - 1];
+    tracked.delete(dialog);
+    dialog.close();
+  });
+  const observer = new MutationObserver(sync);
+  observer.observe(document.documentElement, {attributes: true, subtree: true, attributeFilter: ['open']});
+  return sync;
 }

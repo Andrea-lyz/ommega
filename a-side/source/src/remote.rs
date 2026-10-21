@@ -111,7 +111,14 @@ pub struct RemoteHealth {
     pub last_status: Option<u16>,
     pub last_kind: Option<&'static str>,
     pub last_message: Option<String>,
+    /// The verdict of the most recent request: "ok" or "error". Both clocks
+    /// have one-second resolution, so a failure and a success inside the same
+    /// second cannot be ordered by time. This records which one came last.
+    pub last_verdict: Option<&'static str>,
 }
+
+const VERDICT_OK: &str = "ok";
+const VERDICT_ERROR: &str = "error";
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -126,12 +133,13 @@ fn now_unix() -> i64 {
 /// over, and it must not inherit one from an earlier process: the first success
 /// after a restart publishes a clean snapshot. Every other success is silent —
 /// a healthy relay would otherwise rewrite the file on every request.
+///
+/// The verdict of the last request decides this, not the two clocks. A failure
+/// and a success inside the same second tie them, and a tie used to freeze the
+/// error in the published file for good: every later success then looked like
+/// a non-event and the panel kept reporting a failure that was long over.
 fn ok_snapshot_is_news(health: &RemoteHealth) -> bool {
-    match (health.last_ok_unix, health.last_error_unix) {
-        (None, _) => true,
-        (Some(ok), Some(err)) => ok < err,
-        (Some(_), None) => false,
-    }
+    health.last_verdict != Some(VERDICT_OK)
 }
 
 fn record_remote_ok() {
@@ -139,6 +147,7 @@ fn record_remote_ok() {
         let health = guard.get_or_insert_with(RemoteHealth::default);
         let publish = ok_snapshot_is_news(health);
         health.last_ok_unix = Some(now_unix());
+        health.last_verdict = Some(VERDICT_OK);
         publish
     } else {
         false
@@ -155,6 +164,7 @@ fn record_remote_failure(status: Option<u16>, kind: &'static str, message: &str)
         health.last_status = status;
         health.last_kind = Some(kind);
         health.last_message = Some(message.chars().take(200).collect());
+        health.last_verdict = Some(VERDICT_ERROR);
     }
     write_health_snapshot();
 }
@@ -180,6 +190,7 @@ fn write_health_snapshot() {
         "last_status": health.last_status,
         "last_kind": health.last_kind,
         "last_message": health.last_message,
+        "last_verdict": health.last_verdict,
     });
     if let Some(parent) = std::path::Path::new(REMOTE_HEALTH_PATH).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1337,6 +1348,7 @@ mod tests {
         let health = remote_health().expect("health should be recorded");
         assert_eq!(health.last_status, Some(401));
         assert_eq!(health.last_kind, Some("unauthorized"));
+        assert_eq!(health.last_verdict, Some(VERDICT_ERROR));
         assert!(health
             .last_message
             .as_deref()
@@ -1347,6 +1359,9 @@ mod tests {
         record_remote_ok();
         let health = remote_health().unwrap();
         assert!(health.last_ok_unix.is_some());
+        // The verdict follows the last request, while the record of what went
+        // wrong stays available for diagnostics.
+        assert_eq!(health.last_verdict, Some(VERDICT_OK));
         // A later success must not erase the record of what went wrong.
         assert_eq!(health.last_status, Some(401));
     }
@@ -1363,6 +1378,7 @@ mod tests {
         let after_failure = RemoteHealth {
             last_ok_unix: None,
             last_error_unix: Some(1_000),
+            last_verdict: Some(VERDICT_ERROR),
             ..RemoteHealth::default()
         };
         assert!(ok_snapshot_is_news(&after_failure));
@@ -1372,6 +1388,7 @@ mod tests {
         let healthy = RemoteHealth {
             last_ok_unix: Some(2_000),
             last_error_unix: Some(1_000),
+            last_verdict: Some(VERDICT_OK),
             ..RemoteHealth::default()
         };
         assert!(!ok_snapshot_is_news(&healthy));
@@ -1380,6 +1397,7 @@ mod tests {
         let never_failed = RemoteHealth {
             last_ok_unix: Some(2_000),
             last_error_unix: None,
+            last_verdict: Some(VERDICT_OK),
             ..RemoteHealth::default()
         };
         assert!(!ok_snapshot_is_news(&never_failed));
@@ -1389,9 +1407,27 @@ mod tests {
         let failure_is_newer = RemoteHealth {
             last_ok_unix: Some(1_000),
             last_error_unix: Some(2_000),
+            last_verdict: Some(VERDICT_ERROR),
             ..RemoteHealth::default()
         };
         assert!(ok_snapshot_is_news(&failure_is_newer));
+
+        // Same second: the clocks tie, so only the verdict can order the two
+        // events. A stale error must not survive the next good request.
+        let tied = RemoteHealth {
+            last_ok_unix: Some(1_000),
+            last_error_unix: Some(1_000),
+            last_verdict: Some(VERDICT_ERROR),
+            ..RemoteHealth::default()
+        };
+        assert!(ok_snapshot_is_news(&tied));
+        let recovered = RemoteHealth {
+            last_ok_unix: Some(1_300),
+            last_error_unix: Some(1_000),
+            last_verdict: Some(VERDICT_OK),
+            ..RemoteHealth::default()
+        };
+        assert!(!ok_snapshot_is_news(&recovered));
     }
 
     #[test]

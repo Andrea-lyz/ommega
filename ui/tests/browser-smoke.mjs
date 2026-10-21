@@ -38,8 +38,6 @@ try {
       await page.emulateMedia({reducedMotion:'no-preference'});
       assert.equal(await refresh.locator('svg').evaluate(svg=>getComputedStyle(svg).animationName),'om-refresh-spin');
       await page.emulateMedia({reducedMotion:'reduce'});
-      await refresh.evaluate(button=>button.click());
-      assert.equal(await page.evaluate(()=>window.__heldRefreshes.length),1,'Busy refresh must not send another read');
       await page.evaluate(failed => {
         const {command,options,callback} = window.__heldRefreshes.shift();
         if (failed) window[callback](1,'','Preview read failed');
@@ -50,6 +48,15 @@ try {
       assert.equal(await refresh.getAttribute('aria-label'),locale.startsWith('zh')?'刷新状态':'Refresh status');
       if (failed) assert.equal(await page.locator(side==='a'?'#om-updated':'#runtime-time').textContent(),'Preview read failed');
     }
+    // A tap during a running read is queued, never dropped: the panel has to
+    // show the result of the request the user actually asked for.
+    await refresh.click();
+    await refresh.evaluate(button=>button.click());
+    assert.equal(await page.evaluate(()=>window.__heldRefreshes.length),1,'A busy refresh must not start a second read');
+    await page.evaluate(()=>{ const {command,options,callback} = window.__heldRefreshes.shift(); window.__originalExec(command,options,callback); });
+    await page.waitForFunction(()=>window.__heldRefreshes.length===1,'The queued read has to start');
+    await page.evaluate(()=>{ const {command,options,callback} = window.__heldRefreshes.shift(); window.__originalExec(command,options,callback); });
+    await page.waitForFunction(selector=>document.querySelector(selector).getAttribute('aria-busy')==='false',side==='a'?'#om-refresh':'#runtime-refresh');
     await page.evaluate(()=>{window.ksu.exec=window.__originalExec;});
     await refresh.screenshot({path:fileURLToPath(new URL(`${side}-refresh-${locale}.png`,output))});
     await page.screenshot({path:fileURLToPath(new URL(`${side}-${locale}-${theme}.png`,output)),fullPage:true});
@@ -84,7 +91,23 @@ try {
       for (const action of ['help','about']) {
         await page.locator(`[data-om-action=${action}]`).click();
         await page.locator(`#${action}-dialog`).waitFor({state:'visible'});
+        if (action === 'help') {
+          // A dialog covers the page: the navigation has to dim with it and
+          // stop looking actionable.
+          assert.equal(await page.evaluate(()=>document.body.classList.contains('om-dialog-open')),true);
+          const navOpacity = await page.locator('.om-nav').evaluate(element=>getComputedStyle(element).opacity);
+          assert.ok(Number(navOpacity) < 0.5,`the navigation must dim with the dialog (opacity ${navOpacity})`);
+          // The back gesture closes the dialog instead of switching the view.
+          const view = await page.evaluate(()=>document.body.dataset.omView);
+          await page.goBack().catch(()=>{});
+          await page.locator('#help-dialog').waitFor({state:'hidden'});
+          assert.equal(await page.evaluate(()=>document.body.classList.contains('om-dialog-open')),false);
+          assert.equal(await page.evaluate(()=>document.body.dataset.omView),view,'the back gesture must not switch the view');
+          await page.locator(`[data-om-action=${action}]`).click();
+          await page.locator(`#${action}-dialog`).waitFor({state:'visible'});
+        }
         await page.locator(`#close-${action}`).click();
+        await page.locator(`#${action}-dialog`).waitFor({state:'hidden'});
       }
       await page.locator('[data-om-action=remote-config]').click();
       await page.locator('#remote-config-dialog').waitFor({state:'visible'});
@@ -95,12 +118,45 @@ try {
       await page.locator('#ommega-soterta-close').click();
       await page.locator('[data-om-view=apps]').click();
       await page.locator('#apps-list').waitFor({state:'visible'});
+      // The title and the search button are not surfaces: they carry no
+      // background of their own.
+      for (const selector of ['#title','#search-button']) {
+        const background = await page.locator(selector).evaluate(element=>getComputedStyle(element).backgroundColor);
+        assert.ok(/rgba\(0, 0, 0, 0\)|transparent/.test(background),`${selector} must not carry a background (${background})`);
+      }
+      // The save button stays above the dock, and the list can scroll its last
+      // card clear of it.
+      await page.evaluate(()=>window.scrollTo(0,document.body.scrollHeight));
+      const layout = await page.evaluate(()=>{
+        const save=document.getElementById('save').getBoundingClientRect();
+        const dock=document.querySelector('.om-nav').getBoundingClientRect();
+        const cards=[...document.querySelectorAll('#apps-list .card')];
+        return {saveBottom:save.bottom,dockTop:dock.top,lastBottom:cards[cards.length-1].getBoundingClientRect().bottom};
+      });
+      assert.ok(layout.saveBottom <= layout.dockTop,`the save button must stay above the dock (${layout.saveBottom} > ${layout.dockTop})`);
+      assert.ok(layout.lastBottom <= layout.dockTop,`the last card must clear the dock (${layout.lastBottom} > ${layout.dockTop})`);
       await page.screenshot({path:fileURLToPath(new URL(`a-apps-${locale}.png`,output)),fullPage:true});
       await page.locator('#menu-button').click();
       await page.locator('#select-denylist').waitFor({state:'visible'});
       assert.deepEqual(await page.locator('#menu-options md-menu-item').evaluateAll(items=>items.map(item=>item.id)),['select-denylist','deselect-unnecessary','add-system-app']);
       await page.screenshot({path:fileURLToPath(new URL(`a-app-menu-${locale}.png`,output)),fullPage:true,animations:'disabled'});
       await page.keyboard.press('Escape');
+      await page.locator('[data-om-view=settings]').click();
+      // The recorded outcome is shown with its time, and a recovered relay is
+      // not reported as a failure.
+      await page.locator('[data-om-view=overview]').click();
+      const badge = page.locator('#om-relay-state');
+      assert.equal(await badge.getAttribute('data-tone'),'ok');
+      assert.match(await badge.textContent(),/\d{1,2}:\d{2}/);
+      assert.equal(await page.locator('#om-health-message').textContent(),'');
+      // An error verdict shows the reason the relay gave.
+      await page.evaluate(()=>{
+        const now=Math.floor(Date.now()/1000);
+        window.__OM_HEALTH__=JSON.stringify({last_ok_unix:now-120,last_error_unix:now-120,last_status:500,last_kind:'error',last_message:JSON.stringify({error:'no key for alias ommega-remote-1'}),last_verdict:'error'});
+      });
+      await page.locator('#om-refresh').click();
+      await page.waitForFunction(()=>document.getElementById('om-relay-state').dataset.tone==='error');
+      assert.match(await page.locator('#om-health-message').textContent(),/no key for alias ommega-remote-1/);
       await page.locator('[data-om-view=settings]').click();
     }
     await page.locator('#om-theme').selectOption(theme==='dark'?'light':'dark');

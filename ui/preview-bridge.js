@@ -6,7 +6,7 @@ window.ksu = {
     window.__previewCommands.push(command);
     const now = Math.floor(Date.now()/1000);
     let stdout = '', errno = 0;
-    if (command.includes('[HEALTH]')) stdout = '\n[HEALTH]\n'+JSON.stringify({last_ok_unix:now-24})+'\n[SOTER]\n'+JSON.stringify({enabled:1,running:1,ledger:1,updated:now})+'\n[VERSION]\nversion=1.8.0-preview\n[DAEMON]\n1924\n[END]\n';
+    if (command.includes('[HEALTH]')) stdout = '\n[HEALTH]\n'+(window.__OM_HEALTH__ || JSON.stringify({last_ok_unix:now-120,last_error_unix:now-3600,last_status:500,last_kind:'error',last_message:JSON.stringify({error:'all fulfilment layers failed for device op11-b: no key for alias ommega-remote-c83964f4bf8534c1 (call attest first)'}),last_verdict:'ok'}))+'\n[SOTER]\n'+JSON.stringify({enabled:1,running:1,ledger:1,updated:now})+'\n[VERSION]\nversion=1.8.0-preview\n[DAEMON]\n1924\n[END]\n';
     else if (command.includes('PIDS=')) stdout = 'PIDS=14680\nSPL=2026-08-01\nOS=16\n';
     else if (command.includes('payload=$(base64')) stdout = window.__OM_FIXTURE__.digest+'\n'+window.__OM_FIXTURE__.raw+'\n';
     else if (command.includes('spl-control.sh') && command.includes('status')) stdout = 'SYSTEM_SPL=2026-08-01\nBOOT_SPL=2025-12-01\nVENDOR_SPL=2026-08-01\nOS_VERSION=16\nORIGIN_SYSTEM_SPL=2025-12-01\nORIGIN_VENDOR_SPL=2025-12-01\nORIGIN_OS_VERSION=16\nFLOOR_SYSTEM_SPL=2026-08-01\nFLOOR_VENDOR_SPL=2026-08-01\nFLOOR_OS_VERSION=16\nAPPLIED_SYSTEM_SPL=2026-08-01\nAPPLIED_BOOT_SPL=2025-12-01\nAPPLIED_VENDOR_SPL=2026-08-01\nAPPLIED_OS_VERSION=16\n';
