@@ -24,6 +24,9 @@
 .om-modern .search-bg { background:transparent; color:var(--om-ink); }
 .om-modern .search-input { background:var(--om-raised); border:1px solid var(--om-line); border-radius:16px; color:var(--om-ink); }
 .om-modern .floating-btn { z-index:89; }
+/* The packaged header uses tonal icon buttons. They take their colour from the
+   secondary container of the theme, so they have to follow this panel. */
+.om-modern md-filled-tonal-icon-button { --md-filled-tonal-icon-button-container-color:var(--om-accent-bg); --md-filled-tonal-icon-button-icon-color:var(--om-accent); }
 .om-modern #om-main { outline:none; }
 /* While a dialog is open the page is covered, so the navigation and the save
    button have to fade with it instead of looking actionable. */

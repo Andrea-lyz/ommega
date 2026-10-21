@@ -8,6 +8,9 @@
   --md-sys-color-primary:var(--om-accent); --md-sys-color-on-primary:var(--om-on-accent);
   --md-sys-color-surface:var(--om-surface); --md-sys-color-on-surface:var(--om-ink);
   --md-sys-color-primary-container:var(--om-accent-bg); --md-sys-color-on-primary-container:var(--om-accent);
+  --md-sys-color-secondary:var(--om-raised); --md-sys-color-on-secondary:var(--om-ink);
+  --md-sys-color-secondary-container:var(--om-accent-bg); --md-sys-color-on-secondary-container:var(--om-accent);
+  --md-sys-color-tertiary-container:var(--om-accent-bg); --md-sys-color-on-tertiary-container:var(--om-accent);
   --md-sys-color-surface-container:var(--om-surface); --md-sys-color-surface-container-high:var(--om-raised);
 }
 @media(prefers-color-scheme:dark) { :root:not([data-theme=light]) {
