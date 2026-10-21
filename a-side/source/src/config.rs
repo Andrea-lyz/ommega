@@ -154,11 +154,18 @@ fn bootstrap_config_file_to_path(path: &Path) -> Result<ConfigFile> {
     let updated: toml::Table =
         toml::from_str(&typed).context("failed to deserialize serialized config.toml")?;
     let migrated = parsed.migrated;
+    // A config.toml written before remote mode existed has no [remote] table.
+    // The merge below seeds the defaults (disabled) and nothing ever repairs the
+    // file, so losing the WebUI file silently falls back to local attestation.
+    // Materialise the WebUI relay while it is still available.
+    let had_remote_table = parsed.table.contains_key("remote");
     let original_table = parsed.table.clone();
     let mut merged = parsed.table;
     merged.remove("trust_record");
     merge_config_table(&mut merged, updated);
-    let needs_write = contents.is_none() || migrated || merged != original_table;
+    let healed_remote =
+        !had_remote_table && persist_clienta_remote(&mut merged, load_clienta_remote_override());
+    let needs_write = contents.is_none() || migrated || healed_remote || merged != original_table;
     let serialized =
         toml::to_string_pretty(&merged).context("failed to serialize merged config.toml")?;
     let config_file = parse_config_file(&serialized, false)
@@ -797,6 +804,39 @@ fn parse_clienta_remote(contents: &str) -> Option<RemoteConfig> {
     })
 }
 
+/// Writes the WebUI relay into a config table that has no `[remote]` of its own.
+///
+/// Returns whether the table changed. Only an enabled relay with a URL is
+/// materialised, so a user who turned remote off is not overridden on the next
+/// boot; the runtime override still wins for the current session either way.
+fn persist_clienta_remote(table: &mut toml::Table, remote: Option<RemoteConfig>) -> bool {
+    let Some(remote) = remote else {
+        return false;
+    };
+    if !remote.enabled || remote.url.is_empty() {
+        return false;
+    }
+    let Ok(serialized) = toml::to_string(&remote) else {
+        return false;
+    };
+    let Ok(remote_table) = toml::from_str::<toml::Table>(&serialized) else {
+        return false;
+    };
+    if table.get("remote").and_then(toml::Value::as_table) == Some(&remote_table) {
+        return false;
+    }
+    table.insert("remote".to_string(), toml::Value::Table(remote_table));
+    log::info!(
+        "config.toml had no [remote] table; persisted the WebUI relay (device_id={})",
+        if remote.device_id.is_empty() {
+            "-"
+        } else {
+            remote.device_id.as_str()
+        }
+    );
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigFile {
     pub version: u32,
@@ -1231,6 +1271,66 @@ impl Default for DeviceProperty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn webui_remote(remote_enabled: bool, url: &str) -> RemoteConfig {
+        RemoteConfig {
+            enabled: remote_enabled,
+            url: url.to_string(),
+            token: "t".to_string(),
+            device_id: "op11-b".to_string(),
+            tls_insecure: true,
+            fallback_local: false,
+            debug_logging: false,
+        }
+    }
+
+    #[test]
+    fn absent_remote_table_is_materialised_from_the_webui_relay() {
+        let mut table = toml::Table::new();
+        table.insert("version".to_string(), toml::Value::Integer(2));
+
+        assert!(persist_clienta_remote(
+            &mut table,
+            Some(webui_remote(true, "https://relay.example:8443")),
+        ));
+
+        let remote = table
+            .get("remote")
+            .and_then(toml::Value::as_table)
+            .expect("remote table");
+        assert_eq!(
+            remote.get("enabled").and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            remote.get("url").and_then(toml::Value::as_str),
+            Some("https://relay.example:8443")
+        );
+        assert_eq!(
+            remote.get("device_id").and_then(toml::Value::as_str),
+            Some("op11-b")
+        );
+        assert!(!persist_clienta_remote(
+            &mut table,
+            Some(webui_remote(true, "https://relay.example:8443")),
+        ));
+    }
+
+    #[test]
+    fn disabled_or_url_less_webui_relay_is_not_materialised() {
+        let mut table = toml::Table::new();
+
+        assert!(!persist_clienta_remote(
+            &mut table,
+            Some(webui_remote(false, "https://relay.example:8443")),
+        ));
+        assert!(!persist_clienta_remote(
+            &mut table,
+            Some(webui_remote(true, "")),
+        ));
+        assert!(!persist_clienta_remote(&mut table, None));
+        assert!(!table.contains_key("remote"));
+    }
 
     #[test]
     fn trust_value_spec_parses_tokens_and_hex() {
