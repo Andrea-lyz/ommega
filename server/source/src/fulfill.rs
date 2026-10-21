@@ -101,6 +101,7 @@ pub struct Fulfill {
 
 impl Fulfill {
     pub fn new(enabled: bool, db: Option<Arc<Db>>) -> Arc<Self> {
+        let enabled = crate::runtime_state::desired(crate::runtime_state::SERVERBOX, enabled);
         let f = Arc::new(Self {
             inner: Mutex::new(Inner::default()),
             enabled: AtomicBool::new(enabled),
@@ -118,6 +119,7 @@ impl Fulfill {
 
     pub fn set_enabled(&self, on: bool) {
         self.enabled.store(on, Ordering::Relaxed);
+        crate::runtime_state::set(crate::runtime_state::SERVERBOX, on);
     }
 
     fn session_expired(s: &Session) -> bool {

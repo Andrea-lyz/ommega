@@ -42,8 +42,14 @@ pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+/// The persisted admin switch wins over the startup configuration.
+pub fn desired_from_state(config_value: bool) -> bool {
+    crate::runtime_state::desired(crate::runtime_state::AUTOKEYBOX, config_value)
+}
+
 pub fn set_enabled(v: bool) {
     ENABLED.store(v, Ordering::Relaxed);
+    crate::runtime_state::set(crate::runtime_state::AUTOKEYBOX, v);
 }
 
 /// Get the current device_id for a source name.
