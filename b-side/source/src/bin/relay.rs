@@ -877,13 +877,10 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
         // NO_AUTH_REQUIRED, 504 USER_AUTH_TYPE, 505 AUTH_TIMEOUT, 506
         // ALLOW_WHILE_ON_BODY, 507 TRUSTED_USER_PRESENCE_REQUIRED, 508
         // TRUSTED_CONFIRMATION_REQUIRED, 509 UNLOCKED_DEVICE_REQUIRED). They are
-        // parsed into the KeySpec; `tee_ops::relay_user_auth_params` then drops
-        // the token-bound entries (502/507/508) that the relay cannot satisfy
-        // and keeps the metadata-only entries (504/505/506/509) for the leaf.
-        // Duplicated tags are dropped, and NO_AUTH_REQUIRED is dropped whenever
-        // another policy tag came along — KeyMint rejects that contradictory
-        // combination, and the A-side fallback (the server keybox layer) drops
-        // it the same way.
+        // parsed for wire compatibility but deliberately ignored by `tee_ops`:
+        // every relay-minted key is unconditional NO_AUTH_REQUIRED because B
+        // has no token that the A-side Gatekeeper can validate. The A-side
+        // keyblob/Keystore2 still carries and enforces the fingerprint policy.
         user_auth: {
             let mut tags = Vec::new();
             for pair in get("user_auth")
