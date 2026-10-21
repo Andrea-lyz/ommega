@@ -78,6 +78,14 @@ try {
       await page.waitForFunction(()=>document.getElementById('system').value==='2026-08-01');
     } else {
       await page.locator('[data-om-view=settings]').click();
+      assert.deepEqual(await page.locator('#om-language option').evaluateAll(options=>options.map(option=>option.value)),['auto','zh-CN','en']);
+      assert.deepEqual(await page.evaluate(async()=>Object.keys(await(await fetch('./locales/languages.json')).json()).sort()),['en','zh-CN']);
+      assert.equal(await page.locator('#om-legacy-settings').isVisible(),false);
+      for (const action of ['help','about']) {
+        await page.locator(`[data-om-action=${action}]`).click();
+        await page.locator(`#${action}-dialog`).waitFor({state:'visible'});
+        await page.locator(`#close-${action}`).click();
+      }
       await page.locator('[data-om-action=remote-config]').click();
       await page.locator('#remote-config-dialog').waitFor({state:'visible'});
       await page.locator('#cancel-remote-config').click();
@@ -88,6 +96,11 @@ try {
       await page.locator('[data-om-view=apps]').click();
       await page.locator('#apps-list').waitFor({state:'visible'});
       await page.screenshot({path:fileURLToPath(new URL(`a-apps-${locale}.png`,output)),fullPage:true});
+      await page.locator('#menu-button').click();
+      await page.locator('#select-denylist').waitFor({state:'visible'});
+      assert.deepEqual(await page.locator('#menu-options md-menu-item').evaluateAll(items=>items.map(item=>item.id)),['select-denylist','deselect-unnecessary','add-system-app']);
+      await page.screenshot({path:fileURLToPath(new URL(`a-app-menu-${locale}.png`,output)),fullPage:true,animations:'disabled'});
+      await page.keyboard.press('Escape');
       await page.locator('[data-om-view=settings]').click();
     }
     await page.locator('#om-theme').selectOption(theme==='dark'?'light':'dark');

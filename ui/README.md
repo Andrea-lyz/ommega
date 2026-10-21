@@ -14,6 +14,8 @@ KeyMint and SOTER are separate paths from A through Server to B. A SOTER `ledger
 
 Language defaults to the system: Chinese locales use simplified Chinese; other locales use English. System / Chinese / English and system / light / dark overrides are available. Only appearance preferences are written to WebView storage. Tokens are masked, and configuration credentials stay in the existing device configuration files. Language changes ask before discarding unsaved form values.
 
+A's Apps overflow menu contains only app operations. Global configuration, language, help and about are in Settings. The original dialog bindings stay hidden behind those Settings actions. A packages only the English and simplified Chinese translation files.
+
 The A/B refresh buttons show a busy state while reading status and reject duplicate clicks until the read finishes. A failed read releases the button for retry. Refresh motion follows the system's reduced-motion preference.
 
 B SPL and OS values can only increase. Their minimum is the highest of the device original, currently reported value and recorded applied target; blank fields keep the current effective value. The settings panel separately displays original values, `FLOOR_*` minimums and `APPLIED_*` targets. Recorded dates are retained. Restoring factory dates requires a factory reset; see [B date controls](../b-side/source/SPL-PERMANENT-DATE-IDENTITY.md).
