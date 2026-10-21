@@ -226,6 +226,19 @@ fn remote_child_version_normalization_preserves_user_authentication() {
     check_child_versions(true, true);
 }
 
+#[test]
+fn child_attestation_leaf_is_requested_for_auth_and_unlocked_constraints() {
+    assert!(!needs_child_attestation_leaf(&[]));
+    assert!(!needs_child_attestation_leaf(&[KeyParam::NoAuthRequired]));
+    assert!(needs_child_attestation_leaf(&[KeyParam::UserSecureId(42)]));
+    assert!(needs_child_attestation_leaf(&[KeyParam::UserAuthType(2)]));
+    assert!(needs_child_attestation_leaf(&[KeyParam::AuthTimeout(30)]));
+    assert!(needs_child_attestation_leaf(&[
+        KeyParam::UnlockedDeviceRequired
+    ]));
+    assert!(needs_child_attestation_leaf(&[KeyParam::AllowWhileOnBody]));
+}
+
 fn check_child_versions(remote: bool, auth_bound: bool) {
     let mut ta = test_ta();
     let ordinary_params = key_params(KeyPurpose::Sign);
