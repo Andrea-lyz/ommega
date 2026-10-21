@@ -6,6 +6,12 @@ STATE_DIR=${OMMEGA_STATE_DIR:-/data/adb/ommega}
 CONF_FILE=$STATE_DIR/spl.conf
 BASELINE_FILE=$STATE_DIR/spl-baseline.conf
 ORIGIN_FILE=$STATE_DIR/spl-origin.conf
+# The target this module has already applied. Patch levels and the release are
+# one-way ratchets for the hardware KeyMint: a key blob minted - or upgraded -
+# under a newer value refuses to be used once the device reports an older one.
+# The applied record is therefore the floor for every later write, so the
+# reported date can never drop below a date that key blobs already depend on.
+APPLIED_FILE=$STATE_DIR/spl-applied.conf
 
 # Read-only property files that still carry the values the installed firmware
 # shipped with. resetprop only rewrites the in-memory property copy, so these
@@ -28,6 +34,10 @@ ORIGIN_BOOT_VENDOR_SPL=
 ORIGIN_BOOT_IMAGE_SPL=
 ORIGIN_VENDOR_SPL=
 ORIGIN_OS_VERSION=
+APPLIED_SYSTEM_SPL=
+APPLIED_BOOT_SPL=
+APPLIED_VENDOR_SPL=
+APPLIED_OS_VERSION=
 DOWNGRADE_REFUSED=
 SAVE_IN_PROGRESS=
 
@@ -90,6 +100,26 @@ load_baseline() {
   BASE_BOOT_IMAGE_SPL=$(read_key_file "$BASELINE_FILE" BOOT_IMAGE_SPL)
   BASE_VENDOR_SPL=$(read_key_file "$BASELINE_FILE" VENDOR_SPL)
   BASE_OS_VERSION=$(read_key_file "$BASELINE_FILE" OS_VERSION)
+}
+
+load_applied() {
+  APPLIED_SYSTEM_SPL=$(read_key_file "$APPLIED_FILE" SYSTEM_SPL)
+  APPLIED_BOOT_SPL=$(read_key_file "$APPLIED_FILE" BOOT_SPL)
+  APPLIED_VENDOR_SPL=$(read_key_file "$APPLIED_FILE" VENDOR_SPL)
+  APPLIED_OS_VERSION=$(read_key_file "$APPLIED_FILE" OS_VERSION)
+}
+
+save_applied() {
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+  tmp=$APPLIED_FILE.tmp.$$
+  {
+    echo "SYSTEM_SPL=$1"
+    echo "BOOT_SPL=$2"
+    echo "VENDOR_SPL=$3"
+    echo "OS_VERSION=$4"
+  } > "$tmp" || return 1
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$APPLIED_FILE" || return 1
 }
 
 # Security patch levels and the OS release are one-way ratchets for the
@@ -199,6 +229,17 @@ device_value() {
   esac
 }
 
+# The target this module has already applied, for one property.
+applied_value() {
+  case "$1" in
+    ro.build.version.release) echo "$APPLIED_OS_VERSION" ;;
+    ro.vendor.build.security_patch) echo "$APPLIED_VENDOR_SPL" ;;
+    ro.vendor.boot_security_patch) echo "$APPLIED_BOOT_SPL" ;;
+    ro.boot.image.build.security_patch) echo "$APPLIED_BOOT_SPL" ;;
+    *) echo "$APPLIED_SYSTEM_SPL" ;;
+  esac
+}
+
 baseline_value() {
   case "$1" in
     ro.build.version.release) echo "$BASE_OS_VERSION" ;;
@@ -217,12 +258,39 @@ restore_value() {
   echo "$value"
 }
 
-# The lowest value a write may use for the property named in $1. A patch level
+# What an emptied configuration field means: keep what the device reports.
+# The applied target comes first because it is the value key blobs were
+# minted under, the live value comes next because it is what the device
+# reports right now, and the device's own value is the last resort for a
+# field that was never configured. Lowering the reported date below a date
+# that key blobs were minted under makes those blobs unusable, so the module
+# never does it and the only way out is a factory reset.
+keep_value() {
+  value=$(applied_value "$1")
+  [ -n "$value" ] || value=$(getprop "$1")
+  [ -n "$value" ] || value=$(restore_value "$1")
+  echo "$value"
+}
+
+# The lowest value a write may use for the property named in $1. It is the
+# newest of the device's own value, the target this module already applied and
+# the value the device currently reports, so the reported date can only move
+# up. A key blob minted - or upgraded - under a newer date stays unusable once
+# the device reports an older one, and nothing on the module side can undo
+# that, so a date that was ever reported is never taken back. A patch level
 # without a readable original is held above the device's own system patch
 # level, so a boot or vendor override can never pull the reported date below
 # what the firmware shipped with.
 floor_for() {
   floor=$(device_value "$1")
+  applied=$(applied_value "$1")
+  live=$(getprop "$1")
+  if [ -n "$applied" ]; then
+    floor=$(keep_newest "$floor" "$applied")
+  fi
+  if [ -n "$live" ]; then
+    floor=$(keep_newest "$floor" "$live")
+  fi
   if [ -z "$floor" ]; then
     case "$1" in
       ro.build.version.release) floor=$BASE_OS_VERSION ;;
@@ -245,7 +313,7 @@ write_property() {
   name=$1
   desired=$2
   if refuses_downgrade "$name" "$desired"; then
-    echo "refused to set $name to $desired: this device's original value is $floor, and an override may not go below it. Patch levels and the OS version are one-way ratchets for the hardware KeyMint, and a key blob minted or upgraded while the device reported a newer value stays unusable once the device reports an older one (later signs and attestations fail with INVALID_ARGUMENT/-38). Set $floor or newer, or leave the field empty to restore $floor." >&2
+    echo "refused to set $name to $desired: the floor is $floor, the newest of this device's own value, the value the device reports right now and the target already applied, and a write may not go below it. Patch levels and the OS version are one-way ratchets for the hardware KeyMint, and a key blob minted or upgraded while the device reported a newer value stays unusable once the device reports an older one (later signs and attestations fail with INVALID_ARGUMENT/-38). Set $floor or newer; there is no way back below it, and restoring the device's own date needs a factory reset." >&2
     DOWNGRADE_REFUSED=1
     return 1
   fi
@@ -292,6 +360,7 @@ apply_config() {
   load_config
   refresh_origin
   load_baseline || return 1
+  load_applied
   DOWNGRADE_REFUSED=
   RESETPROP=$(resetprop_bin) || {
     echo "resetprop is unavailable" >&2
@@ -311,13 +380,15 @@ apply_config() {
     fi
   fi
 
-  # An emptied field restores the device's own value, never the live property:
-  # the live value may be this module's own previous override.
-  desired_system=${SYSTEM_SPL:-$(restore_value ro.build.version.security_patch)}
-  desired_vendor=${VENDOR_SPL:-$(restore_value ro.vendor.build.security_patch)}
-  desired_boot_vendor=${BOOT_SPL:-$(restore_value ro.vendor.boot_security_patch)}
-  desired_boot_image=${BOOT_SPL:-$(restore_value ro.boot.image.build.security_patch)}
-  desired_os_version=${OS_VERSION:-$(restore_value ro.build.version.release)}
+  # An emptied field keeps the target that was already applied, and only falls
+  # back to the device's own value when nothing has been applied yet. The live
+  # property is never used as the source: it may be this module's own
+  # previous override.
+  desired_system=${SYSTEM_SPL:-$(keep_value ro.build.version.security_patch)}
+  desired_vendor=${VENDOR_SPL:-$(keep_value ro.vendor.build.security_patch)}
+  desired_boot_vendor=${BOOT_SPL:-$(keep_value ro.vendor.boot_security_patch)}
+  desired_boot_image=${BOOT_SPL:-$(keep_value ro.boot.image.build.security_patch)}
+  desired_os_version=${OS_VERSION:-$(keep_value ro.build.version.release)}
   changed=0
 
   # Release first: the KeyMint HAL reads ro.build.version.release when it
@@ -351,6 +422,17 @@ apply_config() {
   [ "$rc" -eq 0 ] && changed=1
 
   [ "$changed" -eq 0 ] || restart_keymint_stack
+
+  # Record what the device reports now that the values are in place. From here
+  # on the reported date may not drop below these: key blobs minted under them
+  # stay unusable once the device reports an older date, and that damage
+  # cannot be undone from the module side. A device that comes back without
+  # the module therefore needs the target applied again, not a lower value.
+  save_applied \
+    "$(getprop ro.build.version.security_patch)" \
+    "$(getprop ro.boot.image.build.security_patch)" \
+    "$(getprop ro.vendor.build.security_patch)" \
+    "$(getprop ro.build.version.release)" || return 1
 
   # A refusal during an interactive save must reach the WebUI; the boot-time
   # apply only reports it on stderr so a persisted downgrade cannot fail the
@@ -387,6 +469,7 @@ save_config() {
 
 show_status() {
   load_config
+  load_applied
   # Record the device's own values here as well, so the WebUI can show the
   # floor before the first save. Reading the recorded baseline directly keeps
   # status from capturing a live baseline as a side effect.
@@ -405,6 +488,10 @@ show_status() {
   echo "ORIGIN_SYSTEM_SPL=$(device_value ro.build.version.security_patch)"
   echo "ORIGIN_VENDOR_SPL=$(device_value ro.vendor.build.security_patch)"
   echo "ORIGIN_OS_VERSION=$(device_value ro.build.version.release)"
+  echo "APPLIED_SYSTEM_SPL=$APPLIED_SYSTEM_SPL"
+  echo "APPLIED_BOOT_SPL=$APPLIED_BOOT_SPL"
+  echo "APPLIED_VENDOR_SPL=$APPLIED_VENDOR_SPL"
+  echo "APPLIED_OS_VERSION=$APPLIED_OS_VERSION"
   echo "FLOOR_SYSTEM_SPL=$(floor_for ro.build.version.security_patch)"
   echo "FLOOR_VENDOR_SPL=$(floor_for ro.vendor.build.security_patch)"
   echo "FLOOR_OS_VERSION=$(floor_for ro.build.version.release)"

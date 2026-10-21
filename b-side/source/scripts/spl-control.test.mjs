@@ -121,6 +121,14 @@ function sandbox(t, options = {}) {
       const line = readFileSync(props, 'utf8').split('\n').find(row => row.startsWith(key + '='));
       return line === undefined ? null : line.slice(key.length + 1);
     },
+    // Writes the live property directly, the way a device that booted
+    // without the module reports its own value again.
+    setProp: (key, value) => {
+      const rows = readFileSync(props, 'utf8').split('\n')
+        .filter(row => row && !row.startsWith(key + '='));
+      if (value !== '') rows.push(key + '=' + value);
+      writeFileSync(props, rows.join('\n') + '\n');
+    },
     calls: () => (existsSync(calls) ? readFileSync(calls, 'utf8') : ''),
     firmware: current => writeFirmware({...firmware, ...current}),
     state: readState,
@@ -135,8 +143,11 @@ test('status reports the configuration, the live values and the floor', t => {
   assert.match(result.stdout, /^CURRENT_OS_VERSION=16$/m);
   assert.match(result.stdout, /^CURRENT_SYSTEM_SPL=2026-08-01$/m);
   assert.match(result.stdout, /^ORIGIN_SYSTEM_SPL=2025-12-01$/m);
-  assert.match(result.stdout, /^FLOOR_SYSTEM_SPL=2025-12-01$/m);
+  // The floor is the newest value the device ever reported, so it starts at
+  // the live patch level and never drops below it.
+  assert.match(result.stdout, /^FLOOR_SYSTEM_SPL=2026-08-01$/m);
   assert.match(result.stdout, /^FLOOR_OS_VERSION=16$/m);
+  assert.match(result.stdout, /^APPLIED_SYSTEM_SPL=$/m);
   // The device's own values are recorded, so a later run knows the floor even
   // when the firmware files cannot be read.
   assert.match(box.state('spl-origin.conf'), /^SYSTEM_SPL=2025-12-01$/m);
@@ -154,26 +165,27 @@ test('saving an OS version rewrites the property and restarts the stack', t => {
   assert.match(calls, /setprop ctl\.restart keystore2/);
 });
 
-test('clearing the fields restores the device values', t => {
+test('clearing the fields keeps the reported values', t => {
   const box = sandbox(t);
   assert.equal(box.run('save', '2026-09-01', '2026-09-01', '2026-09-01', '17').status, 0);
   assert.equal(box.prop('ro.build.version.security_patch'), '2026-09-01');
   assert.equal(box.prop('ro.build.version.release'), '17');
   const result = box.run('save', '', '', '', '');
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(box.prop('ro.build.version.security_patch'), '2025-12-01');
-  assert.equal(box.prop('ro.vendor.build.security_patch'), '2025-12-01');
-  assert.equal(box.prop('ro.build.version.release'), '16');
-  assert.match(box.calls(), /ctl\.restart/);
+  // The device's own date is never taken back: key blobs minted under the
+  // newer date would stop working.
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-09-01');
+  assert.equal(box.prop('ro.vendor.build.security_patch'), '2026-09-01');
+  assert.equal(box.prop('ro.build.version.release'), '17');
 });
 
-test('lowers a security patch level to the device original', t => {
+test('refuses to lower a security patch level below the reported value', t => {
   const box = sandbox(t);
   const result = box.run('save', '2025-12-01', '', '', '');
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(box.prop('ro.build.version.security_patch'), '2025-12-01');
-  assert.match(box.calls(), /set ro\.build\.version\.security_patch=2025-12-01/);
-  assert.match(box.calls(), /ctl\.restart/);
+  assert.notEqual(result.status, 0, 'a date below the reported one must not report success');
+  assert.match(result.stderr, /refused to set ro\.build\.version\.security_patch to 2025-12-01/);
+  assert.match(result.stderr, /floor is 2026-08-01/);
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
 });
 
 test('applies a newer security patch level', t => {
@@ -184,12 +196,12 @@ test('applies a newer security patch level', t => {
   assert.match(box.calls(), /ctl\.restart/);
 });
 
-test('refuses a patch level older than the device original', t => {
+test('refuses a patch level older than the reported value', t => {
   const box = sandbox(t);
   const result = box.run('save', '2025-06-01', '2025-06-01', '2025-06-01', '');
   assert.notEqual(result.status, 0, 'a value below the original must not report success');
   assert.match(result.stderr, /refused to set ro\.build\.version\.security_patch to 2025-06-01/);
-  assert.match(result.stderr, /original value is 2025-12-01/);
+  assert.match(result.stderr, /floor is 2026-08-01/);
   assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
   // Nothing is written at all: every refused field keeps the live value.
   assert.equal(box.calls(), '');
@@ -200,9 +212,9 @@ test('holds the boot and vendor patch levels above the original too', t => {
   const result = box.run('save', '', '2024-01-01', '2024-01-01', '');
   assert.notEqual(result.status, 0, 'a boot patch level below the original must not report success');
   assert.match(result.stderr, /refused to set ro\.vendor\.build\.security_patch to 2024-01-01/);
-  // The emptied system field still restores the device value; the refused
+  // The emptied system field keeps what the device reports; the refused
   // vendor fields keep what the device reports.
-  assert.equal(box.prop('ro.build.version.security_patch'), '2025-12-01');
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
   assert.equal(box.prop('ro.vendor.build.security_patch'), '2026-08-01');
   assert.equal(box.prop('ro.vendor.boot_security_patch'), '');
 });
@@ -212,12 +224,12 @@ test('refuses to lower the OS release below the device original', t => {
   const result = box.run('save', '2026-08-01', '', '2026-08-01', '15');
   assert.notEqual(result.status, 0, 'lowering the release must not report success');
   assert.match(result.stderr, /refused to set ro\.build\.version\.release to 15/);
-  assert.match(result.stderr, /original value is 16/);
+  assert.match(result.stderr, /floor is 16/);
   assert.equal(box.prop('ro.build.version.release'), '16');
   assert.doesNotMatch(box.calls(), /ctl\.restart/);
 });
 
-test('a baseline recorded under an override never becomes the floor', t => {
+test('a device that reports a newer date never returns to its own value', t => {
   const box = sandbox(t);
   // Values captured while the other device's patch date was in effect must not
   // stop the device from returning to its own.
@@ -227,15 +239,18 @@ test('a baseline recorded under an override never becomes the floor', t => {
   );
   const result = box.run('save', '', '', '', '');
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(box.prop('ro.build.version.security_patch'), '2025-12-01');
+  // The baseline recorded under an override is not a floor, and the reported
+  // date is not taken back either.
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
   assert.equal(box.prop('ro.build.version.release'), '16');
 });
 
-test('without readable firmware files the recorded baseline is the floor', t => {
+test('without readable firmware files the reported value is still the floor', t => {
   const box = sandbox(t, {firmwareUnreadable: true});
   const result = box.run('save', '2025-12-01', '', '', '');
-  assert.notEqual(result.status, 0, 'the captured baseline must still hold the floor');
+  assert.notEqual(result.status, 0, 'the reported value must still hold the floor');
   assert.match(result.stderr, /refused to set ro\.build\.version\.security_patch to 2025-12-01/);
+  assert.match(result.stderr, /floor is 2026-08-01/);
   assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
 });
 
@@ -246,7 +261,7 @@ test('a firmware update raises the floor', t => {
   box.firmware({system: '2026-08-01', vendor: '2026-08-01'});
   const result = box.run('save', '2025-12-01', '', '', '');
   assert.notEqual(result.status, 0, 'the new firmware value is the floor');
-  assert.match(result.stderr, /original value is 2026-08-01/);
+  assert.match(result.stderr, /floor is 2026-08-01/);
   assert.match(box.state('spl-origin.conf'), /^SYSTEM_SPL=2026-08-01$/m);
 });
 
@@ -256,7 +271,7 @@ test('the recorded origin survives firmware files that disappear', t => {
   rmSync(path.join(box.dir, 'firmware'), {recursive: true, force: true});
   const result = box.run('save', '2025-06-01', '', '', '');
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /original value is 2025-12-01/);
+  assert.match(result.stderr, /floor is 2026-08-01/);
 });
 
 test('the removed downgrade marker grants nothing', t => {
@@ -277,10 +292,10 @@ test('a baseline from an older module gains an OS version instead of losing it',
   assert.equal(result.status, 0, result.stderr);
   assert.equal(box.prop('ro.build.version.release'), '17');
   assert.match(box.state('spl-baseline.conf'), /^OS_VERSION=16$/m);
-  // The recorded baseline is what a cleared field falls back to; here the
-  // firmware files answer first and the device returns to its own release.
+  // A cleared field keeps the applied release: the device does not go back to
+  // the release its key blobs were not minted under.
   assert.equal(box.run('save', '', '', '', '').status, 0);
-  assert.equal(box.prop('ro.build.version.release'), '16');
+  assert.equal(box.prop('ro.build.version.release'), '17');
 });
 
 test('an unset OS version never deletes the property', t => {
@@ -316,4 +331,45 @@ test('boot-time apply reports a persisted downgrade without failing startup', t 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /refused to set ro\.build\.version\.security_patch to 2025-06-01/);
   assert.equal(box.prop('ro.build.version.security_patch'), '2026-08-01');
+});
+
+test('the applied target is recorded and becomes the floor', t => {
+  const box = sandbox(t);
+  assert.equal(box.run('save', '2026-09-01', '', '', '').status, 0);
+  assert.match(box.state('spl-applied.conf'), /^SYSTEM_SPL=2026-09-01$/m);
+  const result = box.run('save', '2026-08-01', '', '', '');
+  assert.notEqual(result.status, 0, 'a date below the applied target must not report success');
+  assert.match(result.stderr, /floor is 2026-09-01/);
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-09-01');
+});
+
+test('a device that came back without the module is repaired by re-applying', t => {
+  const box = sandbox(t);
+  assert.equal(box.run('save', '2026-09-01', '', '', '').status, 0);
+  // A boot without the module leaves the live property at the device's own
+  // value while the applied record still holds the target.
+  box.setProp('ro.build.version.security_patch', '2025-12-01');
+  assert.equal(box.prop('ro.build.version.security_patch'), '2025-12-01');
+  const result = box.run('apply');
+  assert.equal(result.status, 0, result.stderr);
+  // The target is put back, so the key blobs that depend on it work again
+  // instead of staying unusable.
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-09-01');
+  assert.match(box.calls(), /ctl\.restart/);
+  // The same holds without the configuration file: the applied record alone
+  // carries the target.
+  rmSync(path.join(box.dir, 'state', 'spl.conf'), {force: true});
+  box.setProp('ro.build.version.security_patch', '2025-12-01');
+  assert.equal(box.run('apply').status, 0);
+  assert.equal(box.prop('ro.build.version.security_patch'), '2026-09-01');
+});
+
+test('status reports the applied target and the effective floor', t => {
+  const box = sandbox(t);
+  assert.equal(box.run('save', '2026-09-01', '', '', '').status, 0);
+  const result = box.run('status');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^APPLIED_SYSTEM_SPL=2026-09-01$/m);
+  assert.match(result.stdout, /^FLOOR_SYSTEM_SPL=2026-09-01$/m);
+  assert.match(result.stdout, /^ORIGIN_SYSTEM_SPL=2025-12-01$/m);
 });

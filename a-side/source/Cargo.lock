@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "ommega"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "ommega-injector"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "android_logger",
  "anyhow",

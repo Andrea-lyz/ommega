@@ -1,0 +1,10 @@
+{
+  "name":"ommega-ui", "private":true, "type":"module",
+  "scripts":{
+    "build":"node build.mjs", "test":"node --test tests/*.test.mjs",
+    "preview":"node preview.mjs", "design:build":"node openui/build.mjs"
+  },
+  "devDependencies":{
+    "@openuidev/react-ui":"0.18.1", "esbuild":"0.25.12", "react":"19.2.0", "react-dom":"19.2.0"
+  }
+}

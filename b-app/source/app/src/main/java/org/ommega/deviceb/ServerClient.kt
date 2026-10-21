@@ -45,8 +45,8 @@ object ServerClient {
 
     private val trustAllHosts = HostnameVerifier { _, _ -> true }
 
-    private fun applyTls(conn: HttpURLConnection) {
-        if (!tlsInsecure || conn !is HttpsURLConnection) return
+    private fun applyTls(conn: HttpURLConnection, insecure: Boolean = tlsInsecure) {
+        if (!insecure || conn !is HttpsURLConnection) return
         conn.sslSocketFactory = insecureSsl.socketFactory
         conn.hostnameVerifier = trustAllHosts
     }
@@ -60,20 +60,20 @@ object ServerClient {
         url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
 
     /** Checks relay connectivity. relay_rs `/api/ping/` returns plain `"pong"`. */
-    fun ping(): Boolean {
+    fun ping(baseUrl: String = serverUrl, token: String = relayToken, insecure: Boolean = tlsInsecure): Boolean {
         return try {
-            val conn = openDirect(URL("$serverUrl/api/ping/")).apply {
+            val conn = openDirect(URL("$baseUrl/api/ping/")).apply {
                     requestMethod = "GET"
                     connectTimeout = 5_000
                     readTimeout = 5_000
-                    if (relayToken.isNotBlank()) {
-                        setRequestProperty("X-Relay-Token", relayToken)
+                    if (token.isNotBlank()) {
+                        setRequestProperty("X-Relay-Token", token)
                     }
                 }
-            applyTls(conn)
-            if (conn.responseCode != 200) return false
-            val body = conn.inputStream.bufferedReader().readText()
-            body.trim() == "pong"
+            try {
+                applyTls(conn, insecure)
+                conn.responseCode == 200 && conn.inputStream.bufferedReader().use { it.readText().trim() == "pong" }
+            } finally { conn.disconnect() }
         } catch (e: Exception) {
             Log.e(TAG, "ping failed: ${e.message}")
             false

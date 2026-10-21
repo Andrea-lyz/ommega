@@ -31,17 +31,23 @@
 
         <service
             android:name=".RelayService"
+            android:enabled="${relayEnabled}"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
         <receiver
             android:name=".BootReceiver"
+            android:enabled="${relayEnabled}"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 
+        <service android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+            android:enabled="false" android:exported="false">
+            <meta-data android:name="autoStoreLocales" android:value="true" />
+        </service>
     </application>
 
 </manifest>

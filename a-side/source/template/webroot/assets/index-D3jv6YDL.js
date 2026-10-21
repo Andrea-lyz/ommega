@@ -1472,6 +1472,20 @@ ommegaRebind("save-remote-config", async () => {
 const OMMEGA_TARGET_COMPAT = "/data/adb/ommega/ommegadata/target-compat.toml";
 let ommegaCompatEnabled = false;
 
+// Existing diagnostics keep their bilingual representation for tooling; the UI
+// presents the matching half using the same resolved preference as the shell.
+function ommegaUiLocalize(value) {
+  let chinese = false;
+  try { chinese = /^zh/i.test(localStorage.getItem("trickyAddonLanguage") || navigator.language); } catch (_) {}
+  return String(value).split("\n").map(line => {
+    const halves = line.split(/\s*\/ (?=[A-Za-z])/);
+    return halves.length === 2 && /[\u3400-\u9fff]/.test(halves[0]) ? halves[chinese ? 0 : 1] : line;
+  }).join("\n");
+}
+function ommegaUiLocalizeHtml(html) {
+  return html.replace(/>([^<>]+)</g, (_, value) => ">" + ommegaUiLocalize(value) + "<");
+}
+
 function ommegaParseTargetCompat(contents) {
   let enabled = false;
   let inSection = false;
@@ -1532,11 +1546,12 @@ function ommegaInstallCompatOption() {
   row.id = "mode-compat-row";
   row.innerHTML = '<md-checkbox id="mode-compat" touch-target="wrapper"></md-checkbox>' +
     '<span data-i18n="mode_detector_compat">检测器兼容 / Detector compat</span>';
+  row.innerHTML = ommegaUiLocalizeHtml(row.innerHTML);
   container.appendChild(row);
   const hint = document.createElement("div");
   hint.id = "mode-compat-hint";
   hint.setAttribute("data-i18n", "mode_detector_compat_hint");
-  hint.textContent = "对所有目标应用生效 / Applies to every target application";
+  hint.textContent = ommegaUiLocalize("对所有目标应用生效 / Applies to every target application");
   hint.style.cssText = "font-size:11px;line-height:1.4;opacity:.7;margin:-4px 0 8px 4px";
   container.parentElement.appendChild(hint);
   const box = row.querySelector("md-checkbox");
@@ -1688,7 +1703,7 @@ async function ommegaRefreshHealth() {
     report = "无法读取中继状态（remote-health.json 解析失败） / " +
       "Could not read the relay status (remote-health.json is unreadable).";
   }
-  panel.textContent = "Integrity / KeyMint 远程中继\n" + (report === ""
+  panel.textContent = ommegaUiLocalize("KeyMint 远程中继 / KeyMint remote relay") + "\n" + ommegaUiLocalize(report === ""
     ? "中继状态：暂无失败记录 / Relay status: no failures recorded yet."
     : report);
 }
@@ -1866,7 +1881,7 @@ async function ommegaSotertaRefresh(pending) {
     lines.push("开关已写入，看门狗会在几秒内接管（要先停掉原厂 HAL）/ " +
       "Switch written; the watchdog applies it within a few seconds (it stops the stock HAL first).");
   }
-  report.textContent = lines.join("\n\n");
+  report.textContent = ommegaUiLocalize(lines.join("\n\n"));
 }
 
 // The flag is the request; the watchdog reacts within its poll interval and the
@@ -1878,7 +1893,7 @@ async function ommegaSotertaApply() {
   const box = document.getElementById("ommega-soterta-enabled");
   const report = document.getElementById("ommega-soterta-report");
   const on = !!(box && box.checked);
-  if (report) report.textContent = "正在写入开关… / Writing the switch…";
+  if (report) report.textContent = ommegaUiLocalize("正在写入开关… / Writing the switch…");
   let errno = 1;
   let stderr = "";
   try {
@@ -1943,6 +1958,11 @@ function ommegaSotertaDialog() {
       '<md-text-button id="ommega-soter-remote-save">保存 / Save</md-text-button>' +
       '<md-text-button id="ommega-soterta-close">关闭 / Close</md-text-button>' +
     '</div>';
+  dialog.innerHTML = ommegaUiLocalizeHtml(dialog.innerHTML);
+  const englishLabels = {url:"Soter server URL",device:"Soter B device ID","uid-map":"UID mapping (A=B, optional)"};
+  if (ommegaUiLocalize("中文 / English") === "English") {
+    for (const [key, label] of Object.entries(englishLabels)) dialog.querySelector("#ommega-soter-remote-" + key)?.setAttribute("label", label);
+  }
   wrapper.appendChild(dialog);
   const box = dialog.querySelector("#ommega-soterta-enabled");
   if (box) box.addEventListener("click", () => { ommegaSotertaApply(); });
@@ -1971,6 +1991,7 @@ function ommegaSotertaInstallMenu() {
   item.className = "automation-menu-item";
   item.innerHTML = '<div slot="headline">Soter 原生 HAL 与远程中继 / Native Soter HAL and relay</div>' +
     '<md-icon slot="end">fingerprint</md-icon>';
+  item.innerHTML = ommegaUiLocalizeHtml(item.innerHTML);
   item.addEventListener("click", () => {
     // md-menu closes itself when an item is activated; close() is only the nudge
     // for elements that need one.
@@ -2019,9 +2040,9 @@ async function ommegaSoterRemoteLoad() {
       const element = document.getElementById("ommega-soter-remote-" + key.replaceAll("_", "-"));
       if (element) element.checked = cfg[key];
     }
-    if (result) result.textContent = cfg.enabled
-      ? "Soter 使用独立远程服务器；原生 HAL 仍由软件 TA 接管。"
-      : "Soter 远程已关闭；软件 TA 使用本地账本。";
+    if (result) result.textContent = ommegaUiLocalize(cfg.enabled
+      ? "Soter 使用独立远程服务器；原生 HAL 仍由软件 TA 接管。 / Soter uses a separate relay server; the software TA still owns the HAL."
+      : "Soter 远程已关闭；软件 TA 使用本地账本。 / Remote Soter is off; the software TA uses its local ledger.");
   } catch (error) {
     if (result) result.textContent = "读取 Soter 远程配置失败 / Could not read Soter relay config: " + error;
   }
@@ -2044,7 +2065,7 @@ async function ommegaSoterRemoteSave() {
   const uidMap = ommegaSoterRemoteField("uid-map");
   const values = [url, token, device, uidMap];
   if (values.some(value => /[\r\n]/.test(value))) {
-    if (result) result.textContent = "配置中不能有换行 / Newlines are not allowed.";
+    if (result) result.textContent = ommegaUiLocalize("配置中不能有换行 / Newlines are not allowed.");
     return;
   }
   if (enabled) {
@@ -2054,7 +2075,7 @@ async function ommegaSoterRemoteSave() {
       validUrl = ["http:", "https:"].includes(parsed.protocol) && !!parsed.hostname && !parsed.username && !parsed.password;
     } catch (error) { /* invalid URL */ }
     if (!validUrl || !token || !device) {
-      if (result) result.textContent = "启用前请填写 HTTP(S) URL、Token 和 B 设备 ID。";
+      if (result) result.textContent = ommegaUiLocalize("启用前请填写 HTTP(S) URL、Token 和 B 设备 ID。 / Enter an HTTP(S) URL, token and B device ID before enabling.");
       return;
     }
   }
@@ -2078,7 +2099,7 @@ async function ommegaSoterRemoteSave() {
     'chmod 0600 "' + OMMEGA_SOTER_REMOTE_CONFIG + '.tmp"',
     'mv -f "' + OMMEGA_SOTER_REMOTE_CONFIG + '.tmp" "' + OMMEGA_SOTER_REMOTE_CONFIG + '"',
   ].join("\n");
-  if (result) result.textContent = "正在保存 Soter 远程配置… / Saving Soter relay config…";
+  if (result) result.textContent = ommegaUiLocalize("正在保存 Soter 远程配置… / Saving Soter relay config…");
   try {
     const response = await _(command);
     if (Number(response.errno) !== 0) throw new Error(String(response.stderr || "write failed"));

@@ -1,0 +1,34 @@
+/* Keep the legacy app list and every dialog intact; style the surrounding views. */
+.om-modern .header { position:relative; max-width:900px; margin:0 auto 18px; border-radius:20px; top:auto; width:auto; background:var(--om-surface); color:var(--om-ink); padding:12px; }
+.om-modern #apps-list { max-width:900px; margin:0 auto; padding-top:0; padding-bottom:0; }
+.om-modern .card { background:var(--om-surface); color:var(--om-ink); border:1px solid var(--om-line); border-radius:18px; }
+.om-modern .card-box { padding-top:5px; padding-bottom:5px; }
+/* The packaged bundle hides the save button while the list scrolls down, so it
+   sinks behind the navigation dock. The button stays above the dock instead.
+   The dock is fixed, so the list needs room of its own: the last card has to
+   be able to scroll clear of both. */
+.om-modern .floating-btn, .om-modern .floating-btn.hide { transform:none; }
+.om-modern #save { bottom:calc(var(--om-dock-gap) + var(--om-dock-h) + 16px + env(safe-area-inset-bottom,0px)); z-index:91; }
+.om-modern[data-om-view=apps] { padding-bottom:0; }
+.om-modern[data-om-view=apps] #apps-list { padding-bottom:calc(var(--om-dock-gap) + var(--om-dock-h) + 88px + env(safe-area-inset-bottom,0px)); }
+.om-modern[data-om-view]:not([data-om-view=apps]) > .header,
+.om-modern[data-om-view]:not([data-om-view=apps]) > #apps-list,
+.om-modern[data-om-view]:not([data-om-view=apps]) > .loading,
+.om-modern[data-om-view]:not([data-om-view=apps]) > #save { display:none !important; }
+.om-modern > .footer { max-width:900px; margin:20px auto; padding:0; }
+.om-modern:not([data-om-view=settings]) > .footer { display:none; }
+.om-modern md-dialog { --md-dialog-container-color:var(--om-surface); --md-dialog-headline-color:var(--om-ink); --md-dialog-supporting-text-color:var(--om-muted); }
+/* The legacy header marks the title and the search button with .search-bg so
+   it can fade them while the search field is open. They are not surfaces, so
+   they must not carry a background of their own. */
+.om-modern .search-bg { background:transparent; color:var(--om-ink); }
+.om-modern .search-input { background:var(--om-raised); border:1px solid var(--om-line); border-radius:16px; color:var(--om-ink); }
+.om-modern .floating-btn { z-index:89; }
+/* The packaged header uses tonal icon buttons. They take their colour from the
+   secondary container of the theme, so they have to follow this panel. */
+.om-modern md-filled-tonal-icon-button { --md-filled-tonal-icon-button-container-color:var(--om-accent-bg); --md-filled-tonal-icon-button-icon-color:var(--om-accent); }
+.om-modern #om-main { outline:none; }
+/* While a dialog is open the page is covered, so the navigation and the save
+   button have to fade with it instead of looking actionable. */
+body.om-modern.om-dialog-open .om-nav,
+body.om-modern.om-dialog-open .floating-btn { opacity:.22; pointer-events:none; transition:opacity var(--om-fast) var(--om-ease); }
