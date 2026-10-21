@@ -4,7 +4,9 @@ export function relayVerdict(health) {
   const ok = Number(health?.last_ok_unix) || 0;
   const error = Number(health?.last_error_unix) || 0;
   if (!ok && !error) return {tone:'unknown', label:text('等待首个请求', 'Awaiting first request'), at:0};
-  if (error > ok) return {tone:'error', label:text('最近请求失败', 'Last request failed'), at:error};
+  // The snapshot timestamps have one-second precision. On a tie retain the
+  // failure verdict, matching the daemon's existing report semantics.
+  if (error && error >= ok) return {tone:'error', label:text('最近请求失败', 'Last request failed'), at:error};
   return {tone:'ok', label:text('最近请求成功', 'Last request succeeded'), at:ok};
 }
 const exec = createBridge('a_dashboard');

@@ -21,6 +21,7 @@ test('missing and stale SOTER snapshots never indicate a recent state', () => {
 test('relay history uses the newest outcome and handles absent files', () => {
   assert.equal(relayVerdict(null).tone,'unknown');
   assert.equal(relayVerdict({last_ok_unix:100,last_error_unix:200}).tone,'error');
+  assert.equal(relayVerdict({last_ok_unix:200,last_error_unix:200}).tone,'error');
   assert.equal(relayVerdict({last_ok_unix:300,last_error_unix:200}).tone,'ok');
 });
 test('overview data handles equals signs and markup as inert text', () => {
