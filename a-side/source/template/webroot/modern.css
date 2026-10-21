@@ -59,6 +59,8 @@ body.om-modern { margin:0; background:var(--om-bg); color:var(--om-ink); font-fa
 .om-button.secondary { background:var(--om-raised); color:var(--om-ink); }
 .om-button:disabled { opacity:.5; cursor:default; }
 .om-icon-button { width:46px; padding:10px; }
+.om-icon-button svg { flex-shrink:0; }
+.om-icon-button[aria-busy=true] svg { animation:om-refresh-spin 800ms linear 120ms infinite; transform-origin:center; }
 .om-modern button { transition:transform var(--om-fast) var(--om-ease),background var(--om-fast) var(--om-ease); }
 .om-modern button:active:not(:disabled) { transform:scale(.97); }
 .om-nav { position:fixed; bottom:calc(12px + env(safe-area-inset-bottom,0px)); left:50%; transform:translateX(-50%); width:min(440px,calc(100% - 32px)); padding:7px; border:1px solid var(--om-line); border-radius:24px; background:var(--om-surface); display:flex; gap:6px; z-index:90; box-shadow:0 6px 30px #0002; }
@@ -76,6 +78,7 @@ body.om-modern { margin:0; background:var(--om-bg); color:var(--om-ink); font-fa
 .om-raw { font:12px/1.7 ui-monospace,monospace; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--om-bg); border-radius:12px; padding:14px; }
 .om-updated { margin:18px 0; color:var(--om-muted); font-size:12px; }
 @keyframes om-enter { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:none; } }
+@keyframes om-refresh-spin { to { transform:rotate(360deg); } }
 @media(min-width:720px) { .om-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } .om-hero { padding:32px; } }
 @media(max-width:719px) { .om-grid > :last-child:nth-child(odd) { grid-column:1/-1; } }
 @media(max-width:360px) { body.om-modern { padding-left:12px; padding-right:12px; } .om-card { padding:15px; } .om-hero { padding:20px; } }

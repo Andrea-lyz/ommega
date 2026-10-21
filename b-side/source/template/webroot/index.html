@@ -42,14 +42,15 @@
     <section class="om-view" id="settings-view" hidden>
       <h1 class="om-section-title" data-msg="设置与设备信息"></h1><div id="appearance"></div>
       <details class="om-card" id="spl-section"><summary data-msg="设备属性（SPL 与 OS 版本）"></summary>
-        <p class="om-note" data-msg="单独保存和应用。修改 SPL 或 OS 版本会重载 KeyMint 与 keystore2；不能低于设备原始值，留空恢复原始值。在新日期下产生或升级过的密钥，降回旧日期后可能永久不可用。"></p>
+        <p class="om-note" data-msg="修改 SPL 或 OS 版本会重载 KeyMint 与 keystore2。日期与 OS 版本只能升不能降；下限取设备原始值、设备当前上报值与已生效目标值三者中最新者，留空即保持当前生效值。"></p>
+        <p class="om-note" data-msg="已上报过的日期不会被收回；恢复出厂日期需要恢复出厂设置。"></p>
         <label class="field" for="system">System SPL<input id="system" placeholder="YYYY-MM-DD"></label>
         <label class="field" for="boot">Boot SPL<input id="boot" placeholder="YYYY-MM-DD"></label>
         <label class="field" for="vendor">Vendor SPL<input id="vendor" placeholder="YYYY-MM-DD"></label>
-        <label class="field" for="osversion"><span data-msg="OS 版本"></span><input id="osversion" inputmode="numeric" data-placeholder="如 17，留空恢复原始值"></label>
+        <label class="field" for="osversion"><span data-msg="OS 版本"></span><input id="osversion" inputmode="numeric" data-placeholder="如 17，留空保持当前生效值"></label>
         <p class="om-note" data-msg="OS 版本只影响 ro.build.version.release 与证明 OS_VERSION；SDK 等级不变。"></p>
-        <div class="actions"><button id="save" type="button" class="om-button" disabled data-msg="保存并应用"></button><button id="same" type="button" class="om-button secondary" data-msg="三项使用 System 值"></button><button id="auto" type="button" class="om-button secondary" data-msg="清空全部填写"></button></div>
-        <div id="message" class="om-message" role="status" aria-live="polite"></div><p class="om-note" id="origin"></p><p class="om-note" data-msg="Boot SPL 是否被硬件接受，以新生成的证明证书为准。"></p><pre id="status" class="om-raw"></pre>
+        <div class="actions"><button id="save" type="button" class="om-button" disabled data-msg="保存并应用"></button><button id="same" type="button" class="om-button secondary" data-msg="三项使用 System 值"></button><button id="auto" type="button" class="om-button secondary" data-msg="留空保持当前值"></button></div>
+        <div id="message" class="om-message" role="status" aria-live="polite"></div><p class="om-note" id="origin"></p><p class="om-note" id="spl-floor"></p><p class="om-note" id="spl-applied"></p><p class="om-note" data-msg="Boot SPL 是否被硬件接受，以新生成的证明证书为准。"></p><pre id="status" class="om-raw"></pre>
       </details>
     </section>
   </main>

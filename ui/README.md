@@ -14,6 +14,10 @@ KeyMint and SOTER are separate paths from A through Server to B. A SOTER `ledger
 
 Language defaults to the system: Chinese locales use simplified Chinese; other locales use English. System / Chinese / English and system / light / dark overrides are available. Only appearance preferences are written to WebView storage. Tokens are masked, and configuration credentials stay in the existing device configuration files. Language changes ask before discarding unsaved form values.
 
+The A/B refresh buttons show a busy state while reading status and reject duplicate clicks until the read finishes. A failed read releases the button for retry. Refresh motion follows the system's reduced-motion preference.
+
+B SPL and OS values can only increase. Their minimum is the highest of the device original, currently reported value and recorded applied target; blank fields keep the current effective value. The settings panel separately displays original values, `FLOOR_*` minimums and `APPLIED_*` targets. Recorded dates are retained. Restoring factory dates requires a factory reset; see [B date controls](../b-side/source/SPL-PERMANENT-DATE-IDENTITY.md).
+
 ## Build and previews
 
 ```sh
@@ -34,7 +38,7 @@ Browser smoke test (against the preview server, with Playwright installed or `PL
 node ui/tests/browser-smoke.mjs
 ```
 
-It checks Chinese/English, light/dark, 320–1024 px layout, A remote/SOTER dialogs, B form loading and token visibility, and the OpenUI prototype. Screenshots and results are written to ignored `ui/test-results/`.
+It checks Chinese/English, light/dark, 320–1024 px layout, refresh loading/duplicate-click/error/retry behavior, reduced-motion support, A remote/SOTER dialogs, B form loading and token visibility, B SPL minimum/applied-target display, and the OpenUI prototype. Screenshots and results are written to ignored `ui/test-results/`.
 
 ## Android preview and validation
 
@@ -47,7 +51,7 @@ The preview has application ID `org.ommega.deviceb.preview`. Relay service and b
 
 Local validation on 2026-10-21:
 
-- 44 host JavaScript tests passed: presentation 5, B configuration 10, A compatibility 11, stubbed B SPL controller 18. No real HAL/device calls were used.
+- 47 host JavaScript tests passed: presentation 5, B configuration 10, A compatibility 11, stubbed B SPL controller 21. No real HAL/device calls were used.
 - B Android Release assembled, lintVital passed, two native unit tests passed. Preview Debug assembled.
 - Five browser smoke cases passed without JavaScript runtime errors, including a real OpenUI component render.
 - Mobile MCP on A (`PJZ110`) verified the separate native preview, Chinese system adaptation, manual English switching, and dark theme. Production A/B modules and the real relay/TEE paths were not deployed or exercised as part of this UI change.
@@ -56,5 +60,7 @@ Local validation on 2026-10-21:
 ## Deployment and rollback
 
 Keep the existing module/APK as the rollback artifact. For A, replace only the module UI through the normal tested module package, preserving its device configuration. B deployment requires the separate explicit approval and preflight in `AGENTS.md`; local implementation and CI are not B deployment approval. Do not run manual Keystore diagnostics or restart services merely to validate the new UI. A WebUI-only deployment can be rolled back by restoring the backed-up webroot; no reboot or HAL reload is needed for static assets.
+
+Restoring B UI assets does not lower an applied date. Preserve B's `spl-applied.conf` and its recorded floor when changing module versions.
 
 Design reference: [OpenUI standalone components](https://github.com/thesysdev/openui/tree/main/packages/react-ui), [Compose state](https://developer.android.com/develop/ui/compose/state), [Compose lifecycle](https://developer.android.com/develop/ui/compose/lifecycle).

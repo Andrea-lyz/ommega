@@ -20,6 +20,38 @@ try {
     await page.goto(`http://127.0.0.1:4179/${side}/`,{waitUntil:'domcontentloaded'});
     await page.locator(side==='a'?'#om-updated':'#runtime-time').filter({hasText:/状态读取于|Status read at/}).waitFor();
     assert.equal(await page.locator('html').getAttribute('lang'),locale.startsWith('zh')?'zh-CN':'en');
+    const refresh = page.locator(side==='a'?'#om-refresh':'#runtime-refresh');
+    await page.evaluate(prefix => {
+      window.__originalExec = window.ksu.exec;
+      window.__heldRefreshes = [];
+      window.ksu.exec = (command,options,callback) => {
+        if (callback.startsWith(prefix)) window.__heldRefreshes.push({command,options,callback});
+        else window.__originalExec(command,options,callback);
+      };
+    },side==='a'?'ommega_a_dashboard_':'ommega_b_status_');
+    for (const failed of [true,false]) {
+      await refresh.click();
+      assert.equal(await refresh.isDisabled(),true);
+      assert.equal(await refresh.getAttribute('aria-busy'),'true');
+      assert.equal(await refresh.getAttribute('aria-label'),locale.startsWith('zh')?'正在刷新':'Refreshing');
+      assert.equal(await refresh.locator('svg').evaluate(svg=>getComputedStyle(svg).animationName),'none');
+      await page.emulateMedia({reducedMotion:'no-preference'});
+      assert.equal(await refresh.locator('svg').evaluate(svg=>getComputedStyle(svg).animationName),'om-refresh-spin');
+      await page.emulateMedia({reducedMotion:'reduce'});
+      await refresh.evaluate(button=>button.click());
+      assert.equal(await page.evaluate(()=>window.__heldRefreshes.length),1,'Busy refresh must not send another read');
+      await page.evaluate(failed => {
+        const {command,options,callback} = window.__heldRefreshes.shift();
+        if (failed) window[callback](1,'','Preview read failed');
+        else window.__originalExec(command,options,callback);
+      },failed);
+      await page.waitForFunction(selector=>document.querySelector(selector).getAttribute('aria-busy')==='false',side==='a'?'#om-refresh':'#runtime-refresh');
+      assert.equal(await refresh.isEnabled(),true);
+      assert.equal(await refresh.getAttribute('aria-label'),locale.startsWith('zh')?'刷新状态':'Refresh status');
+      if (failed) assert.equal(await page.locator(side==='a'?'#om-updated':'#runtime-time').textContent(),'Preview read failed');
+    }
+    await page.evaluate(()=>{window.ksu.exec=window.__originalExec;});
+    await refresh.screenshot({path:fileURLToPath(new URL(`${side}-refresh-${locale}.png`,output))});
     await page.screenshot({path:fileURLToPath(new URL(`${side}-${locale}-${theme}.png`,output)),fullPage:true});
     for (const width of [320,393,768,1024]) {
       await page.setViewportSize({width,height:852});
@@ -33,6 +65,17 @@ try {
       await page.locator('#token-toggle').click();
       assert.equal(await page.locator('#relay-token').getAttribute('type'),'text');
       await page.locator('[data-view=settings]').click();
+      await page.locator('#spl-section > summary').click();
+      assert.match(await page.locator('#origin').textContent(),/System 2025-12-01/);
+      assert.match(await page.locator('#spl-floor').textContent(),/System 2026-08-01/);
+      assert.match(await page.locator('#spl-applied').textContent(),/Boot 2025-12-01/);
+      assert.equal(await page.locator('#osversion').getAttribute('placeholder'),locale.startsWith('zh')?'如 17，留空保持当前生效值':'e.g. 17; blank keeps the current value');
+      await page.getByRole('button',{name:locale.startsWith('zh')?'留空保持当前值':'Keep current values',exact:true}).click();
+      assert.equal(await page.locator('#system').inputValue(),'');
+      assert.equal(await page.locator('#osversion').inputValue(),'');
+      await page.screenshot({path:fileURLToPath(new URL(`b-spl-${locale}.png`,output)),fullPage:true});
+      await page.reload({waitUntil:'domcontentloaded'}); // Discard the unsaved fixture-only draft.
+      await page.waitForFunction(()=>document.getElementById('system').value==='2026-08-01');
     } else {
       await page.locator('[data-om-view=settings]').click();
       await page.locator('[data-om-action=remote-config]').click();

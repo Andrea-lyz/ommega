@@ -67,8 +67,8 @@ function install() {
     const save = document.getElementById('save');
     return !save || save.classList.contains('hide') || window.confirm(text('尚有未保存的应用设置，切换语言会重新加载。继续？','You have unsaved app changes. Changing language reloads the page. Continue?'));
   });
-  const refresh = pollWhenVisible(readStatus);
-  document.getElementById('om-refresh').onclick = refresh;
+  const refreshButton = document.getElementById('om-refresh');
+  refreshButton.onclick = pollWhenVisible(readStatus, 10000, refreshButton);
 }
 async function readStatus() {
   const result = await exec(`printf '\\n[HEALTH]\\n'

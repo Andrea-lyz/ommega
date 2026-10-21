@@ -112,8 +112,8 @@ const fields = ['system', 'boot', 'vendor'];
 // Field id -> the key spl-control.sh reports in `status` and expects in `save`.
 // Order matters: it is both the save argument order and the status order.
 const propertyFields = [
-  ...fields.map(name => ({id: name, status: `${name.toUpperCase()}_SPL`})),
-  {id: 'osversion', status: 'OS_VERSION'},
+  ...fields.map(name => ({id: name, status: `${name.toUpperCase()}_SPL`, label: name[0].toUpperCase() + name.slice(1)})),
+  {id: 'osversion', status: 'OS_VERSION', label: 'OS'},
 ];
 let savedSplValues = null;
 const message = $('message');
@@ -127,29 +127,29 @@ async function refreshSpl() {
   save.disabled = result.errno !== 0;
   if (result.errno !== 0) {
     $('origin').textContent = t('设备原始值：不可用');
+    $('spl-floor').textContent = t('下限：不可用');
+    $('spl-applied').textContent = t('已生效目标：不可用');
     return;
   }
   const values = Object.fromEntries(result.stdout.split('\n').map(line => line.split('=', 2)));
   propertyFields.forEach(field => $(field.id).value = values[field.status] || '');
   savedSplValues = propertyFields.map(field => $(field.id).value);
-  // The floor a save is checked against: the device's own values, read from the
-  // read-only firmware property files rather than from the live property. A
-  // value that had to come from the recorded baseline says so.
-  const floor = key => {
-    const origin = values['ORIGIN_' + key];
-    const value = origin || values['FLOOR_' + key] || t('未知');
-    return origin || value === t('未知') ? value : value + t('（基线回退）');
-  };
-  $('origin').textContent = t('设备原始值：System ') + floor('SYSTEM_SPL')
-    + ' · Vendor ' + floor('VENDOR_SPL')
-    + ' · OS ' + floor('OS_VERSION')
-    + t('。低于原始值的保存会被拒绝。');
+  // Original values and the ratcheted minimum are separate facts. Never label
+  // FLOOR_* as an original value when the firmware value is unavailable.
+  const original = key => values['ORIGIN_' + key] || t('未知');
+  $('origin').textContent = t('设备原始值：System ') + original('SYSTEM_SPL')
+    + ' · Vendor ' + original('VENDOR_SPL') + ' · OS ' + original('OS_VERSION');
+  // status exposes FLOOR_* for System, Vendor and OS; APPLIED_* also includes Boot.
+  const summary = prefix => propertyFields.filter(field => prefix !== 'FLOOR_' || field.id !== 'boot')
+    .map(field => `${field.label} ${values[prefix + field.status] || '—'}`).join(' · ');
+  $('spl-floor').textContent = t('下限：') + summary('FLOOR_') + t('。低于下限的保存会被拒绝。');
+  $('spl-applied').textContent = t('已生效目标：') + summary('APPLIED_');
 }
 save.onclick = async () => {
   const values = propertyFields.map(field => $(field.id).value.trim());
   const datesValid = fields.every(name => valid($(name).value.trim()));
-  if (!datesValid) { message.className = 'om-message error'; message.textContent = t('日期格式必须为 YYYY-MM-DD，或留空恢复设备原始值。'); return; }
-  if (!validOsVersion($('osversion').value.trim())) { message.className = 'om-message error'; message.textContent = t('OS 版本必须是 1-2 位数字，或留空恢复设备原始值。'); return; }
+  if (!datesValid) { message.className = 'om-message error'; message.textContent = t('日期格式必须为 YYYY-MM-DD，或留空保持当前生效值。'); return; }
+  if (!validOsVersion($('osversion').value.trim())) { message.className = 'om-message error'; message.textContent = t('OS 版本必须是 1-2 位数字，或留空保持当前生效值。'); return; }
   save.disabled = true;
   message.className = 'om-message';
   message.textContent = t('正在保存并应用…');
@@ -183,7 +183,7 @@ printf 'OS=%s\\n' "$(getprop ro.build.version.release)"`);
   $('relay-status').dataset.tone = running ? 'ok' : 'unknown';
   setText('summary-spl', values.SPL || '—'); setText('summary-os',values.OS || '—');
   setText('runtime-time',result.errno ? result.stderr : `${t('状态读取于')} ${new Intl.DateTimeFormat(document.documentElement.lang,{timeStyle:'medium'}).format(new Date())}`);
-});
+}, 10000, $('runtime-refresh'));
 $('runtime-refresh').onclick = refresh;
 function navigate(view, focus = false) {
   if (!['overview','connection','settings'].includes(view)) view = 'overview';

@@ -50,7 +50,7 @@ export function icon(name) {
     overview:'<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
     apps:'<rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 8h8M8 12h8M8 16h4"/>',
     settings:'<path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/>',
-    refresh:'<path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 2M4 16l2 2a7 7 0 0 0 12-1"/>',
+    refresh:'<path d="M3 12a9 9 0 0 1 9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M16 8h5V3"/><path d="M21 12a9 9 0 0 1-9 9c-2.52 0-4.93-1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
     arrow:'<path d="m9 5 7 7-7 7"/>',
     shield:'<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/>',
   };
@@ -69,12 +69,23 @@ export function createBridge(scope) {
     catch { clearTimeout(timer); delete window[callback]; resolve({errno:1, stdout:'', stderr:text('请从支持 WebUI 的模块管理器打开。', 'Open from a module manager with WebUI support.')}); }
   });
 }
-export function pollWhenVisible(refresh, delay = 10000) {
+export function pollWhenVisible(refresh, delay = 10000, button = null) {
   let busy = false, stopped = false;
+  const label = button?.getAttribute('aria-label') || text('刷新状态', 'Refresh status');
+  const setBusy = value => {
+    if (!button) return;
+    button.disabled = value;
+    button.setAttribute('aria-busy', String(value));
+    const description = value ? text('正在刷新', 'Refreshing') : label;
+    button.setAttribute('aria-label', description);
+    button.title = description;
+  };
+  setBusy(false);
   const run = async () => {
     if (busy || stopped || document.hidden) return;
     busy = true;
-    try { await refresh(); } finally { busy = false; }
+    setBusy(true);
+    try { await refresh(); } finally { busy = false; setBusy(false); }
   };
   const timer = setInterval(run, delay);
   document.addEventListener('visibilitychange', run);
