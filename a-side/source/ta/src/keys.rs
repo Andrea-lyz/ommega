@@ -132,6 +132,28 @@ fn overlay_remote_version_tags(
     }
 }
 
+/// Whether the app requested an authorization policy that the relay's real
+/// B-side key cannot carry.
+///
+/// The relay signs with no `HardwareAuthToken`, and the A-side Gatekeeper token
+/// cannot validate on B. The business key must stay `NO_AUTH_REQUIRED`, but its
+/// leaf can still echo the requested policy: mint a separate B attestation key
+/// and let it sign a child leaf carrying these parameters.
+fn needs_child_attestation_leaf(params: &[KeyParam]) -> bool {
+    params.iter().any(|param| {
+        matches!(
+            param,
+            KeyParam::UserSecureId(_)
+                | KeyParam::UserAuthType(_)
+                | KeyParam::AuthTimeout(_)
+                | KeyParam::AllowWhileOnBody
+                | KeyParam::TrustedUserPresenceRequired
+                | KeyParam::TrustedConfirmationRequired
+                | KeyParam::UnlockedDeviceRequired
+        )
+    })
+}
+
 /// Contents of wrapping key data
 ///
 /// ```asn1
@@ -711,11 +733,7 @@ impl crate::KeyMintTa {
                 "remote attestation is missing an Android attestation record"
             ));
         }
-        let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
-            alias,
-            public_key,
-            root_of_trust,
-        });
+        let mut key_root_of_trust = root_of_trust;
 
         let mut certificate_chain = Vec::new();
         for der in chain.iter() {
@@ -723,6 +741,123 @@ impl crate::KeyMintTa {
                 encoded_certificate: der.clone(),
             })?;
         }
+
+        // The relay has no A-side HardwareAuthToken, so the business key must
+        // stay NO_AUTH_REQUIRED. When the app requested auth/unlocked-device
+        // constraints, keep that policy out of the business key but put it in
+        // a child leaf signed by a separate B-side attestation key. The leaf's
+        // public key is still the business key, so the app's signatures verify.
+        if needs_child_attestation_leaf(params) {
+            let attest_alias = format!("{alias}-attest");
+            let attest_params = device::RemoteAttestParams {
+                key_algorithm: Some(3), // EC
+                key_size: Some(256),
+                ec_curve: Some(1), // P-256
+                purpose: vec![KeyPurpose::AttestKey as i32],
+                digest: vec![Digest::Sha256 as i32],
+                security_level: Some(self.hw_info.security_level as i32),
+                user_auth: vec![(503, 1)],
+                ..Default::default()
+            };
+
+            let Some(attestation) = remote.attest(
+                challenge,
+                app_id,
+                &attest_alias,
+                effective_serial,
+                &attest_params,
+            )?
+            else {
+                return Ok(None);
+            };
+            let attest_profile = attestation.profile;
+            if attest_profile.profile_version != self.aidl_version as i32 {
+                return Err(km_err!(
+                    VerificationFailed,
+                    "remote attestation-key/local KeyMint identity mismatch: remote={} local={}",
+                    attest_profile.profile_version,
+                    self.aidl_version as i32
+                ));
+            }
+            if attest_profile.interface_version * 100 != attest_profile.profile_version {
+                return Err(km_err!(
+                    VerificationFailed,
+                    "remote attestation-key interface/profile version mismatch"
+                ));
+            }
+            let attest_level = attestation
+                .effective_security_level
+                .unwrap_or(self.hw_info.security_level);
+            if attest_level != self.hw_info.security_level {
+                return Err(km_err!(
+                    VerificationFailed,
+                    "unsupported remote attestation-key security-level downgrade"
+                ));
+            }
+            let attest_chain = attestation.cert_chain;
+            if attest_chain.is_empty() {
+                return Ok(None);
+            }
+            crate::cert::validate_remote_attestation(
+                &attest_chain[0],
+                challenge,
+                app_id,
+                attest_level,
+            )?;
+            let attest_leaf = x509_cert::Certificate::from_der(&attest_chain[0])
+                .map_err(|e| km_err!(UnknownError, "parse remote attestation-key leaf: {e:?}"))?;
+            let attest_public_key = attest_leaf
+                .tbs_certificate()
+                .subject_public_key_info()
+                .to_der()
+                .map_err(|e| km_err!(UnknownError, "encode remote attestation-key SPKI: {e:?}"))?;
+            let Some(attest_rot) = crate::cert::parse_remote_root_of_trust(&attest_chain[0])?
+            else {
+                return Err(km_err!(
+                    VerificationFailed,
+                    "remote attestation key is missing an Android attestation record"
+                ));
+            };
+            let attest_leaf_cert = keymint::Certificate {
+                encoded_certificate: attest_chain[0].clone(),
+            };
+            let attest_issuer = crate::cert::extract_subject(&attest_leaf_cert)?;
+
+            // The child leaf must carry the attestation key's root of trust
+            // and version tags, not the A-side device's.
+            overlay_remote_version_tags(&mut chars, &attest_rot, effective_security_level);
+
+            let mut attest_chain_certs = Vec::new();
+            for der in &attest_chain {
+                attest_chain_certs.try_push(keymint::Certificate {
+                    encoded_certificate: der.clone(),
+                })?;
+            }
+            let signing_info = SigningInfo {
+                attestation_info: Some((challenge, app_id)),
+                signing_key: KeyMaterial::Remote(crypto::RemoteRef {
+                    alias: attest_alias,
+                    public_key: attest_public_key,
+                    root_of_trust: Some(attest_rot.clone()),
+                }),
+                issuer_subject: attest_issuer,
+                chain: attest_chain_certs.clone(),
+            };
+            let child_leaf = self.generate_cert(Some(signing_info), &public_key, params, &chars)?;
+            certificate_chain.clear();
+            certificate_chain.try_push(child_leaf)?;
+            for cert in attest_chain_certs {
+                certificate_chain.try_push(cert)?;
+            }
+            key_root_of_trust = Some(attest_rot);
+            log::info!("event=remote_child_attestation alias={alias}");
+        }
+
+        let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
+            alias,
+            public_key,
+            root_of_trust: key_root_of_trust,
+        });
 
         // Build the keyblob (encrypted, containing the Remote reference).
         let keyblob = keyblob::PlaintextKeyBlob {
