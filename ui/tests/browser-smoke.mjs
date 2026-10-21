@@ -62,6 +62,10 @@ try {
   await design.getByRole('button',{name:'A / B',exact:true}).click();
   await design.getByRole('heading',{name:'硬件证明，随时就绪。'}).waitFor();
   assert.deepEqual(designErrors,[],'OpenUI design renderer errors');
+  assert.equal(await design.locator('html').getAttribute('data-theme'),'dark');
+  await design.getByRole('button',{name:'切换外观',exact:true}).click();
+  assert.equal(await design.locator('html').getAttribute('data-theme'),'light');
+  await design.getByRole('button',{name:'切换外观',exact:true}).click();
   await design.screenshot({path:fileURLToPath(new URL('openui-design.png',output)),fullPage:true});
   results.push({surface:'OpenUI design preview',errors:designErrors});
   await design.close();

@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useEffect,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Card} from '@openuidev/react-ui/Card';
 import {Button} from '@openuidev/react-ui/Button';
@@ -10,6 +10,10 @@ function DesignPreview() {
   const [side,setSide] = useState('A');
   const [dark,setDark] = useState(true);
   const [zh,setZh] = useState(true);
+  useEffect(() => {
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    document.documentElement.lang = zh ? 'zh-CN' : 'en';
+  }, [dark,zh]);
   const t = (cn,en) => zh ? cn : en;
   return <ThemeProvider mode={dark?'dark':'light'}><div className="om-modern" data-theme={dark?'dark':'light'} style={{minHeight:'100vh',padding:'24px',background:'var(--om-bg)',color:'var(--om-ink)'}}>
     <div style={{maxWidth:720,margin:'auto'}}>
