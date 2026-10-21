@@ -80,7 +80,7 @@
   </section>
   <details class="card" id="spl-section">
     <summary>设备属性（SPL 与 OS 版本）</summary>
-    <p class="note">单独保存和应用。修改 SPL 或 OS 版本会重载 KeyMint 与 keystore2；可以升也可以降，但不能低于设备原始值，留空即恢复原始值。在新日期下产生或升级过的密钥，降回旧日期后可能永久不可用。</p>
+    <p class="note">单独保存和应用。修改 SPL 或 OS 版本会重载 KeyMint 与 keystore2。日期只能升不能降：下限取设备原始值、设备当前上报值与已生效目标值三者中最新者，留空即保持当前生效值。在新日期下产生或升级过的密钥，降回旧日期后永久不可用，因此已上报过的日期不会被收回；恢复出厂日期需要恢复出厂设置。</p>
     <label class="field">System SPL<input id="system" placeholder="YYYY-MM-DD"></label>
     <label class="field">Boot SPL<input id="boot" placeholder="YYYY-MM-DD"></label>
     <label class="field">Vendor SPL<input id="vendor" placeholder="YYYY-MM-DD"></label>

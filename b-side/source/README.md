@@ -100,17 +100,27 @@ Patch levels and the Android release are one-way ratchets for the hardware
 KeyMint: a key blob minted or upgraded under a newer value refuses to be
 upgraded once the device reports an older one, after which every sign and
 attestation for those keys fails with `INVALID_ARGUMENT` (-38) and nothing on
-the module side can undo it. A value may therefore move in either direction,
-but never below the device's own original value. `spl-control.sh` reads that
-original from the read-only firmware property files (`/system/build.prop`,
-`/vendor/build.prop`, ...) and records it in
-`/data/adb/ommega/spl-origin.conf`: the live property may already carry an
+the module side can undo it. A value may therefore only move up, never below
+the device's own original value and never below a date that was already
+reported. `spl-control.sh` reads the original from the read-only firmware
+property files (`/system/build.prop`, `/vendor/build.prop`, ...) and records it
+in `/data/adb/ommega/spl-origin.conf`: the live property may already carry an
 override and `/data/adb/ommega/spl-baseline.conf` may have been captured while
 one was active, so neither of them is authoritative. Of the readings the newest
 wins, a firmware update raises the floor, and a recorded floor is never dropped
-because a file cannot be read. An emptied field restores the device's own
-value. A refused write only warns on stderr at boot time, while an interactive
-`save` returns non-zero so the WebUI shows the original value and the reason.
+because a file cannot be read.
+
+The floor is the newest of the device's own value, the value the device
+currently reports and the target the module already applied, which is recorded
+in `/data/adb/ommega/spl-applied.conf`. A date that was ever reported is never
+taken back, and an emptied field keeps what the device reports instead of
+restoring the device's own value: lowering the reported date is what makes the
+key blobs minted under it unusable. Returning to the device's own date needs a
+factory reset. A device that boots without the module reports its own value
+again, and the next `apply` puts the recorded target back, so the key blobs
+that depend on it work again. A refused write only warns on stderr at boot
+time, while an interactive `save` returns non-zero so the WebUI shows the
+floor and the reason.
 
 The B-side module intentionally uses `service.sh` as its only lifecycle entry
 point. It does not ship `post-fs-data.sh` and never requests a hard reboot.
