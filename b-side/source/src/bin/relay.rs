@@ -439,7 +439,14 @@ fn build_http_client(iface: Option<&str>) -> Result<Client> {
 /// Returns the shared HTTP client, building it on first use.
 fn get_http_client() -> Result<Arc<Client>> {
     let (bind_iface, server) = uplink_config();
-    let iface = ommegaclient_b::uplink::desired_iface(&bind_iface, &server);
+    let mut iface = ommegaclient_b::uplink::desired_iface(&bind_iface, &server);
+    if let Some(name) = iface.as_deref() {
+        if !std::path::Path::new(&format!("/sys/class/net/{name}")).exists() {
+            log::warn!("selected uplink {name} disappeared; not binding this client");
+            ommegaclient_b::uplink::invalidate_pick();
+            iface = None;
+        }
+    }
     // Fast path: read lock, return if present.
     if let Ok(guard) = HTTP_CLIENT.read() {
         if let Some((cached, client)) = guard.as_ref() {
@@ -520,9 +527,16 @@ fn http_request_with_timeout(
         req = req.timeout(limit);
     }
     let t0 = std::time::Instant::now();
-    let resp = req
-        .send()
-        .with_context(|| format!("http {method} {url} failed"))?;
+    let resp = match req.send() {
+        Ok(resp) => resp,
+        Err(error) => {
+            // A failed connect may be a stale uplink choice. Drop the cached
+            // pick and the pooled client so the next poll resolves again.
+            ommegaclient_b::uplink::invalidate_pick();
+            reset_http_client();
+            return Err(error).with_context(|| format!("http {method} {url} failed"));
+        }
+    };
     let status = resp.status().as_u16();
     let retry_after = parse_retry_after(resp.headers());
     let bytes = resp

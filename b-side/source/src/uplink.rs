@@ -87,7 +87,14 @@ pub fn desired_iface(bind_iface: &str, base_url: &str) -> Option<String> {
         return None;
     }
     if let Some(hit) = cached_pick(bind_iface, base_url) {
-        return hit;
+        // The interface can disappear between the probe and the next request
+        // (Wi-Fi switch, VPN teardown). Never hand a dead name to reqwest:
+        // binding it fails with ENODEV and every poll is lost.
+        if hit.as_deref().is_some_and(|name| !iface_exists(name)) {
+            invalidate_pick();
+        } else {
+            return hit;
+        }
     }
     let picked = match choice {
         BindChoice::Always => pick_uplink(base_url),
@@ -143,6 +150,10 @@ fn cached_pick(bind_iface: &str, base_url: &str) -> Option<Option<String>> {
     } else {
         None
     }
+}
+
+fn iface_exists(name: &str) -> bool {
+    !name.is_empty() && std::path::Path::new(&format!("{SYS_CLASS_NET}/{name}")).exists()
 }
 
 fn store_pick(bind_iface: &str, base_url: &str, iface: Option<String>) {
