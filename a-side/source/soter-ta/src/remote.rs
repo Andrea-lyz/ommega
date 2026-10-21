@@ -308,6 +308,26 @@ fn decode_reply(tx: u32, body: &Value) -> Result<Outcome, String> {
     Ok(Outcome::Code(code))
 }
 
+/// The upstream relay answers probes and callers outside the real-SOTER
+/// allowlist with `local_only: true` and a synthetic `-1001` instead of
+/// forwarding the transaction. That is a routing instruction for this TA, not a
+/// vendor error: answer it from the local ledger.
+fn is_local_only(body: &Value) -> bool {
+    body.get("local_only").and_then(Value::as_bool) == Some(true)
+}
+
+fn parse_reply(tx: u32, bytes: &[u8]) -> Result<Option<Outcome>, String> {
+    let reply: Value =
+        serde_json::from_slice(bytes).map_err(|_| "SOTER relay reply is not JSON".to_string())?;
+    if reply.get("error").is_some() {
+        return Err("SOTER relay could not serve this operation".to_string());
+    }
+    if is_local_only(&reply) {
+        return Ok(None);
+    }
+    decode_reply(tx, &reply).map(Some)
+}
+
 /// The relay answers `get_device_id` the way the Java face spells it: 32 ASCII
 /// hex characters with a trailing NUL (captured from the public relay,
 /// 2026-09-28: 33 bytes for `090000005171734c42866bea148b21f5`). This TA replaces
@@ -354,7 +374,7 @@ pub fn forward(
     tx: u32,
     request: &Request,
     cpu_id: &str,
-) -> Result<Outcome, String> {
+) -> Result<Option<Outcome>, String> {
     // The caller's package names let the relay server keep real SOTER
     // applications on the real device, and the device id lets it mint its
     // built-in answers with one stable identity. Without them an application
@@ -382,12 +402,7 @@ pub fn forward(
     if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err("SOTER relay reply is too large".to_string());
     }
-    let reply: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "SOTER relay reply is not JSON".to_string())?;
-    if reply.get("error").is_some() {
-        return Err("SOTER relay could not serve this operation".to_string());
-    }
-    decode_reply(tx, &reply)
+    parse_reply(tx, &bytes)
 }
 
 #[cfg(test)]
@@ -480,6 +495,31 @@ mod tests {
                 session: (-2i64) as u64
             }
         );
+    }
+
+    #[test]
+    fn local_only_reply_requests_the_local_ledger() {
+        assert_eq!(
+            parse_reply(
+                dispatch::TX_HAS_ASK,
+                br#"{"op":"has_ask_already","local_only":true,"error_code":-1001}"#,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_reply(
+                dispatch::TX_HAS_ASK,
+                br#"{"op":"has_ask_already","local_only":false,"error_code":-5}"#,
+            )
+            .unwrap(),
+            Some(Outcome::Code(-5))
+        );
+        assert!(parse_reply(
+            dispatch::TX_HAS_ASK,
+            br#"{"op":"has_ask_already","local_only":true,"error":"relay failed"}"#,
+        )
+        .is_err());
     }
 
     #[test]
@@ -584,10 +624,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             outcome,
-            Outcome::Init {
+            Some(Outcome::Init {
                 code: 0,
                 session: 42
-            }
+            })
         );
         let request = server.join().unwrap();
         assert!(request.starts_with("POST /api/soter/ HTTP/1.1"));

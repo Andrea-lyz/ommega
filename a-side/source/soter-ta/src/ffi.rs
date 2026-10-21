@@ -357,9 +357,17 @@ pub unsafe extern "C" fn soterta_handle(
             Err(error) => Err(error),
         };
         let outcome = match answer {
-            Ok(outcome) => {
+            Ok(Some(outcome)) => {
                 clear_error();
-                outcome
+                Some(outcome)
+            }
+            Ok(None) => {
+                // The relay explicitly asked this TA to answer the transaction
+                // locally. That is how probes and callers outside its real-SOTER
+                // allowlist are kept off the physical device; handing the
+                // synthetic -1001 up would make every such client see a broken
+                // local SOTER instead.
+                None
             }
             Err(error) => {
                 eprintln!("soterta remote: {error}");
@@ -367,11 +375,13 @@ pub unsafe extern "C" fn soterta_handle(
                 let Some(dead) = dispatch::dead_reply(tx) else {
                     return SOTERTA_UNHANDLED;
                 };
-                dead
+                Some(dead)
             }
         };
-        fill(&mut *reply, outcome);
-        return SOTERTA_HANDLED;
+        if let Some(outcome) = outcome {
+            fill(&mut *reply, outcome);
+            return SOTERTA_HANDLED;
+        }
     }
     // The sign transactions read the platform before the ledger lock is taken:
     // the hooks spawn a platform dump, and that must not stall every other
