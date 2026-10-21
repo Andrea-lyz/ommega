@@ -876,13 +876,14 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
         // A-side as `[tag, value]` pairs (502 USER_SECURE_ID, 503
         // NO_AUTH_REQUIRED, 504 USER_AUTH_TYPE, 505 AUTH_TIMEOUT, 506
         // ALLOW_WHILE_ON_BODY, 507 TRUSTED_USER_PRESENCE_REQUIRED, 508
-        // TRUSTED_CONFIRMATION_REQUIRED, 509 UNLOCKED_DEVICE_REQUIRED). These go
-        // straight into the real TEE request: the TEE keeps USER_SECURE_ID inside
-        // the key blob, enforces USER_AUTH_TYPE/AUTH_TIMEOUT, and stamps them
-        // (but not NO_AUTH_REQUIRED) into the leaf. Duplicated tags are dropped,
-        // and NO_AUTH_REQUIRED is dropped whenever a real auth requirement came
-        // along — KeyMint rejects that contradictory combination, and the A-side
-        // fallback (the server keybox layer) drops it the same way.
+        // TRUSTED_CONFIRMATION_REQUIRED, 509 UNLOCKED_DEVICE_REQUIRED). They are
+        // parsed into the KeySpec; `tee_ops::relay_user_auth_params` then drops
+        // the token-bound entries (502/507/508) that the relay cannot satisfy
+        // and keeps the metadata-only entries (504/505/506/509) for the leaf.
+        // Duplicated tags are dropped, and NO_AUTH_REQUIRED is dropped whenever
+        // another policy tag came along — KeyMint rejects that contradictory
+        // combination, and the A-side fallback (the server keybox layer) drops
+        // it the same way.
         user_auth: {
             let mut tags = Vec::new();
             for pair in get("user_auth")
