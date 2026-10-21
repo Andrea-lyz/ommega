@@ -30,6 +30,12 @@ const CONFIG_PATH: &str = "/data/misc/keystore/ommega/config.toml";
 /// `/data/adb/ommega/ommegadata` symlink (which points here), so both the UI
 /// and the keystore process (uid 1017) see the same file.  There is no copy.
 const CLIENTA_CONFIG_PATH: &str = "/data/misc/keystore/ommega/config";
+/// The same file seen through the directory the WebUI writes to. It is normally
+/// the same inode through the `/data/adb/ommega/ommegadata` symlink; reading it
+/// keeps the UI usable when the link is missing, and post-fs-data.sh repairs the
+/// link on the next boot.
+const CLIENTA_CONFIG_UI_PATH: &str = "/data/adb/ommega/ommegadata/config";
+const CLIENTA_CONFIG_PATHS: [&str; 2] = [CLIENTA_CONFIG_PATH, CLIENTA_CONFIG_UI_PATH];
 const CONFIG_VERSION_V1: u32 = 1;
 const CURRENT_CONFIG_VERSION: u32 = 2;
 
@@ -453,6 +459,24 @@ fn start_config_watcher() -> Result<()> {
         PathBuf::from(CLIENTA_CONFIG_PATH),
         reload_runtime_config,
     )?;
+    // The WebUI path is normally the same inode (a symlink), so only watch it
+    // when it resolves elsewhere; otherwise every save would reload twice.
+    let ui_path = PathBuf::from(CLIENTA_CONFIG_UI_PATH);
+    let same_file = match (
+        std::fs::canonicalize(&ui_path),
+        std::fs::canonicalize(CLIENTA_CONFIG_PATH),
+    ) {
+        (Ok(ui), Ok(keystore)) => ui == keystore,
+        (Ok(_), Err(_)) => false,
+        _ => true,
+    };
+    if !same_file {
+        file_watch::spawn_path_watcher(
+            "ommega-clienta-ui-config-watch",
+            ui_path,
+            reload_runtime_config,
+        )?;
+    }
     Ok(())
 }
 
@@ -641,7 +665,11 @@ pub struct Config {
 
 impl Config {
     fn from_file(config_file: &ConfigFile, resolved_trust: ResolvedTrust) -> Self {
-        let remote = load_clienta_remote_override().unwrap_or_else(|| config_file.remote.clone());
+        let clienta = load_clienta_remote_override();
+        let remote = clienta
+            .clone()
+            .unwrap_or_else(|| config_file.remote.clone());
+        log_remote_source(&remote, clienta.is_some());
         Self {
             main: config_file.main.clone(),
             crypto: config_file.crypto.clone(),
@@ -653,16 +681,53 @@ impl Config {
     }
 }
 
-/// Reads the legacy A-side flat config (`/data/adb/ommega/config`) and maps it
-/// onto a [`RemoteConfig`], matching the old client-a semantics exactly.
+/// Records which relay the daemon actually resolved. A missing `[remote]` table
+/// plus an empty WebUI file keeps attestation local with no other symptom than a
+/// KeyMint identity mismatch much later, so the decision is logged every load.
+fn log_remote_source(remote: &RemoteConfig, from_webui: bool) {
+    let source = if from_webui { "webui" } else { "config.toml" };
+    if remote.enabled {
+        log::info!(
+            "remote relay enabled: url={} device_id={} source={source}",
+            remote.url,
+            if remote.device_id.is_empty() {
+                "-"
+            } else {
+                remote.device_id.as_str()
+            }
+        );
+    } else if remote.url.is_empty() {
+        log::info!("remote relay disabled: no relay url configured; attestation stays local");
+    } else {
+        log::warn!(
+            "remote relay disabled although url={} is configured (source={source}); attestation stays local",
+            remote.url
+        );
+    }
+}
+
+/// Reads the legacy A-side flat config and maps it onto a [`RemoteConfig`],
+/// matching the old client-a semantics exactly.
+///
+/// Two paths carry the same file: the keystore copy and the WebUI path, normally
+/// the same inode through the `/data/adb/ommega/ommegadata` symlink. The WebUI
+/// path is read as a fallback so a device whose link was lost still honours what
+/// the user saved there.
 ///
 /// The file is a simple `key: value` map (one pair per line, `#` comments and
 /// blank lines ignored, keys lowercased). `remote` / `local_hw` /
 /// `tls_insecure` accept `0|1|false|true|no|yes|off|on`; an empty or
-/// `none`/`off` URL disables the relay. Returns `None` when the file is absent
-/// (or unreadable), in which case the `[remote]` table in `config.toml` is used.
+/// `none`/`off` URL disables the relay. Returns `None` when neither file is
+/// present (or readable), in which case the `[remote]` table in `config.toml`
+/// is used.
 fn load_clienta_remote_override() -> Option<RemoteConfig> {
-    let contents = std::fs::read_to_string(CLIENTA_CONFIG_PATH).ok()?;
+    CLIENTA_CONFIG_PATHS
+        .iter()
+        .find_map(|path| parse_clienta_remote(&std::fs::read_to_string(path).ok()?))
+}
+
+/// Parses one flat client-a config into relay settings.
+fn parse_clienta_remote(contents: &str) -> Option<RemoteConfig> {
     if contents.trim().is_empty() {
         return None;
     }
