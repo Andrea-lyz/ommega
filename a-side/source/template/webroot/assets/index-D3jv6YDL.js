@@ -1021,7 +1021,11 @@ $s = function (apps) {
       return;
     }
     const frag = document.createDocumentFragment();
-    const end = Math.min(start + OMMEGA_APP_CHUNK, sorted.length);
+    // Search filters the live DOM; rendering only part of the list makes
+    // apps below the last chunk unfindable until their frame arrives. Build
+    // the complete card list in this frame so every installed app is
+    // searchable immediately.
+    const end = sorted.length;
     for (let i = start; i < end; i++) {
       const {appName, packageName} = sorted[i];
       const node = document.importNode(Es, true);
