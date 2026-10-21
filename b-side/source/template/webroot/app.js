@@ -1,4 +1,11 @@
 import {KEYS, LEVELS, parseConfig, validateConfig, serializeConfig, readCommand, parseSnapshot, saveCommand} from './relay-config.js';
+import {applyAppearance, appearanceControls, bindAppearance, createBridge, icon, parseProperties, pollWhenVisible, setText, text} from './ui-kit.js';
+import {t, translatePage} from './i18n.js';
+
+applyAppearance();
+translatePage();
+document.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
+document.getElementById('appearance').innerHTML = appearanceControls();
 
 const $ = id => document.getElementById(id);
 let seq = 0;
@@ -10,7 +17,7 @@ function exec(command) {
       resolve({errno: Number(errno), stdout: stdout || '', stderr: stderr || ''});
     };
     try { window.ksu.exec(command, '{}', callback); }
-    catch { delete window[callback]; resolve({errno: 1, stdout: '', stderr: '请从支持 WebUI 的模块管理器打开此页面。'}); }
+    catch { delete window[callback]; resolve({errno: 1, stdout: '', stderr: text('请从支持 WebUI 的模块管理器打开此页面。','Open from a module manager with WebUI support.')}); }
   });
 }
 const moduleDir = '/data/adb/modules/ommegaclient_b';
@@ -23,8 +30,8 @@ for (const id of ['file-log-level', 'logcat-level']) {
   for (const level of LEVELS) $(id).add(new Option(level, level));
 }
 function relayMessage(text, error = false) {
-  $('relay-message').textContent = text;
-  $('relay-message').className = error ? 'message error' : 'message';
+  $('relay-message').textContent = t(text);
+  $('relay-message').className = error ? 'om-message error' : 'om-message';
 }
 function relayBusy(busy) {
   $('relay-fields').disabled = busy || !snapshot;
@@ -36,7 +43,7 @@ function fillRelay(values) {
     else $(id).value = values[KEYS[i]];
   });
   $('relay-token').type = 'password';
-  $('token-toggle').textContent = '显示';
+  $('token-toggle').textContent = t('显示');
   $('token-toggle').setAttribute('aria-pressed', 'false');
 }
 function relayValues() {
@@ -51,6 +58,7 @@ async function readRelay() {
     snapshot = parseSnapshot(result.stdout);
     savedValues = parseConfig(snapshot.raw);
     fillRelay(savedValues);
+    updateSummary();
     relayMessage(snapshot.digest === 'missing' ? '尚无配置，请填写连接参数后保存。' : '已读取保存的配置。');
   } catch (error) { snapshot = null; relayMessage(error.message, true); }
   finally { relayBusy(false); }
@@ -83,10 +91,11 @@ $('relay-form').onsubmit = async event => {
     if (snapshot.raw !== raw) { snapshot = null; throw new Error('保存后配置发生变化，请重新读取确认。'); }
     savedValues = values;
     fillRelay(values);
-    let notice = '配置已保存。';
-    if (connectionChanged) notice += '连接参数将由运行中的 relay 自动加载。';
-    if (logsChanged) notice += '日志选项在 relay 下次启动时生效。';
-    if (result.stdout.includes('SAVED_RELOAD_MARKER_FAILED')) notice += '加载通知未写入，将由文件监测触发加载。';
+    updateSummary();
+    let notice = t('配置已保存。');
+    if (connectionChanged) notice += t('连接参数将由运行中的 relay 自动加载。');
+    if (logsChanged) notice += t('日志选项在 relay 下次启动时生效。');
+    if (result.stdout.includes('SAVED_RELOAD_MARKER_FAILED')) notice += t('加载通知未写入，将由文件监测触发加载。');
     relayMessage(notice);
   } catch (error) { relayMessage(error.message, true); }
   finally { relayBusy(false); }
@@ -95,7 +104,7 @@ $('relay-reload').onclick = readRelay;
 $('token-toggle').onclick = () => {
   const visible = $('relay-token').type === 'password';
   $('relay-token').type = visible ? 'text' : 'password';
-  $('token-toggle').textContent = visible ? '隐藏' : '显示';
+  $('token-toggle').textContent = t(visible ? '隐藏' : '显示');
   $('token-toggle').setAttribute('aria-pressed', String(visible));
 };
 
@@ -106,6 +115,7 @@ const propertyFields = [
   ...fields.map(name => ({id: name, status: `${name.toUpperCase()}_SPL`})),
   {id: 'osversion', status: 'OS_VERSION'},
 ];
+let savedSplValues = null;
 const message = $('message');
 const save = $('save');
 const valid = value => value === '' || /^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(value);
@@ -113,48 +123,79 @@ const valid = value => value === '' || /^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/
 const validOsVersion = value => value === '' || /^\d{1,2}$/.test(value);
 async function refreshSpl() {
   const result = await exec(`sh "${moduleDir}/spl-control.sh" status`);
-  $('status').textContent = result.stdout || result.stderr || '状态不可用';
+  $('status').textContent = result.stdout || result.stderr || t('状态不可用');
   save.disabled = result.errno !== 0;
   if (result.errno !== 0) {
-    $('origin').textContent = '设备原始值：不可用';
+    $('origin').textContent = t('设备原始值：不可用');
     return;
   }
   const values = Object.fromEntries(result.stdout.split('\n').map(line => line.split('=', 2)));
   propertyFields.forEach(field => $(field.id).value = values[field.status] || '');
+  savedSplValues = propertyFields.map(field => $(field.id).value);
   // The floor a save is checked against: the device's own values, read from the
   // read-only firmware property files rather than from the live property. A
   // value that had to come from the recorded baseline says so.
   const floor = key => {
     const origin = values['ORIGIN_' + key];
-    const value = origin || values['FLOOR_' + key] || '未知';
-    return origin || value === '未知' ? value : value + '（基线回退）';
+    const value = origin || values['FLOOR_' + key] || t('未知');
+    return origin || value === t('未知') ? value : value + t('（基线回退）');
   };
-  $('origin').textContent = '设备原始值：System ' + floor('SYSTEM_SPL')
+  $('origin').textContent = t('设备原始值：System ') + floor('SYSTEM_SPL')
     + ' · Vendor ' + floor('VENDOR_SPL')
     + ' · OS ' + floor('OS_VERSION')
-    + '。低于原始值的保存会被拒绝。';
+    + t('。低于原始值的保存会被拒绝。');
 }
 save.onclick = async () => {
   const values = propertyFields.map(field => $(field.id).value.trim());
   const datesValid = fields.every(name => valid($(name).value.trim()));
-  if (!datesValid) { message.className = 'message error'; message.textContent = '日期格式必须为 YYYY-MM-DD，或留空恢复设备原始值。'; return; }
-  if (!validOsVersion($('osversion').value.trim())) { message.className = 'message error'; message.textContent = 'OS 版本必须是 1-2 位数字，或留空恢复设备原始值。'; return; }
+  if (!datesValid) { message.className = 'om-message error'; message.textContent = t('日期格式必须为 YYYY-MM-DD，或留空恢复设备原始值。'); return; }
+  if (!validOsVersion($('osversion').value.trim())) { message.className = 'om-message error'; message.textContent = t('OS 版本必须是 1-2 位数字，或留空恢复设备原始值。'); return; }
   save.disabled = true;
-  message.className = 'message';
-  message.textContent = '正在保存并应用…';
+  message.className = 'om-message';
+  message.textContent = t('正在保存并应用…');
   const args = values.map(value => `'${value}'`).join(' ');
   const result = await exec(`sh "${moduleDir}/spl-control.sh" save ${args}`);
-  message.className = result.errno === 0 ? 'message' : 'message error';
+  message.className = result.errno === 0 ? 'om-message' : 'om-message error';
   message.textContent = result.errno === 0
-    ? '已应用。新生成的证明证书才会体现 OS 版本；已存在的密钥不变。'
-    : `应用失败：${result.stderr || result.stdout}`;
+    ? t('已应用。新生成的证明证书才会体现 OS 版本；已存在的密钥不变。')
+    : t('应用失败：') + (result.stderr || result.stdout);
   await refreshSpl();
 };
 $('same').onclick = () => { $('boot').value = $('vendor').value = $('system').value.trim(); };
 $('auto').onclick = () => propertyFields.forEach(field => $(field.id).value = '');
 readRelay();
 refreshSpl();
-exec('pidof relay').then(result => {
-  const pids = result.stdout.trim();
-  $('relay-status').textContent = result.errno === 0 && /^\d+(\s+\d+)*$/.test(pids) ? `relay 运行中 · PID ${pids}` : '未确认 relay 运行状态';
+function updateSummary() {
+  setText('summary-device', savedValues?.[KEYS[1]] || '—');
+  // Never display embedded URL credentials, fragments or queries on the overview.
+  try { const url = new URL(savedValues?.[KEYS[0]]); setText('summary-server',url.origin + url.pathname); }
+  catch { setText('summary-server','—'); }
+}
+const readRuntime = createBridge('b_status');
+const refresh = pollWhenVisible(async () => {
+  const result = await readRuntime(`pids=$(pidof relay 2>/dev/null)
+printf 'PIDS=%s\\n' "$pids"
+printf 'SPL=%s\\n' "$(getprop ro.build.version.security_patch)"
+printf 'OS=%s\\n' "$(getprop ro.build.version.release)"`);
+  const values = parseProperties(result.stdout);
+  const running = !result.errno && /^\d+(\s+\d+)*$/.test(values.PIDS || '');
+  setText('relay-status',running ? `${t('relay 运行中')} · PID ${values.PIDS}` : t('未确认 relay 运行状态'));
+  $('relay-status').dataset.tone = running ? 'ok' : 'unknown';
+  setText('summary-spl', values.SPL || '—'); setText('summary-os',values.OS || '—');
+  setText('runtime-time',result.errno ? result.stderr : `${t('状态读取于')} ${new Intl.DateTimeFormat(document.documentElement.lang,{timeStyle:'medium'}).format(new Date())}`);
+});
+$('runtime-refresh').onclick = refresh;
+function navigate(view, focus = false) {
+  if (!['overview','connection','settings'].includes(view)) view = 'overview';
+  for (const id of ['overview','connection','settings']) $(id + '-view').hidden = id !== view;
+  document.querySelectorAll('[data-view]').forEach(el => el.setAttribute('aria-current',el.dataset.view === view ? 'page' : 'false'));
+  if (focus) $('main').focus({preventScroll:true});
+}
+document.querySelectorAll('[data-view]').forEach(el => { el.onclick = () => { location.hash = el.dataset.view; }; });
+window.addEventListener('hashchange',() => navigate(location.hash.slice(1),true));
+navigate(location.hash.slice(1));
+bindAppearance(() => {
+  const relayDirty = savedValues && JSON.stringify(relayValues()) !== JSON.stringify(savedValues);
+  const splDirty = savedSplValues && propertyFields.some((field, index) => $(field.id).value !== savedSplValues[index]);
+  return (!relayDirty && !splDirty) || window.confirm(t('尚有未保存的修改，继续会丢失。切换语言？'));
 });

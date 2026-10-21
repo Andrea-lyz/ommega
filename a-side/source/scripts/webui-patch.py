@@ -29,7 +29,9 @@ MARKER = "OMMEGA_TARGET_COMPAT"
 GLUE_HEADER = "\n// ── Ommega detector compatibility policy"
 
 # sha256 of the unpatched bundle this glue was written against.
-BASELINE = "88e369b9dcc6176c50dcc2666e0e49c568d966ab9400f4a817f57227d39a9309"
+# Includes the fork's existing remote/profile patches. The pre-glue source was
+# verified byte-for-byte (after newline normalization) against master 1d214a4.
+BASELINE = "7aa75a11e39b3e55333187e2af15fa787116fd184a7d7326eb10d3907cb5ef8d"
 
 
 def sha256(path: Path) -> str:

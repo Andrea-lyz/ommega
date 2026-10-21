@@ -1,0 +1,16 @@
+.field { display:block; margin:18px 0; font-size:14px; font-weight:600; }
+.field:first-child { margin-top:0; }
+fieldset { margin:0; padding:0; border:0; min-width:0; }
+fieldset .om-card { margin:18px 0; }
+.om-row input { flex:1; }
+.om-row #token-toggle { margin-top:7px; flex-shrink:0; }
+.logging { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+.log-sink { padding:14px; border:1px solid var(--om-line); border-radius:16px; }
+.log-sink .field { margin-bottom:0; }
+.toggle { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:44px; font-size:14px; }
+summary { cursor:pointer; min-height:44px; padding:10px 0; font-weight:650; }
+.om-advanced { margin-top:20px; border-top:1px solid var(--om-line); }
+.actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
+#relay-fields>.om-button { width:100%; }
+#main { outline:none; }
+@media(max-width:390px) { .logging { grid-template-columns:1fr; } }

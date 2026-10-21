@@ -1,11 +1,16 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.compose.compiler)
 }
 
 android {
     namespace = "org.ommega.deviceb"
     compileSdk = 36
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 
     defaultConfig {
         applicationId = "org.ommega.deviceb"
@@ -14,6 +19,9 @@ android {
         versionCode = 28
         versionName = "1.8.0-ommega"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("boolean", "UI_PREVIEW", (project.findProperty("uiPreview") == "true").toString())
+        if (project.findProperty("uiPreview") == "true") applicationIdSuffix = ".preview"
+        manifestPlaceholders["relayEnabled"] = (project.findProperty("uiPreview") != "true").toString()
     }
 
     signingConfigs {
@@ -53,6 +61,15 @@ kotlin {
 }
 
 dependencies {
+    // Stay on the existing SDK 36 / AGP 8 toolchain.
+    implementation(platform("androidx.compose:compose-bom:2025.12.01"))
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-core")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    implementation("androidx.activity:activity-compose:1.12.4")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

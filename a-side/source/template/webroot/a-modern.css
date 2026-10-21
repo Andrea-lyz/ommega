@@ -1,0 +1,16 @@
+/* Keep the legacy app list and every dialog intact; style the surrounding views. */
+.om-modern .header { position:relative; max-width:900px; margin:0 auto 18px; border-radius:20px; top:auto; width:auto; background:var(--om-surface); color:var(--om-ink); padding:12px; }
+.om-modern #apps-list { max-width:900px; margin:0 auto; padding-top:0; padding-bottom:0; }
+.om-modern .card { background:var(--om-surface); color:var(--om-ink); border:1px solid var(--om-line); border-radius:18px; }
+.om-modern .card-box { padding-top:5px; padding-bottom:5px; }
+.om-modern #save { bottom:calc(100px + env(safe-area-inset-bottom,0px)); }
+.om-modern[data-om-view]:not([data-om-view=apps]) > .header,
+.om-modern[data-om-view]:not([data-om-view=apps]) > #apps-list,
+.om-modern[data-om-view]:not([data-om-view=apps]) > .loading,
+.om-modern[data-om-view]:not([data-om-view=apps]) > #save { display:none !important; }
+.om-modern > .footer { max-width:900px; margin:20px auto; padding:0; }
+.om-modern:not([data-om-view=settings]) > .footer { display:none; }
+.om-modern md-dialog { --md-dialog-container-color:var(--om-surface); --md-dialog-headline-color:var(--om-ink); --md-dialog-supporting-text-color:var(--om-muted); }
+.om-modern .search-bg { background:var(--om-raised); color:var(--om-ink); }
+.om-modern .floating-btn { z-index:89; }
+.om-modern #om-main { outline:none; }

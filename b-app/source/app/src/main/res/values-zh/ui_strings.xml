@@ -1,0 +1,16 @@
+<resources>
+    <string name="overview">概览</string><string name="connection">连接</string><string name="settings">设置</string>
+    <string name="hardware_ready">硬件证明，随时就绪。</string><string name="hero_description">管理专用 B 端与远程证明服务器的连接。</string>
+    <string name="device_id">设备 ID</string><string name="server_url">服务器地址</string>
+    <string name="status_source">连接状态来自当前 Android 中继服务；模块中继独立运行。</string>
+    <string name="ready">已就绪。服务上报后将显示连接状态。</string><string name="connected">通讯中</string><string name="disconnected">通讯中断</string><string name="conflict">设备 ID 冲突</string><string name="idle">空闲</string><string name="not_reported">尚未上报</string>
+    <string name="start_service">保存并启动服务</string><string name="stop_service">停止服务</string><string name="check_connection">检测连接</string><string name="checking">正在检测连接…</string><string name="saved">配置已保存。</string>
+    <string name="ping_ok">服务器可达。本次检查没有调用 TEE。</string><string name="ping_failed">无法连接服务器，请检查地址与网络。</string>
+    <string name="invalid_configuration">请填写不含凭据和查询参数的 HTTP(S) 地址、不含空格的设备 ID，以及非空的 ASCII Token。</string>
+    <string name="notification_required">启动前台服务需要通知权限。</string><string name="service_started">服务已启动，等待连接状态上报。</string><string name="stopped">服务已停止。</string>
+    <string name="remote_connection">远程连接</string><string name="show">显示</string><string name="hide">隐藏</string><string name="trust_self_signed">信任自签 HTTPS 证书（仅私有服务器）</string>
+    <string name="appearance">外观</string><string name="language">语言</string><string name="system">跟随系统</string><string name="light">浅色</string><string name="dark">深色</string>
+    <string name="diagnostics">本地诊断</string><string name="diagnostics_note">手动操作使用 Android Keystore。打开此页面不会生成密钥或调用 TEE。</string><string name="diagnostics_confirmation">执行现有的 Keystore 诊断？请等待完成，期间不要停止应用或服务。</string><string name="stop_confirmation">停止当前 Android 中继服务？停止后将不再接收任务。</string>
+    <string name="attest_test">随机 Challenge 证明</string><string name="get_chain">获取本地证书链</string><string name="certificate_count">证书链共 %1$d 张证书</string><string name="diagnostic_failed">诊断失败，详情请查看设备日志。</string>
+    <string name="expand">显示手动操作</string><string name="collapse">收起手动操作</string><string name="confirm">继续</string><string name="cancel">取消</string><string name="preview_note">界面预览 · 示例数据 · 服务与 TEE 操作已禁用</string>
+</resources>

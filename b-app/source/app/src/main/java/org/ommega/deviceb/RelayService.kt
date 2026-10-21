@@ -52,6 +52,8 @@ class RelayService : Service() {
 
     companion object {
         const val PREFS_NAME = "deviceb_prefs"
+        private val mutableConnectionUpdates = kotlinx.coroutines.flow.MutableStateFlow<ConnectionState?>(null)
+        val connectionUpdates: kotlinx.coroutines.flow.StateFlow<ConnectionState?> = mutableConnectionUpdates
 
         /** Listener registered by MainActivity. */
         private var uiListenerRef: WeakReference<ConnectionListener>? = null
@@ -175,6 +177,7 @@ class RelayService : Service() {
     }
 
     private fun updateConnectionState(newState: ConnectionState) {
+        mutableConnectionUpdates.value = newState
         if (connectionState == newState) return
         connectionState = newState
         connectionListener?.onStateChanged(newState)
