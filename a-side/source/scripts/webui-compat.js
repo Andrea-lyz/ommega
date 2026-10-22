@@ -11,7 +11,10 @@ let ommegaCompatEnabled = false;
 // presents the matching half using the same resolved preference as the shell.
 function ommegaUiLocalize(value) {
   let chinese = false;
-  try { chinese = /^zh/i.test(localStorage.getItem("trickyAddonLanguage") || navigator.language); } catch (_) {}
+  try {
+    const preference = localStorage.getItem("trickyAddonLanguage");
+    chinese = /^zh/i.test(preference && preference !== "default" ? preference : navigator.language);
+  } catch (_) {}
   return String(value).split("\n").map(line => {
     const halves = line.split(/\s*\/ (?=[A-Za-z])/);
     return halves.length === 2 && /[\u3400-\u9fff]/.test(halves[0]) ? halves[chinese ? 0 : 1] : line;
@@ -645,3 +648,186 @@ async function ommegaSoterRemoteSave() {
     if (result) result.textContent = "保存失败 / Save failed: " + error;
   }
 }
+
+
+// Global scope reuses [filter].enabled in injector.toml: false means all regular
+// applications and exactly bound UID-1000 apps, excluding core system services.
+// The saved target lists and per-app policies are never rewritten by this switch.
+const OMMEGA_SCOPE_CONFIG = "/data/adb/ommega/ommegadata/injector.toml";
+let ommegaGlobalScopeEnabled = false;
+let ommegaGlobalScopeKnown = false;
+let ommegaGlobalScopePending = false;
+let ommegaGlobalScopeMessage = "";
+
+function ommegaScopeSetting(contents) {
+  const lines = String(contents).split("\n");
+  let section = -1;
+  let index = -1;
+  let inFilter = false;
+  let match = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith("#")) continue;
+    // Do not mistake a table-looking line inside a multiline value for a table.
+    if (line.includes('"""') || line.includes("'''")) {
+      throw new Error("Multiline TOML values require editing injector.toml directly");
+    }
+    if (line.startsWith("[")) {
+      inFilter = /^\[\s*(?:filter|"filter"|'filter')\s*\]\s*(?:#.*)?$/.test(line);
+      if (inFilter) {
+        if (section !== -1) throw new Error("Duplicate filter table");
+        section = i;
+      }
+      continue;
+    }
+    if (inFilter && /^(?:enabled|"enabled"|'enabled')\s*=/.test(line)) {
+      if (index !== -1) throw new Error("Duplicate filter.enabled");
+      match = lines[i].match(/^(\s*(?:enabled|"enabled"|'enabled')\s*=\s*)(true|false)([ \t]*(?:#[^\r]*)?\r?)$/);
+      if (!match) throw new Error("Invalid filter.enabled");
+      index = i;
+    }
+  }
+  return {lines, section, index, match, global: !!match && match[2] === "false"};
+}
+
+function ommegaScopeConfig(contents, global) {
+  const parsed = ommegaScopeSetting(contents);
+  const value = global ? "false" : "true";
+  if (parsed.index !== -1) {
+    parsed.lines[parsed.index] = parsed.match[1] + value + parsed.match[3];
+  } else if (parsed.section !== -1) {
+    parsed.lines.splice(parsed.section + 1, 0, "enabled = " + value +
+      (parsed.lines[parsed.section].endsWith("\r") ? "\r" : ""));
+  } else {
+    return String(contents) + (String(contents).endsWith("\n") ? "" : "\n") +
+      "\n[filter]\nenabled = " + value + "\n";
+  }
+  return parsed.lines.join("\n");
+}
+
+function ommegaScopeWriteCommand(contents, global) {
+  const before = ommegaSoterRemoteBase64(contents);
+  const after = ommegaSoterRemoteBase64(ommegaScopeConfig(contents, global));
+  return [
+    "set -e",
+    'ommega_scope_file="' + OMMEGA_SCOPE_CONFIG + '"',
+    'ommega_scope_tmp="$ommega_scope_file.scope.$$"',
+    'trap \'rm -f "$ommega_scope_tmp"\' EXIT',
+    'ommega_scope_current=$(base64 < "$ommega_scope_file" | tr -d \'\\r\\n\')',
+    `[ "$ommega_scope_current" = '${before}' ] || { echo "Config changed; retry" >&2; exit 75; }`,
+    "printf '%s' '" + after + "' | base64 -d > \"$ommega_scope_tmp\"",
+    'chmod 0644 "$ommega_scope_tmp"',
+    'chown 1017:1017 "$ommega_scope_tmp"',
+    'mv -f "$ommega_scope_tmp" "$ommega_scope_file"',
+    "trap - EXIT",
+  ].join("\n");
+}
+
+function ommegaScopeSync() {
+  const box = document.getElementById("ommega-global-scope-enabled");
+  const report = document.getElementById("ommega-global-scope-status");
+  const list = document.getElementById("apps-list");
+  if (!box || !report || !list) return;
+  if (!ommegaGlobalScopePending) box.checked = ommegaGlobalScopeEnabled;
+  box.disabled = !ommegaGlobalScopeKnown || ommegaGlobalScopePending;
+  const blocked = !ommegaGlobalScopeKnown || ommegaGlobalScopeEnabled || ommegaGlobalScopePending;
+  list.inert = blocked;
+  list.setAttribute("aria-disabled", String(blocked));
+  list.style.opacity = blocked ? "0.45" : "";
+  list.style.pointerEvents = blocked ? "none" : "";
+  for (const id of ["select-all", "deselect-all", "select-denylist",
+      "deselect-unnecessary", "add-system-app", "save"]) {
+    const control = document.getElementById(id);
+    if (control) control.disabled = blocked || ommegaGlobalScopePending;
+  }
+  report.textContent = ommegaGlobalScopeMessage || ommegaUiLocalize(ommegaGlobalScopeEnabled
+    ? "已开启：覆盖用户应用和普通系统应用，排除核心系统服务。列表暂不生效，关闭后恢复。 / On: user apps and regular system apps are in scope; core system services are excluded. The saved list is paused."
+    : "已关闭：按原作用域列表生效。 / Off: the saved scope list applies.");
+}
+
+async function ommegaScopeRead() {
+  // The manager's exec bridge joins stdout lines and drops their terminators.
+  // Transport the file as base64 so CRLF and the final newline survive exactly;
+  // the atomic writer compares these original bytes before replacing the file.
+  const result = await _('base64 < "' + OMMEGA_SCOPE_CONFIG + '"');
+  if (Number(result.errno) !== 0) throw new Error(result.stderr || "Could not read injector.toml");
+  const bytes = Uint8Array.from(atob(String(result.stdout).replace(/\s/g, "")), byte => byte.charCodeAt(0));
+  const contents = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);
+  const setting = ommegaScopeSetting(contents);
+  ommegaGlobalScopeEnabled = setting.global;
+  ommegaGlobalScopeKnown = true;
+  return contents;
+}
+
+async function ommegaRefreshGlobalScope() {
+  if (ommegaGlobalScopePending) return;
+  try {
+    await ommegaScopeRead();
+    ommegaGlobalScopeMessage = "";
+  } catch (error) {
+    ommegaGlobalScopeKnown = false;
+    ommegaGlobalScopeMessage = ommegaUiLocalize("无法读取作用域状态 / Could not read scope") + ": " + error.message;
+  }
+  ommegaScopeSync();
+}
+
+async function ommegaApplyGlobalScope() {
+  if (ommegaGlobalScopePending || !ommegaGlobalScopeKnown) return;
+  const requested = document.getElementById("ommega-global-scope-enabled").checked;
+  ommegaGlobalScopePending = true;
+  ommegaGlobalScopeMessage = ommegaUiLocalize("正在保存… / Saving…");
+  ommegaScopeSync();
+  try {
+    const contents = await ommegaScopeRead();
+    const response = await _(ommegaScopeWriteCommand(contents, requested));
+    if (Number(response.errno) !== 0) throw new Error(response.stderr || "Write failed");
+    await ommegaScopeRead();
+    if (ommegaGlobalScopeEnabled !== requested) throw new Error("Scope readback did not match");
+    ommegaGlobalScopeMessage = "";
+  } catch (error) {
+    try { await ommegaScopeRead(); } catch { ommegaGlobalScopeKnown = false; }
+    ommegaGlobalScopeMessage = ommegaUiLocalize("保存失败 / Could not save scope") + ": " + error.message;
+  } finally {
+    ommegaGlobalScopePending = false;
+    ommegaScopeSync();
+  }
+}
+
+function ommegaInstallGlobalScope() {
+  const list = document.getElementById("apps-list");
+  if (!list || !list.parentElement || document.getElementById("ommega-global-scope")) return false;
+  const panel = document.createElement("section");
+  panel.id = "ommega-global-scope";
+  panel.style.cssText = "margin:12px 16px;padding:14px 16px;border-radius:16px;" +
+    "background:var(--md-sys-color-surface-container,#eee);color:var(--md-sys-color-on-surface,#222)";
+  panel.innerHTML = ommegaUiLocalizeHtml('<style>#ommega-global-scope label{display:flex;align-items:center;gap:12px;min-height:48px;cursor:pointer}' +
+    '#ommega-global-scope input{appearance:none;flex:none;width:48px;height:28px;border:2px solid currentColor;' +
+    'border-radius:18px;position:relative;cursor:pointer;background:transparent;color:inherit}' +
+    '#ommega-global-scope input:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;' +
+    'border-radius:50%;background:currentColor;transition:transform .15s}' +
+    '#ommega-global-scope input:checked{background:var(--md-sys-color-primary,#465b91);color:var(--md-sys-color-on-primary,#fff);border-color:var(--md-sys-color-primary,#465b91)}' +
+    '#ommega-global-scope input:checked:before{transform:translateX(20px)}' +
+    '#ommega-global-scope input:focus-visible{outline:3px solid var(--md-sys-color-primary,#465b91);outline-offset:4px}' +
+    '#ommega-global-scope input:disabled{opacity:.5;cursor:wait}' +
+    '@media(prefers-reduced-motion:reduce){#ommega-global-scope input:before{transition:none}}</style>' +
+    '<label for="ommega-global-scope-enabled"><input type="checkbox" role="switch" id="ommega-global-scope-enabled" ' +
+    'aria-describedby="ommega-global-scope-status" disabled><strong>全局作用域 / Global scope</strong></label>' +
+    '<div id="ommega-global-scope-status" role="status" aria-live="polite" style="font-size:13px;line-height:1.5;margin-top:4px">正在读取… / Loading…</div>');
+  list.parentElement.insertBefore(panel, list);
+  document.getElementById("ommega-global-scope-enabled").addEventListener("change", ommegaApplyGlobalScope);
+  const baseLoad = Mi;
+  Mi = async function () {
+    await ommegaRefreshGlobalScope();
+    return baseLoad();
+  };
+  const save = document.getElementById("save");
+  const baseSave = save.onclick;
+  save.onclick = function (event) {
+    if (!ommegaGlobalScopeKnown || ommegaGlobalScopeEnabled || ommegaGlobalScopePending) return;
+    return baseSave ? baseSave.call(this, event) : undefined;
+  };
+  ommegaRefreshGlobalScope();
+  return true;
+}
+
+ommegaInstallGlobalScope();

@@ -5,6 +5,7 @@
 // committed bundle and exercises its policy parsing/serialization, which keeps
 // the patched bundle honest in CI.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -22,11 +23,13 @@ const start = source.indexOf(GLUE_START);
 assert.notEqual(start, -1, "compat glue missing from the WebUI bundle");
 const glue = source.slice(start);
 
-function loadGlue() {
+function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
   const element = { checked: false, onclick: undefined, addEventListener() {} };
   const context = {
     console,
     TextEncoder,
+    TextDecoder,
+    atob,
     btoa,
     URL,
     setTimeout,
@@ -34,6 +37,8 @@ function loadGlue() {
     _: async () => ({ stdout: "" }),
     se: { querySelectorAll: () => [] },
     Dl: new Set(),
+    navigator: {language},
+    localStorage: {getItem: () => preference},
     document: {
       getElementById: () => element,
       querySelector: () => null,
@@ -49,13 +54,218 @@ function loadGlue() {
     },
   };
   vm.createContext(context);
-  vm.runInContext(glue, context);
+  vm.runInContext(scopeConfig ? glue.replace('"/data/adb/ommega/ommegadata/injector.toml"', JSON.stringify(scopeConfig)) : glue, context);
   return context;
 }
 
 test("the glue evaluates without the WebUI globals", () => {
   loadGlue();
 });
+
+
+test("global scope toggles only filter.enabled and restores the saved configuration", () => {
+  const ctx = loadGlue();
+  const original = [
+    "version = 1",
+    'scoop = ["com.saved"]',
+    "[main]",
+    "enabled = true",
+    "[filter]",
+    "enabled = true # selected apps",
+    'deny_packages = ["com.denied"]',
+    'system_app_contexts = { "com.factory" = "u:r:factory_app:s0" }',
+    "[intercept]",
+    "get_security_level = true",
+    "",
+  ].join("\n");
+  const global = ctx.ommegaScopeConfig(original, true);
+  assert.equal(ctx.ommegaScopeSetting(global).global, true);
+  assert.equal(global, original.replace("enabled = true # selected apps", "enabled = false # selected apps"));
+  assert.equal(ctx.ommegaScopeConfig(global, false), original);
+  assert.equal(ctx.ommegaScopeSetting(original).global, false);
+});
+
+test("scope editing supports defaults, quoted tables, CRLF and rejects ambiguous input", () => {
+  const ctx = loadGlue();
+  for (const source of [
+    "version = 1\n[main]\nenabled = true\n",
+    "version = 1\n[filter]\ndeny_packages = []\n",
+    "version = 1\r\n[ 'filter' ] # scope\r\n 'enabled' = true # active\r\n",
+  ]) {
+    const global = ctx.ommegaScopeConfig(source, true);
+    assert.equal(ctx.ommegaScopeSetting(global).global, true);
+    assert.equal(ctx.ommegaScopeSetting(ctx.ommegaScopeConfig(global, false)).global, false);
+  }
+  assert.throws(() => ctx.ommegaScopeConfig("[filter]\nenabled = 1", true), /Invalid/);
+  assert.throws(() => ctx.ommegaScopeConfig("[filter]\nenabled = true\nenabled = false", true), /Duplicate/);
+  assert.throws(() => ctx.ommegaScopeConfig('[main]\nnotes = """\n[filter]\n"""', true), /Multiline/);
+});
+
+test("scope writes are atomic, detect stale input and never rewrite the target list", () => {
+  const ctx = loadGlue();
+  const original = "version = 1\n[filter]\nenabled = true\n";
+  const command = ctx.ommegaScopeWriteCommand(original, true);
+  assert.match(command, /injector\.toml/);
+  assert.match(command, /Config changed; retry/);
+  assert.match(command, /exit 75/);
+  assert.match(command, /\.scope\.\$\$/);
+  assert.match(command, /trap/);
+  assert.match(command, /chown 1017:1017/);
+  assert.match(command, /mv -f/);
+  assert.doesNotMatch(command, /target\.txt|target-security\.toml|target-compat\.toml/);
+  const encoded = command.match(/printf '%s' '([^']+)'/)[1];
+  assert.equal(Buffer.from(encoded, "base64").toString("utf8"), ctx.ommegaScopeConfig(original, true));
+});
+
+test("global scope disables list editing and restores it after switching off", () => {
+  const ctx = loadGlue({language: "zh-CN"});
+  const elements = {
+    "ommega-global-scope-enabled": {},
+    "ommega-global-scope-status": {},
+    "apps-list": {style: {}, setAttribute() {}},
+    "save": {},
+  };
+  ctx.document.getElementById = id => elements[id] || null;
+  vm.runInContext("ommegaGlobalScopeKnown = true; ommegaGlobalScopeEnabled = true; ommegaScopeSync()", ctx);
+  assert.equal(elements["apps-list"].inert, true);
+  assert.equal(elements.save.disabled, true);
+  assert.match(elements["ommega-global-scope-status"].textContent, /用户应用和普通系统应用.*排除核心系统服务/);
+  vm.runInContext("ommegaGlobalScopeEnabled = false; ommegaScopeSync()", ctx);
+  assert.equal(elements["apps-list"].inert, false);
+  assert.equal(elements.save.disabled, false);
+});
+
+test("a failed scope write restores the readback state and reports failure", async () => {
+  const ctx = loadGlue({language: "zh-CN"});
+  const elements = {
+    "ommega-global-scope-enabled": {checked: true},
+    "ommega-global-scope-status": {},
+    "apps-list": {style: {}, setAttribute() {}},
+    "save": {},
+  };
+  ctx.document.getElementById = id => elements[id] || null;
+  vm.runInContext("ommegaGlobalScopeKnown = true", ctx);
+  ctx._ = async command => command.startsWith("base64 < ")
+    ? {errno: 0, stdout: Buffer.from("[filter]\nenabled = true\n").toString("base64")}
+    : {errno: 75, stderr: "Config changed; retry"};
+  await ctx.ommegaApplyGlobalScope();
+  assert.equal(elements["ommega-global-scope-enabled"].checked, false);
+  assert.equal(elements["ommega-global-scope-enabled"].disabled, false);
+  assert.equal(elements["apps-list"].inert, false);
+  assert.match(elements["ommega-global-scope-status"].textContent, /保存失败.*Config changed/);
+  assert.doesNotMatch(elements["ommega-global-scope-status"].textContent, /Could not save scope/);
+});
+
+// KernelSU's WebViewInterface.exec uses result.out.joinToString("\n"). Each
+// Shell output element is a line without its terminator, including CR in CRLF.
+// Execute the generated commands in a real shell, then apply that bridge
+// contract rather than handing the UI a byte-exact mocked cat result.
+function scopeShell(command) {
+  const file = process.platform === "win32" ? "wsl.exe" : "sh";
+  const args = process.platform === "win32" ? ["-d", "Ubuntu", "--", "sh"] : [];
+  const result = spawnSync(file, args, {input: command, encoding: "utf8"});
+  if (result.error) throw result.error;
+  const bridgeLines = value => {
+    const lines = value.split(/\r\n|[\r\n]/);
+    if (/[\r\n]$/.test(value)) lines.pop();
+    return lines.join("\n");
+  };
+  return {errno: result.status, stdout: bridgeLines(result.stdout), stderr: bridgeLines(result.stderr)};
+}
+
+test("scope toggles preserve real LF/CRLF files through the line-based Android exec bridge", async () => {
+  for (const ending of ["\n", "\r\n"]) {
+    const directory = scopeShell("mktemp -d /tmp/ommega-scope-test.XXXXXX");
+    assert.equal(directory.errno, 0, directory.stderr);
+    assert.match(directory.stdout, /^\/tmp\/ommega-scope-test\.[A-Za-z0-9]+$/);
+    const path = directory.stdout + "/injector.toml";
+    const ctx = loadGlue({scopeConfig: path});
+    const original = ["# 配置保持原样", "version = 1", "[filter]", "enabled = true # selected", 'deny_packages = ["com.saved"]', ""].join(ending);
+    const initialize = scopeShell("printf '%s' '" + Buffer.from(original).toString("base64") + "' | base64 -d > '" + path + "'");
+    assert.equal(initialize.errno, 0, initialize.stderr);
+    const execute = command => scopeShell(command.replace("chown 1017:1017", 'chown "$(id -u):$(id -g)"'));
+    const elements = {
+      "ommega-global-scope-enabled": {checked: false},
+      "ommega-global-scope-status": {},
+      "apps-list": {style: {}, setAttribute() {}},
+      "save": {},
+    };
+    ctx.document.getElementById = id => elements[id] || null;
+    ctx._ = async command => execute(command);
+    try {
+      // Prove the previous raw-cat protocol produces the reported failure even
+      // when nobody changes the file between reading and writing it.
+      const legacy = execute('cat "' + path + '"');
+      assert.notEqual(legacy.stdout, original);
+      assert.equal(execute(ctx.ommegaScopeWriteCommand(legacy.stdout, true)).errno, 75);
+
+      assert.equal(await ctx.ommegaScopeRead(), original);
+      elements["ommega-global-scope-enabled"].checked = true;
+      await ctx.ommegaApplyGlobalScope();
+      assert.equal(elements["ommega-global-scope-enabled"].checked, true);
+      assert.equal(elements["apps-list"].inert, true);
+      assert.doesNotMatch(elements["ommega-global-scope-status"].textContent, /Could not/);
+      assert.equal(await ctx.ommegaScopeRead(), ctx.ommegaScopeConfig(original, true));
+
+      elements["ommega-global-scope-enabled"].checked = false;
+      await ctx.ommegaApplyGlobalScope();
+      assert.equal(elements["apps-list"].inert, false);
+      assert.equal(await ctx.ommegaScopeRead(), original);
+
+      // Keep the concurrent-change guard: real newer content must survive.
+      const snapshot = await ctx.ommegaScopeRead();
+      assert.equal(execute("printf '# concurrent edit\\n' >> '" + path + "'").errno, 0);
+      const concurrent = await ctx.ommegaScopeRead();
+      assert.equal(execute(ctx.ommegaScopeWriteCommand(snapshot, true)).errno, 75);
+      assert.equal(await ctx.ommegaScopeRead(), concurrent);
+      assert.equal(execute("find '" + directory.stdout + "' -name '*.scope.*'").stdout, "");
+    } finally {
+      assert.equal(scopeShell("rm -f '" + path + "'; rmdir '" + directory.stdout + "'").errno, 0);
+    }
+  }
+});
+
+test("scope reads preserve UTF-8 bytes, blank lines and an unterminated final line", async () => {
+  const ctx = loadGlue();
+  const original = '\ufeff# 配置\r\n\r\n[filter]\r\nenabled = true';
+  ctx._ = async () => ({errno: 0, stdout: Buffer.from(original).toString("base64").match(/.{1,32}/g).join("\n")});
+  assert.equal(await ctx.ommegaScopeRead(), original);
+});
+
+test("scope text follows Chinese, English and system-default language selections", async () => {
+  for (const [language, preference, chinese] of [
+    ["zh-CN", null, true],
+    ["zh-CN", "default", true],
+    ["zh-CN", "en", false],
+    ["en-US", "zh-CN", true],
+    ["en-US", "default", false],
+  ]) {
+    const ctx = loadGlue({language, preference});
+    const panel = {style: {}};
+    const elements = {
+      "ommega-global-scope-enabled": {addEventListener() {}},
+      "ommega-global-scope-status": {},
+      "apps-list": {style: {}, setAttribute() {}, parentElement: {insertBefore() {}}},
+      "save": {},
+    };
+    ctx.document.getElementById = id => elements[id] || null;
+    ctx.document.createElement = () => panel;
+    ctx._ = async () => ({errno: 0, stdout: Buffer.from("[filter]\nenabled = true\n").toString("base64")});
+    assert.equal(ctx.ommegaInstallGlobalScope(), true);
+    await ctx.ommegaRefreshGlobalScope();
+    const status = elements["ommega-global-scope-status"].textContent;
+    assert.match(status, chinese ? /已关闭/ : /^Off:/);
+    assert.doesNotMatch(status, chinese ? /Off:/ : /已关闭/);
+    assert.match(panel.innerHTML, chinese ? /<strong>全局作用域<\/strong>/ : /<strong>Global scope<\/strong>/);
+    assert.doesNotMatch(panel.innerHTML, chinese ? /Global scope|Loading/ : /全局作用域|正在读取/);
+    assert.match(panel.innerHTML, chinese ? /正在读取…<\/div>/ : /Loading…<\/div>/);
+    vm.runInContext("ommegaGlobalScopeEnabled = true; ommegaScopeSync()", ctx);
+    const enabledStatus = elements["ommega-global-scope-status"].textContent;
+    assert.match(enabledStatus, chinese ? /排除核心系统服务/ : /core system services are excluded/);
+    assert.doesNotMatch(enabledStatus, chinese ? /core system services/ : /核心系统服务/);
+  }
+});
+
 
 test("a policy file round-trips through the glue", () => {
   const context = loadGlue();

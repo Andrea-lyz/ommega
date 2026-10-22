@@ -62,12 +62,45 @@ off.
    optional per-package `global_default` / `strongbox` / `tee` policy stored in
    `/data/misc/keystore/ommega/target-security.toml`.
 
-   Two lists feed routing and they are merged when the injector config is read:
+   The WebUI's **Global scope** switch takes effect without clearing the list.
+   It is off by default. Turning it on sets `[filter].enabled = false` in
+   `injector.toml`: user apps and ordinary system apps with an application ID
+   from 10000 through 19999 in each Android user are in scope. Their package
+   lists and denylist are bypassed without querying the package manager. Root,
+   native core services (including system_server, Keystore, Gatekeeper and Vold),
+   SDK sandboxes and isolated processes stay on System. A UID-1000 application
+   is included only after its configured Binder SID and exact full process
+   name match; its saved scope and denylist are then bypassed. All included
+   callers use the global security-level policy.
+   Turning it off restores `[filter].enabled = true`, the saved lists and their
+   per-app policies. The WebUI disables list editing while global scope is on.
+   Existing keys and descriptors are not migrated between System and Ommega.
+
+   In list mode, two lists feed routing and are merged when the injector config is read:
    `scoop` in `/data/misc/keystore/ommega/injector.toml` (the shipped defaults
    plus anything added by hand) and `target.txt` (what the WebUI writes). A
    package listed in either one is routed; `target.txt` entries are appended to
    `scoop`, so the effective list is the union. `target-security.toml` only
    carries the per-app StrongBox / TEE / global-default choice.
+
+   In list mode, shared system UID apps (app id 1000) require a process binding
+   while `block_android_package = true`. The default `[filter].system_app_contexts`
+   contains only the verified `com.oplus.engineermode` main process bound to
+   Binder SELinux context `u:r:engineermode_app:s0`. The shipped `scoop` and
+   SELinux rules already include this adapter; no manual binding or permission
+   setup is needed. A matching process must still be in `scoop` or `target.txt`,
+   and the denylist still applies. Configurations that omit the field inherit
+   this default. An explicit
+   `system_app_contexts = {}` disables the exception, and a custom map replaces
+   the default bindings. Other bindings require verifying the app's UID, exact
+   process name and Binder SID on the target OS. Missing process/SID evidence,
+   other shared-UID processes and native domains such as `system_server` keep
+   the ordinary system-UID block.
+   Only application domains ending in `_app` can use this binding. This selects
+   the whole keystore2 surface for that caller; it does not change authentication
+   or maintenance mirroring. Clearing the map restores the system-UID block;
+   keys created in Ommega stay in its separate backend. Passing a factory key
+   status test also requires the selected backend to support its RSA/EC request.
 
    The remote settings dialog also provides a global "disable native
    StrongBox" switch. It only affects target apps whose policy is

@@ -19,6 +19,213 @@ fn disabled_filter_reports_disabled_and_allows() {
 }
 
 #[test]
+fn default_engineermode_binding_requires_the_selected_exact_system_app_caller() {
+    let package = "com.oplus.engineermode";
+    let sid = "u:r:engineermode_app:s0";
+    let scope = vec![package.to_owned()];
+    let mut config = base_config();
+    for uid in [1000, 101_000] {
+        let decision = evaluate_system_app(&scope, &config, uid, sid, package).unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.packages, scope);
+    }
+    for uid in [0, 1001, 1017, 2000, 10_000] {
+        assert!(evaluate_system_app(&scope, &config, uid, sid, package).is_none());
+    }
+    for (wrong_sid, wrong_process) in [
+        ("", package),
+        ("u:r:system_server:s0", package),
+        ("u:r:system_app:s0", package),
+        ("u:r:factory_app:s0", package),
+        (sid, ""),
+        (sid, "com.oplus.other"),
+        (sid, "com.oplus.engineermode:remote"),
+        (sid, "/system/bin/com.oplus.engineermode"),
+    ] {
+        assert!(evaluate_system_app(&scope, &config, 1000, wrong_sid, wrong_process).is_none());
+    }
+
+    let decision = evaluate_system_app(&[], &config, 1000, sid, package).unwrap();
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedNotInScope);
+    // Even resolving the selected package cannot opt the whole shared UID in.
+    let decision = evaluate(
+        &scope,
+        &config,
+        1000,
+        PackageResolution::Known(scope.clone()),
+    );
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedAndroidPackage);
+
+    config.deny_packages.push(package.into());
+    let decision = evaluate_system_app(&scope, &config, 1000, sid, package).unwrap();
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedByDenylist);
+
+    config.deny_packages.clear();
+    config.system_app_contexts.clear();
+    assert!(evaluate_system_app(&scope, &config, 1000, sid, package).is_none());
+}
+
+#[test]
+fn scoped_system_app_requires_uid_sid_process_and_explicit_binding() {
+    let package = "com.example.engineer";
+    let sid = "u:r:factory_app:s0";
+    let scope = vec![package.to_owned()];
+    let mut config = base_config();
+    assert!(evaluate_system_app(&scope, &config, 1000, sid, package).is_none());
+    config
+        .system_app_contexts
+        .insert(package.into(), sid.into());
+
+    for uid in [1000, 101_000] {
+        let decision = evaluate_system_app(&scope, &config, uid, sid, package).unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.packages, scope);
+        assert_eq!(decision.reason, FilterReason::Allowed);
+    }
+    for uid in [0, 1001, 1017, 2000, 10_000, 110_000] {
+        assert!(evaluate_system_app(&scope, &config, uid, sid, package).is_none());
+    }
+    for (wrong_sid, wrong_process) in [
+        ("", package),
+        ("u:r:system_server:s0", package),
+        ("u:r:system_app:s0", package),
+        (sid, "system_server"),
+        (sid, "com.example.other"),
+        (sid, "com.example.engineer:remote"),
+        (sid, "/system/bin/com.example.engineer"),
+    ] {
+        assert!(evaluate_system_app(&scope, &config, 1000, wrong_sid, wrong_process).is_none());
+    }
+
+    // A caller-supplied configuration cannot opt native core domains in.
+    config
+        .system_app_contexts
+        .insert(package.into(), "u:r:system_server:s0".into());
+    assert!(evaluate_system_app(&scope, &config, 1000, "u:r:system_server:s0", package).is_none());
+}
+
+#[test]
+fn scoped_system_app_keeps_scope_denylist_and_default_uid_policy() {
+    let package = "com.example.engineer";
+    let sid = "u:r:factory_app:s0";
+    let scope = vec![package.to_owned()];
+    let mut config = base_config();
+    config
+        .system_app_contexts
+        .insert(package.into(), sid.into());
+
+    let decision = evaluate_system_app(&[], &config, 1000, sid, package).unwrap();
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedNotInScope);
+
+    config.deny_packages.push(package.into());
+    let decision = evaluate_system_app(&scope, &config, 1000, sid, package).unwrap();
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedByDenylist);
+
+    // Adding a binding never changes UID-wide filtering or unknown callers.
+    let decision = evaluate(&scope, &config, 1000, PackageResolution::Unknown);
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedAndroidPackage);
+}
+
+#[test]
+fn global_scope_ignores_lists_for_regular_application_uids() {
+    let mut config = base_config();
+    config.enabled = false;
+    config.deny_packages = vec!["android".into(), "com.example.denied".into()];
+    for user_offset in [0, AID_USER_OFFSET, 10 * AID_USER_OFFSET] {
+        for app_id in [AID_APP_START, 15_000, AID_APP_END] {
+            let uid = user_offset + app_id;
+            for resolution in [
+                PackageResolution::Unknown,
+                PackageResolution::Known(vec!["android".into()]),
+                PackageResolution::Known(vec!["com.example.denied".into()]),
+            ] {
+                let decision = evaluate(&[], &config, uid, resolution);
+                assert!(
+                    decision.allowed,
+                    "application-global scope rejected uid {uid}"
+                );
+                assert_eq!(decision.reason, FilterReason::Disabled);
+            }
+        }
+    }
+    config.enabled = true;
+    assert_eq!(
+        evaluate(&[], &config, 1000, PackageResolution::Unknown).reason,
+        FilterReason::RejectedAndroidPackage,
+    );
+    assert_eq!(
+        evaluate(&[], &config, 10_000, PackageResolution::Unknown).reason,
+        FilterReason::RejectedUnknownPackage,
+    );
+}
+
+#[test]
+fn global_scope_excludes_core_services_sandboxes_and_isolated_uids() {
+    let mut config = base_config();
+    config.enabled = false;
+    config.block_android_package = false;
+    config.allow_unknown_package = true;
+    let scope = vec!["android".into(), "com.oplus.engineermode".into()];
+    for user_offset in [0, AID_USER_OFFSET, 10 * AID_USER_OFFSET] {
+        for app_id in [
+            0, 1000, 1001, 1017, 1090, 2000, 9999, 20_000, 29_999, 30_000, 89_999, 90_000, 99_999,
+        ] {
+            let uid = user_offset + app_id;
+            for resolution in [
+                PackageResolution::Unknown,
+                PackageResolution::Known(scope.clone()),
+            ] {
+                let decision = evaluate(&scope, &config, uid, resolution);
+                assert!(
+                    !decision.allowed,
+                    "application-global scope allowed uid {uid}"
+                );
+                assert_eq!(decision.reason, FilterReason::RejectedNonApplicationUid);
+            }
+        }
+    }
+}
+
+#[test]
+fn global_scope_uid_1000_apps_still_require_exact_configured_identity() {
+    let package = "com.oplus.engineermode";
+    let sid = "u:r:engineermode_app:s0";
+    let mut config = base_config();
+    config.enabled = false;
+    config.deny_packages.push(package.into());
+    for uid in [1000, AID_USER_OFFSET + 1000, 10 * AID_USER_OFFSET + 1000] {
+        let decision = evaluate_system_app(&[], &config, uid, sid, package).unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, FilterReason::Disabled);
+        assert_eq!(decision.packages, vec![package.to_owned()]);
+    }
+    for uid in [0, 1001, 1017, 10_000, AID_USER_OFFSET + 10_000] {
+        assert!(evaluate_system_app(&[], &config, uid, sid, package).is_none());
+    }
+    for (wrong_sid, wrong_process) in [
+        ("", package),
+        ("u:r:system_server:s0", package),
+        ("u:r:system_app:s0", package),
+        ("u:r:other_app:s0", package),
+        (sid, ""),
+        (sid, "system_server"),
+        (sid, "com.oplus.other"),
+        (sid, "com.oplus.engineermode:remote"),
+        (sid, "/system/bin/com.oplus.engineermode"),
+    ] {
+        assert!(evaluate_system_app(&[], &config, 1000, wrong_sid, wrong_process).is_none());
+    }
+    config.system_app_contexts.clear();
+    assert!(evaluate_system_app(&[], &config, 1000, sid, package).is_none());
+}
+
+#[test]
 fn android_package_is_rejected_when_blocking_is_enabled() {
     let config = base_config();
     let scope = vec!["android".to_string()];

@@ -96,7 +96,44 @@ fn evaluate_caller(
 ) -> crate::filter::FilterDecision {
     let uid = caller.uid as u32;
     let preflight = filter::evaluate(&cfg.scoop, &cfg.filter, uid, PackageResolution::Unknown);
-    if preflight.reason == FilterReason::RejectedAndroidPackage {
+    // Application-global scope skips package lookup for regular application UIDs.
+    // UID-1000 apps still require exact SID and process identity below.
+    if preflight.reason == FilterReason::Disabled {
+        return preflight;
+    }
+    if matches!(
+        preflight.reason,
+        FilterReason::RejectedAndroidPackage | FilterReason::RejectedNonApplicationUid
+    ) {
+        if cfg
+            .filter
+            .system_app_contexts
+            .values()
+            .any(|sid| !sid.is_empty() && sid == &caller.sid)
+        {
+            // Unlike the general process-name helper, require the literal argv[0]:
+            // no executable basename or truncated /proc/comm fallback is an app identity.
+            let decision = i32::try_from(caller.pid)
+                .ok()
+                .filter(|pid| *pid > 0)
+                .and_then(|pid| {
+                    std::fs::read(format!("/proc/{pid}/cmdline"))
+                        .inspect_err(|error| {
+                            warn!(
+                                "event=caller_identity cannot read configured system-app argv[0] uid={} pid={} sid='{}': {}",
+                                uid, pid, caller.sid, error
+                            );
+                        })
+                        .ok()
+                })
+                .and_then(|cmdline| {
+                    let process = std::str::from_utf8(cmdline.split(|b| *b == 0).next()?).ok()?;
+                    filter::evaluate_system_app(&cfg.scoop, &cfg.filter, uid, &caller.sid, process)
+                });
+            if let Some(decision) = decision {
+                return decision;
+            }
+        }
         return preflight;
     }
 
@@ -104,13 +141,7 @@ fn evaluate_caller(
         let _guard = BypassGuard::enter();
         ipc::resolve_packages_for_uid(uid)
     };
-    let decision = filter::evaluate(&cfg.scoop, &cfg.filter, uid, package_resolution);
-    if decision.reason == FilterReason::Disabled {
-        debug!(
-            "event=decision package filter disabled; routing still follows per-method intercept settings"
-        );
-    }
-    decision
+    filter::evaluate(&cfg.scoop, &cfg.filter, uid, package_resolution)
 }
 
 fn service_request_key(request: &ParsedServiceRequest) -> Option<&KeyDescriptor> {

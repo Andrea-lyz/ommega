@@ -11,6 +11,7 @@ pub const AID_ROOT: u32 = 0;
 pub const AID_SYSTEM: u32 = 1000;
 pub const AID_KEYSTORE: u32 = 1017;
 pub const AID_APP_START: u32 = 10_000;
+pub const AID_APP_END: u32 = 19_999;
 pub const AID_USER_OFFSET: u32 = 100_000;
 pub const KEYSTORE_UID: libc::uid_t = AID_KEYSTORE as libc::uid_t;
 pub const KEYSTORE_GID: libc::gid_t = AID_KEYSTORE as libc::gid_t;
