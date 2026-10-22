@@ -57,6 +57,100 @@ test("the glue evaluates without the WebUI globals", () => {
   loadGlue();
 });
 
+
+test("global scope toggles only filter.enabled and restores the saved configuration", () => {
+  const ctx = loadGlue();
+  const original = [
+    "version = 1",
+    'scoop = ["com.saved"]',
+    "[main]",
+    "enabled = true",
+    "[filter]",
+    "enabled = true # selected apps",
+    'deny_packages = ["com.denied"]',
+    'system_app_contexts = { "com.factory" = "u:r:factory_app:s0" }',
+    "[intercept]",
+    "get_security_level = true",
+    "",
+  ].join("\n");
+  const global = ctx.ommegaScopeConfig(original, true);
+  assert.equal(ctx.ommegaScopeSetting(global).global, true);
+  assert.equal(global, original.replace("enabled = true # selected apps", "enabled = false # selected apps"));
+  assert.equal(ctx.ommegaScopeConfig(global, false), original);
+  assert.equal(ctx.ommegaScopeSetting(original).global, false);
+});
+
+test("scope editing supports defaults, quoted tables, CRLF and rejects ambiguous input", () => {
+  const ctx = loadGlue();
+  for (const source of [
+    "version = 1\n[main]\nenabled = true\n",
+    "version = 1\n[filter]\ndeny_packages = []\n",
+    "version = 1\r\n[ 'filter' ] # scope\r\n 'enabled' = true # active\r\n",
+  ]) {
+    const global = ctx.ommegaScopeConfig(source, true);
+    assert.equal(ctx.ommegaScopeSetting(global).global, true);
+    assert.equal(ctx.ommegaScopeSetting(ctx.ommegaScopeConfig(global, false)).global, false);
+  }
+  assert.throws(() => ctx.ommegaScopeConfig("[filter]\nenabled = 1", true), /Invalid/);
+  assert.throws(() => ctx.ommegaScopeConfig("[filter]\nenabled = true\nenabled = false", true), /Duplicate/);
+  assert.throws(() => ctx.ommegaScopeConfig('[main]\nnotes = """\n[filter]\n"""', true), /Multiline/);
+});
+
+test("scope writes are atomic, detect stale input and never rewrite the target list", () => {
+  const ctx = loadGlue();
+  const original = "version = 1\n[filter]\nenabled = true\n";
+  const command = ctx.ommegaScopeWriteCommand(original, true);
+  assert.match(command, /injector\.toml/);
+  assert.match(command, /Config changed; retry/);
+  assert.match(command, /exit 75/);
+  assert.match(command, /\.scope\.\$\$/);
+  assert.match(command, /trap/);
+  assert.match(command, /chown 1017:1017/);
+  assert.match(command, /mv -f/);
+  assert.doesNotMatch(command, /target\.txt|target-security\.toml|target-compat\.toml/);
+  const encoded = command.match(/printf '%s' '([^']+)'/)[1];
+  assert.equal(Buffer.from(encoded, "base64").toString("utf8"), ctx.ommegaScopeConfig(original, true));
+});
+
+test("global scope disables list editing and restores it after switching off", () => {
+  const ctx = loadGlue();
+  const elements = {
+    "ommega-global-scope-enabled": {},
+    "ommega-global-scope-status": {},
+    "apps-list": {style: {}, setAttribute() {}},
+    "save": {},
+  };
+  ctx.document.getElementById = id => elements[id] || null;
+  vm.runInContext("ommegaGlobalScopeKnown = true; ommegaGlobalScopeEnabled = true; ommegaScopeSync()", ctx);
+  assert.equal(elements["apps-list"].inert, true);
+  assert.equal(elements.save.disabled, true);
+  assert.match(elements["ommega-global-scope-status"].textContent, /所有应用和系统服务/);
+  vm.runInContext("ommegaGlobalScopeEnabled = false; ommegaScopeSync()", ctx);
+  assert.equal(elements["apps-list"].inert, false);
+  assert.equal(elements.save.disabled, false);
+});
+
+test("a failed scope write restores the readback state and reports failure", async () => {
+  const ctx = loadGlue();
+  const elements = {
+    "ommega-global-scope-enabled": {checked: true},
+    "ommega-global-scope-status": {},
+    "apps-list": {style: {}, setAttribute() {}},
+    "save": {},
+  };
+  ctx.document.getElementById = id => elements[id] || null;
+  vm.runInContext("ommegaGlobalScopeKnown = true", ctx);
+  ctx._ = async command => command.startsWith("cat ")
+    ? {errno: 0, stdout: "[filter]\nenabled = true\n"}
+    : {errno: 75, stderr: "Config changed; retry"};
+  await ctx.ommegaApplyGlobalScope();
+  assert.equal(elements["ommega-global-scope-enabled"].checked, false);
+  assert.equal(elements["ommega-global-scope-enabled"].disabled, false);
+  assert.equal(elements["apps-list"].inert, false);
+  assert.match(elements["ommega-global-scope-status"].textContent, /保存失败.*Config changed/);
+});
+
+
 test("a policy file round-trips through the glue", () => {
   const context = loadGlue();
   const serialized = context.ommegaTargetCompatToml(true);

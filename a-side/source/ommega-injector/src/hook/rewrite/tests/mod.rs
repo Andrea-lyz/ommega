@@ -194,6 +194,22 @@ pub(super) fn clear_operation_state_for_tests() {
 }
 
 #[test]
+fn global_scope_does_not_resolve_packages_or_process_identity() {
+    let mut config = config::InjectorConfig::default();
+    config.filter.enabled = false;
+    config.scoop.clear();
+    let caller = CallerInfo {
+        uid: 1000,
+        pid: -1,
+        sid: String::new(),
+    };
+    let decision = evaluate_caller(&caller, &config);
+    assert!(decision.allowed);
+    assert_eq!(decision.reason, FilterReason::Disabled);
+    assert!(decision.packages.is_empty());
+}
+
+#[test]
 fn ommega_grant_descriptor_rule_covers_grant_and_key_id() {
     let _guard = route_state_test_guard();
     let caller = CallerInfo {

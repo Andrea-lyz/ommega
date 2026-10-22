@@ -1,4 +1,4 @@
-use kmr_common::consts::{AID_APP_START, AID_USER_OFFSET};
+use kmr_common::consts::{AID_APP_START, AID_SYSTEM, AID_USER_OFFSET};
 
 use crate::config::FilterConfig;
 
@@ -91,6 +91,42 @@ pub fn evaluate(
         reason,
         packages,
     }
+}
+
+/// Resolve an explicitly configured system app without treating every UID-1000
+/// package as its caller. The SID comes from Binder, not from the process name.
+/// Missing identity evidence keeps the ordinary system-UID rejection in force.
+pub fn evaluate_system_app(
+    scoop: &[String],
+    config: &FilterConfig,
+    uid: u32,
+    sid: &str,
+    process: &str,
+) -> Option<FilterDecision> {
+    if !config.enabled || uid % AID_USER_OFFSET != AID_SYSTEM {
+        return None;
+    }
+    // Native/system-server domains cannot opt in, even under a matching name.
+    let domain = sid.strip_prefix("u:r:")?.split_once(':')?.0;
+    if !domain.ends_with("_app")
+        || !process.contains('.')
+        || process.split('.').any(|part| {
+            part.is_empty() || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+        || config.system_app_contexts.get(process).map(String::as_str) != Some(sid)
+    {
+        return None;
+    }
+    // Reuse scope and denylist precedence, relaxing only the system-UID gate
+    // for this authenticated, explicitly named process.
+    let mut app_filter = config.clone();
+    app_filter.block_android_package = false;
+    Some(evaluate(
+        scoop,
+        &app_filter,
+        uid,
+        PackageResolution::Known(vec![process.to_owned()]),
+    ))
 }
 
 #[cfg(test)]

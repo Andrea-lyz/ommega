@@ -1,4 +1,4 @@
-# With `[filter].enabled = true`, a UID is intercepted when any package
+# With `[filter].enabled = true`, an application UID is intercepted when any package
 # sharing that UID is listed in `scoop`.
 # Filter deny settings still apply to every package resolved for the UID.
 
@@ -20,10 +20,18 @@ enabled = true
 log_level = "debug"
 
 [filter]
+# WebUI "Global scope": enabled=false bypasses all package/UID/deny filters.
+# enabled=true restores the saved scope and the rules below.
 enabled = true
 deny_packages = []
 block_android_package = true
 allow_unknown_package = false
+# Exact UID-1000 application process -> Binder SELinux context bindings.
+# Both this binding and a scoop/target.txt entry are required. Native/system_server
+# domains stay blocked. No binding is enabled by default.
+system_app_contexts = {}
+# Example after verifying the app's UID, process name and Binder SID:
+# system_app_contexts = { "com.oplus.engineermode" = "u:r:engineermode_app:s0" }
 
 # The keystore2 surface routes as a whole: with any switch enabled, every method
 # of an allowed caller uses ommega; with none enabled, all of them pass to System.

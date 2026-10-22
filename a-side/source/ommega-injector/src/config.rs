@@ -78,6 +78,9 @@ pub struct FilterConfig {
     pub deny_packages: Vec<String>,
     pub block_android_package: bool,
     pub allow_unknown_package: bool,
+    /// Explicit UID-1000 app process -> Binder SELinux context bindings.
+    /// A matching process must also be in scoop; an empty map keeps system UIDs blocked.
+    pub system_app_contexts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -153,6 +156,7 @@ impl Default for FilterConfig {
             deny_packages: Vec::new(),
             block_android_package: true,
             allow_unknown_package: false,
+            system_app_contexts: BTreeMap::new(),
         }
     }
 }
@@ -375,6 +379,9 @@ fn load_disable_native_strongbox() -> bool {
 
 impl InjectorConfig {
     pub fn target_security_mode_for(&self, packages: &[String]) -> Option<TargetSecurityMode> {
+        if !self.filter.enabled {
+            return Some(TargetSecurityMode::GlobalDefault);
+        }
         let mut targeted = false;
         let mut strongbox = false;
         for package in packages {
@@ -590,7 +597,7 @@ fn default_owner(path: &Path) -> (u32, u32) {
 
 fn render_config(config: &InjectorConfig) -> io::Result<String> {
     let mut contents = String::from(
-        "# With `[filter].enabled = true`, a UID is intercepted when any package\n\
+        "# With `[filter].enabled = true`, an application UID is intercepted when any package\n\
          # sharing that UID is listed in `scoop`.\n\
          # Filter deny settings still apply to every package resolved for the UID.\n\
          # The keystore2 surface routes as a whole: with any `[intercept]` switch\n\

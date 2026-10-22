@@ -62,12 +62,35 @@ off.
    optional per-package `global_default` / `strongbox` / `tee` policy stored in
    `/data/misc/keystore/ommega/target-security.toml`.
 
-   Two lists feed routing and they are merged when the injector config is read:
+   The WebUI's **Global scope** switch takes effect without clearing the list.
+   It is off by default. Turning it on sets `[filter].enabled = false` in
+   `injector.toml`: every UID, including system/root and unresolved callers, is
+   in scope, with no package-list, denylist or system-UID exclusion. Package
+   lookup is skipped and all callers use the global security-level policy.
+   Turning it off restores `[filter].enabled = true`, the saved lists and their
+   per-app policies. The WebUI disables list editing while global scope is on.
+   Existing keys and descriptors are not migrated between System and Ommega.
+
+   In list mode, two lists feed routing and are merged when the injector config is read:
    `scoop` in `/data/misc/keystore/ommega/injector.toml` (the shipped defaults
    plus anything added by hand) and `target.txt` (what the WebUI writes). A
    package listed in either one is routed; `target.txt` entries are appended to
    `scoop`, so the effective list is the union. `target-security.toml` only
    carries the per-app StrongBox / TEE / global-default choice.
+
+   Shared system UID apps (app id 1000) require an additional explicit process
+   binding while `block_android_package = true`. In `[filter]`,
+   `system_app_contexts = { "com.oplus.engineermode" = "u:r:engineermode_app:s0" }`
+   binds that exact main process name to its Binder-supplied SELinux context;
+   verify both on the target OS before configuring it. The process must also be
+   in `scoop` or `target.txt`, and the denylist still applies. The map is empty
+   by default. Missing process/SID evidence, other shared-UID processes and
+   native domains such as `system_server` keep the ordinary system-UID block.
+   Only application domains ending in `_app` can use this binding. This selects
+   the whole keystore2 surface for that caller; it does not change authentication
+   or maintenance mirroring. Removing the binding restores the system-UID block;
+   keys created in Ommega stay in its separate backend. Passing a factory key
+   status test also requires the selected backend to support its RSA/EC request.
 
    The remote settings dialog also provides a global "disable native
    StrongBox" switch. It only affects target apps whose policy is

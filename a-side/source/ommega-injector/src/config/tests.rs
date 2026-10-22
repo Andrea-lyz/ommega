@@ -44,6 +44,7 @@ fn config_defaults_and_log_levels_match_contract() {
     assert_eq!(config.main.log_level_filter(), LevelFilter::Debug);
     assert!(config.filter.block_android_package);
     assert!(!config.filter.allow_unknown_package);
+    assert!(config.filter.system_app_contexts.is_empty());
     assert!(config
         .compat
         .legacy_strongbox_unavailable_packages
@@ -159,6 +160,59 @@ get_supplementary_attestation_info = true
     assert!(!parsed.intercept.get_number_of_entries);
     assert!(!parsed.intercept.list_entries_batched);
     assert!(parsed.intercept.get_supplementary_attestation_info);
+}
+
+#[test]
+fn system_app_context_bindings_survive_parse_and_render() {
+    let parsed = parse_config(
+        r#"
+scoop = ["com.example.engineer"]
+
+[filter]
+system_app_contexts = { "com.example.engineer" = "u:r:factory_app:s0" }
+"#,
+    )
+    .expect("system app binding should parse");
+    assert!(parsed.filter.block_android_package);
+    assert!(!parsed.filter.allow_unknown_package);
+    assert_eq!(
+        parsed
+            .filter
+            .system_app_contexts
+            .get("com.example.engineer")
+            .map(String::as_str),
+        Some("u:r:factory_app:s0"),
+    );
+    let rendered = render_config(&parsed).expect("bound config should render");
+    let restored = parse_config(&rendered).expect("rendered binding should parse");
+    assert_eq!(
+        restored.filter.system_app_contexts,
+        parsed.filter.system_app_contexts
+    );
+}
+
+#[test]
+fn global_scope_uses_global_security_policy_and_restores_saved_app_policy() {
+    let mut config = InjectorConfig::default();
+    let package = "com.example.app".to_owned();
+    config.target_packages.push(package.clone());
+    config
+        .target_security_modes
+        .insert(package.clone(), TargetSecurityMode::Tee);
+    config.filter.enabled = false;
+    assert_eq!(
+        config.target_security_mode_for(&[]),
+        Some(TargetSecurityMode::GlobalDefault)
+    );
+    assert_eq!(
+        config.target_security_mode_for(std::slice::from_ref(&package)),
+        Some(TargetSecurityMode::GlobalDefault),
+    );
+    config.filter.enabled = true;
+    assert_eq!(
+        config.target_security_mode_for(std::slice::from_ref(&package)),
+        Some(TargetSecurityMode::Tee),
+    );
 }
 
 #[test]

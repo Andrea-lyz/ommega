@@ -96,7 +96,32 @@ fn evaluate_caller(
 ) -> crate::filter::FilterDecision {
     let uid = caller.uid as u32;
     let preflight = filter::evaluate(&cfg.scoop, &cfg.filter, uid, PackageResolution::Unknown);
+    // Global scope includes system and unresolved callers and must not depend
+    // on the package manager or the saved per-app scope.
+    if preflight.reason == FilterReason::Disabled {
+        return preflight;
+    }
     if preflight.reason == FilterReason::RejectedAndroidPackage {
+        if cfg
+            .filter
+            .system_app_contexts
+            .values()
+            .any(|sid| !sid.is_empty() && sid == &caller.sid)
+        {
+            // Unlike the general process-name helper, require the literal argv[0]:
+            // no executable basename or truncated /proc/comm fallback is an app identity.
+            let decision = i32::try_from(caller.pid)
+                .ok()
+                .filter(|pid| *pid > 0)
+                .and_then(|pid| std::fs::read(format!("/proc/{pid}/cmdline")).ok())
+                .and_then(|cmdline| {
+                    let process = std::str::from_utf8(cmdline.split(|b| *b == 0).next()?).ok()?;
+                    filter::evaluate_system_app(&cfg.scoop, &cfg.filter, uid, &caller.sid, process)
+                });
+            if let Some(decision) = decision {
+                return decision;
+            }
+        }
         return preflight;
     }
 
@@ -104,13 +129,7 @@ fn evaluate_caller(
         let _guard = BypassGuard::enter();
         ipc::resolve_packages_for_uid(uid)
     };
-    let decision = filter::evaluate(&cfg.scoop, &cfg.filter, uid, package_resolution);
-    if decision.reason == FilterReason::Disabled {
-        debug!(
-            "event=decision package filter disabled; routing still follows per-method intercept settings"
-        );
-    }
-    decision
+    filter::evaluate(&cfg.scoop, &cfg.filter, uid, package_resolution)
 }
 
 fn service_request_key(request: &ParsedServiceRequest) -> Option<&KeyDescriptor> {

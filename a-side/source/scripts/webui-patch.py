@@ -29,9 +29,9 @@ MARKER = "OMMEGA_TARGET_COMPAT"
 GLUE_HEADER = "\n// ── Ommega detector compatibility policy"
 
 # sha256 of the unpatched bundle this glue was written against.
-# Includes the fork's existing remote/profile patches. The pre-glue source was
-# verified byte-for-byte (after newline normalization) against master 1d214a4.
-BASELINE = "7aa75a11e39b3e55333187e2af15fa787116fd184a7d7326eb10d3907cb5ef8d"
+# Includes the current app-list rendering and remote/profile patches. Preserve
+# this pre-glue source byte-for-byte when refreshing the appended glue.
+BASELINE = "0b184c7aa12be4e80e524b01701909a08e2dcfe30cbcc401d4bef329a26eaf0e"
 
 
 def sha256(path: Path) -> str:
@@ -71,7 +71,7 @@ def main() -> int:
     args = parser.parse_args()
 
     path = bundle_path()
-    text = path.read_text(encoding="utf-8")
+    text = path.read_bytes().decode("utf-8")
     glue = GLUE.read_text(encoding="utf-8")
     digest = sha256(path)
     patched = MARKER in text
@@ -126,8 +126,8 @@ def main() -> int:
             return 1
         rebaseline(path, digest)
 
-    path.write_text(text + glue, encoding="utf-8")
-    if not path.read_text(encoding="utf-8").endswith(glue):
+    path.write_bytes((text + glue).encode("utf-8"))
+    if not path.read_bytes().decode("utf-8").endswith(glue):
         raise SystemExit("patch verification failed: the bundle does not end with the glue")
     print("patched " + path.name + " -> " + sha256(path))
     return 0
