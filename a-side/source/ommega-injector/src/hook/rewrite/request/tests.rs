@@ -444,6 +444,39 @@ fn soft_rejected_grant_positive_probe_works_for_service_and_security_level() {
 }
 
 #[test]
+fn android_package_grant_positive_probe_routes_to_ommega() {
+    let _guard = route_state_test_guard();
+    let grant = KeyDescriptor {
+        domain: Domain::GRANT,
+        nspace: 123,
+        alias: None,
+        blob: None,
+    };
+    let decision = crate::filter::FilterDecision {
+        allowed: false,
+        reason: crate::filter::FilterReason::RejectedAndroidPackage,
+        packages: vec![],
+    };
+    let caller = CallerInfo {
+        uid: 1000,
+        sid: String::new(),
+        pid: 2000,
+    };
+
+    assert!(should_allow_ommega_grant_service_request_with_probe(
+        &ParsedServiceRequest::GetKeyEntry { key: grant.clone() },
+        &decision,
+        &caller,
+        |probe_caller, probe_grant| {
+            assert_eq!(probe_caller.uid, caller.uid);
+            assert_eq!(probe_grant, &grant);
+            Ok(true)
+        },
+    )
+    .expect("system_server grant probe should succeed"));
+}
+
+#[test]
 fn denylisted_grant_readback_does_not_probe_ommega() {
     let _guard = route_state_test_guard();
     let grant = KeyDescriptor {
