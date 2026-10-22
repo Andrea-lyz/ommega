@@ -28,10 +28,10 @@ block_android_package = true
 allow_unknown_package = false
 # Exact UID-1000 application process -> Binder SELinux context bindings.
 # Both this binding and a scoop/target.txt entry are required. Native/system_server
-# domains stay blocked. No binding is enabled by default.
-system_app_contexts = {}
-# Example after verifying the app's UID, process name and Binder SID:
-# system_app_contexts = { "com.oplus.engineermode" = "u:r:engineermode_app:s0" }
+# domains stay blocked. Only this verified EngineerMode package/domain is built in.
+# Missing this field inherits the default; an explicit {} disables the exception.
+# A custom map replaces the default bindings.
+system_app_contexts = { "com.oplus.engineermode" = "u:r:engineermode_app:s0" }
 
 # The keystore2 surface routes as a whole: with any switch enabled, every method
 # of an allowed caller uses ommega; with none enabled, all of them pass to System.

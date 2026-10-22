@@ -78,17 +78,20 @@ off.
    `scoop`, so the effective list is the union. `target-security.toml` only
    carries the per-app StrongBox / TEE / global-default choice.
 
-   Shared system UID apps (app id 1000) require an additional explicit process
-   binding while `block_android_package = true`. In `[filter]`,
-   `system_app_contexts = { "com.oplus.engineermode" = "u:r:engineermode_app:s0" }`
-   binds that exact main process name to its Binder-supplied SELinux context;
-   verify both on the target OS before configuring it. The process must also be
-   in `scoop` or `target.txt`, and the denylist still applies. The map is empty
-   by default. Missing process/SID evidence, other shared-UID processes and
-   native domains such as `system_server` keep the ordinary system-UID block.
+   Shared system UID apps (app id 1000) require a process binding while
+   `block_android_package = true`. The default `[filter].system_app_contexts`
+   contains only the verified `com.oplus.engineermode` main process bound to
+   Binder SELinux context `u:r:engineermode_app:s0`. Selecting that package in
+   `scoop` or `target.txt` is sufficient on this domain; the denylist still
+   applies. Configurations that omit the field inherit this default. An explicit
+   `system_app_contexts = {}` disables the exception, and a custom map replaces
+   the default bindings. Other bindings require verifying the app's UID, exact
+   process name and Binder SID on the target OS. Missing process/SID evidence,
+   other shared-UID processes and native domains such as `system_server` keep
+   the ordinary system-UID block.
    Only application domains ending in `_app` can use this binding. This selects
    the whole keystore2 surface for that caller; it does not change authentication
-   or maintenance mirroring. Removing the binding restores the system-UID block;
+   or maintenance mirroring. Clearing the map restores the system-UID block;
    keys created in Ommega stay in its separate backend. Passing a factory key
    status test also requires the selected backend to support its RSA/EC request.
 

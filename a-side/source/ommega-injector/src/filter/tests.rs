@@ -19,6 +19,56 @@ fn disabled_filter_reports_disabled_and_allows() {
 }
 
 #[test]
+fn default_engineermode_binding_requires_the_selected_exact_system_app_caller() {
+    let package = "com.oplus.engineermode";
+    let sid = "u:r:engineermode_app:s0";
+    let scope = vec![package.to_owned()];
+    let mut config = base_config();
+    for uid in [1000, 101_000] {
+        let decision = evaluate_system_app(&scope, &config, uid, sid, package).unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.packages, scope);
+    }
+    for uid in [0, 1001, 1017, 2000, 10_000] {
+        assert!(evaluate_system_app(&scope, &config, uid, sid, package).is_none());
+    }
+    for (wrong_sid, wrong_process) in [
+        ("", package),
+        ("u:r:system_server:s0", package),
+        ("u:r:system_app:s0", package),
+        ("u:r:factory_app:s0", package),
+        (sid, ""),
+        (sid, "com.oplus.other"),
+        (sid, "com.oplus.engineermode:remote"),
+        (sid, "/system/bin/com.oplus.engineermode"),
+    ] {
+        assert!(evaluate_system_app(&scope, &config, 1000, wrong_sid, wrong_process).is_none());
+    }
+
+    let decision = evaluate_system_app(&[], &config, 1000, sid, package).unwrap();
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedNotInScope);
+    // Even resolving the selected package cannot opt the whole shared UID in.
+    let decision = evaluate(
+        &scope,
+        &config,
+        1000,
+        PackageResolution::Known(scope.clone()),
+    );
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedAndroidPackage);
+
+    config.deny_packages.push(package.into());
+    let decision = evaluate_system_app(&scope, &config, 1000, sid, package).unwrap();
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedByDenylist);
+
+    config.deny_packages.clear();
+    config.system_app_contexts.clear();
+    assert!(evaluate_system_app(&scope, &config, 1000, sid, package).is_none());
+}
+
+#[test]
 fn scoped_system_app_requires_uid_sid_process_and_explicit_binding() {
     let package = "com.example.engineer";
     let sid = "u:r:factory_app:s0";

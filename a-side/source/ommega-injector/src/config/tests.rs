@@ -44,7 +44,13 @@ fn config_defaults_and_log_levels_match_contract() {
     assert_eq!(config.main.log_level_filter(), LevelFilter::Debug);
     assert!(config.filter.block_android_package);
     assert!(!config.filter.allow_unknown_package);
-    assert!(config.filter.system_app_contexts.is_empty());
+    assert_eq!(
+        config.filter.system_app_contexts,
+        BTreeMap::from([(
+            "com.oplus.engineermode".to_owned(),
+            "u:r:engineermode_app:s0".to_owned(),
+        )]),
+    );
     assert!(config
         .compat
         .legacy_strongbox_unavailable_packages
@@ -163,6 +169,26 @@ get_supplementary_attestation_info = true
 }
 
 #[test]
+fn legacy_filter_configs_inherit_only_the_verified_system_app_binding() {
+    let expected = FilterConfig::default().system_app_contexts;
+    for contents in [
+        "version = 1\n",
+        "[filter]\nenabled = true\nblock_android_package = true\n",
+        "version = 1\n[filter]\nallow_unknown_package = false\n",
+    ] {
+        let parsed = parse_config(contents).expect("omitted binding should use defaults");
+        assert_eq!(parsed.filter.system_app_contexts, expected);
+    }
+
+    let parsed = parse_config("[filter]\nsystem_app_contexts = {}\n")
+        .expect("explicit empty binding should parse");
+    assert!(parsed.filter.system_app_contexts.is_empty());
+    let rendered = render_config(&parsed).expect("empty binding should render");
+    let restored = parse_config(&rendered).expect("rendered empty binding should parse");
+    assert!(restored.filter.system_app_contexts.is_empty());
+}
+
+#[test]
 fn system_app_context_bindings_survive_parse_and_render() {
     let parsed = parse_config(
         r#"
@@ -183,6 +209,11 @@ system_app_contexts = { "com.example.engineer" = "u:r:factory_app:s0" }
             .map(String::as_str),
         Some("u:r:factory_app:s0"),
     );
+    assert_eq!(parsed.filter.system_app_contexts.len(), 1);
+    assert!(!parsed
+        .filter
+        .system_app_contexts
+        .contains_key("com.oplus.engineermode"));
     let rendered = render_config(&parsed).expect("bound config should render");
     let restored = parse_config(&rendered).expect("rendered binding should parse");
     assert_eq!(
@@ -347,10 +378,14 @@ fn unsupported_versions_are_rejected_without_rewriting() {
 }
 
 #[test]
-fn template_scope_matches_default_scope() {
+fn template_scope_and_system_app_bindings_match_defaults() {
     let template = include_str!("../../../template/injector.toml");
     let parsed = parse_config(template).expect("template injector config should parse");
     assert_eq!(parsed.scoop, default_scoop());
+    assert_eq!(
+        parsed.filter.system_app_contexts,
+        FilterConfig::default().system_app_contexts,
+    );
 }
 
 #[test]

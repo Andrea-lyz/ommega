@@ -11,7 +11,10 @@ let ommegaCompatEnabled = false;
 // presents the matching half using the same resolved preference as the shell.
 function ommegaUiLocalize(value) {
   let chinese = false;
-  try { chinese = /^zh/i.test(localStorage.getItem("trickyAddonLanguage") || navigator.language); } catch (_) {}
+  try {
+    const preference = localStorage.getItem("trickyAddonLanguage");
+    chinese = /^zh/i.test(preference && preference !== "default" ? preference : navigator.language);
+  } catch (_) {}
   return String(value).split("\n").map(line => {
     const halves = line.split(/\s*\/ (?=[A-Za-z])/);
     return halves.length === 2 && /[\u3400-\u9fff]/.test(halves[0]) ? halves[chinese ? 0 : 1] : line;
@@ -736,15 +739,19 @@ function ommegaScopeSync() {
     const control = document.getElementById(id);
     if (control) control.disabled = blocked || ommegaGlobalScopePending;
   }
-  report.textContent = ommegaGlobalScopeMessage || (ommegaGlobalScopeEnabled
+  report.textContent = ommegaGlobalScopeMessage || ommegaUiLocalize(ommegaGlobalScopeEnabled
     ? "已开启：所有应用和系统服务均在作用域内，列表暂不生效。关闭后恢复原列表。 / On: all apps and system services are in scope. The saved list is paused."
     : "已关闭：按原作用域列表生效。 / Off: the saved scope list applies.");
 }
 
 async function ommegaScopeRead() {
-  const result = await _('cat "' + OMMEGA_SCOPE_CONFIG + '"');
+  // The manager's exec bridge joins stdout lines and drops their terminators.
+  // Transport the file as base64 so CRLF and the final newline survive exactly;
+  // the atomic writer compares these original bytes before replacing the file.
+  const result = await _('base64 < "' + OMMEGA_SCOPE_CONFIG + '"');
   if (Number(result.errno) !== 0) throw new Error(result.stderr || "Could not read injector.toml");
-  const contents = String(result.stdout);
+  const bytes = Uint8Array.from(atob(String(result.stdout).replace(/\s/g, "")), byte => byte.charCodeAt(0));
+  const contents = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);
   const setting = ommegaScopeSetting(contents);
   ommegaGlobalScopeEnabled = setting.global;
   ommegaGlobalScopeKnown = true;
@@ -758,7 +765,7 @@ async function ommegaRefreshGlobalScope() {
     ommegaGlobalScopeMessage = "";
   } catch (error) {
     ommegaGlobalScopeKnown = false;
-    ommegaGlobalScopeMessage = "无法读取作用域状态 / Could not read scope: " + error.message;
+    ommegaGlobalScopeMessage = ommegaUiLocalize("无法读取作用域状态 / Could not read scope") + ": " + error.message;
   }
   ommegaScopeSync();
 }
@@ -767,7 +774,7 @@ async function ommegaApplyGlobalScope() {
   if (ommegaGlobalScopePending || !ommegaGlobalScopeKnown) return;
   const requested = document.getElementById("ommega-global-scope-enabled").checked;
   ommegaGlobalScopePending = true;
-  ommegaGlobalScopeMessage = "正在保存… / Saving…";
+  ommegaGlobalScopeMessage = ommegaUiLocalize("正在保存… / Saving…");
   ommegaScopeSync();
   try {
     const contents = await ommegaScopeRead();
@@ -778,7 +785,7 @@ async function ommegaApplyGlobalScope() {
     ommegaGlobalScopeMessage = "";
   } catch (error) {
     try { await ommegaScopeRead(); } catch { ommegaGlobalScopeKnown = false; }
-    ommegaGlobalScopeMessage = "保存失败 / Could not save scope: " + error.message;
+    ommegaGlobalScopeMessage = ommegaUiLocalize("保存失败 / Could not save scope") + ": " + error.message;
   } finally {
     ommegaGlobalScopePending = false;
     ommegaScopeSync();
@@ -792,7 +799,7 @@ function ommegaInstallGlobalScope() {
   panel.id = "ommega-global-scope";
   panel.style.cssText = "margin:12px 16px;padding:14px 16px;border-radius:16px;" +
     "background:var(--md-sys-color-surface-container,#eee);color:var(--md-sys-color-on-surface,#222)";
-  panel.innerHTML = '<style>#ommega-global-scope label{display:flex;align-items:center;gap:12px;min-height:48px;cursor:pointer}' +
+  panel.innerHTML = ommegaUiLocalizeHtml('<style>#ommega-global-scope label{display:flex;align-items:center;gap:12px;min-height:48px;cursor:pointer}' +
     '#ommega-global-scope input{appearance:none;flex:none;width:48px;height:28px;border:2px solid currentColor;' +
     'border-radius:18px;position:relative;cursor:pointer;background:transparent;color:inherit}' +
     '#ommega-global-scope input:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;' +
@@ -804,7 +811,7 @@ function ommegaInstallGlobalScope() {
     '@media(prefers-reduced-motion:reduce){#ommega-global-scope input:before{transition:none}}</style>' +
     '<label for="ommega-global-scope-enabled"><input type="checkbox" role="switch" id="ommega-global-scope-enabled" ' +
     'aria-describedby="ommega-global-scope-status" disabled><strong>全局作用域 / Global scope</strong></label>' +
-    '<div id="ommega-global-scope-status" role="status" aria-live="polite" style="font-size:13px;line-height:1.5;margin-top:4px">正在读取… / Loading…</div>';
+    '<div id="ommega-global-scope-status" role="status" aria-live="polite" style="font-size:13px;line-height:1.5;margin-top:4px">正在读取… / Loading…</div>');
   list.parentElement.insertBefore(panel, list);
   document.getElementById("ommega-global-scope-enabled").addEventListener("change", ommegaApplyGlobalScope);
   const baseLoad = Mi;

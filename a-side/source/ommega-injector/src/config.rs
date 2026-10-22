@@ -78,8 +78,9 @@ pub struct FilterConfig {
     pub deny_packages: Vec<String>,
     pub block_android_package: bool,
     pub allow_unknown_package: bool,
-    /// Explicit UID-1000 app process -> Binder SELinux context bindings.
-    /// A matching process must also be in scoop; an empty map keeps system UIDs blocked.
+    /// UID-1000 app process -> Binder SELinux context bindings.
+    /// Defaults to the verified EngineerMode package/domain only. A matching process
+    /// must also be in scoop; an explicitly empty map keeps system UIDs blocked.
     pub system_app_contexts: BTreeMap<String, String>,
 }
 
@@ -134,6 +135,7 @@ fn default_scoop() -> Vec<String> {
         "com.google.android.gms",
         "com.android.vending",
         "com.eltavine.duckdetector",
+        "com.oplus.engineermode",
     ]
     .into_iter()
     .map(str::to_string)
@@ -156,7 +158,10 @@ impl Default for FilterConfig {
             deny_packages: Vec::new(),
             block_android_package: true,
             allow_unknown_package: false,
-            system_app_contexts: BTreeMap::new(),
+            system_app_contexts: BTreeMap::from([(
+                "com.oplus.engineermode".to_owned(),
+                "u:r:engineermode_app:s0".to_owned(),
+            )]),
         }
     }
 }
