@@ -252,12 +252,14 @@ fn auth_bound_generation_stays_on_the_local_path() {
     params.retain(|p| !matches!(p, KeyParam::NoAuthRequired));
     params.extend([
         KeyParam::UserSecureId(42),
-        KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
-        KeyParam::AuthTimeout(5),
+        KeyParam::UserAuthType(HardwareAuthenticatorType::Fingerprint as u32),
+        KeyParam::AuthTimeout(0),
         KeyParam::UnlockedDeviceRequired,
     ]);
     params.push(KeyParam::AttestationChallenge(b"test-challenge".to_vec()));
-    params.push(KeyParam::AttestationApplicationId(b"test-app".to_vec()));
+    params.push(KeyParam::AttestationApplicationId(
+        b"com.ommega.authrepro".to_vec(),
+    ));
 
     // TestRemote would panic if this request went to the relay. The fixture
     // has no local keybox, so the local path stops with this error instead.
@@ -269,28 +271,49 @@ fn auth_bound_generation_stays_on_the_local_path() {
 }
 
 #[test]
-fn auth_bound_signing_requests_are_kept_local() {
-    for param in [
+fn per_use_biometric_signing_stays_local() {
+    let fingerprint = HardwareAuthenticatorType::Fingerprint as u32;
+    let password = HardwareAuthenticatorType::Password as u32;
+    assert!(requires_local_auth_signing(&[
+        KeyParam::Purpose(KeyPurpose::Sign),
         KeyParam::UserSecureId(42),
-        KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
-        KeyParam::AuthTimeout(30),
-        KeyParam::AllowWhileOnBody,
-        KeyParam::TrustedUserPresenceRequired,
-        KeyParam::TrustedConfirmationRequired,
+        KeyParam::UserAuthType(fingerprint),
+    ]));
+    assert!(requires_local_auth_signing(&[
+        KeyParam::Purpose(KeyPurpose::Sign),
+        KeyParam::UserAuthType(fingerprint),
+        KeyParam::AuthTimeout(0),
+    ]));
+    for params in [
+        vec![
+            KeyParam::Purpose(KeyPurpose::Sign),
+            KeyParam::UserAuthType(fingerprint),
+            KeyParam::AuthTimeout(10),
+        ],
+        vec![
+            KeyParam::Purpose(KeyPurpose::Sign),
+            KeyParam::UserAuthType(password),
+        ],
+        vec![
+            KeyParam::Purpose(KeyPurpose::Sign),
+            KeyParam::UserAuthType(fingerprint | password),
+        ],
+        vec![
+            KeyParam::Purpose(KeyPurpose::Decrypt),
+            KeyParam::UserAuthType(fingerprint),
+        ],
+        vec![KeyParam::Purpose(KeyPurpose::Sign)],
     ] {
         assert!(
-            requires_local_auth_signing(&[KeyParam::Purpose(KeyPurpose::Sign), param.clone()]),
-            "auth-bound SIGN should force local generation: {param:?}"
+            !requires_local_auth_signing(&params),
+            "unexpected local: {params:?}"
         );
     }
-    assert!(!requires_local_auth_signing(&[KeyParam::Purpose(
-        KeyPurpose::Sign
-    )]));
-    assert!(!requires_local_auth_signing(&[]));
 }
 
 #[test]
 fn auth_bound_non_signing_requests_stay_remote() {
+    let fingerprint = HardwareAuthenticatorType::Fingerprint as u32;
     for purpose in [
         KeyPurpose::Decrypt,
         KeyPurpose::AgreeKey,
@@ -298,31 +321,12 @@ fn auth_bound_non_signing_requests_stay_remote() {
     ] {
         assert!(!requires_local_auth_signing(&[
             KeyParam::Purpose(purpose),
-            KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
-            KeyParam::AuthTimeout(30),
+            KeyParam::UserAuthType(fingerprint),
         ]));
     }
     assert!(!requires_local_auth_signing(&[KeyParam::UserAuthType(
-        HardwareAuthenticatorType::Password as u32
+        fingerprint
     )]));
-}
-
-#[test]
-fn hardware_chain_packages_stay_remote_for_auth_keys() {
-    for package in [
-        &b"com.google.android.gms"[..],
-        &b"com.google.android.apps.walletnfcrel"[..],
-        &b"com.android.vending"[..],
-        &b"com.lingqing.trustattestor"[..],
-        &b"io.github.vvb2060.keyattestation"[..],
-        &b"com.eltavine.duckdetector"[..],
-        &b"com.oplus.engineermode"[..],
-    ] {
-        assert!(app_id_requires_remote_auth(Some(package)));
-    }
-    assert!(!app_id_requires_remote_auth(Some(b"net.one97.paytm")));
-    assert!(!app_id_requires_remote_auth(Some(b"com.ommega.authrepro")));
-    assert!(!app_id_requires_remote_auth(None));
 }
 
 #[test]

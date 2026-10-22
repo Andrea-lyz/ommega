@@ -87,59 +87,54 @@ fn equalize_to_remote_attest_duration(started: Instant) {
     }
 }
 
-/// Whether this auth-bound request is a signing key that must be local.
+/// Whether this request is a per-use strong-biometric signing key.
 ///
 /// The relay has no A-side `HardwareAuthToken`, and B cannot validate A's
 /// Gatekeeper token. A key minted on B with these tags would reject every
 /// signature with `KeyUserNotAuthenticated` (-26), even after A's fingerprint
-/// prompt succeeds. Keep auth-bound signing keys local: the local keybox chain
-/// carries the requested authorization list and the local Keystore performs
-/// the prompt. Auth-bound decrypt/agreement keys stay remote so their leaf
-/// keeps B's hardware chain; if such an operation is actually used, B will
-/// still return -26 until an explicit local path is added.
+/// prompt succeeds. This policy is automatic rather than a package list: it
+/// matches only `PURPOSE_SIGN` keys with per-operation strong biometric auth.
+/// Timeout-based keys (GMS), device-credential-capable keys (detector probes),
+/// and all decrypt/agreement keys keep B's hardware chain. The trade-off is
+/// that a per-use biometric key from an arbitrary app also uses the local
+/// keybox; if such an operation is actually used remotely, B will still return
+/// -26 until an explicit local path is added.
 ///
 /// `UNLOCKED_DEVICE_REQUIRED` (509) is intentionally not included. B can
 /// enforce that constraint while its user is unlocked, so those keys remain
 /// remote and their leaf still carries tag 509.
 fn requires_local_auth_signing(params: &[KeyParam]) -> bool {
-    let auth_bound = params.iter().any(|param| {
-        matches!(
-            param,
-            KeyParam::UserSecureId(_)
-                | KeyParam::UserAuthType(_)
-                | KeyParam::AuthTimeout(_)
-                | KeyParam::AllowWhileOnBody
-                | KeyParam::TrustedUserPresenceRequired
-                | KeyParam::TrustedConfirmationRequired
-        )
-    });
-    auth_bound
-        && params
-            .iter()
-            .any(|param| matches!(param, KeyParam::Purpose(KeyPurpose::Sign)))
-}
+    const AUTH_DEVICE_CREDENTIAL: u32 = 1;
+    const AUTH_BIOMETRIC_STRONG: u32 = 2;
 
-/// Packages that must keep B's hardware attestation chain for auth-bound keys.
-///
-/// The local keybox on A may be a software keybox (`DeviceID="sw"`); Google
-/// Wallet and hardware-integrity probes reject that chain. These packages keep
-/// the pre-existing remote path, while ordinary apps (including banking apps)
-/// use the local path so their fingerprint signature can succeed.
-fn app_id_requires_remote_auth(app_id: Option<&[u8]>) -> bool {
-    const PACKAGES: &[&[u8]] = &[
-        b"com.google.",
-        b"com.android.vending",
-        b"com.lingqing.trustattestor",
-        b"io.github.vvb2060.keyattestation",
-        b"com.eltavine.duckdetector",
-        b"com.oplus.engineermode",
-    ];
-    let Some(app_id) = app_id else {
-        return false;
-    };
-    PACKAGES
-        .iter()
-        .any(|needle| app_id.windows(needle.len()).any(|window| window == *needle))
+    let mut signs = false;
+    let mut auth_bound = false;
+    let mut auth_type = None;
+    let mut auth_timeout = None;
+    for param in params {
+        match param {
+            KeyParam::Purpose(KeyPurpose::Sign) => signs = true,
+            KeyParam::UserSecureId(_) => auth_bound = true,
+            KeyParam::UserAuthType(value) => {
+                auth_bound = true;
+                auth_type = Some(*value);
+            }
+            KeyParam::AuthTimeout(value) => {
+                auth_bound = true;
+                auth_timeout = Some(*value);
+            }
+            KeyParam::AllowWhileOnBody
+            | KeyParam::TrustedUserPresenceRequired
+            | KeyParam::TrustedConfirmationRequired => auth_bound = true,
+            _ => {}
+        }
+    }
+    signs
+        && auth_bound
+        && auth_type.is_some_and(|value| {
+            value & AUTH_BIOMETRIC_STRONG != 0 && value & AUTH_DEVICE_CREDENTIAL == 0
+        })
+        && auth_timeout.unwrap_or(0) == 0
 }
 
 /// Make remote key characteristics use the version tags from B's certificate.
@@ -572,10 +567,7 @@ impl crate::KeyMintTa {
         // B has no A-side HAT, so such a key could never sign. The supplied-
         // issuer path keeps its existing remote delegation behavior. Ordinary
         // keys and UNLOCKED_DEVICE_REQUIRED-only keys continue through B.
-        let app_id = get_opt_tag_value!(params, AttestationApplicationId)?;
-        let local_auth_signing = requires_local_auth_signing(params)
-            && attestation_key.is_none()
-            && !app_id_requires_remote_auth(app_id.map(|id| &id[..]));
+        let local_auth_signing = requires_local_auth_signing(params) && attestation_key.is_none();
         let remote_attest = has_challenge
             && remote_enabled
             && !local_auth_signing
