@@ -323,12 +323,14 @@ the requested authorization list, including user SIDs, authentication type,
 timeout and `UNLOCKED_DEVICE_REQUIRED` (509). It adds `NO_AUTH_REQUIRED` only
 when no authentication policy was specified. B cannot validate A's user token,
 so an auth-bound remote hardware operation can still be rejected by B.
-A returns B's certificate chain unchanged, reporting B's actual authorizations
-without adding a synthetic child leaf for auth-bound keys. `ATTEST_KEY` reaches
+Without a caller-provided issuer, A returns B's full certificate chain unchanged,
+reporting B's actual authorizations without adding a synthetic child leaf for
+auth-bound keys. `ATTEST_KEY` reaches
 the HAL unchanged. B checks the returned hardware purpose; A checks the
 certificate's hardware ATTEST_KEY authorization. Explicit
 delegation uses B's native `generateKey(..., AttestationKey)`. B appends the
-parent chain; A verifies the selected parent public key and child signature.
+parent chain; A verifies the selected parent public key and child signature, then
+returns only the new child certificate. The caller appends its existing issuer chain.
 Native delegation permissions come from the hardware keyblob. This path does
 not impose a generic PKIX CA gate or rewrite certificate extensions.
 Both A and B must support delegation. A rejects an old relay that ignores the

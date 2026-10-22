@@ -736,11 +736,17 @@ impl crate::KeyMintTa {
             root_of_trust,
         });
 
+        // Preserve B's certificate bytes without synthesizing auth metadata.
+        // The full chain above is needed to validate delegation. For a
+        // caller-provided issuer, KeyCreationResult must return only the child:
+        // the caller already has the issuer chain and appends it separately.
+        let returned_chain = if attestation_key.is_some() {
+            &chain[..1]
+        } else {
+            &chain[..]
+        };
         let mut certificate_chain = Vec::new();
-        // Return the physical chain unchanged. The relay key is no-auth on B;
-        // A enforces the caller's original authentication policy locally. A
-        // synthetic leaf must not claim that B enforces the A-side policy.
-        for der in chain.iter() {
+        for der in returned_chain {
             certificate_chain.try_push(keymint::Certificate {
                 encoded_certificate: der.clone(),
             })?;
