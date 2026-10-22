@@ -448,7 +448,7 @@ impl DelegationFixture {
 }
 
 #[test]
-fn native_remote_delegation_preserves_the_hardware_chain() {
+fn native_remote_delegation_returns_only_the_child_certificate() {
     let mut fixture = DelegationFixture::new();
     let result = fixture.generate().unwrap();
     let returned: Vec<_> = result
@@ -456,7 +456,11 @@ fn native_remote_delegation_preserves_the_hardware_chain() {
         .into_iter()
         .map(|cert| cert.encoded_certificate)
         .collect();
-    assert_eq!(returned, fixture.chain);
+    assert_eq!(returned, fixture.chain[..1]);
+    // setAttestKeyAlias callers append their existing issuer chain themselves.
+    let mut caller_chain = returned;
+    caller_chain.extend_from_slice(&fixture.chain[1..]);
+    assert_eq!(caller_chain, fixture.chain);
     let (stored, _) = fixture
         .ta
         .keyblob_parse_decrypt(&result.key_blob, &[])
@@ -480,7 +484,22 @@ fn native_remote_delegation_rejects_an_ignored_issuer() {
 #[test]
 fn native_remote_delegation_accepts_a_valid_rsa_issuer_signature() {
     let mut fixture = DelegationFixture::with_rsa_issuer(true);
-    assert!(fixture.generate().is_ok());
+    let result = fixture.generate().unwrap();
+    assert_eq!(result.certificate_chain.len(), 1);
+    assert_eq!(
+        result.certificate_chain[0].encoded_certificate,
+        fixture.chain[0]
+    );
+}
+
+#[test]
+fn native_remote_delegation_requires_the_issuer_chain_for_validation() {
+    let mut fixture = DelegationFixture::new();
+    fixture.response(fixture.chain[..1].to_vec(), false);
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
 }
 
 #[test]
