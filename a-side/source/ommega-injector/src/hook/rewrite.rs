@@ -96,12 +96,15 @@ fn evaluate_caller(
 ) -> crate::filter::FilterDecision {
     let uid = caller.uid as u32;
     let preflight = filter::evaluate(&cfg.scoop, &cfg.filter, uid, PackageResolution::Unknown);
-    // Global scope includes system and unresolved callers and must not depend
-    // on the package manager or the saved per-app scope.
+    // Application-global scope skips package lookup for regular application UIDs.
+    // UID-1000 apps still require exact SID and process identity below.
     if preflight.reason == FilterReason::Disabled {
         return preflight;
     }
-    if preflight.reason == FilterReason::RejectedAndroidPackage {
+    if matches!(
+        preflight.reason,
+        FilterReason::RejectedAndroidPackage | FilterReason::RejectedNonApplicationUid
+    ) {
         if cfg
             .filter
             .system_app_contexts
@@ -113,7 +116,16 @@ fn evaluate_caller(
             let decision = i32::try_from(caller.pid)
                 .ok()
                 .filter(|pid| *pid > 0)
-                .and_then(|pid| std::fs::read(format!("/proc/{pid}/cmdline")).ok())
+                .and_then(|pid| {
+                    std::fs::read(format!("/proc/{pid}/cmdline"))
+                        .inspect_err(|error| {
+                            warn!(
+                                "event=caller_identity cannot read configured system-app argv[0] uid={} pid={} sid='{}': {}",
+                                uid, pid, caller.sid, error
+                            );
+                        })
+                        .ok()
+                })
                 .and_then(|cmdline| {
                     let process = std::str::from_utf8(cmdline.split(|b| *b == 0).next()?).ok()?;
                     filter::evaluate_system_app(&cfg.scoop, &cfg.filter, uid, &caller.sid, process)

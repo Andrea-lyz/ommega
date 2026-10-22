@@ -20,15 +20,20 @@ enabled = true
 log_level = "debug"
 
 [filter]
-# WebUI "Global scope": enabled=false bypasses all package/UID/deny filters.
+# WebUI "Global scope": enabled=false bypasses package/deny lists for regular
+# application IDs (10000-19999 per user) and exactly bound UID-1000 app processes.
+# Root/native core services, SDK sandboxes and isolated processes stay on System.
 # enabled=true restores the saved scope and the rules below.
 enabled = true
 deny_packages = []
 block_android_package = true
 allow_unknown_package = false
 # Exact UID-1000 application process -> Binder SELinux context bindings.
-# Both this binding and a scoop/target.txt entry are required. Native/system_server
-# domains stay blocked. Only this verified EngineerMode package/domain is built in.
+# In list mode both this binding and a scoop/target.txt entry are required.
+# Global scope still requires the exact Binder SID and full process identity.
+# Native/system_server domains stay blocked. Only this verified EngineerMode
+# package/domain is built in.
+# EngineerMode is already in the shipped scoop and has matching SELinux rules.
 # Missing this field inherits the default; an explicit {} disables the exception.
 # A custom map replaces the default bindings.
 system_app_contexts = { "com.oplus.engineermode" = "u:r:engineermode_app:s0" }

@@ -129,7 +129,7 @@ test("global scope disables list editing and restores it after switching off", (
   vm.runInContext("ommegaGlobalScopeKnown = true; ommegaGlobalScopeEnabled = true; ommegaScopeSync()", ctx);
   assert.equal(elements["apps-list"].inert, true);
   assert.equal(elements.save.disabled, true);
-  assert.match(elements["ommega-global-scope-status"].textContent, /所有应用和系统服务/);
+  assert.match(elements["ommega-global-scope-status"].textContent, /用户应用和普通系统应用.*排除核心系统服务/);
   vm.runInContext("ommegaGlobalScopeEnabled = false; ommegaScopeSync()", ctx);
   assert.equal(elements["apps-list"].inert, false);
   assert.equal(elements.save.disabled, false);
@@ -259,6 +259,10 @@ test("scope text follows Chinese, English and system-default language selections
     assert.match(panel.innerHTML, chinese ? /<strong>全局作用域<\/strong>/ : /<strong>Global scope<\/strong>/);
     assert.doesNotMatch(panel.innerHTML, chinese ? /Global scope|Loading/ : /全局作用域|正在读取/);
     assert.match(panel.innerHTML, chinese ? /正在读取…<\/div>/ : /Loading…<\/div>/);
+    vm.runInContext("ommegaGlobalScopeEnabled = true; ommegaScopeSync()", ctx);
+    const enabledStatus = elements["ommega-global-scope-status"].textContent;
+    assert.match(enabledStatus, chinese ? /排除核心系统服务/ : /core system services are excluded/);
+    assert.doesNotMatch(enabledStatus, chinese ? /core system services/ : /核心系统服务/);
   }
 });
 

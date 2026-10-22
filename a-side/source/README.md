@@ -64,9 +64,14 @@ off.
 
    The WebUI's **Global scope** switch takes effect without clearing the list.
    It is off by default. Turning it on sets `[filter].enabled = false` in
-   `injector.toml`: every UID, including system/root and unresolved callers, is
-   in scope, with no package-list, denylist or system-UID exclusion. Package
-   lookup is skipped and all callers use the global security-level policy.
+   `injector.toml`: user apps and ordinary system apps with an application ID
+   from 10000 through 19999 in each Android user are in scope. Their package
+   lists and denylist are bypassed without querying the package manager. Root,
+   native core services (including system_server, Keystore, Gatekeeper and Vold),
+   SDK sandboxes and isolated processes stay on System. A UID-1000 application
+   is included only after its configured Binder SID and exact full process
+   name match; its saved scope and denylist are then bypassed. All included
+   callers use the global security-level policy.
    Turning it off restores `[filter].enabled = true`, the saved lists and their
    per-app policies. The WebUI disables list editing while global scope is on.
    Existing keys and descriptors are not migrated between System and Ommega.
@@ -78,12 +83,14 @@ off.
    `scoop`, so the effective list is the union. `target-security.toml` only
    carries the per-app StrongBox / TEE / global-default choice.
 
-   Shared system UID apps (app id 1000) require a process binding while
-   `block_android_package = true`. The default `[filter].system_app_contexts`
+   In list mode, shared system UID apps (app id 1000) require a process binding
+   while `block_android_package = true`. The default `[filter].system_app_contexts`
    contains only the verified `com.oplus.engineermode` main process bound to
-   Binder SELinux context `u:r:engineermode_app:s0`. Selecting that package in
-   `scoop` or `target.txt` is sufficient on this domain; the denylist still
-   applies. Configurations that omit the field inherit this default. An explicit
+   Binder SELinux context `u:r:engineermode_app:s0`. The shipped `scoop` and
+   SELinux rules already include this adapter; no manual binding or permission
+   setup is needed. A matching process must still be in `scoop` or `target.txt`,
+   and the denylist still applies. Configurations that omit the field inherit
+   this default. An explicit
    `system_app_contexts = {}` disables the exception, and a custom map replaces
    the default bindings. Other bindings require verifying the app's UID, exact
    process name and Binder SID on the target OS. Missing process/SID evidence,

@@ -650,7 +650,8 @@ async function ommegaSoterRemoteSave() {
 }
 
 
-// Global scope reuses [filter].enabled in injector.toml: false means global.
+// Global scope reuses [filter].enabled in injector.toml: false means all regular
+// applications and exactly bound UID-1000 apps, excluding core system services.
 // The saved target lists and per-app policies are never rewritten by this switch.
 const OMMEGA_SCOPE_CONFIG = "/data/adb/ommega/ommegadata/injector.toml";
 let ommegaGlobalScopeEnabled = false;
@@ -740,7 +741,7 @@ function ommegaScopeSync() {
     if (control) control.disabled = blocked || ommegaGlobalScopePending;
   }
   report.textContent = ommegaGlobalScopeMessage || ommegaUiLocalize(ommegaGlobalScopeEnabled
-    ? "已开启：所有应用和系统服务均在作用域内，列表暂不生效。关闭后恢复原列表。 / On: all apps and system services are in scope. The saved list is paused."
+    ? "已开启：覆盖用户应用和普通系统应用，排除核心系统服务。列表暂不生效，关闭后恢复。 / On: user apps and regular system apps are in scope; core system services are excluded. The saved list is paused."
     : "已关闭：按原作用域列表生效。 / Off: the saved scope list applies.");
 }
 

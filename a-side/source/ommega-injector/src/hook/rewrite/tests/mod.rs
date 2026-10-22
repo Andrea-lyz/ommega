@@ -194,19 +194,109 @@ pub(super) fn clear_operation_state_for_tests() {
 }
 
 #[test]
-fn global_scope_does_not_resolve_packages_or_process_identity() {
+fn application_global_scope_skips_package_and_process_lookup_for_regular_uids() {
     let mut config = config::InjectorConfig::default();
     config.filter.enabled = false;
     config.scoop.clear();
-    let caller = CallerInfo {
-        uid: 1000,
-        pid: -1,
-        sid: String::new(),
-    };
-    let decision = evaluate_caller(&caller, &config);
-    assert!(decision.allowed);
-    assert_eq!(decision.reason, FilterReason::Disabled);
-    assert!(decision.packages.is_empty());
+    for uid in [10_000, 19_999, 110_000, 119_999] {
+        let caller = CallerInfo {
+            uid,
+            pid: -1,
+            sid: String::new(),
+        };
+        let decision = evaluate_caller(&caller, &config);
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, FilterReason::Disabled);
+        assert!(decision.packages.is_empty());
+    }
+}
+
+#[test]
+fn application_global_scope_keeps_core_services_and_sandboxes_on_system() {
+    let mut config = config::InjectorConfig::default();
+    config.filter.enabled = false;
+    config.filter.block_android_package = false;
+    config.filter.allow_unknown_package = true;
+    for user_offset in [0, 100_000] {
+        for (app_id, sid) in [
+            (0, "u:r:init:s0"),
+            (1000, "u:r:system_server:s0"),
+            (1017, "u:r:keystore:s0"),
+            (1000, "u:r:gatekeeperd:s0"),
+            (0, "u:r:vold:s0"),
+            (1090, "u:r:sdk_sandbox:s0"),
+            (20_000, "u:r:sdk_sandbox:s0"),
+            (90_000, "u:r:isolated_app:s0"),
+            (99_999, "u:r:isolated_app:s0"),
+        ] {
+            let caller = CallerInfo {
+                uid: user_offset + app_id,
+                pid: -1,
+                sid: sid.into(),
+            };
+            let decision = evaluate_caller(&caller, &config);
+            assert!(!decision.allowed);
+            assert_eq!(decision.reason, FilterReason::RejectedNonApplicationUid);
+        }
+    }
+}
+
+#[test]
+fn application_global_scope_uid_1000_exception_needs_a_valid_process_identity() {
+    let mut config = config::InjectorConfig::default();
+    config.filter.enabled = false;
+    config.scoop.clear();
+    for pid in [-1, 0] {
+        let caller = CallerInfo {
+            uid: 1000,
+            pid,
+            sid: "u:r:engineermode_app:s0".into(),
+        };
+        let decision = evaluate_caller(&caller, &config);
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason, FilterReason::RejectedNonApplicationUid);
+    }
+}
+
+#[test]
+fn application_global_scope_excluded_uids_never_probe_grant_descriptors() {
+    let mut config = config::InjectorConfig::default();
+    config.filter.enabled = false;
+    let probes = AtomicUsize::new(0);
+    for (uid, sid) in [
+        (0, "u:r:init:s0"),
+        (1000, "u:r:system_server:s0"),
+        (1017, "u:r:keystore:s0"),
+        (20_000, "u:r:sdk_sandbox:s0"),
+        (90_000, "u:r:isolated_app:s0"),
+    ] {
+        let caller = CallerInfo {
+            uid,
+            pid: -1,
+            sid: sid.into(),
+        };
+        let decision = evaluate_caller(&caller, &config);
+        assert_eq!(decision.reason, FilterReason::RejectedNonApplicationUid);
+        for domain in [Domain::GRANT, Domain::KEY_ID] {
+            let descriptor = KeyDescriptor {
+                domain,
+                nspace: 7,
+                alias: None,
+                blob: None,
+            };
+            assert!(!should_allow_ommega_grant_descriptor_with_probe(
+                &descriptor,
+                &decision,
+                &caller,
+                |_, _| {
+                    probes.fetch_add(1, Ordering::SeqCst);
+                    Ok(true)
+                },
+            )
+            .unwrap());
+        }
+    }
+    assert_eq!(probes.load(Ordering::SeqCst), 0);
 }
 
 #[test]
