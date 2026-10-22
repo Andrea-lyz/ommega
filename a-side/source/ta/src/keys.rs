@@ -112,6 +112,29 @@ fn requires_local_auth_key(params: &[KeyParam]) -> bool {
     })
 }
 
+/// Packages that must keep B's hardware attestation chain for auth-bound keys.
+///
+/// The local keybox on A may be a software keybox (`DeviceID="sw"`); Google
+/// Wallet and hardware-integrity probes reject that chain. These packages keep
+/// the pre-existing remote path, while ordinary apps (including banking apps)
+/// use the local path so their fingerprint signature can succeed.
+fn app_id_requires_remote_auth(app_id: Option<&[u8]>) -> bool {
+    const PACKAGES: &[&[u8]] = &[
+        b"com.google.",
+        b"com.android.vending",
+        b"com.lingqing.trustattestor",
+        b"io.github.vvb2060.keyattestation",
+        b"com.eltavine.duckdetector",
+        b"com.oplus.engineermode",
+    ];
+    let Some(app_id) = app_id else {
+        return false;
+    };
+    PACKAGES
+        .iter()
+        .any(|needle| app_id.windows(needle.len()).any(|window| window == *needle))
+}
+
 /// Make remote key characteristics use the version tags from B's certificate.
 fn overlay_remote_version_tags(
     chars: &mut [KeyCharacteristics],
@@ -542,7 +565,10 @@ impl crate::KeyMintTa {
         // B has no A-side HAT, so such a key could never sign. The supplied-
         // issuer path keeps its existing remote delegation behavior. Ordinary
         // keys and UNLOCKED_DEVICE_REQUIRED-only keys continue through B.
-        let local_auth_key = requires_local_auth_key(params) && attestation_key.is_none();
+        let app_id = get_opt_tag_value!(params, AttestationApplicationId)?;
+        let local_auth_key = requires_local_auth_key(params)
+            && attestation_key.is_none()
+            && !app_id_requires_remote_auth(app_id.map(|id| &id[..]));
         let remote_attest = has_challenge
             && remote_enabled
             && !local_auth_key

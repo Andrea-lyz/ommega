@@ -291,6 +291,24 @@ fn auth_bound_requests_are_kept_local() {
 }
 
 #[test]
+fn hardware_chain_packages_stay_remote_for_auth_keys() {
+    for package in [
+        &b"com.google.android.gms"[..],
+        &b"com.google.android.apps.walletnfcrel"[..],
+        &b"com.android.vending"[..],
+        &b"com.lingqing.trustattestor"[..],
+        &b"io.github.vvb2060.keyattestation"[..],
+        &b"com.eltavine.duckdetector"[..],
+        &b"com.oplus.engineermode"[..],
+    ] {
+        assert!(app_id_requires_remote_auth(Some(package)));
+    }
+    assert!(!app_id_requires_remote_auth(Some(b"net.one97.paytm")));
+    assert!(!app_id_requires_remote_auth(Some(b"com.ommega.authrepro")));
+    assert!(!app_id_requires_remote_auth(None));
+}
+
+#[test]
 fn remote_key_cannot_issue_certificates_via_the_sign_transport() {
     let ta = test_ta();
     let error = ta
