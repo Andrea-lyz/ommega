@@ -246,68 +246,48 @@ fn remote_rot() -> crypto::RemoteRootOfTrust {
 }
 
 #[test]
-fn auth_bound_remote_generation_keeps_the_physical_chain_and_local_policy() {
+fn auth_bound_generation_stays_on_the_local_path() {
     let mut ta = test_ta();
-    // Mint the simulated B chain entirely in software. No Binder or HAL calls.
-    let parent_params = key_params(KeyPurpose::AttestKey);
-    let parent = ta.generate_key(&parent_params, None).unwrap();
     let mut params = key_params(KeyPurpose::Sign);
-    params.extend([
-        KeyParam::AttestationChallenge(b"test-challenge".to_vec()),
-        KeyParam::AttestationApplicationId(b"test-app".to_vec()),
-    ]);
-    let physical = ta
-        .generate_key(
-            &params,
-            Some(AttestationKey {
-                key_blob: parent.key_blob,
-                attest_key_params: vec![],
-                issuer_subject_name: tag::get_cert_subject(&parent_params).unwrap().to_vec(),
-            }),
-        )
-        .unwrap();
-    let mut chain: Vec<_> = physical
-        .certificate_chain
-        .iter()
-        .map(|cert| cert.encoded_certificate.clone())
-        .collect();
-    chain.extend(
-        parent
-            .certificate_chain
-            .into_iter()
-            .map(|cert| cert.encoded_certificate),
-    );
-    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
-        cert_chain: Some(chain.clone()),
-        ..TestRemote::default()
-    }));
-
     params.retain(|p| !matches!(p, KeyParam::NoAuthRequired));
-    let policy = [
+    params.extend([
         KeyParam::UserSecureId(42),
         KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
         KeyParam::AuthTimeout(5),
-    ];
-    params.extend(policy.clone());
-    params.push(KeyParam::UnlockedDeviceRequired);
-    let result = ta.generate_key(&params, None).unwrap();
-    let returned: Vec<_> = result
-        .certificate_chain
-        .iter()
-        .map(|cert| cert.encoded_certificate.clone())
-        .collect();
-    assert_eq!(returned, chain);
-    let (stored, _) = ta.keyblob_parse_decrypt(&result.key_blob, &[]).unwrap();
-    let auths = tag::characteristics_at(&stored.characteristics, SecurityLevel::TrustedEnvironment)
-        .unwrap();
-    for param in policy {
-        assert!(auths.contains(&param), "local policy lost: {param:?}");
+        KeyParam::UnlockedDeviceRequired,
+    ]);
+    params.push(KeyParam::AttestationChallenge(b"test-challenge".to_vec()));
+    params.push(KeyParam::AttestationApplicationId(b"test-app".to_vec()));
+
+    // TestRemote would panic if this request went to the relay. The fixture
+    // has no local keybox, so the local path stops with this error instead.
+    let error = ta.generate_key(&params, None).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::AttestationKeysNotProvisioned, _)
+    ));
+}
+
+#[test]
+fn auth_bound_requests_are_kept_local() {
+    for param in [
+        KeyParam::UserSecureId(42),
+        KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
+        KeyParam::AuthTimeout(30),
+        KeyParam::AllowWhileOnBody,
+        KeyParam::TrustedUserPresenceRequired,
+        KeyParam::TrustedConfirmationRequired,
+    ] {
+        assert!(
+            requires_local_auth_key(std::slice::from_ref(&param)),
+            "auth tag should force local generation: {param:?}"
+        );
     }
-    assert!(!auths.contains(&KeyParam::NoAuthRequired));
-    // Unlock state is policed by Keystore, not sealed into KeyMint's keyblob.
-    let keystore_auths =
-        tag::characteristics_at(&result.key_characteristics, SecurityLevel::Keystore).unwrap();
-    assert!(keystore_auths.contains(&KeyParam::UnlockedDeviceRequired));
+    assert!(!requires_local_auth_key(&[
+        KeyParam::UnlockedDeviceRequired
+    ]));
+    assert!(!requires_local_auth_key(&[KeyParam::NoAuthRequired]));
+    assert!(!requires_local_auth_key(&[]));
 }
 
 #[test]

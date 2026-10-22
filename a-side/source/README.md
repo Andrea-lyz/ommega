@@ -20,6 +20,14 @@ relay_server.
   startup retries until the remote profile is available instead of freezing a
   mismatched local profile. Profile or certificate mismatches fail closed;
   enabling local fallback does not bypass identity checks.
+- **Auth-bound keys** (502/504/505/506/507/508) are always minted locally, even
+  in remote mode. B has no A-side HardwareAuthToken and cannot validate A's
+  Gatekeeper token, so a remote auth-bound key would reject every signature
+  with `KeyUserNotAuthenticated` (-26). The local keybox chain keeps the
+  requested authorization list and the local Keystore performs the fingerprint
+  or credential check. `UNLOCKED_DEVICE_REQUIRED` (509) still uses B when its
+  user is unlocked. Caller-supplied attestation-key delegation keeps its
+  existing remote path.
 
 The native Soter HAL has an independent relay. Enable the software Soter TA in
 the WebUI to take over `vendor.qti.hardware.soter.ISoter/default`; then configure
