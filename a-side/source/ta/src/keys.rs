@@ -87,19 +87,22 @@ fn equalize_to_remote_attest_duration(started: Instant) {
     }
 }
 
-/// Whether this request needs a locally enforced user-authentication policy.
+/// Whether this auth-bound request is a signing key that must be local.
 ///
 /// The relay has no A-side `HardwareAuthToken`, and B cannot validate A's
 /// Gatekeeper token. A key minted on B with these tags would reject every
 /// signature with `KeyUserNotAuthenticated` (-26), even after A's fingerprint
-/// prompt succeeds. Keep these keys local: the local keybox chain carries the
-/// requested authorization list and the local Keystore performs the prompt.
+/// prompt succeeds. Keep auth-bound signing keys local: the local keybox chain
+/// carries the requested authorization list and the local Keystore performs
+/// the prompt. Auth-bound decrypt/agreement keys stay remote so their leaf
+/// keeps B's hardware chain; if such an operation is actually used, B will
+/// still return -26 until an explicit local path is added.
 ///
 /// `UNLOCKED_DEVICE_REQUIRED` (509) is intentionally not included. B can
 /// enforce that constraint while its user is unlocked, so those keys remain
 /// remote and their leaf still carries tag 509.
-fn requires_local_auth_key(params: &[KeyParam]) -> bool {
-    params.iter().any(|param| {
+fn requires_local_auth_signing(params: &[KeyParam]) -> bool {
+    let auth_bound = params.iter().any(|param| {
         matches!(
             param,
             KeyParam::UserSecureId(_)
@@ -109,7 +112,11 @@ fn requires_local_auth_key(params: &[KeyParam]) -> bool {
                 | KeyParam::TrustedUserPresenceRequired
                 | KeyParam::TrustedConfirmationRequired
         )
-    })
+    });
+    auth_bound
+        && params
+            .iter()
+            .any(|param| matches!(param, KeyParam::Purpose(KeyPurpose::Sign)))
 }
 
 /// Packages that must keep B's hardware attestation chain for auth-bound keys.
@@ -566,12 +573,12 @@ impl crate::KeyMintTa {
         // issuer path keeps its existing remote delegation behavior. Ordinary
         // keys and UNLOCKED_DEVICE_REQUIRED-only keys continue through B.
         let app_id = get_opt_tag_value!(params, AttestationApplicationId)?;
-        let local_auth_key = requires_local_auth_key(params)
+        let local_auth_signing = requires_local_auth_signing(params)
             && attestation_key.is_none()
             && !app_id_requires_remote_auth(app_id.map(|id| &id[..]));
         let remote_attest = has_challenge
             && remote_enabled
-            && !local_auth_key
+            && !local_auth_signing
             && (attestation_key.is_none() || remote_issuer.is_some());
         let pad_local_attest_key =
             has_challenge && attestation_key.is_some() && remote_enabled && !remote_attest;

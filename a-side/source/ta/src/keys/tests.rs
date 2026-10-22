@@ -269,7 +269,7 @@ fn auth_bound_generation_stays_on_the_local_path() {
 }
 
 #[test]
-fn auth_bound_requests_are_kept_local() {
+fn auth_bound_signing_requests_are_kept_local() {
     for param in [
         KeyParam::UserSecureId(42),
         KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
@@ -279,15 +279,32 @@ fn auth_bound_requests_are_kept_local() {
         KeyParam::TrustedConfirmationRequired,
     ] {
         assert!(
-            requires_local_auth_key(std::slice::from_ref(&param)),
-            "auth tag should force local generation: {param:?}"
+            requires_local_auth_signing(&[KeyParam::Purpose(KeyPurpose::Sign), param.clone()]),
+            "auth-bound SIGN should force local generation: {param:?}"
         );
     }
-    assert!(!requires_local_auth_key(&[
-        KeyParam::UnlockedDeviceRequired
-    ]));
-    assert!(!requires_local_auth_key(&[KeyParam::NoAuthRequired]));
-    assert!(!requires_local_auth_key(&[]));
+    assert!(!requires_local_auth_signing(&[KeyParam::Purpose(
+        KeyPurpose::Sign
+    )]));
+    assert!(!requires_local_auth_signing(&[]));
+}
+
+#[test]
+fn auth_bound_non_signing_requests_stay_remote() {
+    for purpose in [
+        KeyPurpose::Decrypt,
+        KeyPurpose::AgreeKey,
+        KeyPurpose::Verify,
+    ] {
+        assert!(!requires_local_auth_signing(&[
+            KeyParam::Purpose(purpose),
+            KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
+            KeyParam::AuthTimeout(30),
+        ]));
+    }
+    assert!(!requires_local_auth_signing(&[KeyParam::UserAuthType(
+        HardwareAuthenticatorType::Password as u32
+    )]));
 }
 
 #[test]

@@ -20,10 +20,11 @@ relay_server.
   startup retries until the remote profile is available instead of freezing a
   mismatched local profile. Profile or certificate mismatches fail closed;
   enabling local fallback does not bypass identity checks.
-- **Auth-bound keys** (502/504/505/506/507/508) are minted locally, even in
-  remote mode, except for packages that need B's hardware chain (Google/GMS,
-  Google Wallet/Vending, TrustAttestor, KeyAttestation, DuckDetector, and
-  EngineerMode). B has no A-side HardwareAuthToken and cannot validate A's
+- **Auth-bound signing keys** (502/504/505/506/507/508 + `PURPOSE_SIGN`) are
+  minted locally, even in remote mode, except for packages that need B's
+  hardware chain (Google/GMS, Google Wallet/Vending, TrustAttestor,
+  KeyAttestation, DuckDetector, and EngineerMode). Auth-bound decrypt/agreement
+  keys stay remote. B has no A-side HardwareAuthToken and cannot validate A's
   Gatekeeper token, so a remote auth-bound key would reject every signature
   with `KeyUserNotAuthenticated` (-26). The local keybox chain keeps the
   requested authorization list and the local Keystore performs the fingerprint
