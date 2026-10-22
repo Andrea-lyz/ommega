@@ -11,9 +11,9 @@
 //!
 //! Key generation and private-key operations here use the selected real KeyMint
 //! HAL. This does not move A-side storage, authorization or local software-key
-//! operations to B. Generation translates some authorizations, including
-//! ATTEST_KEY to SIGN and user-auth requirements to NO_AUTH_REQUIRED; it does
-//! not provide hardware enforcement of the original A user's authentication.
+//! operations to B. Generation preserves key purposes and uses NO_AUTH_REQUIRED
+//! because B cannot verify an A-side auth token. It does not provide hardware
+//! enforcement of the original A user's authentication.
 //!
 //! Sessions are cached by alias and persisted atomically. A hardware-requested
 //! keyblob upgrade is saved before begin is retried; it never generates a new key.
@@ -93,14 +93,13 @@ pub struct KeySpec {
     pub ec_curve: Option<KmEcCurve>,
     /// Key size in bits; defaults to 256 (EC) / 2048 (RSA).
     pub key_size: Option<u32>,
-    /// Business-key purposes are forwarded unchanged, including AgreeKey.
-    /// ATTEST_KEY is translated to SIGN for the existing child-TBS signing path.
+    /// Requested purposes, forwarded unchanged, including AttestKey and AgreeKey.
     pub purposes: Vec<KmKeyPurpose>,
-    /// Requested digests. SHA-256 is added only for translated ATTEST_KEY keys.
+    /// Requested digests, forwarded unchanged.
     pub digests: Vec<KmDigest>,
     /// Requested MGF1 digest (RSA-OAEP), when the app specified one.
     pub mgf_digest: Option<KmDigest>,
-    /// Requested paddings (RSA only), with signing padding for translated ATTEST_KEY.
+    /// Requested paddings (RSA only), forwarded unchanged.
     pub paddings: Vec<KmPadding>,
     /// RSA public exponent; defaults to 65537.
     pub rsa_public_exponent: Option<u64>,
@@ -623,29 +622,15 @@ fn build_attestation_params(
         KeyParam::AttestationApplicationId(app_id_der.to_vec()),
     ];
 
-    // Forward business-key purposes exactly. The only unavoidable translation
-    // is ATTEST_KEY -> SIGN: this qti TEE rejects direct ATTEST_KEY generation,
-    // while the A-side later asks this key to sign a child certificate TBS.
-    let mut purposes = spec.purposes.clone();
-    let is_attest_key = purposes.contains(&KmKeyPurpose::AttestKey);
-    if is_attest_key {
-        purposes.retain(|p| *p != KmKeyPurpose::AttestKey);
-        if !purposes.contains(&KmKeyPurpose::Sign) {
-            purposes.push(KmKeyPurpose::Sign);
-        }
-    }
-    for p in purposes {
-        params.push(KeyParam::Purpose(p));
+    // A SIGN certificate is not an attestation issuer: it lacks CA/keyCertSign.
+    // Preserve ATTEST_KEY and let the HAL report unsupported purposes instead
+    // of returning a key with different privileges.
+    for p in &spec.purposes {
+        params.push(KeyParam::Purpose(*p));
     }
 
-    // Forward business-key digests exactly. A translated ATTEST_KEY needs
-    // SHA-256 because child certificates are signed with SHA256withRSA/ECDSA.
-    let mut digests = spec.digests.clone();
-    if is_attest_key && !digests.contains(&KmDigest::Sha256) {
-        digests.push(KmDigest::Sha256);
-    }
-    for d in digests {
-        params.push(KeyParam::Digest(d));
+    for d in &spec.digests {
+        params.push(KeyParam::Digest(*d));
     }
 
     match algo {
@@ -665,12 +650,6 @@ fn build_attestation_params(
             // only the requested paddings are needed.
             for p in spec.paddings.iter() {
                 params.push(KeyParam::Padding(*p));
-            }
-            // An attestation key signs the child-cert TBS with PKCS1v15
-            // (SHA256withRSA); ensure that padding is authorized too, even when
-            // the app only requested ATTEST_KEY use.
-            if is_attest_key && !spec.paddings.contains(&KmPadding::RsaPkcs115Sign) {
-                params.push(KeyParam::Padding(KmPadding::RsaPkcs115Sign));
             }
             // MGF1 digest for RSA-OAEP. Always push an explicit MGF1 digest so
             // the TEE's key authorization carries the tag. begin(DECRYPT)
@@ -1422,6 +1401,48 @@ mod identity_profile_tests {
                 b"ec-sign",
             );
             assert!(!signature.is_empty(), "algorithm={algorithm}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod attestation_purpose_tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::Tag::Tag;
+
+    #[test]
+    fn attest_key_is_not_replaced_with_a_signing_key() {
+        for algorithm in [KeyAlgorithm::EcP256, KeyAlgorithm::Rsa2048] {
+            for explicit_signing_params in [false, true] {
+                let spec = KeySpec {
+                    algorithm,
+                    purposes: vec![KmKeyPurpose::AttestKey],
+                    digests: if explicit_signing_params {
+                        vec![KmDigest::Sha384]
+                    } else {
+                        vec![]
+                    },
+                    paddings: if explicit_signing_params && algorithm == KeyAlgorithm::Rsa2048 {
+                        vec![KmPadding::RsaPss]
+                    } else {
+                        vec![]
+                    },
+                    ..KeySpec::default()
+                };
+                for version in [100, 200, 300, 400, 500] {
+                    let params =
+                        build_attestation_params(b"appid", b"challenge", &spec, version).unwrap();
+                    let actual: Vec<_> = params
+                        .iter()
+                        .filter(|p| matches!(p.tag, Tag::PURPOSE | Tag::DIGEST | Tag::PADDING))
+                        .collect();
+                    let mut expected = vec![KeyParam::Purpose(KmKeyPurpose::AttestKey)];
+                    expected.extend(spec.digests.iter().copied().map(KeyParam::Digest));
+                    expected.extend(spec.paddings.iter().copied().map(KeyParam::Padding));
+                    let expected = key_params_to_aidl(&expected, version).unwrap();
+                    assert_eq!(actual, expected.iter().collect::<Vec<_>>());
+                }
+            }
         }
     }
 }

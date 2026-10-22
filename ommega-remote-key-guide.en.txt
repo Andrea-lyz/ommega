@@ -58,8 +58,11 @@ Remote-only does not mean every operation runs on B. The software TA enters remo
 generation when remote is enabled, an attestation challenge exists and no caller
 attestation key is supplied. Other generation can remain local. B performs remote
 signing/decryption/agreement. A enforces app authentication and stores local state.
-B translates authentication to NO_AUTH_REQUIRED and ATTEST_KEY to SIGN; B hardware
-does not validate A's user authentication token.
+B uses NO_AUTH_REQUIRED because its hardware cannot validate A's user token.
+A preserves the app's authentication policy and timeout. It returns B's physical
+certificate chain unchanged without adding an auth-bound child leaf. ATTEST_KEY
+purposes are preserved and require CA/keyCertSign certificate privileges; remote
+certificate issuance through the SIGN transport is unsupported.
 
 Main fork changes:
   - A obtains/freezes B's real profile before TA startup, with network retries.

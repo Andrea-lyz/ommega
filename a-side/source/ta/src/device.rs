@@ -218,14 +218,10 @@ pub struct RemoteAttestParams {
     ///   only a presence marker,
     /// * `504` `USER_AUTH_TYPE` and `505` `AUTH_TIMEOUT` — integers.
     ///
-    /// The local software path enforces the policy from the key blob and derives
-    /// the leaf's `AuthorizationList` from the *key params*, so the remote
-    /// path has to carry them too: a leaf that says `NO_AUTH_REQUIRED` for a
-    /// key the app created with `setUserAuthenticationRequired(true)`
-    /// contradicts itself, and one without `USER_AUTH_TYPE` /
-    /// `AUTH_TIMEOUT` drops the policy entirely (TrustAttestor reports
-    /// `hardware.attestation.user_auth_metadata` /
-    /// `user_auth_policy`).
+    /// A enforces this policy from the local keyblob. B cannot validate an
+    /// A-side authentication token, so the native relay generates a no-auth
+    /// physical key. Its certificate reports B's actual policy; forwarding
+    /// these tags does not provide hardware enforcement of A's policy.
     pub user_auth: Vec<(u32, i64)>,
 }
 

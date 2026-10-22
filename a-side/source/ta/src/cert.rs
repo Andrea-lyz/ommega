@@ -346,6 +346,42 @@ pub(crate) fn parse_remote_root_of_trust(
     }))
 }
 
+/// Check the certificate privileges required before storing a remote ATTEST_KEY.
+/// A certificate for an ordinary signing key is not a certificate issuer.
+pub(crate) fn validate_attestation_issuer(cert_der: &[u8]) -> Result<(), Error> {
+    let cert = <x509_cert::Certificate as Decode>::from_der(cert_der)
+        .map_err(|e| km_err!(VerificationFailed, "parse attestation issuer: {e:?}"))?;
+    let extensions = cert
+        .tbs_certificate()
+        .extensions()
+        .ok_or_else(|| km_err!(IncompatiblePurpose, "attestation issuer has no extensions"))?;
+    let constraints = extensions
+        .iter()
+        .find(|extension| extension.extn_id == BasicConstraints::OID)
+        .ok_or_else(|| km_err!(IncompatiblePurpose, "attestation issuer is not a CA"))?;
+    let constraints = BasicConstraints::from_der(constraints.extn_value.as_bytes())
+        .map_err(|e| km_err!(VerificationFailed, "parse issuer basic constraints: {e:?}"))?;
+    if !constraints.ca {
+        return Err(km_err!(
+            IncompatiblePurpose,
+            "attestation issuer is not a CA"
+        ));
+    }
+    let usage = extensions
+        .iter()
+        .find(|extension| extension.extn_id == KeyUsage::OID)
+        .ok_or_else(|| km_err!(IncompatiblePurpose, "attestation issuer lacks keyCertSign"))?;
+    let usage = KeyUsage::from_der(usage.extn_value.as_bytes())
+        .map_err(|e| km_err!(VerificationFailed, "parse issuer key usage: {e:?}"))?;
+    if (usage.0 & KeyUsages::KeyCertSign).bits() == 0 {
+        return Err(km_err!(
+            IncompatiblePurpose,
+            "attestation issuer lacks keyCertSign"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_remote_attestation(
     cert_der: &[u8],
     expected_challenge: &[u8],
@@ -1747,6 +1783,70 @@ mod tests {
     use super::*;
     use crate::{AttestationIdInfo, KeyMintHalVersion};
     use std::vec;
+
+    fn issuer_certificate(ca: Option<bool>, cert_sign: Option<bool>) -> Vec<u8> {
+        let spki_der = hex::decode("3012300d06092a864886f70d0101010500030100").unwrap();
+        let params = [
+            KeyParam::Algorithm(keymint::Algorithm::Rsa),
+            KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: 0 }),
+            KeyParam::CertificateNotAfter(DateTime { ms_since_epoch: 0 }),
+        ];
+        let purpose = if cert_sign == Some(true) {
+            KeyPurpose::AttestKey
+        } else {
+            KeyPurpose::Sign
+        };
+        let usage =
+            x509_der_encode(&key_usage_extension_bits(&[KeyParam::Purpose(purpose)])).unwrap();
+        let constraints = ca.map(|ca| x509_der_encode(&basic_constraints_ext_value(ca)).unwrap());
+        let mut tbs = tbs_certificate(
+            &None,
+            &spki_der,
+            &usage,
+            constraints.as_deref(),
+            None,
+            &[],
+            &params,
+        )
+        .unwrap();
+        if cert_sign.is_none() {
+            tbs.extensions
+                .as_mut()
+                .unwrap()
+                .retain(|ext| ext.extn_id != KeyUsage::OID);
+        }
+        // This tests certificate privileges, not signature verification.
+        x509_der_encode(&certificate(tbs, &[0]).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn attestation_issuer_requires_both_ca_and_key_cert_sign() {
+        validate_attestation_issuer(&issuer_certificate(Some(true), Some(true))).unwrap();
+        for (ca, cert_sign) in [
+            (Some(false), Some(false)),
+            (Some(false), Some(true)),
+            (Some(true), Some(false)),
+            (None, Some(true)),
+            (Some(true), None),
+            (None, None),
+        ] {
+            let error =
+                validate_attestation_issuer(&issuer_certificate(ca, cert_sign)).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                CommonErrorKind::Hal(ErrorCode::IncompatiblePurpose, _)
+            ));
+        }
+    }
+
+    #[test]
+    fn attestation_issuer_rejects_malformed_der() {
+        let error = validate_attestation_issuer(&[0]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            CommonErrorKind::Hal(ErrorCode::VerificationFailed, _)
+        ));
+    }
 
     #[test]
     fn test_rsa_signature_algorithm_has_null_parameters() {

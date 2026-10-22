@@ -1002,11 +1002,9 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
     })?;
     let alias = alias_of(payload, "attest");
     let spec = parse_key_spec(payload)?;
-    // The requested purposes are forwarded unchanged (see
-    // tee_ops::build_attestation_params). For an App Attest Key this mirrors
-    // AOSP keystore2: a lone PURPOSE_ATTEST_KEY is accepted by the real TEE
-    // (verified working on-device); such a key is later used only as an
-    // `AttestationKey` when the A-side signs a child certificate.
+    // Preserve the requested purposes, including ATTEST_KEY. A HAL rejection
+    // is authoritative; substituting SIGN would return an ordinary end-entity
+    // certificate that cannot issue a child certificate.
 
     // The A-side forwards the requesting security level (1 = TEE, 2 = StrongBox)
     // in `device_attest_context.attestation_security_level`. A StrongBox request

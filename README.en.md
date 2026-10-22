@@ -317,10 +317,12 @@ Remote-only forbids implicit fallback for eligible generation, not every local
 operation. Remote generation needs remote enabled, an attestation challenge and
 no caller-provided attestation key. Other generation may remain local.
 B handles remote signing/decryption/agreement; A stores state and enforces user
-authentication. A forwards user-auth authorization tags; B removes duplicates and
-conflicting `NO_AUTH_REQUIRED` so certificate authorizations match the request.
-`ATTEST_KEY` maps to `SIGN`. Forwarding tags does not mean B hardware authenticates
-A's user token.
+authentication with the application's original policy and timeout. B cannot
+validate A's user token, so its physical key uses `NO_AUTH_REQUIRED`.
+A returns B's certificate chain unchanged, reporting B's actual authorizations
+without adding a synthetic child leaf for auth-bound keys. `ATTEST_KEY` reaches
+the HAL unchanged; its certificate must authorize CA/keyCertSign. The remote
+SIGN transport cannot issue child certificates and rejects such requests.
 B-app supports only `attest/sign/decrypt`, lacks `profile/agree`, and uses its own
 AndroidKeyStore identity. It cannot replace native B in the same acceptance suite.
 

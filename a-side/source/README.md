@@ -185,18 +185,19 @@ mirror queue replays captured state changes after the service becomes ready.
 
 ## Key consistency and lifecycle
 
-New local child keys signed by a remote attestation key inherit its available
-OS, vendor and boot version tags before certificate generation and keyblob
-serialization. The certificate, returned authorizations and stored new keyblob
-use the same values. Existing keys are not rewritten; their key material and
-credential-encryption state are retained.
+Remote keys use B's certificate chain unchanged and inherit its available OS,
+vendor and boot version tags in their returned characteristics and new keyblob.
+A does not add a synthetic child leaf for authentication or unlock constraints.
+Existing keys retain their key material and credential-encryption state.
 
 The relay's physical authorization policy is distinct from A-side application
-policy: B translates `ATTEST_KEY` to `SIGN` and uses `NO_AUTH_REQUIRED`. A keeps
-the application's original purposes and authentication requirements. Replacing
-those with B's values would change application behavior and weaken local
-authentication. This proxy limitation is not full hardware enforcement of A's
-user authentication, nor full equality between physical and logical purposes.
+policy: B preserves the requested purposes and uses `NO_AUTH_REQUIRED` because
+it cannot validate A's user token. A enforces the application's original
+authentication policy and timeout without alias-specific extensions.
+This proxy does not provide hardware enforcement of A's user authentication;
+the certificate reports B's actual policy. An `ATTEST_KEY` certificate must
+authorize CA/keyCertSign. The remote SIGN transport cannot issue certificates,
+including with legacy remote attestation-key blobs; it returns an error.
 
 Keybox rotation retires only dedicated `ATTEST_KEY` entries bound to the old
 keybox. Ordinary signing keys, including entries with legacy keybox metadata,
