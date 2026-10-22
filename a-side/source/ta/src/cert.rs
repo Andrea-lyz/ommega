@@ -273,10 +273,8 @@ pub(crate) fn extract_subject(cert: &keymint::Certificate) -> Result<Vec<u8>, Er
 /// Returns `Ok(None)` when the certificate carries no attestation extension
 /// (a non-attested key) or no root-of-trust record.
 ///
-/// When a remote (B-side TEE) key is later used as an attestation key, its
-/// root-of-trust must be reused verbatim for the child leaf — otherwise the
-/// child's ROOT_OF_TRUST disagrees with the attestation key's and detectors
-/// flag the attestation key as tampered.
+/// These signed values describe the remote key's characteristics. Native B
+/// generation supplies child records; A never rewrites their certificates.
 pub(crate) fn parse_remote_root_of_trust(
     cert_der: &[u8],
 ) -> Result<Option<RemoteRootOfTrust>, Error> {
@@ -380,6 +378,89 @@ pub(crate) fn validate_attestation_issuer(cert_der: &[u8]) -> Result<(), Error> 
         ));
     }
     Ok(())
+}
+
+/// Verify that B honored the caller-selected issuer, including on older relays
+/// that might otherwise ignore the delegation field and use their batch key.
+pub(crate) fn validate_remote_delegation(
+    chain: &[Vec<u8>],
+    issuer: &crate::device::RemoteAttestationKey,
+) -> Result<(), Error> {
+    use ring::signature;
+
+    let invalid = || km_err!(VerificationFailed, "remote certificate issuer mismatch");
+    if chain.len() < 2 {
+        return Err(invalid());
+    }
+    let leaf = <x509_cert::Certificate as Decode>::from_der(&chain[0]).map_err(|_| invalid())?;
+    let parent = <x509_cert::Certificate as Decode>::from_der(&chain[1]).map_err(|_| invalid())?;
+    validate_attestation_issuer(&chain[1])?;
+    let spki = parent.tbs_certificate().subject_public_key_info();
+    if spki.to_der().map_err(|_| invalid())? != issuer.public_key
+        || parent
+            .tbs_certificate()
+            .subject()
+            .to_der()
+            .map_err(|_| invalid())?
+            != issuer.issuer_subject_name
+        || leaf.tbs_certificate().issuer() != parent.tbs_certificate().subject()
+        || leaf.signature_algorithm() != leaf.tbs_certificate().signature()
+    {
+        return Err(invalid());
+    }
+    let key_oid = spki.algorithm.oid.to_string();
+    let signature_oid = leaf.signature_algorithm().oid.to_string();
+    let curve_oid = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|p| p.decode_as::<X509ObjectIdentifier>().ok())
+        .map(|oid| oid.to_string());
+    let algorithm: &dyn signature::VerificationAlgorithm = match (
+        key_oid.as_str(),
+        curve_oid.as_deref(),
+        signature_oid.as_str(),
+    ) {
+        ("1.2.840.10045.2.1", Some("1.2.840.10045.3.1.7"), "1.2.840.10045.4.3.2") => {
+            &signature::ECDSA_P256_SHA256_ASN1
+        }
+        ("1.2.840.10045.2.1", Some("1.2.840.10045.3.1.7"), "1.2.840.10045.4.3.3") => {
+            &signature::ECDSA_P256_SHA384_ASN1
+        }
+        ("1.2.840.10045.2.1", Some("1.3.132.0.34"), "1.2.840.10045.4.3.2") => {
+            &signature::ECDSA_P384_SHA256_ASN1
+        }
+        ("1.2.840.10045.2.1", Some("1.3.132.0.34"), "1.2.840.10045.4.3.3") => {
+            &signature::ECDSA_P384_SHA384_ASN1
+        }
+        ("1.2.840.113549.1.1.1", _, "1.2.840.113549.1.1.11") => {
+            &signature::RSA_PKCS1_2048_8192_SHA256
+        }
+        ("1.2.840.113549.1.1.1", _, "1.2.840.113549.1.1.12") => {
+            &signature::RSA_PKCS1_2048_8192_SHA384
+        }
+        ("1.2.840.113549.1.1.1", _, "1.2.840.113549.1.1.13") => {
+            &signature::RSA_PKCS1_2048_8192_SHA512
+        }
+        ("1.3.101.112", None, "1.3.101.112") => &signature::ED25519,
+        _ => {
+            return Err(km_err!(
+                UnsupportedAlgorithm,
+                "unsupported remote issuer signature"
+            ))
+        }
+    };
+    let public_key = spki.subject_public_key.as_bytes().ok_or_else(invalid)?;
+    let signature = leaf.signature().as_bytes().ok_or_else(invalid)?;
+    let tbs = leaf.tbs_certificate().to_der().map_err(|_| invalid())?;
+    signature::UnparsedPublicKey::new(algorithm, public_key)
+        .verify(&tbs, signature)
+        .map_err(|_| {
+            km_err!(
+                VerificationFailed,
+                "remote child certificate signature mismatch"
+            )
+        })
 }
 
 pub(crate) fn validate_remote_attestation(

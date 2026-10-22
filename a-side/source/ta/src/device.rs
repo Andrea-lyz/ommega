@@ -180,6 +180,8 @@ pub struct SigningInfoSnapshot {
 /// fields let the B-side fall back to its defaults (EC P-256, SHA-256, etc.).
 #[derive(Debug, Clone, Default)]
 pub struct RemoteAttestParams {
+    /// Caller-selected remote issuer for native KeyMint certificate generation.
+    pub attestation_key: Option<RemoteAttestationKey>,
     /// Raw KeyMint algorithm enum value (1 = RSA, 3 = EC).
     pub key_algorithm: Option<i32>,
     /// Key size in bits.
@@ -223,6 +225,14 @@ pub struct RemoteAttestParams {
     /// physical key. Its certificate reports B's actual policy; forwarding
     /// these tags does not provide hardware enforcement of A's policy.
     pub user_auth: Vec<(u32, i64)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteAttestationKey {
+    pub alias: String,
+    /// Public key retained locally to verify that the requested issuer was used.
+    pub public_key: Vec<u8>,
+    pub issuer_subject_name: Vec<u8>,
 }
 
 /// Identity of the physical KeyMint HAL that minted a remote result.

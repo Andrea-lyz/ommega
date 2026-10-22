@@ -25,6 +25,7 @@ kmr-common = { path = "../common", version = "0.1.0" }
 kmr-derive = { path = "../derive", version = "0.1.0" }
 kmr-wire = { path = "../wire", version = "0.1.0" }
 log = "0.4.33"
+ring = "0.17.14"
 sha2 = "0.10.9"
 spki = { version = "0.8.0"}
 x509-cert = { version = "0.3.0", default-features = false }

@@ -558,6 +558,15 @@ impl RemoteRelay {
         cert_serial: Option<&[u8]>,
     ) -> Result<Option<Value>> {
         let mut ctx = serde_json::Map::new();
+        if let Some(issuer) = &params.attestation_key {
+            ctx.insert(
+                "attestation_key".to_string(),
+                json!({
+                    "alias": issuer.alias,
+                    "issuer_subject_name": base64_encode(&issuer.issuer_subject_name),
+                }),
+            );
+        }
         ctx.insert(
             "attestation_application_id".to_string(),
             Value::String(base64_encode(app_id_der)),
@@ -661,15 +670,8 @@ impl RemoteRelay {
                 Value::from(i64::from(security_level)),
             );
         }
-        // User-authentication / authorization-list entries the app asked for,
-        // as `[tag, value]` pairs (502/503/504/505/506/507/508/509). The A-side
-        // software KeyMint does enforce the policy locally, but the
-        // *attestation* is minted remotely: a leaf that says
-        // `NO_AUTH_REQUIRED` for a key created with
-        // `setUserAuthenticationRequired(true)` contradicts itself, and one
-        // without `USER_AUTH_TYPE` / `AUTH_TIMEOUT` drops the policy — both
-        // are detectable from an app (TrustAttestor:
-        // `hardware.attestation.user_auth_metadata` / `user_auth_policy`).
+        // Carry the original policy. A enforces authentication locally; B
+        // retains the independent unlock constraint but cannot validate A's HAT.
         if !params.user_auth.is_empty() {
             ctx.insert(
                 "user_auth".to_string(),

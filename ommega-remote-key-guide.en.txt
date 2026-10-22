@@ -55,14 +55,19 @@ B-app is optional and supports only attest/sign/decrypt, lacks profile/agree and
 uses its own AndroidKeyStore identity. It cannot replace native B for this suite.
 
 Remote-only does not mean every operation runs on B. The software TA enters remote
-generation when remote is enabled, an attestation challenge exists and no caller
-attestation key is supplied. Other generation can remain local. B performs remote
+generation when remote is enabled and an attestation challenge exists, using the
+default signer or a caller-selected remote App AttestKey. Local issuers keep
+local generation. B performs remote
 signing/decryption/agreement. A enforces app authentication and stores local state.
-B uses NO_AUTH_REQUIRED because its hardware cannot validate A's user token.
+B uses NO_AUTH_REQUIRED because its hardware cannot validate A's user token;
+the independent UNLOCKED_DEVICE_REQUIRED (509) constraint is forwarded.
 A preserves the app's authentication policy and timeout. It returns B's physical
 certificate chain unchanged without adding an auth-bound child leaf. ATTEST_KEY
-purposes are preserved and require CA/keyCertSign certificate privileges; remote
-certificate issuance through the SIGN transport is unsupported.
+purposes are preserved and require CA/keyCertSign certificate privileges.
+Explicit remote delegation uses B's native generateKey(..., AttestationKey)
+and requires updated A and B modules. A verifies the selected issuer and the
+child signature. Issuer failures never select a different signer. Certificate
+issuance through the SIGN transport is unsupported.
 
 Main fork changes:
   - A obtains/freezes B's real profile before TA startup, with network retries.

@@ -20,8 +20,12 @@ impl crypto::MonotonicClock for TestClock {
     }
 }
 
+#[derive(Default)]
 struct TestRemote {
     cert_chain: Option<Vec<Vec<u8>>>,
+    expected_purpose: Option<KeyPurpose>,
+    expected_issuer: Option<String>,
+    unavailable: bool,
 }
 impl device::RemoteBackend for TestRemote {
     fn attest(
@@ -32,11 +36,24 @@ impl device::RemoteBackend for TestRemote {
         _: Option<&[u8]>,
         params: &device::RemoteAttestParams,
     ) -> Result<Option<device::RemoteAttestation>, Error> {
+        assert_eq!(
+            params.purpose,
+            [self.expected_purpose.unwrap_or(KeyPurpose::Sign) as i32]
+        );
+        assert_eq!(
+            params
+                .attestation_key
+                .as_ref()
+                .map(|key| key.alias.as_str()),
+            self.expected_issuer.as_deref()
+        );
+        if self.unavailable {
+            return Ok(None);
+        }
         let cert_chain = self
             .cert_chain
             .as_ref()
             .expect("unexpected remote generation");
-        assert_eq!(params.purpose, [KeyPurpose::Sign as i32]);
         Ok(Some(device::RemoteAttestation {
             cert_chain: cert_chain.clone(),
             effective_security_level: Some(SecurityLevel::TrustedEnvironment),
@@ -165,7 +182,7 @@ fn test_ta() -> KeyMintTa {
         device::Implementation {
             keys: Box::new(TestKeys),
             sign_info: None,
-            remote: Some(std::sync::Arc::new(TestRemote { cert_chain: None })),
+            remote: Some(std::sync::Arc::new(TestRemote::default())),
             attest_ids: None,
             sdd_mgr: None,
             bootloader: Box::new(device::BootloaderDone),
@@ -262,6 +279,7 @@ fn auth_bound_remote_generation_keeps_the_physical_chain_and_local_policy() {
     );
     ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
         cert_chain: Some(chain.clone()),
+        ..TestRemote::default()
     }));
 
     params.retain(|p| !matches!(p, KeyParam::NoAuthRequired));
@@ -308,6 +326,182 @@ fn remote_key_cannot_issue_certificates_via_the_sign_transport() {
     assert!(matches!(
         error.kind(),
         ErrorKind::Hal(ErrorCode::IncompatiblePurpose, _)
+    ));
+}
+
+struct DelegationFixture {
+    ta: KeyMintTa,
+    issuer: AttestationKey,
+    issuer_alias: String,
+    params: Vec<KeyParam>,
+    chain: Vec<Vec<u8>>,
+    batch_chain: Vec<Vec<u8>>,
+}
+
+impl DelegationFixture {
+    fn new() -> Self {
+        Self::with_rsa_issuer(false)
+    }
+
+    fn with_rsa_issuer(rsa: bool) -> Self {
+        let mut ta = test_ta();
+        let root_params = key_params(KeyPurpose::AttestKey);
+        let root = ta.generate_key(&root_params, None).unwrap();
+        let root_info = AttestationKey {
+            key_blob: root.key_blob.clone(),
+            attest_key_params: vec![],
+            issuer_subject_name: cert::extract_subject(&root.certificate_chain[0]).unwrap(),
+        };
+        let mut parent_params = key_params(KeyPurpose::AttestKey);
+        if rsa {
+            parent_params.retain(|p| !matches!(p, KeyParam::Algorithm(_) | KeyParam::EcCurve(_)));
+            parent_params.extend([
+                KeyParam::Algorithm(Algorithm::Rsa),
+                KeyParam::KeySize(kmr_wire::KeySizeInBits(2048)),
+                KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(65537)),
+            ]);
+        }
+        parent_params.extend([
+            KeyParam::AttestationChallenge(b"parent-challenge".to_vec()),
+            KeyParam::AttestationApplicationId(b"test-app".to_vec()),
+        ]);
+        let parent = ta
+            .generate_key(&parent_params, Some(root_info.clone()))
+            .unwrap();
+        let subject = cert::extract_subject(&parent.certificate_chain[0]).unwrap();
+        let parent_chain: Vec<_> = parent
+            .certificate_chain
+            .iter()
+            .chain(&root.certificate_chain)
+            .map(|cert| cert.encoded_certificate.clone())
+            .collect();
+        ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+            cert_chain: Some(parent_chain.clone()),
+            expected_purpose: Some(KeyPurpose::AttestKey),
+            ..TestRemote::default()
+        }));
+        let remote_parent = ta.generate_key(&parent_params, None).unwrap();
+        let (stored, _) = ta
+            .keyblob_parse_decrypt(&remote_parent.key_blob, &[])
+            .unwrap();
+        let KeyMaterial::Remote(reference) = stored.key_material else {
+            panic!("remote parent")
+        };
+        let issuer_alias = reference.alias;
+        let mut params = key_params(KeyPurpose::Sign);
+        params.extend([
+            KeyParam::AttestationChallenge(b"child-challenge".to_vec()),
+            KeyParam::AttestationApplicationId(b"test-app".to_vec()),
+        ]);
+        let physical_child = ta
+            .generate_key(
+                &params,
+                Some(AttestationKey {
+                    key_blob: parent.key_blob,
+                    attest_key_params: vec![],
+                    issuer_subject_name: subject.clone(),
+                }),
+            )
+            .unwrap();
+        let mut chain: Vec<_> = physical_child
+            .certificate_chain
+            .into_iter()
+            .map(|cert| cert.encoded_certificate)
+            .collect();
+        chain.extend(parent_chain);
+        let batch_child = ta.generate_key(&params, Some(root_info)).unwrap();
+        let batch_chain: Vec<_> = batch_child
+            .certificate_chain
+            .into_iter()
+            .chain(root.certificate_chain)
+            .map(|cert| cert.encoded_certificate)
+            .collect();
+        let mut fixture = Self {
+            ta,
+            issuer: AttestationKey {
+                key_blob: remote_parent.key_blob,
+                attest_key_params: vec![],
+                issuer_subject_name: subject,
+            },
+            issuer_alias,
+            params,
+            chain,
+            batch_chain,
+        };
+        fixture.response(fixture.chain.clone(), false);
+        fixture
+    }
+
+    fn response(&mut self, chain: Vec<Vec<u8>>, unavailable: bool) {
+        self.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+            cert_chain: Some(chain),
+            expected_issuer: Some(self.issuer_alias.clone()),
+            unavailable,
+            ..TestRemote::default()
+        }));
+    }
+
+    fn generate(&mut self) -> Result<KeyCreationResult, Error> {
+        self.ta
+            .generate_key(&self.params, Some(self.issuer.clone()))
+    }
+}
+
+#[test]
+fn native_remote_delegation_preserves_the_hardware_chain() {
+    let mut fixture = DelegationFixture::new();
+    let result = fixture.generate().unwrap();
+    let returned: Vec<_> = result
+        .certificate_chain
+        .into_iter()
+        .map(|cert| cert.encoded_certificate)
+        .collect();
+    assert_eq!(returned, fixture.chain);
+    let (stored, _) = fixture
+        .ta
+        .keyblob_parse_decrypt(&result.key_blob, &[])
+        .unwrap();
+    let KeyMaterial::Remote(reference) = stored.key_material else {
+        panic!("remote child")
+    };
+    assert_ne!(reference.alias, fixture.issuer_alias);
+}
+
+#[test]
+fn native_remote_delegation_rejects_an_ignored_issuer() {
+    let mut fixture = DelegationFixture::new();
+    fixture.response(fixture.batch_chain.clone(), false);
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+}
+
+#[test]
+fn native_remote_delegation_accepts_a_valid_rsa_issuer_signature() {
+    let mut fixture = DelegationFixture::with_rsa_issuer(true);
+    assert!(fixture.generate().is_ok());
+}
+
+#[test]
+fn native_remote_delegation_verifies_the_child_signature() {
+    let mut fixture = DelegationFixture::new();
+    let mut chain = fixture.chain.clone();
+    *chain[0].last_mut().unwrap() ^= 1;
+    fixture.response(chain, false);
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+}
+
+#[test]
+fn unavailable_remote_issuer_never_falls_back_to_local_signing() {
+    let mut fixture = DelegationFixture::new();
+    fixture.response(vec![], true);
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::UnknownError, _)
     ));
 }
 
