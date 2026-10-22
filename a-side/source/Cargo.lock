@@ -1692,6 +1692,7 @@ dependencies = [
  "kmr-derive",
  "kmr-wire",
  "log",
+ "ring",
  "sha2 0.10.9",
  "spki 0.8.0",
  "x509-cert",

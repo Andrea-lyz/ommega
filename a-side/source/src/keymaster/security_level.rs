@@ -141,18 +141,6 @@ impl Deref for OmmegaSecurityLevelWrapper {
 // Blob of 32 zeroes used as empty masking key.
 static ZERO_BLOB_32: &[u8] = &[0; 32];
 
-/// Grace period applied to the short auth windows Google ships on its own keys.
-///
-/// Play Integrity keys use a 10 second AUTH_TIMEOUT and Google Pay's unlock,
-/// keyguard fuse and recent-unlock keys use 5 seconds. All of them are used by
-/// multi-step flows (unlock, remote attestation, then the actual operation), so
-/// the window can lapse before the operation starts. That surfaces as
-/// KEY_USER_NOT_AUTHENTICATED and falls back to asking for the PIN.
-const GMS_AUTH_TIMEOUT_GRACE_SECS: i64 = 300;
-
-/// Longest auth window (seconds) that counts as Google's short window.
-const GMS_SHORT_AUTH_TIMEOUT_MAX_SECS: i64 = 10;
-
 impl KeystoreSecurityLevel {
     fn new(security_level: SecurityLevel, id_rotation_state: IdRotationState) -> Result<Self> {
         let use_native_strongbox = security_level == SecurityLevel::STRONGBOX
@@ -457,16 +445,12 @@ impl KeystoreSecurityLevel {
             .collect();
         let operation_parameters = op_params.as_slice();
 
-        // Keys created before this grace period existed still carry the short
-        // Google window, so apply the same bound when they are used.
-        let auth_timeout_grace = Self::auth_timeout_grace(key.alias.as_deref());
         let (immediate_hat, mut auth_info) = ENFORCEMENTS
             .authorize_create(
                 purpose,
                 key_properties.as_ref(),
                 operation_parameters.as_ref(),
                 self.hw_info.timestampTokenRequired,
-                auth_timeout_grace,
             )
             .context(ks_err!())?;
 
@@ -843,30 +827,6 @@ impl KeystoreSecurityLevel {
             })
     }
 
-    /// Whether this key belongs to the Google key family that ships a short
-    /// AUTH_TIMEOUT.
-    ///
-    /// Play Integrity uses 10s; Google Pay's unlock, keyguard fuse and
-    /// recent-unlock keys use 5s. Their request is a multi-step background flow,
-    /// so use a bounded grace period for this family only instead of weakening
-    /// the policy of ordinary application keys.
-    fn is_gms_short_auth_alias(alias: Option<&str>) -> bool {
-        let Some(alias) = alias else {
-            return false;
-        };
-        alias == "integrity.api.key.alias"
-            || alias.starts_with("unstable.")
-            || alias.starts_with("auth_account")
-            || alias.starts_with("auth_folsom")
-            || alias.starts_with("google_pay_")
-            || alias.starts_with("android_pay_")
-    }
-
-    /// Bounded grace period applied to Google's short auth windows.
-    fn auth_timeout_grace(alias: Option<&str>) -> Option<i64> {
-        Self::is_gms_short_auth_alias(alias).then_some(GMS_AUTH_TIMEOUT_GRACE_SECS)
-    }
-
     fn generate_key(
         &self,
         ctx: Option<&CallerInfo>,
@@ -925,33 +885,9 @@ impl KeystoreSecurityLevel {
             } else {
                 attestation_key_info
             };
-        let mut params = self
+        let params = self
             .add_required_parameters(ctx, caller_uid, params, &key)
             .context(ks_err!("Trying to get aaid."))?;
-
-        // Google's own keys carry a 5-10 second AUTH_TIMEOUT, but the flow can
-        // take longer than that between the device unlock and the actual use.
-        // Keep the stricter timeout for ordinary app keys; give only the Google
-        // key family a bounded grace period so the cached device-credential or
-        // fingerprint token can still cover the request. A zero timeout means
-        // per-operation auth and is left untouched.
-        if let Some(grace) = Self::auth_timeout_grace(key.alias.as_deref()) {
-            for param in params.iter_mut() {
-                if param.tag == Tag::AUTH_TIMEOUT {
-                    if let KeyParameterValue::Integer(current) = param.value {
-                        if current > 0 && current as i64 <= GMS_SHORT_AUTH_TIMEOUT_MAX_SECS {
-                            param.value = KeyParameterValue::Integer(grace as i32);
-                            log::info!(
-                                "event=decision gms_short_auth_timeout alias={:?} from={} to={}",
-                                key.alias,
-                                current,
-                                grace
-                            );
-                        }
-                    }
-                }
-            }
-        }
 
         let keybox_attestation_allowed = attestation_key_info.is_none();
         let creation_result = match attestation_key_info {

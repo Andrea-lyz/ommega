@@ -20,7 +20,13 @@ impl crypto::MonotonicClock for TestClock {
     }
 }
 
-struct TestRemote;
+#[derive(Default)]
+struct TestRemote {
+    cert_chain: Option<Vec<Vec<u8>>>,
+    expected_purpose: Option<KeyPurpose>,
+    expected_issuer: Option<String>,
+    unavailable: bool,
+}
 impl device::RemoteBackend for TestRemote {
     fn attest(
         &self,
@@ -28,16 +34,44 @@ impl device::RemoteBackend for TestRemote {
         _: &[u8],
         _: &str,
         _: Option<&[u8]>,
-        _: &device::RemoteAttestParams,
+        params: &device::RemoteAttestParams,
     ) -> Result<Option<device::RemoteAttestation>, Error> {
-        panic!("child generation must not request a remote key")
+        assert_eq!(
+            params.purpose,
+            [self.expected_purpose.unwrap_or(KeyPurpose::Sign) as i32]
+        );
+        assert_eq!(
+            params
+                .attestation_key
+                .as_ref()
+                .map(|key| key.alias.as_str()),
+            self.expected_issuer.as_deref()
+        );
+        if self.unavailable {
+            return Ok(None);
+        }
+        let cert_chain = self
+            .cert_chain
+            .as_ref()
+            .expect("unexpected remote generation");
+        Ok(Some(device::RemoteAttestation {
+            cert_chain: cert_chain.clone(),
+            effective_security_level: Some(SecurityLevel::TrustedEnvironment),
+            profile: device::RemoteKeyMintProfile {
+                interface_version: 5,
+                interface_hash: "test".into(),
+                profile_version: 500,
+                hardware_version: 500,
+                security_level: SecurityLevel::TrustedEnvironment,
+                has_strongbox: false,
+                max_operations: None,
+            },
+        }))
     }
     fn sign(&self, alias: &str, data: &[u8], algorithm: &str) -> Result<Option<Vec<u8>>, Error> {
-        if alias == "test-only" {
-            assert_eq!(algorithm, "SHA256withECDSA");
-            assert_eq!(data, [1, 2, 3]);
-        }
-        // Only certificate encoding/metadata are under test, not the signature.
+        assert_eq!(alias, "test-only", "unexpected remote certificate signing");
+        assert_eq!(algorithm, "SHA256withECDSA");
+        assert_eq!(data, [1, 2, 3]);
         Ok(Some(vec![1; 64]))
     }
     fn decrypt(&self, _: &str, _: &[u8], _: &str) -> Result<Option<Vec<u8>>, Error> {
@@ -148,7 +182,7 @@ fn test_ta() -> KeyMintTa {
         device::Implementation {
             keys: Box::new(TestKeys),
             sign_info: None,
-            remote: Some(std::sync::Arc::new(TestRemote)),
+            remote: Some(std::sync::Arc::new(TestRemote::default())),
             attest_ids: None,
             sdd_mgr: None,
             bootloader: Box::new(device::BootloaderDone),
@@ -212,55 +246,283 @@ fn remote_rot() -> crypto::RemoteRootOfTrust {
 }
 
 #[test]
-fn remote_child_certificate_metadata_and_blob_share_patchlevels() {
-    check_child_versions(true, false);
+fn auth_bound_remote_generation_keeps_the_physical_chain_and_local_policy() {
+    let mut ta = test_ta();
+    // Mint the simulated B chain entirely in software. No Binder or HAL calls.
+    let parent_params = key_params(KeyPurpose::AttestKey);
+    let parent = ta.generate_key(&parent_params, None).unwrap();
+    let mut params = key_params(KeyPurpose::Sign);
+    params.extend([
+        KeyParam::AttestationChallenge(b"test-challenge".to_vec()),
+        KeyParam::AttestationApplicationId(b"test-app".to_vec()),
+    ]);
+    let physical = ta
+        .generate_key(
+            &params,
+            Some(AttestationKey {
+                key_blob: parent.key_blob,
+                attest_key_params: vec![],
+                issuer_subject_name: tag::get_cert_subject(&parent_params).unwrap().to_vec(),
+            }),
+        )
+        .unwrap();
+    let mut chain: Vec<_> = physical
+        .certificate_chain
+        .iter()
+        .map(|cert| cert.encoded_certificate.clone())
+        .collect();
+    chain.extend(
+        parent
+            .certificate_chain
+            .into_iter()
+            .map(|cert| cert.encoded_certificate),
+    );
+    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(chain.clone()),
+        ..TestRemote::default()
+    }));
+
+    params.retain(|p| !matches!(p, KeyParam::NoAuthRequired));
+    let policy = [
+        KeyParam::UserSecureId(42),
+        KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
+        KeyParam::AuthTimeout(5),
+    ];
+    params.extend(policy.clone());
+    params.push(KeyParam::UnlockedDeviceRequired);
+    let result = ta.generate_key(&params, None).unwrap();
+    let returned: Vec<_> = result
+        .certificate_chain
+        .iter()
+        .map(|cert| cert.encoded_certificate.clone())
+        .collect();
+    assert_eq!(returned, chain);
+    let (stored, _) = ta.keyblob_parse_decrypt(&result.key_blob, &[]).unwrap();
+    let auths = tag::characteristics_at(&stored.characteristics, SecurityLevel::TrustedEnvironment)
+        .unwrap();
+    for param in policy {
+        assert!(auths.contains(&param), "local policy lost: {param:?}");
+    }
+    assert!(!auths.contains(&KeyParam::NoAuthRequired));
+    // Unlock state is policed by Keystore, not sealed into KeyMint's keyblob.
+    let keystore_auths =
+        tag::characteristics_at(&result.key_characteristics, SecurityLevel::Keystore).unwrap();
+    assert!(keystore_auths.contains(&KeyParam::UnlockedDeviceRequired));
+}
+
+#[test]
+fn remote_key_cannot_issue_certificates_via_the_sign_transport() {
+    let ta = test_ta();
+    let error = ta
+        .sign_cert_data(
+            KeyMaterial::Remote(crypto::RemoteRef {
+                alias: "legacy-attest-key".into(),
+                public_key: vec![],
+                root_of_trust: Some(remote_rot()),
+            }),
+            b"child TBS",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::IncompatiblePurpose, _)
+    ));
+}
+
+struct DelegationFixture {
+    ta: KeyMintTa,
+    issuer: AttestationKey,
+    issuer_alias: String,
+    params: Vec<KeyParam>,
+    chain: Vec<Vec<u8>>,
+    batch_chain: Vec<Vec<u8>>,
+}
+
+impl DelegationFixture {
+    fn new() -> Self {
+        Self::with_rsa_issuer(false)
+    }
+
+    fn with_rsa_issuer(rsa: bool) -> Self {
+        let mut ta = test_ta();
+        let root_params = key_params(KeyPurpose::AttestKey);
+        let root = ta.generate_key(&root_params, None).unwrap();
+        let root_info = AttestationKey {
+            key_blob: root.key_blob.clone(),
+            attest_key_params: vec![],
+            issuer_subject_name: cert::extract_subject(&root.certificate_chain[0]).unwrap(),
+        };
+        let mut parent_params = key_params(KeyPurpose::AttestKey);
+        if rsa {
+            parent_params.retain(|p| !matches!(p, KeyParam::Algorithm(_) | KeyParam::EcCurve(_)));
+            parent_params.extend([
+                KeyParam::Algorithm(Algorithm::Rsa),
+                KeyParam::KeySize(kmr_wire::KeySizeInBits(2048)),
+                KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(65537)),
+            ]);
+        }
+        parent_params.extend([
+            KeyParam::AttestationChallenge(b"parent-challenge".to_vec()),
+            KeyParam::AttestationApplicationId(b"test-app".to_vec()),
+        ]);
+        let parent = ta
+            .generate_key(&parent_params, Some(root_info.clone()))
+            .unwrap();
+        let subject = cert::extract_subject(&parent.certificate_chain[0]).unwrap();
+        let parent_chain: Vec<_> = parent
+            .certificate_chain
+            .iter()
+            .chain(&root.certificate_chain)
+            .map(|cert| cert.encoded_certificate.clone())
+            .collect();
+        ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+            cert_chain: Some(parent_chain.clone()),
+            expected_purpose: Some(KeyPurpose::AttestKey),
+            ..TestRemote::default()
+        }));
+        let remote_parent = ta.generate_key(&parent_params, None).unwrap();
+        let (stored, _) = ta
+            .keyblob_parse_decrypt(&remote_parent.key_blob, &[])
+            .unwrap();
+        let KeyMaterial::Remote(reference) = stored.key_material else {
+            panic!("remote parent")
+        };
+        let issuer_alias = reference.alias;
+        let mut params = key_params(KeyPurpose::Sign);
+        params.extend([
+            KeyParam::AttestationChallenge(b"child-challenge".to_vec()),
+            KeyParam::AttestationApplicationId(b"test-app".to_vec()),
+        ]);
+        let physical_child = ta
+            .generate_key(
+                &params,
+                Some(AttestationKey {
+                    key_blob: parent.key_blob,
+                    attest_key_params: vec![],
+                    issuer_subject_name: subject.clone(),
+                }),
+            )
+            .unwrap();
+        let mut chain: Vec<_> = physical_child
+            .certificate_chain
+            .into_iter()
+            .map(|cert| cert.encoded_certificate)
+            .collect();
+        chain.extend(parent_chain);
+        let batch_child = ta.generate_key(&params, Some(root_info)).unwrap();
+        let batch_chain: Vec<_> = batch_child
+            .certificate_chain
+            .into_iter()
+            .chain(root.certificate_chain)
+            .map(|cert| cert.encoded_certificate)
+            .collect();
+        let mut fixture = Self {
+            ta,
+            issuer: AttestationKey {
+                key_blob: remote_parent.key_blob,
+                attest_key_params: vec![],
+                issuer_subject_name: subject,
+            },
+            issuer_alias,
+            params,
+            chain,
+            batch_chain,
+        };
+        fixture.response(fixture.chain.clone(), false);
+        fixture
+    }
+
+    fn response(&mut self, chain: Vec<Vec<u8>>, unavailable: bool) {
+        self.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+            cert_chain: Some(chain),
+            expected_issuer: Some(self.issuer_alias.clone()),
+            unavailable,
+            ..TestRemote::default()
+        }));
+    }
+
+    fn generate(&mut self) -> Result<KeyCreationResult, Error> {
+        self.ta
+            .generate_key(&self.params, Some(self.issuer.clone()))
+    }
+}
+
+#[test]
+fn native_remote_delegation_preserves_the_hardware_chain() {
+    let mut fixture = DelegationFixture::new();
+    let result = fixture.generate().unwrap();
+    let returned: Vec<_> = result
+        .certificate_chain
+        .into_iter()
+        .map(|cert| cert.encoded_certificate)
+        .collect();
+    assert_eq!(returned, fixture.chain);
+    let (stored, _) = fixture
+        .ta
+        .keyblob_parse_decrypt(&result.key_blob, &[])
+        .unwrap();
+    let KeyMaterial::Remote(reference) = stored.key_material else {
+        panic!("remote child")
+    };
+    assert_ne!(reference.alias, fixture.issuer_alias);
+}
+
+#[test]
+fn native_remote_delegation_rejects_an_ignored_issuer() {
+    let mut fixture = DelegationFixture::new();
+    fixture.response(fixture.batch_chain.clone(), false);
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+}
+
+#[test]
+fn native_remote_delegation_accepts_a_valid_rsa_issuer_signature() {
+    let mut fixture = DelegationFixture::with_rsa_issuer(true);
+    assert!(fixture.generate().is_ok());
+}
+
+#[test]
+fn native_remote_delegation_verifies_the_child_signature() {
+    let mut fixture = DelegationFixture::new();
+    let mut chain = fixture.chain.clone();
+    *chain[0].last_mut().unwrap() ^= 1;
+    fixture.response(chain, false);
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+}
+
+#[test]
+fn unavailable_remote_issuer_never_falls_back_to_local_signing() {
+    let mut fixture = DelegationFixture::new();
+    fixture.response(vec![], true);
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::UnknownError, _)
+    ));
 }
 
 #[test]
 fn local_attestation_child_keeps_local_patchlevels() {
-    check_child_versions(false, false);
+    check_child_versions(false);
 }
 
 #[test]
-fn remote_child_version_normalization_preserves_user_authentication() {
-    check_child_versions(true, true);
+fn local_attestation_child_preserves_user_authentication() {
+    check_child_versions(true);
 }
 
-#[test]
-fn child_attestation_leaf_is_requested_for_auth_and_unlocked_constraints() {
-    assert!(!needs_child_attestation_leaf(&[]));
-    assert!(!needs_child_attestation_leaf(&[KeyParam::NoAuthRequired]));
-    assert!(needs_child_attestation_leaf(&[KeyParam::UserSecureId(42)]));
-    assert!(needs_child_attestation_leaf(&[KeyParam::UserAuthType(2)]));
-    assert!(needs_child_attestation_leaf(&[KeyParam::AuthTimeout(30)]));
-    assert!(needs_child_attestation_leaf(&[
-        KeyParam::UnlockedDeviceRequired
-    ]));
-    assert!(needs_child_attestation_leaf(&[KeyParam::AllowWhileOnBody]));
-}
-
-fn check_child_versions(remote: bool, auth_bound: bool) {
+fn check_child_versions(auth_bound: bool) {
     let mut ta = test_ta();
     let ordinary_params = key_params(KeyPurpose::Sign);
     let old_key = ta.generate_key(&ordinary_params, None).unwrap();
     let (old_blob, _) = ta.keyblob_parse_decrypt(&old_key.key_blob, &[]).unwrap();
 
     let parent_params = key_params(KeyPurpose::AttestKey);
-    let (mut material, chars) = ta.generate_key_material(&parent_params).unwrap();
-    let rot = remote_rot();
-    if remote {
-        let spki = material
-            .subject_public_key_info(&mut Vec::new(), &*ta.imp.ec, &*ta.imp.rsa, &*ta.imp.mldsa)
-            .unwrap()
-            .unwrap()
-            .to_der()
-            .unwrap();
-        material = KeyMaterial::Remote(crypto::RemoteRef {
-            alias: "unit-test".into(),
-            public_key: spki,
-            root_of_trust: Some(rot.clone()),
-        });
-    }
+    let (material, chars) = ta.generate_key_material(&parent_params).unwrap();
     let parent = ta
         .finish_keyblob_creation(
             &parent_params,
@@ -305,21 +567,18 @@ fn check_child_versions(remote: bool, auth_bound: bool) {
             .unwrap();
     let auths = tag::characteristics_at(&reported, SecurityLevel::TrustedEnvironment).unwrap();
     for (param, expected) in [
-        (
-            KeyParam::OsVersion(cert_rot.os_version.unwrap()),
-            if remote { 150000 } else { 160000 },
-        ),
+        (KeyParam::OsVersion(cert_rot.os_version.unwrap()), 160000),
         (
             KeyParam::OsPatchlevel(cert_rot.os_patchlevel.unwrap()),
-            if remote { 202512 } else { 202608 },
+            202608,
         ),
         (
             KeyParam::VendorPatchlevel(cert_rot.vendor_patchlevel.unwrap()),
-            if remote { 20251205 } else { 20260801 },
+            20260801,
         ),
         (
             KeyParam::BootPatchlevel(cert_rot.boot_patchlevel.unwrap()),
-            if remote { 20251201 } else { 20260801 },
+            20260801,
         ),
     ] {
         assert!(

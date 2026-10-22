@@ -23,6 +23,26 @@ stable-AIDL version/hash and `getHardwareInfo()` values, reports StrongBox
 availability, and freezes that identity for the relay process. Attestation
 results carry the same profile so A can reject mixed A/B identities.
 
+App AttestKey delegation uses `device_attest_context.attestation_key` containing
+the existing session alias and a base64 DER `issuer_subject_name`. B requires
+that session to belong to the selected HAL and its certificate to have the
+requested subject. Generation checks the HAL's returned hardware ATTEST_KEY
+authorization; native delegation enforces the existing keyblob's purpose.
+Certificate CA/KeyUsage extensions are preserved without a generic PKIX gate.
+It passes the existing keyblob to
+native `generateKey(..., AttestationKey)` and appends its unmodified issuer
+chain to the returned child. It does not issue certificates with `begin(SIGN)`.
+Hardware-requested issuer keyblob upgrades are persisted before one retry.
+
+B forwards the requested user-authentication and authorization tags (502-509)
+to the real HAL, including user SIDs, authentication type, timeout and
+`UNLOCKED_DEVICE_REQUIRED`. It adds `NO_AUTH_REQUIRED` only when no explicit
+authentication policy was supplied; unsupported tags fail rather than silently
+weakening the policy. A also enforces its original authentication policy.
+B cannot authenticate A's user token, so operations on auth-bound hardware keys
+can still require authentication the relay cannot provide. The certificate
+reports B's actual key policy; it does not prove B accepted A's fingerprint.
+
 ## Install and configure
 
 **Android 12 or above required.**

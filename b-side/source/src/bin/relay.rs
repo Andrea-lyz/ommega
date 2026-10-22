@@ -62,7 +62,7 @@ use serde_json::{json, Value};
 
 use ommegaclient_b::keymaster::attest_proxy::{check_app_id_der, SYSTEM_KEYMINT_STRONGBOX};
 use ommegaclient_b::keymaster::relay_tee::keymint_error;
-use ommegaclient_b::keymaster::tee_ops::{self, KeyAlgorithm, KeySpec};
+use ommegaclient_b::keymaster::tee_ops::{self, AttestationKeyRef, KeyAlgorithm, KeySpec};
 use ommegaclient_b::wakelock;
 
 /// Long-poll timeout. 0 = short poll: the server answers immediately and the
@@ -842,6 +842,7 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
     let mgf_digest = parse_mgf_digest(get("mgf_digest"))?;
 
     Ok(KeySpec {
+        attestation_key: parse_attestation_key(get("attestation_key"))?,
         algorithm,
         ec_curve: get_i64("ec_curve").and_then(|v| KmEcCurve::try_from(v as i32).ok()),
         key_size: get_i64("key_size").map(|v| v as u32),
@@ -877,10 +878,8 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
         // NO_AUTH_REQUIRED, 504 USER_AUTH_TYPE, 505 AUTH_TIMEOUT, 506
         // ALLOW_WHILE_ON_BODY, 507 TRUSTED_USER_PRESENCE_REQUIRED, 508
         // TRUSTED_CONFIRMATION_REQUIRED, 509 UNLOCKED_DEVICE_REQUIRED). They are
-        // parsed for wire compatibility but deliberately ignored by `tee_ops`:
-        // every relay-minted key is unconditional NO_AUTH_REQUIRED because B
-        // has no token that the A-side Gatekeeper can validate. The A-side
-        // keyblob/Keystore2 still carries and enforces the fingerprint policy.
+        // Authentication is enforced by A. B keeps NO_AUTH_REQUIRED because
+        // it cannot validate A's token, and forwards tag 509 independently.
         user_auth: {
             let mut tags = Vec::new();
             for pair in get("user_auth")
@@ -909,6 +908,30 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
             tags
         },
     })
+}
+
+fn parse_attestation_key(value: Option<&Value>) -> Result<Option<AttestationKeyRef>> {
+    let Some(value) = value else { return Ok(None) };
+    let invalid = || {
+        keymint_error(
+            KmErrorCode::InvalidArgument,
+            "invalid attestation_key reference",
+        )
+    };
+    let alias = value
+        .get("alias")
+        .and_then(Value::as_str)
+        .filter(|alias| !alias.is_empty())
+        .ok_or_else(invalid)?;
+    let subject = value.get("issuer_subject_name").ok_or_else(invalid)?;
+    let issuer_subject_name = b64_decode(subject).map_err(|_| invalid())?;
+    if issuer_subject_name.is_empty() {
+        return Err(invalid());
+    }
+    Ok(Some(AttestationKeyRef {
+        alias: alias.to_string(),
+        issuer_subject_name,
+    }))
 }
 
 fn parse_mgf_digest(value: Option<&Value>) -> Result<Option<KmDigest>> {
@@ -1002,11 +1025,9 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
     })?;
     let alias = alias_of(payload, "attest");
     let spec = parse_key_spec(payload)?;
-    // The requested purposes are forwarded unchanged (see
-    // tee_ops::build_attestation_params). For an App Attest Key this mirrors
-    // AOSP keystore2: a lone PURPOSE_ATTEST_KEY is accepted by the real TEE
-    // (verified working on-device); such a key is later used only as an
-    // `AttestationKey` when the A-side signs a child certificate.
+    // Preserve the requested purposes, including ATTEST_KEY. A HAL rejection
+    // is authoritative; substituting SIGN would return an ordinary end-entity
+    // certificate that cannot issue a child certificate.
 
     // The A-side forwards the requesting security level (1 = TEE, 2 = StrongBox)
     // in `device_attest_context.attestation_security_level`. A StrongBox request
@@ -1527,6 +1548,37 @@ mod tests {
             }),
         };
         assert_eq!(reported_caps(&cfg), "");
+    }
+
+    #[test]
+    fn attestation_key_reference_is_preserved_from_the_nested_context() {
+        let subject = b64(&[0x30, 0]);
+        let spec = parse_key_spec(&json!({"device_attest_context": {
+            "attestation_key": {"alias": "parent-key", "issuer_subject_name": subject},
+        }}))
+        .unwrap();
+        let issuer = spec.attestation_key.unwrap();
+        assert_eq!(issuer.alias, "parent-key");
+        assert_eq!(issuer.issuer_subject_name, [0x30, 0]);
+    }
+
+    #[test]
+    fn attestation_key_reference_cannot_silently_fall_back_to_the_batch_key() {
+        assert!(parse_attestation_key(None).unwrap().is_none());
+        for value in [
+            Value::Null,
+            json!({}),
+            json!({"alias": "parent-key"}),
+            json!({"alias": "", "issuer_subject_name": "MAA="}),
+            json!({"alias": "parent-key", "issuer_subject_name": "!"}),
+            json!({"alias": "parent-key", "issuer_subject_name": ""}),
+        ] {
+            let error = parse_attestation_key(Some(&value)).unwrap_err();
+            assert_eq!(
+                relay_error_result(&error)["keymint_error_code"],
+                KmErrorCode::InvalidArgument as i32
+            );
+        }
     }
 
     fn assert_mgf_error(value: Value) {

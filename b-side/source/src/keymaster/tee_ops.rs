@@ -6,14 +6,15 @@
 //!   * generate an attestation/signing key (with an A-side supplied appid / 709)
 //!   * derive a signing key attested by an attestation key
 //!   * fetch the certificate chain / public key of a previously generated key
-//!   * sign data / sign a to-be-signed (TBS) blob / sign a challenge
+//!   * sign data / sign a challenge
 //!   * decrypt data / perform EC key agreement
 //!
 //! Key generation and private-key operations here use the selected real KeyMint
 //! HAL. This does not move A-side storage, authorization or local software-key
-//! operations to B. Generation translates some authorizations, including
-//! ATTEST_KEY to SIGN and user-auth requirements to NO_AUTH_REQUIRED; it does
-//! not provide hardware enforcement of the original A user's authentication.
+//! operations to B. Generation preserves key purposes and the requested
+//! authorization list. B cannot verify an A-side auth token, so operations on
+//! auth-bound hardware keys can still be rejected; generation does not relax
+//! the policy to make such operations succeed.
 //!
 //! Sessions are cached by alias and persisted atomically. A hardware-requested
 //! keyblob upgrade is saved before begin is retried; it never generates a new key.
@@ -31,6 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use der::{Decode, Encode};
 use kmr_wire::{
     keymint::{
         Algorithm as KmAlgorithm, DateTime, Digest as KmDigest, EcCurve as KmEcCurve,
@@ -62,6 +64,9 @@ fn after_date_time() -> DateTime {
 
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter as KmKeyParameter;
 use crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose;
+use crate::android::hardware::security::keymint::{
+    AttestationKey::AttestationKey as NativeAttestationKey, IKeyMintDevice::IKeyMintDevice,
+};
 use crate::err as ks_err;
 use crate::keymaster::relay_tee::{
     clear_system_keymint, extract_km_error_code, get_system_keymint, key_params_to_aidl,
@@ -87,20 +92,21 @@ pub enum KeyAlgorithm {
 /// etc.).
 #[derive(Clone, Debug, Default)]
 pub struct KeySpec {
+    /// Existing native ATTEST_KEY that must issue this key's certificate.
+    pub attestation_key: Option<AttestationKeyRef>,
     /// EC vs RSA key family (also drives later begin() parameter construction).
     pub algorithm: KeyAlgorithm,
     /// EC curve; defaults to P256.
     pub ec_curve: Option<KmEcCurve>,
     /// Key size in bits; defaults to 256 (EC) / 2048 (RSA).
     pub key_size: Option<u32>,
-    /// Business-key purposes are forwarded unchanged, including AgreeKey.
-    /// ATTEST_KEY is translated to SIGN for the existing child-TBS signing path.
+    /// Requested purposes, forwarded unchanged, including AttestKey and AgreeKey.
     pub purposes: Vec<KmKeyPurpose>,
-    /// Requested digests. SHA-256 is added only for translated ATTEST_KEY keys.
+    /// Requested digests, forwarded unchanged.
     pub digests: Vec<KmDigest>,
     /// Requested MGF1 digest (RSA-OAEP), when the app specified one.
     pub mgf_digest: Option<KmDigest>,
-    /// Requested paddings (RSA only), with signing padding for translated ATTEST_KEY.
+    /// Requested paddings (RSA only), forwarded unchanged.
     pub paddings: Vec<KmPadding>,
     /// RSA public exponent; defaults to 65537.
     pub rsa_public_exponent: Option<u64>,
@@ -119,13 +125,16 @@ pub struct KeySpec {
     /// `TRUSTED_CONFIRMATION_REQUIRED`, 509
     /// `UNLOCKED_DEVICE_REQUIRED`).
     ///
-    /// Forwarded by the A-side for wire compatibility and intentionally ignored
-    /// when minting the real B-side key. The relay always uses
-    /// `NO_AUTH_REQUIRED`: it has no `HardwareAuthToken` that B's TEE can
-    /// validate, and some vendor TEEs enforce `USER_AUTH_TYPE` even without
-    /// `USER_SECURE_ID`. The A-side keyblob/Keystore2 still carries and enforces
-    /// the app's fingerprint policy.
+    /// Preserve the requested policy in the real hardware key and its
+    /// attestation. A also enforces its local policy, but its HAT cannot
+    /// authorize an operation on an auth-bound B-side key.
     pub user_auth: Vec<(u32, i64)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AttestationKeyRef {
+    pub alias: String,
+    pub issuer_subject_name: Vec<u8>,
 }
 
 /// A single generated key, held for the lifetime of the relay process.
@@ -565,6 +574,22 @@ pub fn generate_attest_key_on(
     app_id_der: &[u8],
     spec: &KeySpec,
 ) -> Result<TeeSession> {
+    let parent = match spec.attestation_key.as_ref() {
+        Some(issuer) => {
+            if issuer.alias.is_empty() || issuer.alias == alias {
+                return Err(keymint_error(
+                    KmErrorCode::InvalidArgument,
+                    "invalid issuer alias",
+                ));
+            }
+            Some(session_get(&issuer.alias)?)
+        }
+        None => None,
+    };
+    let native_issuer = match (&spec.attestation_key, &parent) {
+        (Some(issuer), Some(parent)) => Some(native_attestation_key(issuer, parent, service)?),
+        _ => None,
+    };
     let keymint = get_system_keymint(service)
         .with_context(|| ks_err!("real keymint {service} connect failed"))?;
     // Probe the actual HAL version instead of assuming V5. A StrongBox HAL
@@ -573,29 +598,56 @@ pub fn generate_attest_key_on(
     let km_version = probe_keymint_version(&keymint);
     let params = build_attestation_params(app_id_der, challenge, spec, km_version)?;
 
-    let result = match keymint.generateKey(&params, None) {
-        Ok(result) => result,
-        Err(status) => {
-            if is_dead_object_status(&status) {
-                clear_system_keymint(service);
+    let generated = if let (Some(issuer), Some(parent), Some(native)) =
+        (&spec.attestation_key, &parent, &native_issuer)
+    {
+        with_keyblob_upgrade_retry(
+            parent,
+            |blob| {
+                let mut native = native.clone();
+                native.keyBlob = blob.to_vec();
+                keymint.generateKey(&params, Some(&native))
+            },
+            || upgrade_session_for_use(&issuer.alias, parent, &*keymint),
+        )
+        .with_context(|| "native delegated generateKey failed")?
+    } else {
+        match keymint.generateKey(&params, None) {
+            Ok(result) => result,
+            Err(status) => {
+                if is_dead_object_status(&status) {
+                    clear_system_keymint(service);
+                }
+                // Extract the KeyMint ErrorCode (e.g., -74, -68) so the caller can
+                // distinguish "HAL not provisioned" from "parameter rejected".
+                return Err(keymint_status_error(
+                    &status,
+                    &format!("real keymint {service} generateKey failed"),
+                ));
             }
-            // Extract the KeyMint ErrorCode (e.g., -74, -68) so the caller can
-            // distinguish "HAL not provisioned" from "parameter rejected".
-            return Err(keymint_status_error(
-                &status,
-                &format!("real keymint {service} generateKey failed"),
-            ));
         }
     };
 
-    let cert_chain: Vec<Vec<u8>> = result
+    if spec.purposes.contains(&KmKeyPurpose::AttestKey) {
+        validate_native_attestation_characteristics(&generated.keyCharacteristics, service)?;
+        if generated.certificateChain.is_empty() {
+            return Err(keymint_error(
+                KmErrorCode::VerificationFailed,
+                "attestation issuer certificate missing",
+            ));
+        }
+    }
+    let mut cert_chain: Vec<Vec<u8>> = generated
         .certificateChain
         .into_iter()
         .map(|cert| cert.encodedCertificate)
         .collect();
+    if let Some(parent) = &parent {
+        append_issuer_chain(&mut cert_chain, &parent.cert_chain)?;
+    }
 
     let session = TeeSession {
-        key_blob: result.keyBlob,
+        key_blob: generated.keyBlob,
         cert_chain,
         algorithm: spec.algorithm,
         hal_service: service,
@@ -603,6 +655,86 @@ pub fn generate_attest_key_on(
     };
     session_put(alias, session.clone())?;
     Ok(session)
+}
+
+fn validate_native_attestation_characteristics(
+    characteristics: &[crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics],
+    service: &str,
+) -> Result<()> {
+    use crate::android::hardware::security::keymint::{
+        KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
+    };
+    let expected = if service == SYSTEM_KEYMINT_STRONGBOX {
+        SecurityLevel::STRONGBOX
+    } else {
+        SecurityLevel::TRUSTED_ENVIRONMENT
+    };
+    // Follow native KeyMint: authority comes from the hardware keyblob, not
+    // the CA/KeyUsage appearance of its public certificate. Check the HAL's
+    // result instead of merely trusting the requested purpose.
+    let attest_only = characteristics
+        .iter()
+        .filter(|chars| chars.securityLevel == expected)
+        .flat_map(|chars| &chars.authorizations)
+        .filter(|param| param.tag == Tag::PURPOSE)
+        .map(|param| &param.value)
+        .eq([&KeyParameterValue::KeyPurpose(KeyPurpose::ATTEST_KEY)]);
+    if !attest_only {
+        return Err(keymint_error(
+            KmErrorCode::IncompatiblePurpose,
+            "HAL did not authorize an exclusive hardware ATTEST_KEY",
+        ));
+    }
+    Ok(())
+}
+
+fn native_attestation_key(
+    request: &AttestationKeyRef,
+    parent: &TeeSession,
+    service: &str,
+) -> Result<NativeAttestationKey> {
+    if parent.hal_service != service {
+        return Err(keymint_error(
+            KmErrorCode::InvalidKeyBlob,
+            "issuer belongs to another HAL",
+        ));
+    }
+    let cert = parent
+        .cert_chain
+        .first()
+        .ok_or_else(|| keymint_error(KmErrorCode::InvalidKeyBlob, "issuer certificate missing"))?;
+    // generateKey(..., AttestationKey) enforces the parent's keyblob purpose.
+    // Do not substitute a general-purpose PKIX CA permission check here.
+    let cert = x509_cert::Certificate::from_der(cert).context("parse native issuer certificate")?;
+    if cert.tbs_certificate().subject().to_der()? != request.issuer_subject_name {
+        return Err(keymint_error(
+            KmErrorCode::InvalidArgument,
+            "issuer subject mismatch",
+        ));
+    }
+    Ok(NativeAttestationKey {
+        keyBlob: parent.key_blob.clone(),
+        attestKeyParams: vec![],
+        issuerSubjectName: request.issuer_subject_name.clone(),
+    })
+}
+
+fn append_issuer_chain(chain: &mut Vec<Vec<u8>>, parent: &[Vec<u8>]) -> Result<()> {
+    if chain.is_empty() || parent.is_empty() {
+        return Err(keymint_error(
+            KmErrorCode::VerificationFailed,
+            "delegated certificate missing",
+        ));
+    }
+    if chain.len() == 1 {
+        chain.extend_from_slice(parent);
+    } else if chain[1..] != *parent {
+        return Err(keymint_error(
+            KmErrorCode::VerificationFailed,
+            "unexpected delegated chain",
+        ));
+    }
+    Ok(())
 }
 
 fn build_attestation_params(
@@ -623,29 +755,15 @@ fn build_attestation_params(
         KeyParam::AttestationApplicationId(app_id_der.to_vec()),
     ];
 
-    // Forward business-key purposes exactly. The only unavoidable translation
-    // is ATTEST_KEY -> SIGN: this qti TEE rejects direct ATTEST_KEY generation,
-    // while the A-side later asks this key to sign a child certificate TBS.
-    let mut purposes = spec.purposes.clone();
-    let is_attest_key = purposes.contains(&KmKeyPurpose::AttestKey);
-    if is_attest_key {
-        purposes.retain(|p| *p != KmKeyPurpose::AttestKey);
-        if !purposes.contains(&KmKeyPurpose::Sign) {
-            purposes.push(KmKeyPurpose::Sign);
-        }
-    }
-    for p in purposes {
-        params.push(KeyParam::Purpose(p));
+    // A SIGN certificate is not an attestation issuer: it lacks CA/keyCertSign.
+    // Preserve ATTEST_KEY and let the HAL report unsupported purposes instead
+    // of returning a key with different privileges.
+    for p in &spec.purposes {
+        params.push(KeyParam::Purpose(*p));
     }
 
-    // Forward business-key digests exactly. A translated ATTEST_KEY needs
-    // SHA-256 because child certificates are signed with SHA256withRSA/ECDSA.
-    let mut digests = spec.digests.clone();
-    if is_attest_key && !digests.contains(&KmDigest::Sha256) {
-        digests.push(KmDigest::Sha256);
-    }
-    for d in digests {
-        params.push(KeyParam::Digest(d));
+    for d in &spec.digests {
+        params.push(KeyParam::Digest(*d));
     }
 
     match algo {
@@ -665,12 +783,6 @@ fn build_attestation_params(
             // only the requested paddings are needed.
             for p in spec.paddings.iter() {
                 params.push(KeyParam::Padding(*p));
-            }
-            // An attestation key signs the child-cert TBS with PKCS1v15
-            // (SHA256withRSA); ensure that padding is authorized too, even when
-            // the app only requested ATTEST_KEY use.
-            if is_attest_key && !spec.paddings.contains(&KmPadding::RsaPkcs115Sign) {
-                params.push(KeyParam::Padding(KmPadding::RsaPkcs115Sign));
             }
             // MGF1 digest for RSA-OAEP. Always push an explicit MGF1 digest so
             // the TEE's key authorization carries the tag. begin(DECRYPT)
@@ -692,14 +804,10 @@ fn build_attestation_params(
         _ => {}
     }
 
-    // Remote-proxy model: the relay signs with no auth token, and the A-side
-    // Gatekeeper token cannot validate on B. Some vendor TEEs also enforce
-    // USER_AUTH_TYPE (504) even when USER_SECURE_ID (502) is absent, which
-    // kept freshly generated keys failing with -26 in the 1.9.0 follow-up.
-    // Every relay-minted key is therefore unconditionally NO_AUTH_REQUIRED;
-    // A's keyblob still carries 502/504 and its Keystore2 still requires the
-    // fingerprint before it calls this relay.
-    params.push(relay_user_auth_param(&spec.user_auth));
+    // The hardware key and its certificate must describe the requested
+    // authorization policy. Local enforcement on A does not justify turning
+    // an auth-bound B-side key into a NO_AUTH_REQUIRED key.
+    params.extend(relay_authorization_params(&spec.user_auth)?);
 
     // Certificate validity bounds (app-specified or default now / now+10y);
     // real TEEs require NOT_BEFORE/NOT_AFTER (else MISSING_NOT_BEFORE -80).
@@ -724,18 +832,32 @@ fn build_attestation_params(
         .with_context(|| ks_err!("encode real TEE attestation parameters"))
 }
 
-/// Every relay-minted key must be usable without a `HardwareAuthToken`.
+/// Preserve the caller's authentication and independent authorization tags.
 ///
-/// The A-side forwards `device_attest_context.user_auth`, but that policy is
-/// enforced by A's keyblob and Keystore2. B's real TEE cannot validate the
-/// A-side Gatekeeper/ConfirmationUI token, and the relay always calls
-/// `begin`/`update`/`finish` with `None` (see `run_single_input_op`). A key
-/// carrying `USER_SECURE_ID` (502) fails every relay `begin(SIGN)` with
-/// `KeyUserNotAuthenticated` (-26); the 1.9.0 follow-up showed that some vendor
-/// TEEs do the same for a metadata-only `USER_AUTH_TYPE` (504). Keep the proven
-/// pre-1.9.0 policy: one unconditional `NO_AUTH_REQUIRED`.
-fn relay_user_auth_param(_user_auth: &[(u32, i64)]) -> KeyParam {
-    KeyParam::NoAuthRequired
+/// Only a request with no explicit authentication policy gets the relay's
+/// default NO_AUTH_REQUIRED tag. Explicit policies, including invalid or
+/// unsupported combinations, remain for the HAL to validate without silently
+/// weakening them. A's HAT is not valid on B, so subsequent hardware operations
+/// may still require authentication that the relay cannot provide.
+fn relay_authorization_params(user_auth: &[(u32, i64)]) -> Result<Vec<KeyParam>> {
+    let mut params = Vec::with_capacity(user_auth.len() + 1);
+    if !user_auth.iter().any(|(tag, _)| matches!(*tag, 502..=504)) {
+        params.push(KeyParam::NoAuthRequired);
+    }
+    for (tag, value) in user_auth {
+        params.push(match *tag {
+            502 => KeyParam::UserSecureId(*value as u64),
+            503 => KeyParam::NoAuthRequired,
+            504 => KeyParam::UserAuthType(*value as u32),
+            505 => KeyParam::AuthTimeout(*value as u32),
+            506 => KeyParam::AllowWhileOnBody,
+            507 => KeyParam::TrustedUserPresenceRequired,
+            508 => KeyParam::TrustedConfirmationRequired,
+            509 => KeyParam::UnlockedDeviceRequired,
+            other => return Err(anyhow!("unsupported user-auth tag {other}")),
+        });
+    }
+    Ok(params)
 }
 
 // ---------------------------------------------------------------------------
@@ -865,7 +987,7 @@ fn agreement_peer_curve(input: &[u8]) -> Result<KmEcCurve> {
     Ok(curve)
 }
 
-fn begin_with_upgrade_retry<T>(
+fn with_keyblob_upgrade_retry<T>(
     session: &TeeSession,
     mut begin: impl FnMut(&[u8]) -> rsbinder::status::Result<T>,
     recover: impl FnOnce() -> Result<TeeSession>,
@@ -886,7 +1008,7 @@ fn begin_with_upgrade_retry<T>(
         }
         keymint_status_error(
             &status,
-            &format!("real keymint {} begin failed", session.hal_service),
+            &format!("real keymint {} key operation failed", session.hal_service),
         )
     })
 }
@@ -902,37 +1024,10 @@ fn run_single_input_op(
     let keymint = get_system_keymint(hal_service)
         .with_context(|| ks_err!("real keymint {hal_service} connect failed"))?;
 
-    let begin = begin_with_upgrade_retry(
+    let begin = with_keyblob_upgrade_retry(
         session,
         |blob| keymint.begin(purpose, blob, op_params, None),
-        || {
-            // Only recovery holds this lock over a HAL call. Ordinary crypto
-            // operations still run concurrently without the session-table lock.
-            let mut sessions = sessions().lock().unwrap();
-            let cached = sessions
-                .get_mut(alias)
-                .context("upgrade session is missing")?;
-            let upgraded = recover_upgraded_session(
-                cached,
-                session,
-                |blob| {
-                    // Relay-generated keys have no APPLICATION_ID/DATA binding.
-                    // ATTESTATION_APPLICATION_ID is a separate, non-hidden tag.
-                    keymint.upgradeKey(blob, &[]).map_err(|status| {
-                        if is_dead_object_status(&status) {
-                            clear_system_keymint(hal_service);
-                        }
-                        keymint_status_error(
-                            &status,
-                            &format!("real keymint {hal_service} upgradeKey failed"),
-                        )
-                    })
-                },
-                |session| save_session_to_disk(alias, session),
-            )?;
-            log::info!("event=keyblob_upgrade_ready alias={alias} hal={hal_service}");
-            Ok(upgraded)
-        },
+        || upgrade_session_for_use(alias, session, &*keymint),
     )?;
 
     let Some(operation) = begin.operation else {
@@ -951,6 +1046,37 @@ fn run_single_input_op(
             let _ = operation.r#abort();
         },
     )
+}
+
+fn upgrade_session_for_use(
+    alias: &str,
+    session: &TeeSession,
+    keymint: &dyn IKeyMintDevice,
+) -> Result<TeeSession> {
+    // Preserve the established persist-before-retry protocol for both begin
+    // and native generateKey calls using an existing attestation key.
+    let mut sessions = sessions().lock().unwrap();
+    let cached = sessions
+        .get_mut(alias)
+        .context("upgrade session is missing")?;
+    let upgraded = recover_upgraded_session(
+        cached,
+        session,
+        |blob| {
+            keymint.upgradeKey(blob, &[]).map_err(|status| {
+                if is_dead_object_status(&status) {
+                    clear_system_keymint(session.hal_service);
+                }
+                keymint_status_error(&status, "real keymint upgradeKey failed")
+            })
+        },
+        |updated| save_session_to_disk(alias, updated),
+    )?;
+    log::info!(
+        "event=keyblob_upgrade_ready alias={alias} hal={}",
+        session.hal_service
+    );
+    Ok(upgraded)
 }
 
 fn complete_single_input_op(
@@ -1427,6 +1553,226 @@ mod identity_profile_tests {
 }
 
 #[cfg(test)]
+mod native_attestation_tests {
+    use super::*;
+    use crate::keymaster::relay_tee::relay_error_result;
+
+    fn parent(ca: bool, cert_sign: bool) -> TeeSession {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = if ca {
+            rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained)
+        } else {
+            rcgen::IsCa::ExplicitNoCa
+        };
+        params.key_usages = vec![if cert_sign {
+            rcgen::KeyUsagePurpose::KeyCertSign
+        } else {
+            rcgen::KeyUsagePurpose::DigitalSignature
+        }];
+        let certificate = params.self_signed(&key).unwrap();
+        TeeSession {
+            key_blob: vec![1, 2, 3],
+            cert_chain: vec![certificate.der().to_vec()],
+            algorithm: KeyAlgorithm::EcP256,
+            hal_service: SYSTEM_KEYMINT_DEFAULT,
+            km_version: 500,
+        }
+    }
+
+    fn request(parent: &TeeSession) -> AttestationKeyRef {
+        let cert = x509_cert::Certificate::from_der(&parent.cert_chain[0]).unwrap();
+        AttestationKeyRef {
+            alias: "test-attest-key".into(),
+            issuer_subject_name: cert.tbs_certificate().subject().to_der().unwrap(),
+        }
+    }
+
+    #[test]
+    fn native_issuer_uses_the_existing_blob_without_pkix_ca_gating() {
+        for (ca, cert_sign) in [(false, false), (false, true), (true, false), (true, true)] {
+            let parent = parent(ca, cert_sign);
+            let request = request(&parent);
+            let native = native_attestation_key(&request, &parent, SYSTEM_KEYMINT_DEFAULT).unwrap();
+            assert_eq!(native.keyBlob, parent.key_blob);
+            assert_eq!(native.issuerSubjectName, request.issuer_subject_name);
+            assert!(native.attestKeyParams.is_empty());
+        }
+    }
+
+    #[test]
+    fn hal_must_authorize_an_exclusive_attest_key_in_the_correct_hardware() {
+        use crate::android::hardware::security::keymint::{
+            KeyCharacteristics::KeyCharacteristics, SecurityLevel::SecurityLevel,
+        };
+        for (level, purposes, service, accepted) in [
+            (
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                vec![KmKeyPurpose::AttestKey],
+                SYSTEM_KEYMINT_DEFAULT,
+                true,
+            ),
+            (
+                SecurityLevel::STRONGBOX,
+                vec![KmKeyPurpose::AttestKey],
+                SYSTEM_KEYMINT_STRONGBOX,
+                true,
+            ),
+            (
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                vec![KmKeyPurpose::Sign],
+                SYSTEM_KEYMINT_DEFAULT,
+                false,
+            ),
+            (
+                SecurityLevel::SOFTWARE,
+                vec![KmKeyPurpose::AttestKey],
+                SYSTEM_KEYMINT_DEFAULT,
+                false,
+            ),
+            (
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                vec![KmKeyPurpose::AttestKey, KmKeyPurpose::Sign],
+                SYSTEM_KEYMINT_DEFAULT,
+                false,
+            ),
+            (
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                vec![KmKeyPurpose::AttestKey],
+                SYSTEM_KEYMINT_STRONGBOX,
+                false,
+            ),
+        ] {
+            let params: Vec<_> = purposes.into_iter().map(KeyParam::Purpose).collect();
+            let chars = [KeyCharacteristics {
+                securityLevel: level,
+                authorizations: key_params_to_aidl(&params, 200).unwrap(),
+            }];
+            let result = validate_native_attestation_characteristics(&chars, service);
+            assert_eq!(result.is_ok(), accepted);
+            if let Err(error) = result {
+                assert_eq!(
+                    relay_error_result(&error)["keymint_error_code"],
+                    KmErrorCode::IncompatiblePurpose as i32
+                );
+            }
+        }
+        assert!(validate_native_attestation_characteristics(&[], SYSTEM_KEYMINT_DEFAULT).is_err());
+    }
+
+    #[test]
+    fn native_issuer_rejects_wrong_hal_and_subject_without_a_hal_call() {
+        let parent = parent(true, true);
+        let mut request = request(&parent);
+        let error =
+            native_attestation_key(&request, &parent, SYSTEM_KEYMINT_STRONGBOX).unwrap_err();
+        assert_eq!(
+            relay_error_result(&error)["keymint_error_code"],
+            KmErrorCode::InvalidKeyBlob as i32
+        );
+        request.issuer_subject_name = vec![0x30, 0];
+        let error = native_attestation_key(&request, &parent, SYSTEM_KEYMINT_DEFAULT).unwrap_err();
+        assert_eq!(
+            relay_error_result(&error)["keymint_error_code"],
+            KmErrorCode::InvalidArgument as i32
+        );
+    }
+
+    #[test]
+    fn native_leaf_is_joined_to_the_unchanged_parent_chain_once() {
+        let parent = vec![vec![2], vec![3]];
+        let mut chain = vec![vec![1]];
+        append_issuer_chain(&mut chain, &parent).unwrap();
+        assert_eq!(chain, vec![vec![1], vec![2], vec![3]]);
+        append_issuer_chain(&mut chain, &parent).unwrap();
+        assert_eq!(chain, vec![vec![1], vec![2], vec![3]]);
+        assert!(append_issuer_chain(&mut vec![vec![1], vec![9]], &parent).is_err());
+        assert!(append_issuer_chain(&mut vec![], &parent).is_err());
+    }
+
+    #[test]
+    fn auth_and_unlock_constraints_reach_every_supported_keymint_version() {
+        use crate::android::hardware::security::keymint::Tag::Tag;
+        let spec = KeySpec {
+            purposes: vec![KmKeyPurpose::Sign],
+            user_auth: vec![(502, 42), (504, 2), (505, 5), (509, 1)],
+            ..KeySpec::default()
+        };
+        for version in [100, 200, 300, 400, 500] {
+            let params = build_attestation_params(b"app", b"challenge", &spec, version).unwrap();
+            let auths: Vec<_> = params
+                .into_iter()
+                .filter(|param| {
+                    matches!(
+                        param.tag,
+                        Tag::USER_SECURE_ID
+                            | Tag::USER_AUTH_TYPE
+                            | Tag::AUTH_TIMEOUT
+                            | Tag::NO_AUTH_REQUIRED
+                            | Tag::UNLOCKED_DEVICE_REQUIRED
+                    )
+                })
+                .collect();
+            assert_eq!(
+                auths,
+                key_params_to_aidl(
+                    &[
+                        KeyParam::UserSecureId(42),
+                        KeyParam::UserAuthType(2),
+                        KeyParam::AuthTimeout(5),
+                        KeyParam::UnlockedDeviceRequired,
+                    ],
+                    version
+                )
+                .unwrap()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod attestation_purpose_tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::Tag::Tag;
+
+    #[test]
+    fn attest_key_is_not_replaced_with_a_signing_key() {
+        for algorithm in [KeyAlgorithm::EcP256, KeyAlgorithm::Rsa2048] {
+            for explicit_signing_params in [false, true] {
+                let spec = KeySpec {
+                    algorithm,
+                    purposes: vec![KmKeyPurpose::AttestKey],
+                    digests: if explicit_signing_params {
+                        vec![KmDigest::Sha384]
+                    } else {
+                        vec![]
+                    },
+                    paddings: if explicit_signing_params && algorithm == KeyAlgorithm::Rsa2048 {
+                        vec![KmPadding::RsaPss]
+                    } else {
+                        vec![]
+                    },
+                    ..KeySpec::default()
+                };
+                for version in [100, 200, 300, 400, 500] {
+                    let params =
+                        build_attestation_params(b"appid", b"challenge", &spec, version).unwrap();
+                    let actual: Vec<_> = params
+                        .iter()
+                        .filter(|p| matches!(p.tag, Tag::PURPOSE | Tag::DIGEST | Tag::PADDING))
+                        .collect();
+                    let mut expected = vec![KeyParam::Purpose(KmKeyPurpose::AttestKey)];
+                    expected.extend(spec.digests.iter().copied().map(KeyParam::Digest));
+                    expected.extend(spec.paddings.iter().copied().map(KeyParam::Padding));
+                    let expected = key_params_to_aidl(&expected, version).unwrap();
+                    assert_eq!(actual, expected.iter().collect::<Vec<_>>());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod agreement_tests {
     use super::*;
     use crate::keymaster::relay_tee::relay_error_result;
@@ -1726,7 +2072,7 @@ mod upgrade_tests {
 
     #[test]
     fn normal_begin_never_upgrades_or_persists() {
-        let result = begin_with_upgrade_retry(
+        let result = with_keyblob_upgrade_retry(
             &session(),
             |blob| Ok(blob.to_vec()),
             || panic!("successful begin must not recover"),
@@ -1743,7 +2089,7 @@ mod upgrade_tests {
             KmErrorCode::VerificationFailed,
             KmErrorCode::HardwareTypeUnavailable,
         ] {
-            let error = begin_with_upgrade_retry::<()>(
+            let error = with_keyblob_upgrade_retry::<()>(
                 &session(),
                 |_| Err(status(code)),
                 || panic!("non-upgrade HAL failure must not recover"),
@@ -1754,7 +2100,7 @@ mod upgrade_tests {
                 code as i32
             );
         }
-        let error = begin_with_upgrade_retry::<()>(
+        let error = with_keyblob_upgrade_retry::<()>(
             &session(),
             |_| Err(rsbinder::Status::from(rsbinder::StatusCode::DeadObject)),
             || panic!("transport failure must not upgrade"),
@@ -1770,7 +2116,7 @@ mod upgrade_tests {
         let observed = session();
         let mut cached = CachedSession::from(observed.clone());
         let events = RefCell::new(Vec::new());
-        let result = begin_with_upgrade_retry(
+        let result = with_keyblob_upgrade_retry(
             &observed,
             |blob| {
                 if blob == [1] {
@@ -1816,7 +2162,7 @@ mod upgrade_tests {
     fn upgrade_required_on_retry_is_returned_without_a_loop() {
         let attempts = Cell::new(0);
         let recoveries = Cell::new(0);
-        let error = begin_with_upgrade_retry::<()>(
+        let error = with_keyblob_upgrade_retry::<()>(
             &session(),
             |_| {
                 attempts.set(attempts.get() + 1);
@@ -1877,7 +2223,7 @@ mod upgrade_tests {
         let observed = session();
         let mut cached = CachedSession::from(observed.clone());
         let attempts = Cell::new(0);
-        let error = begin_with_upgrade_retry::<()>(
+        let error = with_keyblob_upgrade_retry::<()>(
             &observed,
             |_| {
                 attempts.set(attempts.get() + 1);
@@ -1985,7 +2331,7 @@ mod upgrade_tests {
                 scope.spawn(move || {
                     let observed = session();
                     let mut first = true;
-                    let result = begin_with_upgrade_retry(
+                    let result = with_keyblob_upgrade_retry(
                         &observed,
                         |blob| {
                             if first {
@@ -2025,21 +2371,110 @@ mod upgrade_tests {
 #[cfg(test)]
 mod relay_auth_policy_tests {
     use super::*;
+    use crate::android::hardware::security::keymint::{
+        HardwareAuthenticatorType::HardwareAuthenticatorType, KeyParameterValue::KeyParameterValue,
+        Tag::Tag,
+    };
 
-    /// Every relay-minted key must be usable without an auth token. The
-    /// A-side policy is enforced by A's keyblob/Keystore2; B cannot validate
-    /// the A-side Gatekeeper token, and some vendor TEEs enforce USER_AUTH_TYPE
-    /// even without USER_SECURE_ID.
     #[test]
-    fn relay_keys_are_always_no_auth() {
-        for input in [
+    fn auth_bound_generation_preserves_per_use_and_timed_hal_policy() {
+        for timeout in [None, Some(0), Some(86_400)] {
+            let mut user_auth = vec![(502, 4242), (504, 3)];
+            let mut expected = vec![
+                (Tag::USER_SECURE_ID, KeyParameterValue::LongInteger(4242)),
+                (
+                    Tag::USER_AUTH_TYPE,
+                    KeyParameterValue::HardwareAuthenticatorType(HardwareAuthenticatorType(3)),
+                ),
+            ];
+            if let Some(timeout) = timeout {
+                user_auth.push((505, timeout));
+                expected.push((
+                    Tag::AUTH_TIMEOUT,
+                    KeyParameterValue::Integer(timeout as i32),
+                ));
+            }
+            let spec = KeySpec {
+                user_auth,
+                ..Default::default()
+            };
+            let actual: Vec<_> = build_attestation_params(&[], &[1], &spec, KEY_MINT_V5)
+                .unwrap()
+                .into_iter()
+                .filter(|param| (502..=509).contains(&(param.tag.0 as u32 & 0x0fff_ffff)))
+                .map(|param| (param.tag, param.value))
+                .collect();
+            assert_eq!(actual, expected, "timeout={timeout:?}");
+        }
+    }
+
+    #[test]
+    fn no_auth_generation_gets_exactly_one_unrestricted_hal_tag() {
+        for user_auth in [
             vec![],
             vec![(503, 1)],
-            vec![(502, 4242), (504, 2)],
-            vec![(502, 4242), (504, 2), (505, 30_000), (507, 1), (508, 1)],
-            vec![(506, 1), (509, 1)],
+            vec![(509, 1)],
+            vec![(503, 1), (509, 1)],
         ] {
-            assert_eq!(relay_user_auth_param(&input), KeyParam::NoAuthRequired);
+            let unlocked = user_auth.iter().any(|(tag, _)| *tag == 509);
+            let spec = KeySpec {
+                user_auth,
+                ..Default::default()
+            };
+            let params = build_attestation_params(&[], &[1], &spec, KEY_MINT_V5).unwrap();
+            assert_eq!(
+                params
+                    .iter()
+                    .filter(|param| param.tag == Tag::NO_AUTH_REQUIRED)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                params
+                    .iter()
+                    .any(|param| param.tag == Tag::UNLOCKED_DEVICE_REQUIRED),
+                unlocked
+            );
+            assert!(!params.iter().any(|param| param.tag == Tag::USER_AUTH_TYPE));
         }
+    }
+
+    #[test]
+    fn auth_constraints_are_preserved_without_a_no_auth_override() {
+        assert_eq!(
+            relay_authorization_params(&[
+                (502, -1),
+                (504, 2),
+                (505, 5),
+                (506, 1),
+                (507, 1),
+                (508, 1),
+                (509, 1),
+            ])
+            .unwrap(),
+            vec![
+                KeyParam::UserSecureId(u64::MAX),
+                KeyParam::UserAuthType(2),
+                KeyParam::AuthTimeout(5),
+                KeyParam::AllowWhileOnBody,
+                KeyParam::TrustedUserPresenceRequired,
+                KeyParam::TrustedConfirmationRequired,
+                KeyParam::UnlockedDeviceRequired,
+            ]
+        );
+        assert_eq!(
+            relay_authorization_params(&[(504, 3)]).unwrap(),
+            vec![KeyParam::UserAuthType(3)]
+        );
+    }
+
+    #[test]
+    fn unknown_auth_tags_fail_instead_of_becoming_unrestricted() {
+        let spec = KeySpec {
+            user_auth: vec![(510, 1)],
+            ..Default::default()
+        };
+        let error = build_attestation_params(&[], &[1], &spec, KEY_MINT_V5).unwrap_err();
+        assert!(error.to_string().contains("unsupported user-auth tag 510"));
     }
 }

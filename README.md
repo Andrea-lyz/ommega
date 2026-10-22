@@ -324,11 +324,17 @@ B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
 | Server（`server`） | 鉴权、任务队列、A/B 调度、设备与后台管理 | Linux x86_64 musl 二进制 |
 
 `remote-only` 表示符合远程生成条件时不允许隐式回退；它不表示所有密钥或方法都在 B 执行。
-软件 TA 仅在有 attestation challenge、未提供调用方 attestation key 且远程已启用时
-进入远程生成；其余生成仍可在 A 完成。远程密钥的签名、解密及协商由 B 执行，
-A 负责本地存储和应用认证检查。A 会转发用户认证相关授权标签，B 去重并移除冲突的
-`NO_AUTH_REQUIRED`，以保持证书授权信息与请求一致；`ATTEST_KEY` 会映射为 `SIGN`。
-转发授权标签不等于 B 硬件验证了 A 的用户认证令牌。
+软件 TA 在有 attestation challenge、远程已启用，且未指定签发密钥或指定了远程
+App AttestKey 时进入远程生成；指定本地签发密钥时仍在 A 完成。远程密钥的签名、解密及协商由 B 执行，
+A 负责本地存储和应用认证检查。B 保留请求中的认证授权列表，包括用户 SID、认证类型、超时及
+`UNLOCKED_DEVICE_REQUIRED`（509）；仅在请求未指定认证策略时补充 `NO_AUTH_REQUIRED`。
+A 执行原始认证策略和超时；B 无法验证 A 的用户认证令牌，因此需要认证的远程硬件操作仍可能被 B 拒绝。
+A 原样返回 B 的证书链，证书反映 B 的实际授权，不为认证密钥额外签发子证书。
+`ATTEST_KEY` 原样传给 HAL，B 核对返回的硬件用途，A 核对证书中硬件授权的 `ATTEST_KEY`；
+显式 App AttestKey 委派使用 B 原生 `generateKey(..., AttestationKey)`，B 补齐父链，
+A 核对父公钥及子证书签名。远程 SIGN 接口不支持代签证书。
+原生委派权限由硬件 keyblob 授权决定，不对父证书额外施加通用 PKIX CA 门槛或改写证书扩展。
+该委派路径需要 A、B 均支持；旧 B 忽略委派参数时，A 会拒绝返回链，不回退到其他签发密钥。
 
 B-app 当前只分发 `attest/sign/decrypt`，未实现 native B 所需的 `profile/agree`，
 并通过 B-app 自己的 AndroidKeyStore 身份生成密钥；它目前不能替代 native B 完成同一套验收。

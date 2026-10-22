@@ -47,9 +47,6 @@ use std::{
     time::SystemTime,
 };
 
-/// Longest auth window (seconds) that counts as Google's short window.
-const GMS_SHORT_AUTH_TIMEOUT_MAX_SECS: i64 = 10;
-
 type ConfirmationTokenReceiver = Arc<Mutex<Option<Receiver<Vec<u8>>>>>;
 type FinishAuthTokens = (
     Option<HardwareAuthToken>,
@@ -433,7 +430,6 @@ impl Enforcements {
         key_properties: Option<&(i64, Vec<KeyParameter>)>,
         op_params: &[KmKeyParameter],
         requires_timestamp: bool,
-        auth_timeout_grace: Option<i64>,
     ) -> Result<(Option<HardwareAuthToken>, AuthInfo)> {
         let (key_id, key_params) = match key_properties {
             Some((key_id, key_params)) => (*key_id, key_params),
@@ -644,24 +640,7 @@ impl Enforcements {
                     "Overflow while computing Auth token validity. Validity cannot be established."
                 ))?;
 
-            // Google's own keys (Play Integrity 10s, Google Pay 5s) are used
-            // by multi-step flows, so the short window can lapse before the
-            // operation starts. Widen only those short windows to the
-            // configured grace period; a longer caller-specified timeout is
-            // never shortened and a zero timeout keeps per-operation auth.
-            let effective_time_out = match auth_timeout_grace {
-                Some(grace)
-                    if key_time_out > 0 && key_time_out <= GMS_SHORT_AUTH_TIMEOUT_MAX_SECS =>
-                {
-                    info!(
-                        "event=decision gms_auth_timeout_grace key_timeout={key_time_out}s grace={grace}s"
-                    );
-                    grace
-                }
-                _ => key_time_out,
-            };
-
-            if token_age.seconds() > effective_time_out {
+            if token_age.seconds() > key_time_out {
                 return Err(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED)).context(ks_err!(
                     concat!(
                         "matching auth token (challenge={}, userId={}, authId={}, ",
@@ -677,7 +656,7 @@ impl Enforcements {
                     user_sids,
                     user_auth_type,
                     token_age.seconds(),
-                    effective_time_out
+                    key_time_out
                 ));
             }
             let state = if requires_timestamp {

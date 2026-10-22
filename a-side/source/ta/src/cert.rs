@@ -273,10 +273,8 @@ pub(crate) fn extract_subject(cert: &keymint::Certificate) -> Result<Vec<u8>, Er
 /// Returns `Ok(None)` when the certificate carries no attestation extension
 /// (a non-attested key) or no root-of-trust record.
 ///
-/// When a remote (B-side TEE) key is later used as an attestation key, its
-/// root-of-trust must be reused verbatim for the child leaf — otherwise the
-/// child's ROOT_OF_TRUST disagrees with the attestation key's and detectors
-/// flag the attestation key as tampered.
+/// These signed values describe the remote key's characteristics. Native B
+/// generation supplies child records; A never rewrites their certificates.
 pub(crate) fn parse_remote_root_of_trust(
     cert_der: &[u8],
 ) -> Result<Option<RemoteRootOfTrust>, Error> {
@@ -344,6 +342,132 @@ pub(crate) fn parse_remote_root_of_trust(
         vendor_patchlevel,
         boot_patchlevel,
     }))
+}
+
+/// Check the signed hardware purpose before storing or using a native remote
+/// ATTEST_KEY. Native KeyMint permissions are distinct from PKIX CA validation.
+pub(crate) fn validate_native_attestation_issuer(cert_der: &[u8]) -> Result<(), Error> {
+    let cert = <x509_cert::Certificate as Decode>::from_der(cert_der)
+        .map_err(|e| km_err!(VerificationFailed, "parse attestation issuer: {e:?}"))?;
+    let extensions = cert
+        .tbs_certificate()
+        .extensions()
+        .ok_or_else(|| km_err!(IncompatiblePurpose, "attestation issuer has no extensions"))?;
+    // Native KeyMint authorizes the keyblob by ATTEST_KEY, not by PKIX CA
+    // extensions. In particular, the legacy AOSP C++ certificate builder
+    // represents ATTEST_KEY with digitalSignature and no BasicConstraints.
+    // Require the signed hardware purpose so a legacy SIGN substitute is
+    // still rejected; do not rewrite any certificate extensions.
+    let extension = extensions
+        .iter()
+        .find(|extension| extension.extn_id == X509_ATTESTATION_EXTENSION_OID)
+        .ok_or_else(|| km_err!(IncompatiblePurpose, "issuer has no hardware attestation"))?;
+    let attestation = AttestationExtension::from_der(extension.extn_value.as_bytes())
+        .map_err(|e| km_err!(VerificationFailed, "parse native issuer attestation: {e:?}"))?;
+    let hardware = matches!(
+        attestation.keymint_security_level,
+        SecurityLevel::TrustedEnvironment | SecurityLevel::Strongbox
+    ) && attestation.attestation_security_level
+        == attestation.keymint_security_level;
+    let attest_only = attestation
+        .hw_enforced
+        .auths
+        .iter()
+        .filter_map(|param| match param {
+            KeyParam::Purpose(purpose) => Some(*purpose),
+            _ => None,
+        })
+        .eq([KeyPurpose::AttestKey]);
+    if !hardware || !attest_only {
+        return Err(km_err!(
+            IncompatiblePurpose,
+            "issuer lacks exclusive hardware ATTEST_KEY authorization"
+        ));
+    }
+    Ok(())
+}
+
+/// Verify that B honored the caller-selected issuer, including on older relays
+/// that might otherwise ignore the delegation field and use their batch key.
+pub(crate) fn validate_remote_delegation(
+    chain: &[Vec<u8>],
+    issuer: &crate::device::RemoteAttestationKey,
+) -> Result<(), Error> {
+    use ring::signature;
+
+    let invalid = || km_err!(VerificationFailed, "remote certificate issuer mismatch");
+    if chain.len() < 2 {
+        return Err(invalid());
+    }
+    let leaf = <x509_cert::Certificate as Decode>::from_der(&chain[0]).map_err(|_| invalid())?;
+    let parent = <x509_cert::Certificate as Decode>::from_der(&chain[1]).map_err(|_| invalid())?;
+    let spki = parent.tbs_certificate().subject_public_key_info();
+    if spki.to_der().map_err(|_| invalid())? != issuer.public_key
+        || parent
+            .tbs_certificate()
+            .subject()
+            .to_der()
+            .map_err(|_| invalid())?
+            != issuer.issuer_subject_name
+        || leaf.tbs_certificate().issuer() != parent.tbs_certificate().subject()
+        || leaf.signature_algorithm() != leaf.tbs_certificate().signature()
+    {
+        return Err(invalid());
+    }
+    validate_native_attestation_issuer(&chain[1])?;
+    let key_oid = spki.algorithm.oid.to_string();
+    let signature_oid = leaf.signature_algorithm().oid.to_string();
+    let curve_oid = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|p| p.decode_as::<X509ObjectIdentifier>().ok())
+        .map(|oid| oid.to_string());
+    let algorithm: &dyn signature::VerificationAlgorithm = match (
+        key_oid.as_str(),
+        curve_oid.as_deref(),
+        signature_oid.as_str(),
+    ) {
+        ("1.2.840.10045.2.1", Some("1.2.840.10045.3.1.7"), "1.2.840.10045.4.3.2") => {
+            &signature::ECDSA_P256_SHA256_ASN1
+        }
+        ("1.2.840.10045.2.1", Some("1.2.840.10045.3.1.7"), "1.2.840.10045.4.3.3") => {
+            &signature::ECDSA_P256_SHA384_ASN1
+        }
+        ("1.2.840.10045.2.1", Some("1.3.132.0.34"), "1.2.840.10045.4.3.2") => {
+            &signature::ECDSA_P384_SHA256_ASN1
+        }
+        ("1.2.840.10045.2.1", Some("1.3.132.0.34"), "1.2.840.10045.4.3.3") => {
+            &signature::ECDSA_P384_SHA384_ASN1
+        }
+        ("1.2.840.113549.1.1.1", _, "1.2.840.113549.1.1.11") => {
+            &signature::RSA_PKCS1_2048_8192_SHA256
+        }
+        ("1.2.840.113549.1.1.1", _, "1.2.840.113549.1.1.12") => {
+            &signature::RSA_PKCS1_2048_8192_SHA384
+        }
+        ("1.2.840.113549.1.1.1", _, "1.2.840.113549.1.1.13") => {
+            &signature::RSA_PKCS1_2048_8192_SHA512
+        }
+        ("1.3.101.112", None, "1.3.101.112") => &signature::ED25519,
+        _ => {
+            return Err(km_err!(
+                UnsupportedAlgorithm,
+                "unsupported remote issuer signature"
+            ))
+        }
+    };
+    let public_key = spki.subject_public_key.as_bytes().ok_or_else(invalid)?;
+    let signature = leaf.signature().as_bytes().ok_or_else(invalid)?;
+    let tbs = leaf.tbs_certificate().to_der().map_err(|_| invalid())?;
+    signature::UnparsedPublicKey::new(algorithm, public_key)
+        .verify(&tbs, signature)
+        .map_err(|_| {
+            km_err!(
+                VerificationFailed,
+                "remote child certificate signature mismatch"
+            )
+        })
 }
 
 pub(crate) fn validate_remote_attestation(
@@ -1747,6 +1871,129 @@ mod tests {
     use super::*;
     use crate::{AttestationIdInfo, KeyMintHalVersion};
     use std::vec;
+
+    fn issuer_certificate(
+        ca: Option<bool>,
+        cert_sign: Option<bool>,
+        purposes: Option<&[KeyPurpose]>,
+        hardware: bool,
+    ) -> Vec<u8> {
+        let spki_der = hex::decode("3012300d06092a864886f70d0101010500030100").unwrap();
+        let params = [
+            KeyParam::Algorithm(keymint::Algorithm::Rsa),
+            KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: 0 }),
+            KeyParam::CertificateNotAfter(DateTime { ms_since_epoch: 0 }),
+        ];
+        let purpose = if cert_sign == Some(true) {
+            KeyPurpose::AttestKey
+        } else {
+            KeyPurpose::Sign
+        };
+        let usage =
+            x509_der_encode(&key_usage_extension_bits(&[KeyParam::Purpose(purpose)])).unwrap();
+        let constraints = ca.map(|ca| x509_der_encode(&basic_constraints_ext_value(ca)).unwrap());
+        let attest_ext = purposes.map(|purposes| {
+            let auths: Vec<_> = purposes.iter().map(|p| KeyParam::Purpose(*p)).collect();
+            let level = if hardware {
+                SecurityLevel::TrustedEnvironment
+            } else {
+                SecurityLevel::Software
+            };
+            AttestationExtension {
+                attestation_version: 200,
+                attestation_security_level: level,
+                keymint_version: 200,
+                keymint_security_level: level,
+                attestation_challenge: b"issuer",
+                unique_id: &[],
+                sw_enforced: AuthorizationList::new(
+                    if hardware { &[] } else { &auths },
+                    &[],
+                    None,
+                    None,
+                    None,
+                    &[],
+                )
+                .unwrap(),
+                hw_enforced: AuthorizationList::new(
+                    if hardware { &auths } else { &[] },
+                    &[],
+                    None,
+                    None,
+                    None,
+                    &[],
+                )
+                .unwrap(),
+            }
+            .to_der()
+            .unwrap()
+        });
+        let mut tbs = tbs_certificate(
+            &None,
+            &spki_der,
+            &usage,
+            constraints.as_deref(),
+            attest_ext.as_deref(),
+            &[],
+            &params,
+        )
+        .unwrap();
+        if cert_sign.is_none() {
+            tbs.extensions
+                .as_mut()
+                .unwrap()
+                .retain(|ext| ext.extn_id != KeyUsage::OID);
+        }
+        // This tests signed-purpose parsing, not signature verification.
+        x509_der_encode(&certificate(tbs, &[0]).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn native_attestation_authority_does_not_depend_on_ca_or_usage_extensions() {
+        for ca in [None, Some(false), Some(true)] {
+            for usage in [None, Some(false), Some(true)] {
+                validate_native_attestation_issuer(&issuer_certificate(
+                    ca,
+                    usage,
+                    Some(&[KeyPurpose::AttestKey]),
+                    true,
+                ))
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn ca_appearance_cannot_authorize_a_signing_or_software_key() {
+        for (purposes, hardware) in [
+            (None, true),
+            (Some(&[][..]), true),
+            (Some(&[KeyPurpose::Sign][..]), true),
+            (Some(&[KeyPurpose::Sign, KeyPurpose::AttestKey][..]), true),
+            (Some(&[KeyPurpose::AttestKey][..]), false),
+        ] {
+            let error = validate_native_attestation_issuer(&issuer_certificate(
+                Some(true),
+                Some(true),
+                purposes,
+                hardware,
+            ))
+            .unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                CommonErrorKind::Hal(ErrorCode::IncompatiblePurpose, _)
+            ));
+        }
+    }
+
+    #[test]
+    fn attestation_issuer_rejects_malformed_der() {
+        let error = validate_native_attestation_issuer(&[0]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            CommonErrorKind::Hal(ErrorCode::VerificationFailed, _)
+        ));
+    }
 
     #[test]
     fn test_rsa_signature_algorithm_has_null_parameters() {

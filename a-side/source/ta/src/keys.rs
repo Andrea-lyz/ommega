@@ -87,8 +87,7 @@ fn equalize_to_remote_attest_duration(started: Instant) {
     }
 }
 
-/// Replace (or insert) OS/vendor/boot version tags on `chars` so a child leaf
-/// attested by a remote B-side key carries the same patch levels as that key.
+/// Make remote key characteristics use the version tags from B's certificate.
 fn overlay_remote_version_tags(
     chars: &mut [KeyCharacteristics],
     rot: &crypto::RemoteRootOfTrust,
@@ -130,28 +129,6 @@ fn overlay_remote_version_tags(
             upsert(&mut kc.authorizations, KeyParam::BootPatchlevel(v), insert);
         }
     }
-}
-
-/// Whether the app requested an authorization policy that the relay's real
-/// B-side key cannot carry.
-///
-/// The relay signs with no `HardwareAuthToken`, and the A-side Gatekeeper token
-/// cannot validate on B. The business key must stay `NO_AUTH_REQUIRED`, but its
-/// leaf can still echo the requested policy: mint a separate B attestation key
-/// and let it sign a child leaf carrying these parameters.
-fn needs_child_attestation_leaf(params: &[KeyParam]) -> bool {
-    params.iter().any(|param| {
-        matches!(
-            param,
-            KeyParam::UserSecureId(_)
-                | KeyParam::UserAuthType(_)
-                | KeyParam::AuthTimeout(_)
-                | KeyParam::AllowWhileOnBody
-                | KeyParam::TrustedUserPresenceRequired
-                | KeyParam::TrustedConfirmationRequired
-                | KeyParam::UnlockedDeviceRequired
-        )
-    })
 }
 
 /// Contents of wrapping key data
@@ -456,26 +433,14 @@ impl crate::KeyMintTa {
                 op.update(tbs_data)?;
                 op.finish()
             }
-            KeyMaterial::Remote(remote) => {
-                // The attestation key lives on the relay server / B-side real
-                // TEE; the A-side only holds its public key (SPKI). Forward
-                // the TBS signing so the private key never leaves the real
-                // device, matching how remote SIGN/DECRYPT are forwarded.
-                let backend = self.dev.remote.as_ref().ok_or_else(|| {
-                    km_err!(
-                        UnknownError,
-                        "remote backend not configured for attestation-key signing"
-                    )
-                })?;
-                let algorithm = if crate::cert::remote_key_is_rsa(&remote.public_key) {
-                    "SHA256withRSA"
-                } else {
-                    "SHA256withECDSA"
-                };
-                backend
-                    .sign(&remote.alias, tbs_data, algorithm)?
-                    .ok_or_else(|| km_err!(UnknownError, "remote attestation-key sign unavailable"))
-            }
+            // ATTEST_KEY is consumed by native KeyMint certificate generation,
+            // not by begin(SIGN). A legacy remote blob may describe an ordinary
+            // SIGN key as an attestation key, so never use that transport to
+            // issue a certificate, including for keys created by older builds.
+            KeyMaterial::Remote(_) => Err(km_err!(
+                IncompatiblePurpose,
+                "remote certificate issuance is not supported by the SIGN transport"
+            )),
             _ => Err(km_err!(
                 IncompatibleAlgorithm,
                 "unexpected cert signing key type"
@@ -513,39 +478,57 @@ impl crate::KeyMintTa {
     ) -> Result<KeyCreationResult, Error> {
         // Remote mode: if a remote backend is enabled and attestation is
         // requested, mint the key on the B-side real TEE instead of locally.
-        // A caller-supplied attestation key (e.g. KeyAttestation's persistent
-        // key) must NOT go remote: the remote backend ignores it and mints
-        // with the device batch key, producing a leaf that cannot be linked
-        // to the attest key's own chain ("签名错误" in the UI). Sign locally
-        // with the provided attestation key instead.
-        //
-        // An ATTEST_KEY-purpose key DOES go remote: the relay returns a cert
-        // chain, the TA stores it as `KeyMaterial::Remote` (public key only,
-        // no private key), and when the app later uses that attestation key to
-        // sign a child cert, `sign_cert_data`/`tbs_certificate` forward the
-        // TBS signing back to the relay, which holds the private key.
+        // A caller-selected remote attestation key is passed to B's native
+        // generateKey as AttestationKey. Local issuers keep the local path.
+        // No certificate is issued through the ordinary remote SIGN transport.
         //
         // This software-TA path forwards the requested security level to the
         // relay and validates the returned hardware identity. The native B
         // relay selects the corresponding HAL; changing a certificate tag is
         // not a substitute for using that hardware. A native StrongBox/RKP
         // backend, when configured, is selected outside this software-TA path.
-        // Without a challenge, or with a caller-supplied attestation key,
-        // generation continues locally. Remote-only does not move those keys
-        // or A-side authorization and storage to B.
+        // Without a challenge generation continues locally. A-side
+        // authorization and storage remain local for all of these paths.
         let has_challenge = get_opt_tag_value!(params, AttestationChallenge)?.is_some();
         let remote_enabled = self.dev.remote.as_ref().is_some_and(|r| r.enabled());
-        let remote_attest = has_challenge && attestation_key.is_none() && remote_enabled;
-        let pad_local_attest_key = has_challenge && attestation_key.is_some() && remote_enabled;
+        let remote_issuer = if has_challenge && remote_enabled {
+            if let Some(info) = attestation_key.as_ref() {
+                let (blob, _) =
+                    self.keyblob_parse_decrypt(&info.key_blob, &info.attest_key_params)?;
+                blob.suitable_for(KeyPurpose::AttestKey, self.hw_info.security_level)?;
+                if info.issuer_subject_name.is_empty() {
+                    return Err(km_err!(InvalidArgument, "empty subject name"));
+                }
+                match blob.key_material {
+                    KeyMaterial::Remote(remote) => Some(device::RemoteAttestationKey {
+                        alias: remote.alias,
+                        public_key: remote.public_key,
+                        issuer_subject_name: info.issuer_subject_name.clone(),
+                    }),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let remote_attest = has_challenge
+            && remote_enabled
+            && (attestation_key.is_none() || remote_issuer.is_some());
+        let pad_local_attest_key =
+            has_challenge && attestation_key.is_some() && remote_enabled && !remote_attest;
         let started = Instant::now();
         if remote_attest {
             // `Ok(None)` from the remote backend means it was unavailable; fall
             // back to the local software keybox when `fallback_local` allows.
-            if let Some(result) = self.generate_key_remote(params, attestation_key.clone())? {
+            if let Some(result) = self.generate_key_remote(params, remote_issuer.as_ref())? {
                 record_remote_attest_duration(started.elapsed());
                 return Ok(result);
             }
-            if !self.dev.remote.as_ref().is_some_and(|r| r.fallback_local()) {
+            if remote_issuer.is_some()
+                || !self.dev.remote.as_ref().is_some_and(|r| r.fallback_local())
+            {
                 return Err(km_err!(
                     UnknownError,
                     "remote attest unavailable and fallback disabled"
@@ -576,7 +559,7 @@ impl crate::KeyMintTa {
     fn generate_key_remote(
         &mut self,
         params: &[KeyParam],
-        _attestation_key: Option<AttestationKey>,
+        attestation_key: Option<&device::RemoteAttestationKey>,
     ) -> Result<Option<KeyCreationResult>, Error> {
         let challenge = get_opt_tag_value!(params, AttestationChallenge)?
             .ok_or_else(|| km_err!(AttestationChallengeMissing, "remote attest needs challenge"))?;
@@ -618,6 +601,10 @@ impl crate::KeyMintTa {
         // overwrites the first session and the first key's later sign/decrypt
         // fails with INVALID_KEY_BLOB (the blob was minted by the other HAL).
         seed_input.extend_from_slice(&(self.hw_info.security_level as i32).to_be_bytes());
+        if let Some(issuer) = attestation_key {
+            seed_input.extend_from_slice(b"/issuer/");
+            seed_input.extend_from_slice(issuer.alias.as_bytes());
+        }
         let digest = self_hash_sha256(&seed_input);
         // Use 8 digest bytes (64 bits) for the alias seed so distinct keys with
         // the same challenge+serial+creation-time still map to distinct aliases
@@ -634,6 +621,7 @@ impl crate::KeyMintTa {
         // mints serial 1 because keystore2 never sets the tag.
         let effective_serial = effective_remote_serial(serial.map(Vec::as_slice));
         let mut remote_params = extract_remote_attest_params(params);
+        remote_params.attestation_key = attestation_key.cloned();
         // Tag the relay-minted chain with the requesting security level so a
         // STRONGBOX request is not misreported as TEE by the relay's default.
         remote_params.security_level = Some(self.hw_info.security_level as i32);
@@ -689,6 +677,15 @@ impl crate::KeyMintTa {
             app_id,
             effective_security_level,
         )?;
+        if let Some(issuer) = attestation_key {
+            crate::cert::validate_remote_delegation(&chain, issuer)?;
+        }
+        if params
+            .iter()
+            .any(|p| matches!(p, KeyParam::Purpose(KeyPurpose::AttestKey)))
+        {
+            crate::cert::validate_native_attestation_issuer(leaf_der)?;
+        }
         let public_key = leaf
             .tbs_certificate()
             .subject_public_key_info()
@@ -733,131 +730,21 @@ impl crate::KeyMintTa {
                 "remote attestation is missing an Android attestation record"
             ));
         }
-        let mut key_root_of_trust = root_of_trust;
+        let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
+            alias,
+            public_key,
+            root_of_trust,
+        });
 
         let mut certificate_chain = Vec::new();
+        // Return the physical chain unchanged. The relay key is no-auth on B;
+        // A enforces the caller's original authentication policy locally. A
+        // synthetic leaf must not claim that B enforces the A-side policy.
         for der in chain.iter() {
             certificate_chain.try_push(keymint::Certificate {
                 encoded_certificate: der.clone(),
             })?;
         }
-
-        // The relay has no A-side HardwareAuthToken, so the business key must
-        // stay NO_AUTH_REQUIRED. When the app requested auth/unlocked-device
-        // constraints, keep that policy out of the business key but put it in
-        // a child leaf signed by a separate B-side attestation key. The leaf's
-        // public key is still the business key, so the app's signatures verify.
-        if needs_child_attestation_leaf(params) {
-            let attest_alias = format!("{alias}-attest");
-            let attest_params = device::RemoteAttestParams {
-                key_algorithm: Some(3), // EC
-                key_size: Some(256),
-                ec_curve: Some(1), // P-256
-                purpose: vec![KeyPurpose::AttestKey as i32],
-                digest: vec![Digest::Sha256 as i32],
-                security_level: Some(self.hw_info.security_level as i32),
-                user_auth: vec![(503, 1)],
-                ..Default::default()
-            };
-
-            let Some(attestation) = remote.attest(
-                challenge,
-                app_id,
-                &attest_alias,
-                effective_serial,
-                &attest_params,
-            )?
-            else {
-                return Ok(None);
-            };
-            let attest_profile = attestation.profile;
-            if attest_profile.profile_version != self.aidl_version as i32 {
-                return Err(km_err!(
-                    VerificationFailed,
-                    "remote attestation-key/local KeyMint identity mismatch: remote={} local={}",
-                    attest_profile.profile_version,
-                    self.aidl_version as i32
-                ));
-            }
-            if attest_profile.interface_version * 100 != attest_profile.profile_version {
-                return Err(km_err!(
-                    VerificationFailed,
-                    "remote attestation-key interface/profile version mismatch"
-                ));
-            }
-            let attest_level = attestation
-                .effective_security_level
-                .unwrap_or(self.hw_info.security_level);
-            if attest_level != self.hw_info.security_level {
-                return Err(km_err!(
-                    VerificationFailed,
-                    "unsupported remote attestation-key security-level downgrade"
-                ));
-            }
-            let attest_chain = attestation.cert_chain;
-            if attest_chain.is_empty() {
-                return Ok(None);
-            }
-            crate::cert::validate_remote_attestation(
-                &attest_chain[0],
-                challenge,
-                app_id,
-                attest_level,
-            )?;
-            let attest_leaf = x509_cert::Certificate::from_der(&attest_chain[0])
-                .map_err(|e| km_err!(UnknownError, "parse remote attestation-key leaf: {e:?}"))?;
-            let attest_public_key = attest_leaf
-                .tbs_certificate()
-                .subject_public_key_info()
-                .to_der()
-                .map_err(|e| km_err!(UnknownError, "encode remote attestation-key SPKI: {e:?}"))?;
-            let Some(attest_rot) = crate::cert::parse_remote_root_of_trust(&attest_chain[0])?
-            else {
-                return Err(km_err!(
-                    VerificationFailed,
-                    "remote attestation key is missing an Android attestation record"
-                ));
-            };
-            let attest_leaf_cert = keymint::Certificate {
-                encoded_certificate: attest_chain[0].clone(),
-            };
-            let attest_issuer = crate::cert::extract_subject(&attest_leaf_cert)?;
-
-            // The child leaf must carry the attestation key's root of trust
-            // and version tags, not the A-side device's.
-            overlay_remote_version_tags(&mut chars, &attest_rot, effective_security_level);
-
-            let mut attest_chain_certs = Vec::new();
-            for der in &attest_chain {
-                attest_chain_certs.try_push(keymint::Certificate {
-                    encoded_certificate: der.clone(),
-                })?;
-            }
-            let signing_info = SigningInfo {
-                attestation_info: Some((challenge, app_id)),
-                signing_key: KeyMaterial::Remote(crypto::RemoteRef {
-                    alias: attest_alias,
-                    public_key: attest_public_key,
-                    root_of_trust: Some(attest_rot.clone()),
-                }),
-                issuer_subject: attest_issuer,
-                chain: attest_chain_certs.clone(),
-            };
-            let child_leaf = self.generate_cert(Some(signing_info), &public_key, params, &chars)?;
-            certificate_chain.clear();
-            certificate_chain.try_push(child_leaf)?;
-            for cert in attest_chain_certs {
-                certificate_chain.try_push(cert)?;
-            }
-            key_root_of_trust = Some(attest_rot);
-            log::info!("event=remote_child_attestation alias={alias}");
-        }
-
-        let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
-            alias,
-            public_key,
-            root_of_trust: key_root_of_trust,
-        });
 
         // Build the keyblob (encrypted, containing the Remote reference).
         let keyblob = keyblob::PlaintextKeyBlob {
@@ -1004,11 +891,11 @@ impl crate::KeyMintTa {
         &mut self,
         params: &[KeyParam],
         attestation_key: Option<AttestationKey>,
-        mut chars: Vec<KeyCharacteristics>,
+        chars: Vec<KeyCharacteristics>,
         key_material: KeyMaterial,
         purpose: keyblob::SlotPurpose,
     ) -> Result<KeyCreationResult, Error> {
-        let mut keyblob = keyblob::PlaintextKeyBlob {
+        let keyblob = keyblob::PlaintextKeyBlob {
             // Don't include any `SecurityLevel::Keystore` characteristics in the set that is bound
             // to the key.
             characteristics: chars
@@ -1126,25 +1013,6 @@ impl crate::KeyMintTa {
                     None
                 }
             };
-
-            // Normalize new child keys once, before signing and serialization.
-            // The certificate, returned metadata and stored blob must share the
-            // same version tags. Existing blobs and authorization purposes are
-            // not rewritten by this creation-only path.
-            if let Some(SigningInfo {
-                signing_key: KeyMaterial::Remote(remote),
-                ..
-            }) = &signing_info
-            {
-                if let Some(rot) = &remote.root_of_trust {
-                    overlay_remote_version_tags(&mut chars, rot, self.hw_info.security_level);
-                    keyblob.characteristics = chars
-                        .iter()
-                        .filter(|c| c.security_level != SecurityLevel::Keystore)
-                        .cloned()
-                        .collect();
-                }
-            }
 
             // Build the X.509 leaf certificate.
             let spki_der = cert::asn1_der_encode(&spki)
@@ -1572,18 +1440,9 @@ fn extract_remote_attest_params(params: &[KeyParam]) -> device::RemoteAttestPara
             KeyParam::CertificateNotAfter(date) => {
                 out.certificate_not_after_ms = Some(date.ms_since_epoch)
             }
-            // User-authentication / authorization-list tags. These are copy-only
-            // in the leaf: the local software path enforces the policy from the
-            // key blob and derives the AuthorizationList from the *key params*
-            // (`cert::AuthorizationList::new`), so the remote path has to carry
-            // them too — otherwise a remotely minted leaf claims
-            // `NO_AUTH_REQUIRED` for an auth-bound key (TrustAttestor:
-            // `hardware.attestation.user_auth_metadata` /
-            // `hardware.attestation.user_auth_policy`).
-            //
-            // `UserSecureId` (502) *is* forwarded: the B-side real TEE needs
-            // it to bind the key to a user, and it is the only auth tag a leaf
-            // does not carry (AOSP emits the SID for `importWrappedKey()` only).
+            // Transport the original policy. A seals/enforces its authentication
+            // requirements; B separates the unlock constraint from HAT-bound
+            // authorizations because it cannot validate A's authenticator token.
             KeyParam::UserSecureId(sid) => out.user_auth.push((502, *sid as i64)),
             KeyParam::NoAuthRequired => out.user_auth.push((503, 1)),
             KeyParam::UserAuthType(v) => out.user_auth.push((504, i64::from(*v))),

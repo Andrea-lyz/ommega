@@ -314,13 +314,26 @@ eviction can change the signing identity.
 | Server (`server`) | Authentication, scheduling and administration; Linux x86_64 musl |
 
 Remote-only forbids implicit fallback for eligible generation, not every local
-operation. Remote generation needs remote enabled, an attestation challenge and
-no caller-provided attestation key. Other generation may remain local.
+operation. Remote generation needs remote enabled and an attestation challenge;
+the issuer may be absent or a caller-selected remote App AttestKey. A local
+caller-selected issuer keeps local generation.
 B handles remote signing/decryption/agreement; A stores state and enforces user
-authentication. A forwards user-auth authorization tags; B removes duplicates and
-conflicting `NO_AUTH_REQUIRED` so certificate authorizations match the request.
-`ATTEST_KEY` maps to `SIGN`. Forwarding tags does not mean B hardware authenticates
-A's user token.
+authentication with the application's original policy and timeout. B preserves
+the requested authorization list, including user SIDs, authentication type,
+timeout and `UNLOCKED_DEVICE_REQUIRED` (509). It adds `NO_AUTH_REQUIRED` only
+when no authentication policy was specified. B cannot validate A's user token,
+so an auth-bound remote hardware operation can still be rejected by B.
+A returns B's certificate chain unchanged, reporting B's actual authorizations
+without adding a synthetic child leaf for auth-bound keys. `ATTEST_KEY` reaches
+the HAL unchanged. B checks the returned hardware purpose; A checks the
+certificate's hardware ATTEST_KEY authorization. Explicit
+delegation uses B's native `generateKey(..., AttestationKey)`. B appends the
+parent chain; A verifies the selected parent public key and child signature.
+Native delegation permissions come from the hardware keyblob. This path does
+not impose a generic PKIX CA gate or rewrite certificate extensions.
+Both A and B must support delegation. A rejects an old relay that ignores the
+issuer and never falls back to another signing key. Remote SIGN cannot issue
+certificates.
 B-app supports only `attest/sign/decrypt`, lacks `profile/agree`, and uses its own
 AndroidKeyStore identity. It cannot replace native B in the same acceptance suite.
 
