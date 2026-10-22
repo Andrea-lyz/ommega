@@ -150,7 +150,14 @@ fn should_allow_ommega_grant_descriptor_with_probe(
     if decision.allowed
         || !matches!(
             decision.reason,
-            FilterReason::RejectedUnknownPackage | FilterReason::RejectedNotInScope
+            FilterReason::RejectedUnknownPackage
+                | FilterReason::RejectedNotInScope
+                // system_server creates the grant for an app key. If the key
+                // lives in ommega, the grant must land in ommega too; otherwise
+                // the app's later GetKeyEntry is routed to ommega and fails with
+                // KEY_NOT_FOUND. The probe below still keeps System keys on the
+                // System route because ommega.isGrant() returns false for them.
+                | FilterReason::RejectedAndroidPackage
         )
     {
         return Ok(false);
