@@ -856,7 +856,8 @@ impl KeystoreSecurityLevel {
         };
         alias == "integrity.api.key.alias"
             || alias.starts_with("unstable.")
-            || alias.starts_with("auth_account:lst:darklaunch")
+            || alias.starts_with("auth_account")
+            || alias.starts_with("auth_folsom")
             || alias.starts_with("google_pay_")
             || alias.starts_with("android_pay_")
     }
