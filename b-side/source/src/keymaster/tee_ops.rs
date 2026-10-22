@@ -11,10 +11,10 @@
 //!
 //! Key generation and private-key operations here use the selected real KeyMint
 //! HAL. This does not move A-side storage, authorization or local software-key
-//! operations to B. Generation preserves key purposes and uses NO_AUTH_REQUIRED
-//! because B cannot verify an A-side auth token. It does not provide hardware
-//! enforcement of the original A user's authentication. The independent
-//! UNLOCKED_DEVICE_REQUIRED constraint is forwarded separately.
+//! operations to B. Generation preserves key purposes and the requested
+//! authorization list. B cannot verify an A-side auth token, so operations on
+//! auth-bound hardware keys can still be rejected; generation does not relax
+//! the policy to make such operations succeed.
 //!
 //! Sessions are cached by alias and persisted atomically. A hardware-requested
 //! keyblob upgrade is saved before begin is retried; it never generates a new key.
@@ -125,9 +125,9 @@ pub struct KeySpec {
     /// `TRUSTED_CONFIRMATION_REQUIRED`, 509
     /// `UNLOCKED_DEVICE_REQUIRED`).
     ///
-    /// Authentication stays NO_AUTH_REQUIRED on B because B cannot validate
-    /// A's HAT. UNLOCKED_DEVICE_REQUIRED is forwarded independently. A keeps
-    /// enforcing the full application policy locally.
+    /// Preserve the requested policy in the real hardware key and its
+    /// attestation. A also enforces its local policy, but its HAT cannot
+    /// authorize an operation on an auth-bound B-side key.
     pub user_auth: Vec<(u32, i64)>,
 }
 
@@ -804,14 +804,10 @@ fn build_attestation_params(
         _ => {}
     }
 
-    // Remote-proxy model: the relay signs with no auth token, and the A-side
-    // Gatekeeper token cannot validate on B. Some vendor TEEs also enforce
-    // USER_AUTH_TYPE (504) even when USER_SECURE_ID (502) is absent, which
-    // kept freshly generated keys failing with -26 in the 1.9.0 follow-up.
-    // Every relay-minted key is therefore unconditionally NO_AUTH_REQUIRED;
-    // A's keyblob still carries 502/504 and its Keystore2 still requires the
-    // fingerprint before it calls this relay.
-    params.extend(relay_authorization_params(&spec.user_auth));
+    // The hardware key and its certificate must describe the requested
+    // authorization policy. Local enforcement on A does not justify turning
+    // an auth-bound B-side key into a NO_AUTH_REQUIRED key.
+    params.extend(relay_authorization_params(&spec.user_auth)?);
 
     // Certificate validity bounds (app-specified or default now / now+10y);
     // real TEEs require NOT_BEFORE/NOT_AFTER (else MISSING_NOT_BEFORE -80).
@@ -836,22 +832,32 @@ fn build_attestation_params(
         .with_context(|| ks_err!("encode real TEE attestation parameters"))
 }
 
-/// Every relay-minted key must be usable without a `HardwareAuthToken`.
+/// Preserve the caller's authentication and independent authorization tags.
 ///
-/// The A-side forwards `device_attest_context.user_auth`, but that policy is
-/// enforced by A's keyblob and Keystore2. B's real TEE cannot validate the
-/// A-side Gatekeeper/ConfirmationUI token, and the relay always calls
-/// `begin`/`update`/`finish` with `None` (see `run_single_input_op`). A key
-/// carrying `USER_SECURE_ID` (502) fails every relay `begin(SIGN)` with
-/// `KeyUserNotAuthenticated` (-26); the 1.9.0 follow-up showed that some vendor
-/// TEEs do the same for a metadata-only `USER_AUTH_TYPE` (504). Keep the proven
-/// pre-1.9.0 policy: one unconditional `NO_AUTH_REQUIRED`.
-fn relay_authorization_params(user_auth: &[(u32, i64)]) -> Vec<KeyParam> {
-    let mut params = vec![KeyParam::NoAuthRequired];
-    if user_auth.iter().any(|(tag, _)| *tag == 509) {
-        params.push(KeyParam::UnlockedDeviceRequired);
+/// Only a request with no explicit authentication policy gets the relay's
+/// default NO_AUTH_REQUIRED tag. Explicit policies, including invalid or
+/// unsupported combinations, remain for the HAL to validate without silently
+/// weakening them. A's HAT is not valid on B, so subsequent hardware operations
+/// may still require authentication that the relay cannot provide.
+fn relay_authorization_params(user_auth: &[(u32, i64)]) -> Result<Vec<KeyParam>> {
+    let mut params = Vec::with_capacity(user_auth.len() + 1);
+    if !user_auth.iter().any(|(tag, _)| matches!(*tag, 502..=504)) {
+        params.push(KeyParam::NoAuthRequired);
     }
-    params
+    for (tag, value) in user_auth {
+        params.push(match *tag {
+            502 => KeyParam::UserSecureId(*value as u64),
+            503 => KeyParam::NoAuthRequired,
+            504 => KeyParam::UserAuthType(*value as u32),
+            505 => KeyParam::AuthTimeout(*value as u32),
+            506 => KeyParam::AllowWhileOnBody,
+            507 => KeyParam::TrustedUserPresenceRequired,
+            508 => KeyParam::TrustedConfirmationRequired,
+            509 => KeyParam::UnlockedDeviceRequired,
+            other => return Err(anyhow!("unsupported user-auth tag {other}")),
+        });
+    }
+    Ok(params)
 }
 
 // ---------------------------------------------------------------------------
@@ -1685,7 +1691,7 @@ mod native_attestation_tests {
     }
 
     #[test]
-    fn unlock_tag_reaches_every_supported_keymint_version() {
+    fn auth_and_unlock_constraints_reach_every_supported_keymint_version() {
         use crate::android::hardware::security::keymint::Tag::Tag;
         let spec = KeySpec {
             purposes: vec![KmKeyPurpose::Sign],
@@ -1710,7 +1716,12 @@ mod native_attestation_tests {
             assert_eq!(
                 auths,
                 key_params_to_aidl(
-                    &[KeyParam::NoAuthRequired, KeyParam::UnlockedDeviceRequired,],
+                    &[
+                        KeyParam::UserSecureId(42),
+                        KeyParam::UserAuthType(2),
+                        KeyParam::AuthTimeout(5),
+                        KeyParam::UnlockedDeviceRequired,
+                    ],
                     version
                 )
                 .unwrap()
@@ -2360,37 +2371,110 @@ mod upgrade_tests {
 #[cfg(test)]
 mod relay_auth_policy_tests {
     use super::*;
+    use crate::android::hardware::security::keymint::{
+        HardwareAuthenticatorType::HardwareAuthenticatorType, KeyParameterValue::KeyParameterValue,
+        Tag::Tag,
+    };
 
-    /// Every relay-minted key must be usable without an auth token. The
-    /// A-side policy is enforced by A's keyblob/Keystore2; B cannot validate
-    /// the A-side Gatekeeper token, and some vendor TEEs enforce USER_AUTH_TYPE
-    /// even without USER_SECURE_ID.
     #[test]
-    fn relay_keys_are_always_no_auth() {
-        for input in [
-            vec![],
-            vec![(503, 1)],
-            vec![(502, 4242), (504, 2)],
-            vec![(502, 4242), (504, 2), (505, 30_000), (507, 1), (508, 1)],
-        ] {
-            assert_eq!(
-                relay_authorization_params(&input),
-                vec![KeyParam::NoAuthRequired]
-            );
+    fn auth_bound_generation_preserves_per_use_and_timed_hal_policy() {
+        for timeout in [None, Some(0), Some(86_400)] {
+            let mut user_auth = vec![(502, 4242), (504, 3)];
+            let mut expected = vec![
+                (Tag::USER_SECURE_ID, KeyParameterValue::LongInteger(4242)),
+                (
+                    Tag::USER_AUTH_TYPE,
+                    KeyParameterValue::HardwareAuthenticatorType(HardwareAuthenticatorType(3)),
+                ),
+            ];
+            if let Some(timeout) = timeout {
+                user_auth.push((505, timeout));
+                expected.push((
+                    Tag::AUTH_TIMEOUT,
+                    KeyParameterValue::Integer(timeout as i32),
+                ));
+            }
+            let spec = KeySpec {
+                user_auth,
+                ..Default::default()
+            };
+            let actual: Vec<_> = build_attestation_params(&[], &[1], &spec, KEY_MINT_V5)
+                .unwrap()
+                .into_iter()
+                .filter(|param| (502..=509).contains(&(param.tag.0 as u32 & 0x0fff_ffff)))
+                .map(|param| (param.tag, param.value))
+                .collect();
+            assert_eq!(actual, expected, "timeout={timeout:?}");
         }
     }
 
     #[test]
-    fn unlock_constraint_is_preserved_without_adding_b_side_authentication() {
-        for input in [
+    fn no_auth_generation_gets_exactly_one_unrestricted_hal_tag() {
+        for user_auth in [
+            vec![],
+            vec![(503, 1)],
             vec![(509, 1)],
             vec![(503, 1), (509, 1)],
-            vec![(502, 4242), (504, 2), (505, 5), (506, 1), (509, 1)],
         ] {
+            let unlocked = user_auth.iter().any(|(tag, _)| *tag == 509);
+            let spec = KeySpec {
+                user_auth,
+                ..Default::default()
+            };
+            let params = build_attestation_params(&[], &[1], &spec, KEY_MINT_V5).unwrap();
             assert_eq!(
-                relay_authorization_params(&input),
-                vec![KeyParam::NoAuthRequired, KeyParam::UnlockedDeviceRequired,]
+                params
+                    .iter()
+                    .filter(|param| param.tag == Tag::NO_AUTH_REQUIRED)
+                    .count(),
+                1
             );
+            assert_eq!(
+                params
+                    .iter()
+                    .any(|param| param.tag == Tag::UNLOCKED_DEVICE_REQUIRED),
+                unlocked
+            );
+            assert!(!params.iter().any(|param| param.tag == Tag::USER_AUTH_TYPE));
         }
+    }
+
+    #[test]
+    fn auth_constraints_are_preserved_without_a_no_auth_override() {
+        assert_eq!(
+            relay_authorization_params(&[
+                (502, -1),
+                (504, 2),
+                (505, 5),
+                (506, 1),
+                (507, 1),
+                (508, 1),
+                (509, 1),
+            ])
+            .unwrap(),
+            vec![
+                KeyParam::UserSecureId(u64::MAX),
+                KeyParam::UserAuthType(2),
+                KeyParam::AuthTimeout(5),
+                KeyParam::AllowWhileOnBody,
+                KeyParam::TrustedUserPresenceRequired,
+                KeyParam::TrustedConfirmationRequired,
+                KeyParam::UnlockedDeviceRequired,
+            ]
+        );
+        assert_eq!(
+            relay_authorization_params(&[(504, 3)]).unwrap(),
+            vec![KeyParam::UserAuthType(3)]
+        );
+    }
+
+    #[test]
+    fn unknown_auth_tags_fail_instead_of_becoming_unrestricted() {
+        let spec = KeySpec {
+            user_auth: vec![(510, 1)],
+            ..Default::default()
+        };
+        let error = build_attestation_params(&[], &[1], &spec, KEY_MINT_V5).unwrap_err();
+        assert!(error.to_string().contains("unsupported user-auth tag 510"));
     }
 }

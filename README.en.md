@@ -318,9 +318,11 @@ operation. Remote generation needs remote enabled and an attestation challenge;
 the issuer may be absent or a caller-selected remote App AttestKey. A local
 caller-selected issuer keeps local generation.
 B handles remote signing/decryption/agreement; A stores state and enforces user
-authentication with the application's original policy and timeout. B cannot
-validate A's user token, so its physical key uses `NO_AUTH_REQUIRED` while
-independently forwarding `UNLOCKED_DEVICE_REQUIRED` (509).
+authentication with the application's original policy and timeout. B preserves
+the requested authorization list, including user SIDs, authentication type,
+timeout and `UNLOCKED_DEVICE_REQUIRED` (509). It adds `NO_AUTH_REQUIRED` only
+when no authentication policy was specified. B cannot validate A's user token,
+so an auth-bound remote hardware operation can still be rejected by B.
 A returns B's certificate chain unchanged, reporting B's actual authorizations
 without adding a synthetic child leaf for auth-bound keys. `ATTEST_KEY` reaches
 the HAL unchanged. B checks the returned hardware purpose; A checks the

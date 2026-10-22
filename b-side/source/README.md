@@ -34,10 +34,14 @@ native `generateKey(..., AttestationKey)` and appends its unmodified issuer
 chain to the returned child. It does not issue certificates with `begin(SIGN)`.
 Hardware-requested issuer keyblob upgrades are persisted before one retry.
 
-B cannot authenticate A's user token, so physical relay keys remain
-`NO_AUTH_REQUIRED`. The independent `UNLOCKED_DEVICE_REQUIRED` (509) tag is
-forwarded when requested. A still enforces the original authentication policy;
-the certificate does not claim B hardware authenticates A's fingerprint.
+B forwards the requested user-authentication and authorization tags (502-509)
+to the real HAL, including user SIDs, authentication type, timeout and
+`UNLOCKED_DEVICE_REQUIRED`. It adds `NO_AUTH_REQUIRED` only when no explicit
+authentication policy was supplied; unsupported tags fail rather than silently
+weakening the policy. A also enforces its original authentication policy.
+B cannot authenticate A's user token, so operations on auth-bound hardware keys
+can still require authentication the relay cannot provide. The certificate
+reports B's actual key policy; it does not prove B accepted A's fingerprint.
 
 ## Install and configure
 

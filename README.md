@@ -326,8 +326,9 @@ B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
 `remote-only` 表示符合远程生成条件时不允许隐式回退；它不表示所有密钥或方法都在 B 执行。
 软件 TA 在有 attestation challenge、远程已启用，且未指定签发密钥或指定了远程
 App AttestKey 时进入远程生成；指定本地签发密钥时仍在 A 完成。远程密钥的签名、解密及协商由 B 执行，
-A 负责本地存储和应用认证检查。B 无法验证 A 的用户认证令牌，因此物理密钥使用
-`NO_AUTH_REQUIRED`，独立转发 `UNLOCKED_DEVICE_REQUIRED`（509）；A 执行原始认证策略和超时。
+A 负责本地存储和应用认证检查。B 保留请求中的认证授权列表，包括用户 SID、认证类型、超时及
+`UNLOCKED_DEVICE_REQUIRED`（509）；仅在请求未指定认证策略时补充 `NO_AUTH_REQUIRED`。
+A 执行原始认证策略和超时；B 无法验证 A 的用户认证令牌，因此需要认证的远程硬件操作仍可能被 B 拒绝。
 A 原样返回 B 的证书链，证书反映 B 的实际授权，不为认证密钥额外签发子证书。
 `ATTEST_KEY` 原样传给 HAL，B 核对返回的硬件用途，A 核对证书中硬件授权的 `ATTEST_KEY`；
 显式 App AttestKey 委派使用 B 原生 `generateKey(..., AttestationKey)`，B 补齐父链，
