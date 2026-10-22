@@ -827,6 +827,20 @@ impl KeystoreSecurityLevel {
             })
     }
 
+    /// Whether this key belongs to the GMS/Play Integrity key family.
+    ///
+    /// These keys carry a short `AUTH_TIMEOUT` (10s), but the Play Integrity
+    /// request is a multi-step background flow. Use a bounded grace period for
+    /// them instead of weakening the policy of ordinary application keys.
+    fn is_gms_play_integrity_alias(alias: Option<&str>) -> bool {
+        let Some(alias) = alias else {
+            return false;
+        };
+        alias == "integrity.api.key.alias"
+            || alias.starts_with("unstable.")
+            || alias.starts_with("auth_account:lst:darklaunch")
+    }
+
     fn generate_key(
         &self,
         ctx: Option<&CallerInfo>,
@@ -885,9 +899,26 @@ impl KeystoreSecurityLevel {
             } else {
                 attestation_key_info
             };
-        let params = self
+        let mut params = self
             .add_required_parameters(ctx, caller_uid, params, &key)
             .context(ks_err!("Trying to get aaid."))?;
+
+        // Play Integrity's GMS keys use a 10 second AUTH_TIMEOUT, but the flow
+        // can take longer than that between the device unlock and the actual
+        // sign. Keep the stricter timeout for ordinary app keys; give only the
+        // GMS/Play Integrity key family a bounded grace period so the cached
+        // device-credential/fingerprint token can still cover the request.
+        if Self::is_gms_play_integrity_alias(key.alias.as_deref()) {
+            for param in params.iter_mut() {
+                if param.tag == Tag::AUTH_TIMEOUT {
+                    param.value = KeyParameterValue::Integer(300);
+                    log::info!(
+                        "event=decision gms_play_integrity_auth_timeout alias={:?} value=300",
+                        key.alias
+                    );
+                }
+            }
+        }
 
         let keybox_attestation_allowed = attestation_key_info.is_none();
         let creation_result = match attestation_key_info {
