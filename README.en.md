@@ -323,9 +323,12 @@ validate A's user token, so its physical key uses `NO_AUTH_REQUIRED` while
 independently forwarding `UNLOCKED_DEVICE_REQUIRED` (509).
 A returns B's certificate chain unchanged, reporting B's actual authorizations
 without adding a synthetic child leaf for auth-bound keys. `ATTEST_KEY` reaches
-the HAL unchanged; its certificate must authorize CA/keyCertSign. Explicit
+the HAL unchanged. B checks the returned hardware purpose; A checks the
+certificate's hardware ATTEST_KEY authorization. Explicit
 delegation uses B's native `generateKey(..., AttestationKey)`. B appends the
 parent chain; A verifies the selected parent public key and child signature.
+Native delegation permissions come from the hardware keyblob. This path does
+not impose a generic PKIX CA gate or rewrite certificate extensions.
 Both A and B must support delegation. A rejects an old relay that ignores the
 issuer and never falls back to another signing key. Remote SIGN cannot issue
 certificates.

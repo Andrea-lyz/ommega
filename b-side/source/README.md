@@ -25,8 +25,11 @@ results carry the same profile so A can reject mixed A/B identities.
 
 App AttestKey delegation uses `device_attest_context.attestation_key` containing
 the existing session alias and a base64 DER `issuer_subject_name`. B requires
-that session to belong to the selected HAL and its certificate to authorize
-CA/keyCertSign with the requested subject. It passes the existing keyblob to
+that session to belong to the selected HAL and its certificate to have the
+requested subject. Generation checks the HAL's returned hardware ATTEST_KEY
+authorization; native delegation enforces the existing keyblob's purpose.
+Certificate CA/KeyUsage extensions are preserved without a generic PKIX gate.
+It passes the existing keyblob to
 native `generateKey(..., AttestationKey)` and appends its unmodified issuer
 chain to the returned child. It does not issue certificates with `begin(SIGN)`.
 Hardware-requested issuer keyblob upgrades are persisted before one retry.

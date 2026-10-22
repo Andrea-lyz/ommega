@@ -329,9 +329,10 @@ App AttestKey 时进入远程生成；指定本地签发密钥时仍在 A 完成
 A 负责本地存储和应用认证检查。B 无法验证 A 的用户认证令牌，因此物理密钥使用
 `NO_AUTH_REQUIRED`，独立转发 `UNLOCKED_DEVICE_REQUIRED`（509）；A 执行原始认证策略和超时。
 A 原样返回 B 的证书链，证书反映 B 的实际授权，不为认证密钥额外签发子证书。
-`ATTEST_KEY` 原样传给 HAL，返回的证书必须具有 CA 和 `keyCertSign` 权限；
+`ATTEST_KEY` 原样传给 HAL，B 核对返回的硬件用途，A 核对证书中硬件授权的 `ATTEST_KEY`；
 显式 App AttestKey 委派使用 B 原生 `generateKey(..., AttestationKey)`，B 补齐父链，
 A 核对父公钥及子证书签名。远程 SIGN 接口不支持代签证书。
+原生委派权限由硬件 keyblob 授权决定，不对父证书额外施加通用 PKIX CA 门槛或改写证书扩展。
 该委派路径需要 A、B 均支持；旧 B 忽略委派参数时，A 会拒绝返回链，不回退到其他签发密钥。
 
 B-app 当前只分发 `attest/sign/decrypt`，未实现 native B 所需的 `profile/agree`，

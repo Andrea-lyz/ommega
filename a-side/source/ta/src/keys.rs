@@ -684,7 +684,7 @@ impl crate::KeyMintTa {
             .iter()
             .any(|p| matches!(p, KeyParam::Purpose(KeyPurpose::AttestKey)))
         {
-            crate::cert::validate_attestation_issuer(leaf_der)?;
+            crate::cert::validate_native_attestation_issuer(leaf_der)?;
         }
         let public_key = leaf
             .tbs_certificate()

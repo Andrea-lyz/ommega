@@ -197,13 +197,19 @@ independently. A enforces the application's original
 authentication policy and timeout without alias-specific extensions.
 This proxy does not provide hardware enforcement of A's user authentication;
 the certificate reports B's actual policy. An `ATTEST_KEY` certificate must
-authorize CA/keyCertSign. A caller-selected remote App AttestKey is resolved
+report an exclusive hardware ATTEST_KEY purpose. A caller-selected remote App AttestKey is resolved
 from its keyblob and forwarded as `device_attest_context.attestation_key` with
 its alias and DER issuer subject. B uses native `generateKey` with that existing
 keyblob and appends the parent chain. No private keyblob crosses the relay.
-A verifies the parent public key, CA/keyCertSign, issuer name and child
+A verifies the parent public key, signed hardware purpose, issuer name and child
 signature before storing the child. An unavailable issuer never falls back to
 local signing, and responses from relays that ignore the issuer are rejected.
+
+Native KeyMint delegation is authorized by the keyblob's ATTEST_KEY purpose,
+independently of generic PKIX CA constraints. Legacy AOSP C++ certificate
+generation can use digitalSignature without BasicConstraints for ATTEST_KEY;
+these certificate fields are preserved. B checks the hardware characteristics
+returned by the HAL, and A rejects signed SIGN-only or software purposes.
 
 The delegated-response verifier supports ECDSA P-256/P-384 with SHA-256/SHA-384,
 RSA 2048-8192 PKCS#1 signatures with SHA-256/SHA-384/SHA-512, and Ed25519.

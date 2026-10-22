@@ -32,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use der::{oid::AssociatedOid, Decode, Encode};
+use der::{Decode, Encode};
 use kmr_wire::{
     keymint::{
         Algorithm as KmAlgorithm, DateTime, Digest as KmDigest, EcCurve as KmEcCurve,
@@ -628,6 +628,15 @@ pub fn generate_attest_key_on(
         }
     };
 
+    if spec.purposes.contains(&KmKeyPurpose::AttestKey) {
+        validate_native_attestation_characteristics(&generated.keyCharacteristics, service)?;
+        if generated.certificateChain.is_empty() {
+            return Err(keymint_error(
+                KmErrorCode::VerificationFailed,
+                "attestation issuer certificate missing",
+            ));
+        }
+    }
     let mut cert_chain: Vec<Vec<u8>> = generated
         .certificateChain
         .into_iter()
@@ -635,15 +644,6 @@ pub fn generate_attest_key_on(
         .collect();
     if let Some(parent) = &parent {
         append_issuer_chain(&mut cert_chain, &parent.cert_chain)?;
-    }
-    if spec.purposes.contains(&KmKeyPurpose::AttestKey) {
-        let leaf = cert_chain.first().ok_or_else(|| {
-            keymint_error(
-                KmErrorCode::VerificationFailed,
-                "attestation issuer certificate missing",
-            )
-        })?;
-        parse_attestation_issuer(leaf)?;
     }
 
     let session = TeeSession {
@@ -657,31 +657,35 @@ pub fn generate_attest_key_on(
     Ok(session)
 }
 
-fn parse_attestation_issuer(cert: &[u8]) -> Result<x509_cert::Certificate> {
-    use x509_cert::ext::pkix::{BasicConstraints, KeyUsage, KeyUsages};
-    let invalid = || {
-        keymint_error(
-            KmErrorCode::IncompatiblePurpose,
-            "issuer lacks CA/keyCertSign",
-        )
+fn validate_native_attestation_characteristics(
+    characteristics: &[crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics],
+    service: &str,
+) -> Result<()> {
+    use crate::android::hardware::security::keymint::{
+        KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
     };
-    let cert = x509_cert::Certificate::from_der(cert).map_err(|_| invalid())?;
-    let extensions = cert.tbs_certificate().extensions().ok_or_else(invalid)?;
-    let constraints = extensions
+    let expected = if service == SYSTEM_KEYMINT_STRONGBOX {
+        SecurityLevel::STRONGBOX
+    } else {
+        SecurityLevel::TRUSTED_ENVIRONMENT
+    };
+    // Follow native KeyMint: authority comes from the hardware keyblob, not
+    // the CA/KeyUsage appearance of its public certificate. Check the HAL's
+    // result instead of merely trusting the requested purpose.
+    let attest_only = characteristics
         .iter()
-        .find(|ext| ext.extn_id == BasicConstraints::OID)
-        .ok_or_else(invalid)?;
-    let constraints =
-        BasicConstraints::from_der(constraints.extn_value.as_bytes()).map_err(|_| invalid())?;
-    let usage = extensions
-        .iter()
-        .find(|ext| ext.extn_id == KeyUsage::OID)
-        .ok_or_else(invalid)?;
-    let usage = KeyUsage::from_der(usage.extn_value.as_bytes()).map_err(|_| invalid())?;
-    if !constraints.ca || (usage.0 & KeyUsages::KeyCertSign).bits() == 0 {
-        return Err(invalid());
+        .filter(|chars| chars.securityLevel == expected)
+        .flat_map(|chars| &chars.authorizations)
+        .filter(|param| param.tag == Tag::PURPOSE)
+        .map(|param| &param.value)
+        .eq([&KeyParameterValue::KeyPurpose(KeyPurpose::ATTEST_KEY)]);
+    if !attest_only {
+        return Err(keymint_error(
+            KmErrorCode::IncompatiblePurpose,
+            "HAL did not authorize an exclusive hardware ATTEST_KEY",
+        ));
     }
-    Ok(cert)
+    Ok(())
 }
 
 fn native_attestation_key(
@@ -699,7 +703,9 @@ fn native_attestation_key(
         .cert_chain
         .first()
         .ok_or_else(|| keymint_error(KmErrorCode::InvalidKeyBlob, "issuer certificate missing"))?;
-    let cert = parse_attestation_issuer(cert)?;
+    // generateKey(..., AttestationKey) enforces the parent's keyblob purpose.
+    // Do not substitute a general-purpose PKIX CA permission check here.
+    let cert = x509_cert::Certificate::from_der(cert).context("parse native issuer certificate")?;
     if cert.tbs_certificate().subject().to_der()? != request.issuer_subject_name {
         return Err(keymint_error(
             KmErrorCode::InvalidArgument,
@@ -1577,26 +1583,75 @@ mod native_attestation_tests {
     }
 
     #[test]
-    fn native_issuer_uses_the_existing_blob_and_subject() {
-        let parent = parent(true, true);
-        let request = request(&parent);
-        let native = native_attestation_key(&request, &parent, SYSTEM_KEYMINT_DEFAULT).unwrap();
-        assert_eq!(native.keyBlob, parent.key_blob);
-        assert_eq!(native.issuerSubjectName, request.issuer_subject_name);
-        assert!(native.attestKeyParams.is_empty());
+    fn native_issuer_uses_the_existing_blob_without_pkix_ca_gating() {
+        for (ca, cert_sign) in [(false, false), (false, true), (true, false), (true, true)] {
+            let parent = parent(ca, cert_sign);
+            let request = request(&parent);
+            let native = native_attestation_key(&request, &parent, SYSTEM_KEYMINT_DEFAULT).unwrap();
+            assert_eq!(native.keyBlob, parent.key_blob);
+            assert_eq!(native.issuerSubjectName, request.issuer_subject_name);
+            assert!(native.attestKeyParams.is_empty());
+        }
     }
 
     #[test]
-    fn ordinary_signing_certificates_cannot_be_native_issuers() {
-        for (ca, cert_sign) in [(false, false), (false, true), (true, false)] {
-            let parent = parent(ca, cert_sign);
-            let error = native_attestation_key(&request(&parent), &parent, SYSTEM_KEYMINT_DEFAULT)
-                .unwrap_err();
-            assert_eq!(
-                relay_error_result(&error)["keymint_error_code"],
-                KmErrorCode::IncompatiblePurpose as i32
-            );
+    fn hal_must_authorize_an_exclusive_attest_key_in_the_correct_hardware() {
+        use crate::android::hardware::security::keymint::{
+            KeyCharacteristics::KeyCharacteristics, SecurityLevel::SecurityLevel,
+        };
+        for (level, purposes, service, accepted) in [
+            (
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                vec![KmKeyPurpose::AttestKey],
+                SYSTEM_KEYMINT_DEFAULT,
+                true,
+            ),
+            (
+                SecurityLevel::STRONGBOX,
+                vec![KmKeyPurpose::AttestKey],
+                SYSTEM_KEYMINT_STRONGBOX,
+                true,
+            ),
+            (
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                vec![KmKeyPurpose::Sign],
+                SYSTEM_KEYMINT_DEFAULT,
+                false,
+            ),
+            (
+                SecurityLevel::SOFTWARE,
+                vec![KmKeyPurpose::AttestKey],
+                SYSTEM_KEYMINT_DEFAULT,
+                false,
+            ),
+            (
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                vec![KmKeyPurpose::AttestKey, KmKeyPurpose::Sign],
+                SYSTEM_KEYMINT_DEFAULT,
+                false,
+            ),
+            (
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                vec![KmKeyPurpose::AttestKey],
+                SYSTEM_KEYMINT_STRONGBOX,
+                false,
+            ),
+        ] {
+            let params: Vec<_> = purposes.into_iter().map(KeyParam::Purpose).collect();
+            let chars = [KeyCharacteristics {
+                securityLevel: level,
+                authorizations: key_params_to_aidl(&params, 200).unwrap(),
+            }];
+            let result = validate_native_attestation_characteristics(&chars, service);
+            assert_eq!(result.is_ok(), accepted);
+            if let Err(error) = result {
+                assert_eq!(
+                    relay_error_result(&error)["keymint_error_code"],
+                    KmErrorCode::IncompatiblePurpose as i32
+                );
+            }
         }
+        assert!(validate_native_attestation_characteristics(&[], SYSTEM_KEYMINT_DEFAULT).is_err());
     }
 
     #[test]
