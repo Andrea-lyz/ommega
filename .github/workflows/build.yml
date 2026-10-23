@@ -47,6 +47,25 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Test version synchronization
         run: python3 .github/scripts/test_bump_version.py
+      - name: Test CI toolchain discovery
+        run: python3 .github/scripts/test_ci_toolchain.py
+
+  ui:
+    name: UI checks
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set build version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 .github/scripts/bump_version.py --version "$RELEASE_VERSION"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
       - name: Test B WebUI configuration handling
         run: |
           node --test b-side/source/scripts/webui.test.mjs
@@ -55,11 +74,6 @@ jobs:
         run: |
           node ui/build.mjs --check
           node --test ui/tests/*.test.mjs
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
       - name: Build OpenUI design preview
         run: |
           npm ci --prefix ui --no-audit --no-fund
@@ -97,7 +111,7 @@ jobs:
           workspaces: ${{ matrix.component }}-side/source
           key: android-${{ matrix.component }}-ndk28c-api26
           cache-workspace-crates: true
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Check Android workspace
         working-directory: ${{ matrix.component }}-side/source
         run: |
@@ -155,8 +169,10 @@ jobs:
         run: python3 .github/scripts/bump_version.py --version "$RELEASE_VERSION"
       - name: Install musl
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
+          if ! command -v musl-gcc >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends musl-tools
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
@@ -167,7 +183,7 @@ jobs:
           workspaces: server/source
           key: server-linux-musl
           cache-workspace-crates: true
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Check and test Server
         working-directory: server/source
         run: |
@@ -205,6 +221,8 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       - uses: android-actions/setup-android@v3
         with:
           packages: "platform-tools platforms;android-36 build-tools;35.0.0"
@@ -226,12 +244,12 @@ jobs:
         working-directory: b-app/source
         run: |
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleRelease --build-cache --parallel --no-daemon
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --build-cache --parallel --daemon
       - name: Test and build StrongBoxCapabilityMask
         working-directory: StrongBoxCapabilityMask
         run: |
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleRelease --build-cache --parallel --no-daemon \
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --build-cache --parallel --daemon \
             "-PciDebugKeystore=$HOME/.android/debug.keystore"
       - name: Verify and collect APKs
         env:
@@ -260,8 +278,8 @@ jobs:
           path: dist/*.apk
 
   bundle:
-    name: Collect 1.4.x artifacts
-    needs: [prepare, android, server, apks]
+    name: Collect release artifacts
+    needs: [prepare, ui, android, server, apks]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
