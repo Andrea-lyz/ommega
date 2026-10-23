@@ -1,0 +1,41 @@
+/* The settings launcher and its two modal levels use the dashboard tokens. */
+.ommega-auth-modal{box-sizing:border-box;color:var(--om-ink,#222);background:var(--om-surface,#fff);border:1px solid var(--om-line,#bbb);padding:0;border-radius:22px;overscroll-behavior:contain}
+.ommega-auth-modal::backdrop{background:#0008}
+.ommega-auth-modal h2{font-size:18px;line-height:1.4;margin:0;flex:1;min-width:0;overflow-wrap:anywhere}
+.ommega-auth-toolbar{display:flex;align-items:center;gap:12px;padding:16px;flex-shrink:0}
+.ommega-auth-toolbar .om-button{flex-shrink:0;gap:4px}
+#ommega-auth-policy-dialog{width:calc(100% - 32px);max-width:560px;max-height:90vh;max-height:90dvh}
+#ommega-auth-policy-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
+.ommega-auth-policy-content{padding:0 20px 20px;overflow:auto;min-height:0}
+#ommega-auth-policy-dialog fieldset{border:0;padding:0;margin:0}
+#ommega-auth-policy-dialog fieldset label{display:flex;align-items:center;gap:12px;padding:12px 0;min-height:48px;cursor:pointer}
+#ommega-auth-policy-dialog input[type=radio]{appearance:auto;display:block;flex:none;width:22px;height:22px;min-height:22px;padding:0;margin:0;accent-color:var(--om-accent,#465b91)}
+.ommega-auth-modal small{display:block;font-size:13px;line-height:1.5;color:var(--om-muted,#666);overflow-wrap:anywhere}
+.ommega-auth-note,#ommega-auth-status,#ommega-auth-app-status{font-size:13px;line-height:1.5;color:var(--om-muted,#666);overflow-wrap:anywhere}
+#ommega-auth-status{margin:12px 0}
+.ommega-auth-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:16px}
+.ommega-auth-modal :focus-visible{outline:3px solid var(--om-accent,#465b91);outline-offset:3px}
+.ommega-auth-modal select{font:inherit;min-width:0;min-height:44px;padding:8px 10px;border:1px solid var(--om-line,#aaa);border-radius:12px;color:var(--om-ink,#222);background:var(--om-bg,#eee);max-width:100%}
+.ommega-auth-modal :disabled{opacity:.55}
+#ommega-auth-dialog{width:100vw;max-width:none;height:100vh;height:100dvh;max-height:none;margin:0;border:0;border-radius:0;inset:0}
+#ommega-auth-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
+#ommega-auth-dialog .ommega-auth-toolbar{padding-top:calc(12px + env(safe-area-inset-top,0px));border-bottom:1px solid var(--om-line,#bbb)}
+.ommega-auth-app-filters{flex-shrink:0;padding:12px 16px;border-bottom:1px solid var(--om-line,#bbb)}
+.ommega-auth-app-filters>label{display:block;font-size:13px;color:var(--om-muted,#666)}
+#ommega-auth-search{box-sizing:border-box;width:100%;font:inherit;font-size:16px;min-height:48px;margin:6px 0 8px;padding:10px 12px;border:1px solid var(--om-line,#aaa);border-radius:12px;color:var(--om-ink,#222);background:var(--om-bg,#eee)}
+.ommega-auth-app-filters .ommega-auth-system-option{display:flex;align-items:center;gap:12px;min-height:44px;font-size:14px;color:var(--om-ink,#222);cursor:pointer}
+#ommega-auth-system{appearance:none;position:relative;flex:none;width:44px;height:28px;border:2px solid var(--om-muted,#666);border-radius:18px;background:transparent;color:var(--om-muted,#666);cursor:pointer}
+#ommega-auth-system::before{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:currentColor;transition:transform .15s}
+#ommega-auth-system:checked{background:var(--om-accent,#465b91);border-color:var(--om-accent,#465b91);color:var(--om-on-accent,#fff)}
+#ommega-auth-system:checked::before{transform:translateX(16px)}
+#ommega-auth-app-status{margin-top:8px}
+#ommega-auth-app-list{flex:1;min-height:0;overflow:auto;padding:0 16px calc(16px + env(safe-area-inset-bottom,0px));overscroll-behavior:contain}
+.ommega-auth-app{display:grid;grid-template-columns:44px minmax(0,1fr) minmax(140px,190px);align-items:center;gap:8px 12px;padding:12px 0;border-bottom:1px solid var(--om-line,#bbb)}
+.ommega-auth-app-name{min-width:0;overflow-wrap:anywhere;line-height:1.4}
+.ommega-auth-app-name strong{display:block;font-size:15px}
+.ommega-auth-app-name small{margin-top:2px;font-size:12px}
+.ommega-auth-icon{position:relative;display:grid;place-items:center;width:40px;height:40px;align-self:start;border-radius:12px;background:var(--om-accent-bg,#ddd);color:var(--om-accent,#465b91);overflow:hidden;font-weight:700}
+.ommega-auth-icon img{position:absolute;inset:0;width:40px;height:40px;object-fit:contain;background:var(--om-surface,#fff)}
+#ommega-auth-more{width:calc(100% - 32px);margin:8px 16px calc(8px + env(safe-area-inset-bottom,0px));flex-shrink:0}
+@media(max-width:480px){.ommega-auth-app{grid-template-columns:40px minmax(0,1fr)}.ommega-auth-app select{grid-column:2;width:100%}.ommega-auth-toolbar{gap:8px}.ommega-auth-toolbar .om-button{padding:10px}.ommega-auth-modal h2{font-size:17px}}
+@media(max-height:600px){.ommega-auth-app-filters>small{display:none}.ommega-auth-app-filters{padding-top:6px;padding-bottom:6px}}

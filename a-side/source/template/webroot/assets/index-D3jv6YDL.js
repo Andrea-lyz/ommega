@@ -2264,11 +2264,12 @@ async function ommegaApplyGlobalScope() {
 
 function ommegaInstallGlobalScope() {
   const list = document.getElementById("apps-list");
-  if (!list || !list.parentElement || document.getElementById("ommega-global-scope")) return false;
+  const slot = document.getElementById("om-global-scope-slot");
+  if (!list || !slot || typeof slot.appendChild !== "function" || document.getElementById("ommega-global-scope")) return false;
   const panel = document.createElement("section");
   panel.id = "ommega-global-scope";
-  panel.style.cssText = "margin:12px 16px;padding:14px 16px;border-radius:16px;" +
-    "background:var(--md-sys-color-surface-container,#eee);color:var(--md-sys-color-on-surface,#222)";
+  panel.style.cssText = "margin:10px 0;padding:14px 18px;border:1px solid var(--om-line,#bbb);border-radius:18px;" +
+    "background:var(--om-surface,#eee);color:var(--om-ink,#222)";
   panel.innerHTML = ommegaUiLocalizeHtml('<style>#ommega-global-scope label{display:flex;align-items:center;gap:12px;min-height:48px;cursor:pointer}' +
     '#ommega-global-scope input{appearance:none;flex:none;width:48px;height:28px;border:2px solid currentColor;' +
     'border-radius:18px;position:relative;cursor:pointer;background:transparent;color:inherit}' +
@@ -2282,7 +2283,7 @@ function ommegaInstallGlobalScope() {
     '<label for="ommega-global-scope-enabled"><input type="checkbox" role="switch" id="ommega-global-scope-enabled" ' +
     'aria-describedby="ommega-global-scope-status" disabled><strong>全局作用域 / Global scope</strong></label>' +
     '<div id="ommega-global-scope-status" role="status" aria-live="polite" style="font-size:13px;line-height:1.5;margin-top:4px">正在读取… / Loading…</div>');
-  list.parentElement.insertBefore(panel, list);
+  slot.appendChild(panel);
   document.getElementById("ommega-global-scope-enabled").addEventListener("change", ommegaApplyGlobalScope);
   const baseLoad = Mi;
   Mi = async function () {
@@ -2300,6 +2301,7 @@ function ommegaInstallGlobalScope() {
 }
 
 ommegaInstallGlobalScope();
+if (typeof window !== "undefined") window.addEventListener("ommega-settings-ready", ommegaInstallGlobalScope);
 
 // Runtime auth-signing policy. Kept outside the scope list, which is inert in
 // global mode. App names are display-only; only validated package IDs persist.
@@ -2315,6 +2317,9 @@ let ommegaAuthAppsDraft = null;
 let ommegaAuthAppsOriginal = null;
 let ommegaAuthInventory = [];
 let ommegaAuthLimit = 40;
+let ommegaAuthShowSystem = false;
+let ommegaAuthSystemsLoaded = false;
+let ommegaAuthAppSession = 0;
 
 function ommegaAuthPackage(value) {
   return typeof value === "string" && value.length <= 255 &&
@@ -2390,24 +2395,40 @@ function ommegaAuthModeName(mode) {
   return ommegaUiLocalize({auto: "自动 / Auto", compatibility: "支付兼容 / Payment compatibility", preserve: "保持认证要求 / Preserve authentication"}[mode]);
 }
 
-function ommegaAuthStatus(message, dialog = false) {
-  const element = document.getElementById(dialog ? "ommega-auth-app-status" : "ommega-auth-status");
+function ommegaAuthStatus(message, apps = false) {
+  const element = document.getElementById(apps ? "ommega-auth-app-status" : "ommega-auth-status");
   if (element) element.textContent = message;
+  if (!apps && !ommegaAuthConfig) {
+    const summary = document.getElementById("ommega-auth-summary");
+    if (summary) summary.textContent = message;
+  }
 }
 
 function ommegaAuthSync() {
-  const panel = document.getElementById("ommega-auth-signing");
-  if (!panel || !panel.querySelectorAll) return;
-  for (const control of panel.querySelectorAll("input,button")) {
-    control.disabled = ommegaAuthBusy || (!ommegaAuthConfig && control.id !== "ommega-auth-reload");
+  const policy = document.getElementById("ommega-auth-policy-dialog");
+  if (policy?.querySelectorAll) {
+    for (const control of policy.querySelectorAll("input,button")) {
+      control.disabled = ommegaAuthBusy || (!ommegaAuthConfig && control.id !== "ommega-auth-reload");
+      if (control.id === "ommega-auth-policy-back") control.disabled = false;
+    }
+    for (const radio of policy.querySelectorAll('input[name="ommega-auth-mode"]')) radio.checked = radio.value === ommegaAuthDraft;
   }
-  for (const radio of panel.querySelectorAll('input[name="ommega-auth-mode"]')) radio.checked = radio.value === ommegaAuthDraft;
+  const count = Object.keys(ommegaAuthConfig?.apps || {}).length;
   const button = document.getElementById("ommega-auth-apps");
-  if (button) button.textContent = ommegaUiLocalize("单应用例外 / App exceptions") + " (" + Object.keys(ommegaAuthConfig?.apps || {}).length + ")";
+  if (button) {
+    button.disabled = ommegaAuthBusy || !ommegaAuthConfig;
+    button.textContent = ommegaUiLocalize("单应用例外 / App exceptions") + " (" + count + ")";
+  }
+  const launcher = document.getElementById("ommega-auth-open");
+  if (launcher) launcher.disabled = ommegaAuthBusy;
+  const summary = document.getElementById("ommega-auth-summary");
+  if (summary && ommegaAuthConfig) summary.textContent = ommegaAuthModeName(ommegaAuthConfig.default) + " · " +
+    ommegaUiLocalize("单应用例外 / App exceptions") + " " + count;
   const dialog = document.getElementById("ommega-auth-dialog");
   if (dialog?.querySelectorAll) for (const control of dialog.querySelectorAll("button,input,select")) {
-    control.disabled = ommegaAuthBusy && !(ommegaAuthLoadingApps && control.id === "ommega-auth-app-cancel");
-    if (control.id === "ommega-auth-app-save" && !ommegaAuthAppsLoaded) control.disabled = true;
+    control.disabled = ommegaAuthBusy;
+    if (["ommega-auth-app-save", "ommega-auth-search", "ommega-auth-system"].includes(control.id)) control.disabled ||= !ommegaAuthAppsLoaded;
+    if (control.id === "ommega-auth-app-back") control.disabled = false;
   }
 }
 
@@ -2434,6 +2455,14 @@ async function ommegaAuthCommit(original, config) {
   ommegaAuthConfig = read.config; ommegaAuthOriginal = read.contents;
 }
 
+async function ommegaAuthOpenPolicy() {
+  const dialog = document.getElementById("ommega-auth-policy-dialog");
+  if (dialog.open || ommegaAuthBusy) return;
+  dialog.showModal();
+  await ommegaAuthRefresh();
+  if (dialog.open) (dialog.querySelector("input:checked") || document.getElementById("ommega-auth-reload")).focus();
+}
+
 async function ommegaAuthSaveDefault() {
   if (ommegaAuthBusy || !ommegaAuthConfig) return;
   ommegaAuthBusy = true; ommegaAuthSync();
@@ -2441,27 +2470,52 @@ async function ommegaAuthSaveDefault() {
   try {
     await ommegaAuthCommit(ommegaAuthOriginal, {...ommegaAuthConfig, default: ommegaAuthDraft});
     ommegaAuthStatus(ommegaUiLocalize("策略已保存，将用于之后新建的密钥。 / Policy saved for newly created keys."));
+    document.getElementById("ommega-auth-policy-dialog")?.close();
   } catch (error) {
     ommegaAuthStatus(ommegaUiLocalize("保存失败 / Could not save policy") + ": " + error.message);
-  } finally { ommegaAuthBusy = false; ommegaAuthSync(); }
+  } finally {
+    ommegaAuthBusy = false; ommegaAuthSync();
+    const policy = document.getElementById("ommega-auth-policy-dialog");
+    if (policy && !policy.open) document.getElementById("ommega-auth-open")?.focus();
+  }
 }
 
 function ommegaAuthFilteredApps(query) {
   const search = String(query).trim().toLocaleLowerCase();
-  return ommegaAuthInventory.filter(app => (app.appName + " " + app.packageName).toLocaleLowerCase().includes(search));
+  return ommegaAuthInventory.filter(app => (ommegaAuthShowSystem || !app.system) &&
+    (app.appName + " " + app.packageName).toLocaleLowerCase().includes(search));
+}
+
+function ommegaAuthLoadIcon(image, packageName) {
+  image.addEventListener("error", () => { image.hidden = true; }, {once:true});
+  if (typeof globalThis.ksu?.getPackagesInfo === "function") {
+    image.src = "ksu://icon/" + packageName;
+  } else if (typeof dr !== "undefined" && dr.has(packageName)) {
+    image.src = dr.get(packageName);
+  } else if (typeof $packageManager !== "undefined" && typeof ks === "function") {
+    Promise.resolve().then(() => ks($packageManager.getApplicationIcon(packageName, 0, 0)))
+      .then(response => response.arrayBuffer()).then(buffer => {
+        const source = "data:image/png;base64," + Ts(buffer);
+        if (typeof dr !== "undefined") dr.set(packageName, source);
+        image.src = source;
+      }).catch(() => { image.hidden = true; });
+  } else image.hidden = true;
 }
 
 function ommegaAuthRenderApps() {
   const list = document.getElementById("ommega-auth-app-list");
-  const search = document.getElementById("ommega-auth-search");
-  const matches = ommegaAuthFilteredApps(search.value);
+  const matches = ommegaAuthFilteredApps(document.getElementById("ommega-auth-search").value);
   list.replaceChildren();
   for (const app of matches.slice(0, ommegaAuthLimit)) {
-    const row = document.createElement("label"); row.className = "ommega-auth-app";
-    const name = document.createElement("span");
+    const row = document.createElement("div"); row.className = "ommega-auth-app";
+    const picture = document.createElement("span"); picture.className = "ommega-auth-icon"; picture.setAttribute("aria-hidden", "true");
+    const fallback = document.createElement("span"); fallback.textContent = [...app.appName][0] || "A";
+    const image = document.createElement("img"); image.alt = ""; image.width = 40; image.height = 40;
+    image.loading = "lazy"; image.decoding = "async";
+    picture.append(fallback, image); ommegaAuthLoadIcon(image, app.packageName);
+    const name = document.createElement("span"); name.className = "ommega-auth-app-name";
     const title = document.createElement("strong"); title.textContent = app.appName;
-    const pkg = document.createElement("small"); pkg.textContent = app.packageName;
-    name.append(title, pkg);
+    const pkg = document.createElement("small"); pkg.textContent = app.packageName; name.append(title, pkg);
     const select = document.createElement("select");
     select.setAttribute("aria-label", app.appName + " — " + app.packageName);
     for (const mode of ["inherit", ...OMMEGA_AUTH_MODES]) {
@@ -2477,34 +2531,66 @@ function ommegaAuthRenderApps() {
       else ommegaAuthAppsDraft[app.packageName] = select.value;
       ommegaAuthStatus(ommegaUiLocalize("例外尚未保存 / Exceptions not saved yet"), true);
     });
-    row.append(name, select); list.appendChild(row);
+    row.append(picture, name, select); list.appendChild(row);
   }
-  document.getElementById("ommega-auth-more").hidden = matches.length <= ommegaAuthLimit;
+  const more = document.getElementById("ommega-auth-more");
+  more.hidden = matches.length <= ommegaAuthLimit;
   ommegaAuthStatus(ommegaUiLocalize("匹配应用 / Matching apps") + ": " + matches.length, true);
+}
+
+async function ommegaAuthReadApps(type) {
+  const packages = [...new Set(await Zo(type))].filter(ommegaAuthPackage);
+  return (await ommegaNames(packages, {})).map(app => ({...app, system: type === "system"}));
 }
 
 async function ommegaAuthOpenApps() {
   if (ommegaAuthBusy || !ommegaAuthConfig) return;
+  const session = ++ommegaAuthAppSession;
   ommegaAuthAppsDraft = {...ommegaAuthConfig.apps}; ommegaAuthAppsOriginal = ommegaAuthOriginal;
+  ommegaAuthInventory = []; ommegaAuthShowSystem = false; ommegaAuthSystemsLoaded = false;
+  ommegaAuthLoadingApps = true; ommegaAuthAppsLoaded = false;
   const dialog = document.getElementById("ommega-auth-dialog");
-  dialog.showModal();
+  document.getElementById("ommega-auth-system").checked = false;
   document.getElementById("ommega-auth-search").value = "";
   document.getElementById("ommega-auth-app-list").replaceChildren();
-  ommegaAuthBusy = true; ommegaAuthLoadingApps = true; ommegaAuthAppsLoaded = false; ommegaAuthSync();
-  ommegaAuthStatus(ommegaUiLocalize("正在读取应用… / Loading apps…"), true);
+  document.getElementById("ommega-auth-more").hidden = true;
+  dialog.showModal(); ommegaAuthSync();
+  ommegaAuthStatus(ommegaUiLocalize("正在读取用户应用… / Loading user apps…"), true);
   try {
-    const packages = await Zo("all");
-    const all = [...new Set([...packages, ...Object.keys(ommegaAuthAppsDraft)])].filter(ommegaAuthPackage);
-    ommegaAuthInventory = await ommegaNames(all, {});
-    ommegaAuthInventory.sort((a, b) => Number(Object.hasOwn(ommegaAuthAppsDraft, b.packageName)) -
-      Number(Object.hasOwn(ommegaAuthAppsDraft, a.packageName)) || a.appName.localeCompare(b.appName));
+    const apps = await ommegaAuthReadApps("user");
+    if (session !== ommegaAuthAppSession || !dialog.open) return;
+    ommegaAuthInventory = apps;
+    ommegaAuthInventory.sort((a, b) => a.appName.localeCompare(b.appName));
     ommegaAuthAppsLoaded = true; ommegaAuthLimit = 40; ommegaAuthRenderApps();
   } catch (error) {
-    ommegaAuthStatus(ommegaUiLocalize("读取应用失败，请关闭后重试 / Could not load apps; close and retry") + ": " + error.message, true);
+    if (session === ommegaAuthAppSession && dialog.open) ommegaAuthStatus(ommegaUiLocalize("读取应用失败，请返回后重试 / Could not load apps; go back and retry") + ": " + error.message, true);
   } finally {
-    ommegaAuthBusy = false; ommegaAuthLoadingApps = false; ommegaAuthSync();
-    if (dialog.open) document.getElementById("ommega-auth-search").focus();
-    else document.getElementById("ommega-auth-apps").focus();
+    if (session === ommegaAuthAppSession) { ommegaAuthLoadingApps = false; ommegaAuthSync(); }
+  }
+}
+
+async function ommegaAuthToggleSystem() {
+  ommegaAuthShowSystem = document.getElementById("ommega-auth-system").checked;
+  ommegaAuthLimit = 40;
+  if (!ommegaAuthShowSystem || ommegaAuthSystemsLoaded) { ommegaAuthRenderApps(); return; }
+  if (ommegaAuthLoadingApps) return;
+  const session = ommegaAuthAppSession;
+  ommegaAuthLoadingApps = true;
+  ommegaAuthStatus(ommegaUiLocalize("正在读取系统应用… / Loading system apps…"), true);
+  try {
+    const apps = await ommegaAuthReadApps("system");
+    if (session !== ommegaAuthAppSession) return;
+    const byPackage = new Map(ommegaAuthInventory.map(app => [app.packageName, app]));
+    for (const app of apps) if (!byPackage.has(app.packageName)) byPackage.set(app.packageName, app);
+    ommegaAuthInventory = [...byPackage.values()].sort((a, b) => a.appName.localeCompare(b.appName));
+    ommegaAuthSystemsLoaded = true; ommegaAuthRenderApps();
+  } catch (error) {
+    if (session === ommegaAuthAppSession) {
+      ommegaAuthShowSystem = false; document.getElementById("ommega-auth-system").checked = false;
+      ommegaAuthStatus(ommegaUiLocalize("读取系统应用失败 / Could not load system apps") + ": " + error.message, true);
+    }
+  } finally {
+    if (session === ommegaAuthAppSession) { ommegaAuthLoadingApps = false; ommegaAuthSync(); }
   }
 }
 
@@ -2520,55 +2606,51 @@ async function ommegaAuthSaveApps() {
     ommegaAuthStatus(ommegaUiLocalize("保存失败 / Could not save policy") + ": " + error.message, true);
   } finally {
     ommegaAuthBusy = false; ommegaAuthSync();
-    if (!document.getElementById("ommega-auth-dialog").open) document.getElementById("ommega-auth-apps").focus();
+    if (document.getElementById("ommega-auth-policy-dialog").open && !document.getElementById("ommega-auth-dialog").open) document.getElementById("ommega-auth-apps").focus();
   }
 }
 
 function ommegaInstallAuthSigning() {
-  const anchor = document.getElementById("ommega-global-scope") || document.getElementById("apps-list");
-  if (!anchor?.parentElement || document.getElementById("ommega-auth-signing")) return false;
+  const slot = document.getElementById("om-auth-signing-slot");
+  if (!slot || typeof slot.appendChild !== "function" || document.getElementById("ommega-auth-signing")) return false;
   const panel = document.createElement("section"); panel.id = "ommega-auth-signing";
-  panel.innerHTML = ommegaUiLocalizeHtml('<style>' +
-    '#ommega-auth-signing{margin:12px 16px;padding:16px;border-radius:16px;background:var(--md-sys-color-surface-container,#eee);color:var(--md-sys-color-on-surface,#222)}' +
-    '#ommega-auth-signing h3,#ommega-auth-dialog h3{margin:0 0 12px;font-size:18px}' +
-    '#ommega-auth-signing fieldset{border:0;margin:0;padding:0}#ommega-auth-signing label{display:flex;align-items:center;gap:12px;padding:8px 0;min-height:48px;cursor:pointer}' +
-    '#ommega-auth-signing small,#ommega-auth-dialog small{display:block;font-size:13px;line-height:1.5;overflow-wrap:anywhere}' +
-    '#ommega-auth-signing input[type="radio"]{width:20px;height:20px;flex:none;accent-color:var(--md-sys-color-primary,#465b91)}' +
-    '#ommega-auth-signing button,#ommega-auth-dialog button,#ommega-auth-dialog select,#ommega-auth-search{font:inherit;min-height:44px;border:1px solid var(--md-sys-color-outline,#777);border-radius:12px;padding:8px 12px;background:var(--md-sys-color-surface,#fff);color:var(--md-sys-color-on-surface,#222)}' +
-    '#ommega-auth-signing button,#ommega-auth-dialog button{cursor:pointer}#ommega-auth-signing button:disabled,#ommega-auth-dialog :disabled{opacity:.55;cursor:wait}' +
-    '#ommega-auth-signing :focus-visible,#ommega-auth-dialog :focus-visible{outline:3px solid var(--md-sys-color-primary,#465b91);outline-offset:3px}' +
-    '.ommega-auth-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}' +
-    '#ommega-auth-status,#ommega-auth-app-status{font-size:13px;line-height:1.5;margin-top:12px;overflow-wrap:anywhere}' +
-    '#ommega-auth-dialog{box-sizing:border-box;width:calc(100% - 24px);max-width:640px;max-height:85vh;max-height:85dvh;padding:20px;border:0;border-radius:20px;background:var(--md-sys-color-surface,#fff);color:var(--md-sys-color-on-surface,#222)}' +
-    '#ommega-auth-dialog[open]{display:flex;flex-direction:column;overflow:hidden}#ommega-auth-dialog>*{flex-shrink:0}' +
-    '#ommega-auth-app-list{overflow-y:auto;min-height:0;max-height:42vh;flex:1 1 auto}' +
-    '#ommega-auth-dialog::backdrop{background:#0008}#ommega-auth-search{box-sizing:border-box;width:100%;margin:8px 0}' +
-    '#ommega-auth-app-list .ommega-auth-app{display:flex;align-items:center;flex-wrap:wrap;gap:8px;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--md-sys-color-outline-variant,#bbb)}' +
-    '.ommega-auth-app>span{flex:1;min-width:160px;overflow-wrap:anywhere}.ommega-auth-app select{max-width:100%}' +
-    '</style><h3 id="ommega-auth-heading">认证签名策略 / Authentication signing</h3>' +
-    '<fieldset aria-labelledby="ommega-auth-heading">' +
+  const back = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m14 5-7 7 7 7"/></svg>';
+  const forward = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>';
+  panel.innerHTML = ommegaUiLocalizeHtml(
+    '<button type="button" id="ommega-auth-open" class="om-action"><span>认证签名策略 / Authentication signing<small id="ommega-auth-summary">正在读取… / Loading…</small></span>' + forward + '</button>' +
+    '<dialog id="ommega-auth-policy-dialog" class="ommega-auth-modal" aria-labelledby="ommega-auth-heading" data-om-return-focus="ommega-auth-open">' +
+    '<header class="ommega-auth-toolbar"><button type="button" id="ommega-auth-policy-back" class="om-button secondary">' + back + '<span>返回 / Back</span></button><h2 id="ommega-auth-heading">认证签名策略 / Authentication signing</h2></header>' +
+    '<div class="ommega-auth-policy-content"><fieldset aria-labelledby="ommega-auth-heading">' +
     '<label><input type="radio" name="ommega-auth-mode" value="auto"><span><strong>自动（推荐） / Auto (recommended)</strong><small>识别已知认证检测探针，其余请求优先支付兼容。 / Preserve known authentication probes; use payment compatibility for other eligible requests.</small></span></label>' +
     '<label><input type="radio" name="ommega-auth-mode" value="compatibility"><span><strong>支付兼容 / Payment compatibility</strong><small>在本机验证认证，由远端签名。 / Authenticate on this device and sign remotely.</small></span></label>' +
     '<label><input type="radio" name="ommega-auth-mode" value="preserve"><span><strong>保持认证要求 / Preserve authentication</strong><small>远端保留认证要求，部分应用的指纹签名可能失败。 / Keep authentication requirements on the remote key; fingerprint signing may fail in some apps.</small></span></label>' +
-    '</fieldset><p style="font-size:13px;line-height:1.5">仅影响之后新建的密钥，已有密钥不会自动转换。 / Only affects newly created keys. Existing keys are not converted.</p>' +
-    '<div class="ommega-auth-actions"><button id="ommega-auth-save">保存策略 / Save policy</button><button id="ommega-auth-apps">单应用例外 / App exceptions</button><button id="ommega-auth-reload">重新读取 / Reload</button></div>' +
+    '</fieldset><p class="ommega-auth-note">仅影响之后新建的密钥，已有密钥不会自动转换。 / Only affects newly created keys. Existing keys are not converted.</p>' +
+    '<button type="button" id="ommega-auth-apps" class="om-action">单应用例外 / App exceptions</button>' +
     '<div id="ommega-auth-status" role="status" aria-live="polite"></div>' +
-    '<dialog id="ommega-auth-dialog" aria-labelledby="ommega-auth-app-heading"><h3 id="ommega-auth-app-heading">单应用例外 / App exceptions</h3>' +
-    '<small>例外仅对作用域内应用生效；开启全局作用域后仍然有效。共享 UID 的应用可能共用策略，保持认证要求优先。 / Exceptions apply only to apps in scope and remain active in global scope. Apps sharing a UID may share a policy; preserve authentication takes priority.</small>' +
-    '<label for="ommega-auth-search">搜索应用名称或包名 / Search app name or package</label><input id="ommega-auth-search" type="search" autocomplete="off">' +
-    '<div id="ommega-auth-app-list"></div><button id="ommega-auth-more" hidden>显示更多 / Show more</button>' +
-    '<div id="ommega-auth-app-status" role="status" aria-live="polite"></div>' +
-    '<div class="ommega-auth-actions"><button id="ommega-auth-app-save">保存例外 / Save exceptions</button><button id="ommega-auth-app-cancel">取消 / Cancel</button></div></dialog>');
-  anchor.parentElement.insertBefore(panel, anchor);
+    '<div class="ommega-auth-actions"><button type="button" id="ommega-auth-reload" class="om-button secondary">重新读取 / Reload</button><button type="button" id="ommega-auth-save" class="om-button">保存策略 / Save policy</button></div></div></dialog>' +
+    '<dialog id="ommega-auth-dialog" class="ommega-auth-modal" aria-labelledby="ommega-auth-app-heading" data-om-return-focus="ommega-auth-apps">' +
+    '<header class="ommega-auth-toolbar"><button type="button" id="ommega-auth-app-back" class="om-button secondary">' + back + '<span>返回 / Back</span></button><h2 id="ommega-auth-app-heading">单应用例外 / App exceptions</h2><button type="button" id="ommega-auth-app-save" class="om-button">保存 / Save</button></header>' +
+    '<div class="ommega-auth-app-filters"><label for="ommega-auth-search">搜索应用名称或包名 / Search app name or package</label><input id="ommega-auth-search" type="search" autocomplete="off">' +
+    '<label class="ommega-auth-system-option"><input id="ommega-auth-system" type="checkbox" role="switch"><span>显示系统应用 / Show system apps</span></label>' +
+    '<small>例外仅对作用域内应用生效；全局作用域下仍然有效。 / Exceptions apply only to apps in scope and remain active in global scope.</small>' +
+    '<div id="ommega-auth-app-status" role="status" aria-live="polite"></div></div>' +
+    '<div id="ommega-auth-app-list"></div><button type="button" id="ommega-auth-more" class="om-button secondary" hidden>显示更多 / Show more</button></dialog>');
+  slot.appendChild(panel);
   const byId = id => document.getElementById(id);
+  byId("ommega-auth-open").addEventListener("click", ommegaAuthOpenPolicy);
   byId("ommega-auth-save").addEventListener("click", ommegaAuthSaveDefault);
   byId("ommega-auth-reload").addEventListener("click", ommegaAuthRefresh);
   byId("ommega-auth-apps").addEventListener("click", ommegaAuthOpenApps);
   byId("ommega-auth-app-save").addEventListener("click", ommegaAuthSaveApps);
-  byId("ommega-auth-app-cancel").addEventListener("click", () => byId("ommega-auth-dialog").close());
-  byId("ommega-auth-dialog").addEventListener("cancel", event => { if (ommegaAuthBusy && !ommegaAuthLoadingApps) event.preventDefault(); });
-  byId("ommega-auth-dialog").addEventListener("close", () => byId("ommega-auth-apps").focus());
+  byId("ommega-auth-policy-back").addEventListener("click", () => byId("ommega-auth-policy-dialog").close());
+  byId("ommega-auth-app-back").addEventListener("click", () => byId("ommega-auth-dialog").close());
+  byId("ommega-auth-policy-dialog").addEventListener("close", () => byId("ommega-auth-open").focus());
+  byId("ommega-auth-dialog").addEventListener("close", () => {
+    ++ommegaAuthAppSession; ommegaAuthLoadingApps = false;
+    if (byId("ommega-auth-policy-dialog").open) byId("ommega-auth-apps").focus();
+  });
   byId("ommega-auth-search").addEventListener("input", () => { ommegaAuthLimit = 40; ommegaAuthRenderApps(); });
+  byId("ommega-auth-system").addEventListener("change", ommegaAuthToggleSystem);
   byId("ommega-auth-more").addEventListener("click", () => { ommegaAuthLimit += 40; ommegaAuthRenderApps(); });
   for (const radio of panel.querySelectorAll('input[name="ommega-auth-mode"]')) radio.addEventListener("change", () => {
     ommegaAuthDraft = radio.value;
@@ -2578,3 +2660,4 @@ function ommegaInstallAuthSigning() {
 }
 
 ommegaInstallAuthSigning();
+if (typeof window !== "undefined") window.addEventListener("ommega-settings-ready", ommegaInstallAuthSigning);

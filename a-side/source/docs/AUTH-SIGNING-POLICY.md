@@ -1,6 +1,6 @@
 # Authentication-signing policy
 
-The WebUI's **Authentication signing** card controls new remote EC/RSA
+The WebUI's **Settings > Authentication signing** entry controls new remote EC/RSA
 authentication-signing keys. It has three modes:
 
 | Mode | New eligible key |
@@ -55,8 +55,18 @@ UID, all package records in the AAID are considered. If explicit overrides
 conflict, Preserve wins over Auto, which wins over Compatibility; packages
 without an override inherit without canceling an explicit override.
 
-The WebUI provides a separate searchable **App exceptions** dialog, including
-an **Use default** choice. It stays accessible when the scope list is paused.
+Settings places **Global scope** directly below Language/Appearance. These
+settings appear only in Settings, not Overview or Apps. **Authentication signing**
+opens a policy dialog; **App exceptions** opens a second, full-screen application
+list. The list shows user apps with icons, names and package IDs by default.
+**Show system apps** loads system apps on demand. Search matches name or package,
+and **Use default** removes an explicit exception. Hidden system-app exceptions
+remain saved. The list stays accessible when the scope list is paused.
+
+Browser history, native WebView back events, Escape and the visible Back buttons
+close only the topmost dialog. Returning from the application list preserves
+the policy dialog and its draft selection. Saving exceptions does not save an
+uncommitted default mode. Each page has its own explicit Save action.
 The **Positive key ID compatibility** checkbox is a separate feature.
 
 ## Storage and saving

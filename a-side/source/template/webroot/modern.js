@@ -1,4 +1,9 @@
-import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js';
+import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js?v=auth-settings-2';
+
+if (typeof document !== 'undefined') {
+  const style = document.createElement('link');
+  style.rel = 'stylesheet'; style.href = './auth-signing.css?v=auth-settings-2'; document.head.appendChild(style);
+}
 
 export function relayVerdict(health, now = Date.now()) {
   const ok = Number(health?.last_ok_unix) || 0;
@@ -44,6 +49,8 @@ function install() {
       </section>
       <section id="om-settings" class="om-view" hidden><h1 class="om-section-title">${text('设置','Settings')}</h1>
         ${appearanceControls()}
+        <div id="om-global-scope-slot"></div>
+        <div id="om-auth-signing-slot"></div>
         ${action('remote-config','远程连接','Remote connection','服务器、设备 ID 与凭据','Server, device ID and credentials')}
         ${action('ommega-soterta','SOTER','SOTER','软件 TA 与远程转发','Software TA and remote relay')}
         ${action('automation-settings','自动化','Automation','Keybox 与更新选项','Keybox and update options')}
@@ -81,7 +88,8 @@ function install() {
   refreshButton.onclick = refresh;
   // A dialog covers the page, so the navigation must not look actionable while
   // it is open. The back gesture closes the dialog instead of the view.
-  installDialogGuard(open => document.body.classList.toggle('om-dialog-open', open));
+  installDialogGuard(open => document.body.classList.toggle('om-dialog-open', open), {includeNative:true});
+  window.dispatchEvent(new Event('ommega-settings-ready'));
 }
 async function readStatus() {
   const result = await exec(`printf '\\n[HEALTH]\\n'

@@ -92,6 +92,50 @@ test("auth writer transports exact source bytes and validated replacement to the
   assert.throws(() => ctx.ommegaAuthWriteCommand(before, config), /Invalid/);
 });
 
+function authAppsFixture(ctx) {
+  const dialog = {open:false, showModal() {this.open=true;}, querySelectorAll:()=>[]};
+  const elements = {
+    "ommega-auth-dialog":dialog, "ommega-auth-system":{checked:false},
+    "ommega-auth-search":{value:""}, "ommega-auth-app-status":{},
+    "ommega-auth-app-list":{replaceChildren() {}}, "ommega-auth-more":{hidden:false},
+  };
+  ctx.document.getElementById = id=>elements[id] || null;
+  vm.runInContext('ommegaAuthConfig = {version:1, default:"auto", apps:{"com.system.service":"preserve"}}',ctx);
+  ctx.ommegaNames = async packages=>packages.map(packageName=>({packageName,appName:packageName}));
+  let renders=0;
+  ctx.ommegaAuthRenderApps = ()=>{renders++;};
+  return {elements,dialog,renders:()=>renders};
+}
+
+test("exceptions load user apps first and keep hidden system overrides across filtering", async () => {
+  const ctx=loadGlue(), f=authAppsFixture(ctx), calls=[];
+  ctx.Zo=async type=>{calls.push(type);return type==="user"?["com.user.wallet"]:["com.system.service"];};
+  await ctx.ommegaAuthOpenApps();
+  assert.deepEqual(calls,["user"]);
+  assert.equal(ctx.ommegaAuthFilteredApps("").map(app=>app.packageName).join(),"com.user.wallet");
+  f.elements["ommega-auth-system"].checked=true;
+  await ctx.ommegaAuthToggleSystem();
+  assert.deepEqual(calls,["user","system"]);
+  assert.equal(ctx.ommegaAuthFilteredApps("SYSTEM").map(app=>app.packageName).join(),"com.system.service");
+  f.elements["ommega-auth-system"].checked=false;
+  await ctx.ommegaAuthToggleSystem();
+  assert.equal(ctx.ommegaAuthFilteredApps("system").length,0);
+  assert.equal(vm.runInContext('ommegaAuthAppsDraft["com.system.service"]',ctx),"preserve");
+  assert.equal(vm.runInContext('ommegaAuthConfig.apps["com.system.service"]',ctx),"preserve");
+});
+
+test("returning before the app inventory completes does not render or reopen the closed page", async () => {
+  const ctx=loadGlue(), f=authAppsFixture(ctx);
+  let resolvePackages;
+  ctx.Zo=()=>new Promise(resolve=>{resolvePackages=resolve;});
+  const opening=ctx.ommegaAuthOpenApps();
+  f.dialog.open=false;
+  resolvePackages(["com.user.wallet"]);
+  await opening;
+  assert.equal(f.dialog.open,false); assert.equal(f.renders(),0);
+  assert.equal(vm.runInContext('ommegaAuthInventory.length',ctx),0);
+});
+
 test("auth read preserves newline bytes, distinguishes missing files, and fails on unreadable files", async () => {
   const ctx = loadGlue();
   const contents = '# 配置\r\nversion=1\r\ndefault="auto"\r\n';
@@ -317,6 +361,7 @@ test("scope text follows Chinese, English and system-default language selections
     const ctx = loadGlue({language, preference});
     const panel = {style: {}};
     const elements = {
+      "om-global-scope-slot": {appendChild(child) { assert.equal(child, panel); }},
       "ommega-global-scope-enabled": {addEventListener() {}},
       "ommega-global-scope-status": {},
       "apps-list": {style: {}, setAttribute() {}, parentElement: {insertBefore() {}}},
