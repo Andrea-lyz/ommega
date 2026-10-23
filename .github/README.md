@@ -5,10 +5,13 @@ Rust builds, the server build and the APK builds then run independently. The
 final artifact collection waits for every check and component to pass.
 
 The Android toolchain reuses an installed LLVM 18 libclang when available and
-installs the host packages only when discovery fails. The pinned NDK r28c uses
-the setup action's job cache; the first run fills it and later runs can restore
-it instead of downloading the NDK again. Protoc, Rust and Android API versions
-remain pinned in the workflow/action.
+installs the host packages only when discovery fails. The pinned NDK r28c is
+cached at its stable runner tool-cache path, including compiler symlinks and
+the tool-cache completion marker. The preparation job fills a missing entry
+once; both Android jobs then restore it and execute the compiler, linker and
+archiver before using Rust caches. On a hit, preparation only looks up the
+entry without downloading it. Protoc, Rust and Android API versions remain
+pinned in the workflow/actions.
 
 Rust caches remain separated by component, target toolchain and dependency
 inputs. Rust and Gradle caches can be written by master, manual runs and PRs

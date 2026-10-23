@@ -9,6 +9,7 @@ import unittest
 
 SCRIPT = Path(__file__).with_name("resolve_libclang.sh")
 BASH = shutil.which("bash")
+TAR = shutil.which("tar")
 
 
 @unittest.skipUnless(BASH and os.name == "posix", "requires a POSIX bash environment")
@@ -72,6 +73,26 @@ class LibclangTests(unittest.TestCase):
         result = self.run_discovery()
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(TAR, "requires tar")
+    def test_ndk_cache_restore_keeps_compiler_links_and_completion_marker(self):
+        version = self.root / "tool-cache" / "ndk" / "r28c"
+        binary_dir = version / "x64" / "bin"
+        binary_dir.mkdir(parents=True)
+        compiler = binary_dir / "clang-19"
+        compiler.write_text(f"#!{BASH}\nprintf 'fixture clang\\n'\n", encoding="utf-8")
+        compiler.chmod(0o755)
+        (binary_dir / "clang").symlink_to(compiler)
+        (version / "x64.complete").touch()
+        archive = self.root / "ndk.tar"
+        subprocess.run([TAR, "-cf", str(archive), "-C", str(version.parent), version.name],
+                       check=True)
+        shutil.rmtree(version)
+        subprocess.run([TAR, "-xf", str(archive), "-C", str(version.parent)], check=True)
+        self.assertTrue((version / "x64.complete").is_file())
+        result = subprocess.run([str(binary_dir / "clang"), "--version"],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout, "fixture clang\n")
 
 
 if __name__ == "__main__":
