@@ -26,6 +26,8 @@ struct TestRemote {
     expected_purpose: Option<KeyPurpose>,
     expected_issuer: Option<String>,
     unavailable: bool,
+    expected_user_auth: Option<Vec<(u32, i64)>>,
+    sign_calls: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl device::RemoteBackend for TestRemote {
     fn attest(
@@ -36,6 +38,9 @@ impl device::RemoteBackend for TestRemote {
         _: Option<&[u8]>,
         params: &device::RemoteAttestParams,
     ) -> Result<Option<device::RemoteAttestation>, Error> {
+        if let Some(expected) = &self.expected_user_auth {
+            assert_eq!(&params.user_auth, expected);
+        }
         assert_eq!(
             params.purpose,
             [self.expected_purpose.unwrap_or(KeyPurpose::Sign) as i32]
@@ -69,7 +74,12 @@ impl device::RemoteBackend for TestRemote {
         }))
     }
     fn sign(&self, alias: &str, data: &[u8], algorithm: &str) -> Result<Option<Vec<u8>>, Error> {
-        assert_eq!(alias, "test-only", "unexpected remote certificate signing");
+        if let Some(calls) = &self.sign_calls {
+            assert!(alias.starts_with("ommega-remote-"));
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            assert_eq!(alias, "test-only", "unexpected remote certificate signing");
+        }
         assert_eq!(algorithm, "SHA256withECDSA");
         assert_eq!(data, [1, 2, 3]);
         Ok(Some(vec![1; 64]))
@@ -84,6 +94,8 @@ impl device::RemoteBackend for TestRemote {
         true
     }
 }
+
+mod remote_auth;
 
 fn install_remote_sign(ta: &mut KeyMintTa) -> kmr_wire::FinishRequest {
     ta.operations[0] = Some(crate::operation::Operation {
@@ -246,7 +258,7 @@ fn remote_rot() -> crypto::RemoteRootOfTrust {
 }
 
 #[test]
-fn auth_bound_generation_stays_on_the_local_path() {
+fn unchallenged_auth_bound_generation_stays_local() {
     let mut ta = test_ta();
     let mut params = key_params(KeyPurpose::Sign);
     params.retain(|p| !matches!(p, KeyParam::NoAuthRequired));
@@ -256,56 +268,12 @@ fn auth_bound_generation_stays_on_the_local_path() {
         KeyParam::AuthTimeout(5),
         KeyParam::UnlockedDeviceRequired,
     ]);
-    params.push(KeyParam::AttestationChallenge(b"test-challenge".to_vec()));
     params.push(KeyParam::AttestationApplicationId(b"test-app".to_vec()));
 
-    // TestRemote would panic if this request went to the relay. The fixture
-    // has no local keybox, so the local path stops with this error instead.
-    let error = ta.generate_key(&params, None).unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        ErrorKind::Hal(ErrorCode::AttestationKeysNotProvisioned, _)
-    ));
-}
-
-#[test]
-fn auth_bound_requests_are_kept_local() {
-    for param in [
-        KeyParam::UserSecureId(42),
-        KeyParam::UserAuthType(HardwareAuthenticatorType::Password as u32),
-        KeyParam::AuthTimeout(30),
-        KeyParam::AllowWhileOnBody,
-        KeyParam::TrustedUserPresenceRequired,
-        KeyParam::TrustedConfirmationRequired,
-    ] {
-        assert!(
-            requires_local_auth_key(std::slice::from_ref(&param)),
-            "auth tag should force local generation: {param:?}"
-        );
-    }
-    assert!(!requires_local_auth_key(&[
-        KeyParam::UnlockedDeviceRequired
-    ]));
-    assert!(!requires_local_auth_key(&[KeyParam::NoAuthRequired]));
-    assert!(!requires_local_auth_key(&[]));
-}
-
-#[test]
-fn hardware_chain_packages_stay_remote_for_auth_keys() {
-    for package in [
-        &b"com.google.android.gms"[..],
-        &b"com.google.android.apps.walletnfcrel"[..],
-        &b"com.android.vending"[..],
-        &b"com.lingqing.trustattestor"[..],
-        &b"io.github.vvb2060.keyattestation"[..],
-        &b"com.eltavine.duckdetector"[..],
-        &b"com.oplus.engineermode"[..],
-    ] {
-        assert!(app_id_requires_remote_auth(Some(package)));
-    }
-    assert!(!app_id_requires_remote_auth(Some(b"net.one97.paytm")));
-    assert!(!app_id_requires_remote_auth(Some(b"com.ommega.authrepro")));
-    assert!(!app_id_requires_remote_auth(None));
+    // A request without a challenge must not acquire a remote key.
+    let key = ta.generate_key_default(&params, None).unwrap();
+    let (stored, _) = ta.keyblob_parse_decrypt(&key.key_blob, &[]).unwrap();
+    assert!(!matches!(stored.key_material, KeyMaterial::Remote(_)));
 }
 
 #[test]
@@ -344,7 +312,7 @@ impl DelegationFixture {
     fn with_rsa_issuer(rsa: bool) -> Self {
         let mut ta = test_ta();
         let root_params = key_params(KeyPurpose::AttestKey);
-        let root = ta.generate_key(&root_params, None).unwrap();
+        let root = ta.generate_key_default(&root_params, None).unwrap();
         let root_info = AttestationKey {
             key_blob: root.key_blob.clone(),
             attest_key_params: vec![],
@@ -364,7 +332,7 @@ impl DelegationFixture {
             KeyParam::AttestationApplicationId(b"test-app".to_vec()),
         ]);
         let parent = ta
-            .generate_key(&parent_params, Some(root_info.clone()))
+            .generate_key_default(&parent_params, Some(root_info.clone()))
             .unwrap();
         let subject = cert::extract_subject(&parent.certificate_chain[0]).unwrap();
         let parent_chain: Vec<_> = parent
@@ -378,7 +346,7 @@ impl DelegationFixture {
             expected_purpose: Some(KeyPurpose::AttestKey),
             ..TestRemote::default()
         }));
-        let remote_parent = ta.generate_key(&parent_params, None).unwrap();
+        let remote_parent = ta.generate_key_default(&parent_params, None).unwrap();
         let (stored, _) = ta
             .keyblob_parse_decrypt(&remote_parent.key_blob, &[])
             .unwrap();
@@ -392,7 +360,7 @@ impl DelegationFixture {
             KeyParam::AttestationApplicationId(b"test-app".to_vec()),
         ]);
         let physical_child = ta
-            .generate_key(
+            .generate_key_default(
                 &params,
                 Some(AttestationKey {
                     key_blob: parent.key_blob,
@@ -407,7 +375,7 @@ impl DelegationFixture {
             .map(|cert| cert.encoded_certificate)
             .collect();
         chain.extend(parent_chain);
-        let batch_child = ta.generate_key(&params, Some(root_info)).unwrap();
+        let batch_child = ta.generate_key_default(&params, Some(root_info)).unwrap();
         let batch_chain: Vec<_> = batch_child
             .certificate_chain
             .into_iter()
@@ -441,7 +409,7 @@ impl DelegationFixture {
 
     fn generate(&mut self) -> Result<KeyCreationResult, Error> {
         self.ta
-            .generate_key(&self.params, Some(self.issuer.clone()))
+            .generate_key_default(&self.params, Some(self.issuer.clone()))
     }
 }
 
@@ -535,7 +503,7 @@ fn local_attestation_child_preserves_user_authentication() {
 fn check_child_versions(auth_bound: bool) {
     let mut ta = test_ta();
     let ordinary_params = key_params(KeyPurpose::Sign);
-    let old_key = ta.generate_key(&ordinary_params, None).unwrap();
+    let old_key = ta.generate_key_default(&ordinary_params, None).unwrap();
     let (old_blob, _) = ta.keyblob_parse_decrypt(&old_key.key_blob, &[]).unwrap();
 
     let parent_params = key_params(KeyPurpose::AttestKey);
@@ -561,7 +529,7 @@ fn check_child_versions(auth_bound: bool) {
     child_params.push(KeyParam::AttestationChallenge(b"test-challenge".to_vec()));
     child_params.push(KeyParam::AttestationApplicationId(b"test-app".to_vec()));
     let child = ta
-        .generate_key(
+        .generate_key_default(
             &child_params,
             Some(AttestationKey {
                 key_blob: parent.key_blob,

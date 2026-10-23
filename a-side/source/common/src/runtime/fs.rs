@@ -23,6 +23,35 @@ use std::path::Path;
 
 use anyhow::Context;
 
+/// Serialize cooperating writers across processes. The directory fd remains
+/// locked across the comparison and atomic rename, and closes on every exit.
+/// A busy editor fails immediately, without stale persistent lock files.
+pub fn atomic_compare_replace_preserving_metadata(
+    path: &Path,
+    expected: Option<&[u8]>,
+    contents: &[u8],
+    default_mode: u32,
+    default_uid: u32,
+    default_gid: u32,
+) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("path has no parent"))?;
+    let directory_lock = fs::File::open(parent)?;
+    if unsafe { libc::flock(directory_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let current = match fs::read(path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if current.as_deref() != expected {
+        return Err(io::Error::other("Config changed; reload before saving"));
+    }
+    atomic_replace_preserving_metadata(path, contents, default_mode, default_uid, default_gid)
+}
+
 pub fn atomic_replace_preserving_metadata(
     path: &Path,
     contents: &[u8],
@@ -120,4 +149,66 @@ pub fn backup_file_with_reason(
         writeln!(file, "# {line}")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn policy_compare_replace_rejects_stale_and_concurrent_writers() {
+        let directory =
+            std::env::temp_dir().join(format!("ommega-policy-cas-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = Arc::new(directory.join("auth-signing.toml"));
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        atomic_compare_replace_preserving_metadata(&path, None, b"original", 0o600, uid, gid)
+            .unwrap();
+        assert!(atomic_compare_replace_preserving_metadata(
+            &path,
+            None,
+            b"overwrite",
+            0o600,
+            uid,
+            gid
+        )
+        .is_err());
+        let barrier = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = [b"first".as_slice(), b"second".as_slice()]
+            .into_iter()
+            .map(|value| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    atomic_compare_replace_preserving_metadata(
+                        &path,
+                        Some(b"original"),
+                        value,
+                        0o600,
+                        uid,
+                        gid,
+                    )
+                    .is_ok()
+                })
+            })
+            .collect();
+        let successes = threads
+            .into_iter()
+            .map(|thread| usize::from(thread.join().unwrap()))
+            .sum::<usize>();
+        assert_eq!(successes, 1);
+        let saved = fs::read(&*path).unwrap();
+        assert!(saved == b"first" || saved == b"second");
+        assert_eq!(fs::metadata(&*path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::read_dir(&directory).unwrap().count(),
+            1,
+            "temporary files must be removed"
+        );
+        fs::remove_file(&*path).unwrap();
+        fs::remove_dir(&directory).unwrap();
+    }
 }

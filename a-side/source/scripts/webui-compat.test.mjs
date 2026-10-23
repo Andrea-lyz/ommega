@@ -37,6 +37,8 @@ function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
     _: async () => ({ stdout: "" }),
     se: { querySelectorAll: () => [] },
     Dl: new Set(),
+    Qe: [],
+    ommegaTargetModes: new Map(),
     navigator: {language},
     localStorage: {getItem: () => preference},
     document: {
@@ -60,6 +62,163 @@ function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
 
 test("the glue evaluates without the WebUI globals", () => {
   loadGlue();
+});
+
+test("language changes warn only for real unsaved app selections and modes", async () => {
+  const ctx = loadGlue();
+  ctx.Qe = ["com.example.wallet", "com.example.checker"];
+  ctx.ommegaTargetModes.set("com.example.wallet", "tee");
+  const box = {checked:true, closest:()=>({getAttribute:()=>"com.example.wallet"})};
+  ctx.se.querySelectorAll = () => [box];
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "initial load has no draft");
+  await ctx.Mi();
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "unrendered or filtered cards are not edits");
+  ctx.Qe.reverse();
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "sorting is not an edit");
+  box.checked = false;
+  assert.equal(ctx.ommegaAppsHaveChanges(), true);
+  box.checked = true;
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "reverting a selection is clean");
+  ctx.ommegaTargetModes.set("com.example.wallet", "strongbox");
+  assert.equal(ctx.ommegaAppsHaveChanges(), true);
+  ctx.ommegaTargetModes.set("com.example.wallet", "tee");
+  assert.equal(ctx.ommegaAppsHaveChanges(), false);
+  ctx.ommegaTargetModes.set("com.unselected.app", "strongbox");
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "unselected modes are not saved");
+  ctx.Dl.add("com.retained.app");
+  assert.equal(ctx.ommegaAppsHaveChanges(), true, "retained scope selections count");
+});
+
+test("compatibility drafts remain dirty until the successfully saved settings reload", async () => {
+  const ctx = loadGlue();
+  ctx.Qe = ["com.example.wallet"];
+  await ctx.Mi();
+  vm.runInContext('ommegaCompatEnabled = true', ctx);
+  assert.equal(ctx.ommegaAppsHaveChanges(), true);
+  ctx._ = async () => ({errno:1, stdout:"", stderr:"write failed"});
+  await ctx.ommegaWriteTargetCompat();
+  assert.equal(ctx.ommegaAppsHaveChanges(), true, "failed writes do not clear the baseline");
+  ctx._ = async () => ({errno:0, stdout:"[positive_key_id]\nenabled=true\n"});
+  await ctx.Mi();
+  assert.equal(ctx.ommegaAppsHaveChanges(), false);
+});
+
+test("auth policy round-trips default and app exceptions and rejects ambiguous configs", () => {
+  const ctx = loadGlue();
+  const empty = ctx.ommegaAuthParse(null);
+  assert.equal(empty.default, "auto");
+  assert.equal(Object.keys(empty.apps).length, 0);
+  const config = ctx.ommegaAuthParse('version = 1\r\ndefault = "preserve"\r\n[apps]\r\n"com.example.bank" = "compatibility"\r\n"com.example.probe" = "auto"\r\n');
+  assert.equal(config.apps["com.example.bank"], "compatibility");
+  assert.equal(ctx.ommegaAuthToml(ctx.ommegaAuthParse(ctx.ommegaAuthToml(config))), ctx.ommegaAuthToml(config));
+  for (const invalid of ['', 'version=2\ndefault="auto"', 'version=1\ndefault="auto"\ndefault="preserve"',
+    'version=1\ndefault="auto"\n[apps]\n"com.example.bank"="bad"',
+    'version=1\ndefault="auto"\n[unknown]', 'version=1\ndefault="auto"\n[apps]\n"com.example.bank"="auto"\n"com.example.bank"="preserve"']) {
+    assert.throws(() => ctx.ommegaAuthParse(invalid));
+  }
+});
+
+test("auth writer transports exact source bytes and validated replacement to the Rust writer", () => {
+  const ctx = loadGlue();
+  const before = '# 配置\r\nversion = 1\r\ndefault = "auto"\r\n';
+  const config = ctx.ommegaAuthParse(before);
+  config.apps["com.example.bank"] = "compatibility";
+  const command = ctx.ommegaAuthWriteCommand(before, config);
+  assert.match(command, /ommega-auth-policy/);
+  assert.doesNotMatch(command, /target\.txt|injector\.toml|target-security\.toml|kill|restart/);
+  const payload = JSON.parse(Buffer.from(command.match(/printf '%s' '([^']+)'/)[1], "base64").toString("utf8"));
+  assert.equal(payload.expected, before);
+  assert.equal(payload.replacement, ctx.ommegaAuthToml(config));
+  config.apps['com.example.$(whoami)'] = "preserve";
+  assert.throws(() => ctx.ommegaAuthWriteCommand(before, config), /Invalid/);
+});
+
+function authAppsFixture(ctx) {
+  const dialog = {open:false, showModal() {this.open=true;}, querySelectorAll:()=>[]};
+  const elements = {
+    "ommega-auth-dialog":dialog, "ommega-auth-system":{checked:false},
+    "ommega-auth-search":{value:""}, "ommega-auth-app-status":{},
+    "ommega-auth-app-list":{replaceChildren() {}}, "ommega-auth-more":{hidden:false},
+  };
+  ctx.document.getElementById = id=>elements[id] || null;
+  vm.runInContext('ommegaAuthConfig = {version:1, default:"auto", apps:{"com.system.service":"preserve"}}',ctx);
+  ctx.ommegaNames = async packages=>packages.map(packageName=>({packageName,appName:packageName}));
+  let renders=0;
+  ctx.ommegaAuthRenderApps = ()=>{renders++;};
+  return {elements,dialog,renders:()=>renders};
+}
+
+test("exceptions load user apps first and keep hidden system overrides across filtering", async () => {
+  const ctx=loadGlue(), f=authAppsFixture(ctx), calls=[];
+  ctx.Zo=async type=>{calls.push(type);return type==="user"?["com.user.wallet"]:["com.system.service"];};
+  await ctx.ommegaAuthOpenApps();
+  assert.deepEqual(calls,["user"]);
+  assert.equal(ctx.ommegaAuthFilteredApps("").map(app=>app.packageName).join(),"com.user.wallet");
+  f.elements["ommega-auth-system"].checked=true;
+  await ctx.ommegaAuthToggleSystem();
+  assert.deepEqual(calls,["user","system"]);
+  assert.equal(ctx.ommegaAuthFilteredApps("SYSTEM").map(app=>app.packageName).join(),"com.system.service");
+  f.elements["ommega-auth-system"].checked=false;
+  await ctx.ommegaAuthToggleSystem();
+  assert.equal(ctx.ommegaAuthFilteredApps("system").length,0);
+  assert.equal(vm.runInContext('ommegaAuthAppsDraft["com.system.service"]',ctx),"preserve");
+  assert.equal(vm.runInContext('ommegaAuthConfig.apps["com.system.service"]',ctx),"preserve");
+});
+
+test("returning before the app inventory completes does not render or reopen the closed page", async () => {
+  const ctx=loadGlue(), f=authAppsFixture(ctx);
+  let resolvePackages;
+  ctx.Zo=()=>new Promise(resolve=>{resolvePackages=resolve;});
+  const opening=ctx.ommegaAuthOpenApps();
+  f.dialog.open=false;
+  resolvePackages(["com.user.wallet"]);
+  await opening;
+  assert.equal(f.dialog.open,false); assert.equal(f.renders(),0);
+  assert.equal(vm.runInContext('ommegaAuthInventory.length',ctx),0);
+});
+
+test("auth read preserves newline bytes, distinguishes missing files, and fails on unreadable files", async () => {
+  const ctx = loadGlue();
+  const contents = '# 配置\r\nversion=1\r\ndefault="auto"\r\n';
+  ctx._ = async () => ({errno: 0, stdout: 'F:' + Buffer.from(contents).toString("base64")});
+  assert.equal((await ctx.ommegaAuthRead()).contents, contents);
+  ctx._ = async () => ({errno: 0, stdout: 'M:'});
+  assert.equal((await ctx.ommegaAuthRead()).contents, null);
+  ctx._ = async () => ({errno: 1, stderr: 'permission denied'});
+  await assert.rejects(ctx.ommegaAuthRead(), /permission denied/);
+});
+
+test("global scope leaves auth exceptions enabled and failed writes never report success", async () => {
+  const ctx = loadGlue({language: "zh-CN"});
+  const authButton = {};
+  const elements = {
+    "ommega-auth-signing": {querySelectorAll: () => [authButton]},
+    "ommega-auth-apps": authButton, "ommega-auth-status": {},
+    "ommega-global-scope-enabled": {}, "ommega-global-scope-status": {},
+    "apps-list": {style: {}, setAttribute() {}}, "save": {},
+  };
+  ctx.document.getElementById = id => elements[id] || null;
+  vm.runInContext('ommegaAuthConfig = ommegaAuthParse(null); ommegaGlobalScopeKnown = true; ommegaGlobalScopeEnabled = true; ommegaScopeSync(); ommegaAuthSync()', ctx);
+  assert.equal(elements["apps-list"].inert, true);
+  assert.equal(authButton.disabled, false);
+  ctx._ = async () => ({errno: 75, stderr: 'Config changed; reload before saving'});
+  await ctx.ommegaAuthSaveDefault();
+  assert.match(elements["ommega-auth-status"].textContent, /保存失败.*Config changed/);
+  assert.doesNotMatch(elements["ommega-auth-status"].textContent, /已保存/);
+  assert.equal(authButton.disabled, false);
+});
+
+test("auth save verifies readback and preserves unrelated app exceptions", async () => {
+  const ctx = loadGlue();
+  const config = {version: 1, default: "compatibility", apps: {"com.example.probe": "preserve"}};
+  const body = ctx.ommegaAuthToml(config);
+  let calls = 0;
+  ctx._ = async () => ++calls === 1 ? {errno: 0} : {errno: 0, stdout: 'F:' + Buffer.from(body).toString("base64")};
+  await ctx.ommegaAuthCommit(null, config);
+  assert.equal(vm.runInContext('ommegaAuthConfig.apps["com.example.probe"]', ctx), "preserve");
+  calls = 0;
+  ctx._ = async () => ++calls === 1 ? {errno: 0} : {errno: 0, stdout: 'M:'};
+  await assert.rejects(ctx.ommegaAuthCommit(body, config), /readback/);
 });
 
 
@@ -243,6 +402,7 @@ test("scope text follows Chinese, English and system-default language selections
     const ctx = loadGlue({language, preference});
     const panel = {style: {}};
     const elements = {
+      "om-global-scope-slot": {appendChild(child) { assert.equal(child, panel); }},
       "ommega-global-scope-enabled": {addEventListener() {}},
       "ommega-global-scope-status": {},
       "apps-list": {style: {}, setAttribute() {}, parentElement: {insertBefore() {}}},

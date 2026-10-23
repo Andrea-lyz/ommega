@@ -40,9 +40,14 @@ use base64::Engine as _;
 use reqwest::blocking::Client;
 use reqwest::Method;
 use serde_json::{json, Value};
-use x509_cert::der::Decode as _;
 
 use crate::config;
+
+mod backend;
+mod health;
+pub use backend::RemoteRelayBackend;
+use health::{record_remote_failure, record_remote_ok};
+pub use health::{remote_health, RemoteHealth, REMOTE_HEALTH_PATH};
 
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
@@ -63,11 +68,6 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// "uncheck enable remote, save, re-check, save" ritual users fall back on
 /// genuinely did nothing to the running daemon.
 static REMOTE_IDENTITY_PROFILE: RwLock<Option<RemoteIdentityProfile>> = RwLock::new(None);
-/// Last observed health of the relay, surfaced to the WebUI so a server-side
-/// rejection reads as a server-side rejection instead of an unexplained
-/// attestation error.
-static REMOTE_HEALTH: RwLock<Option<RemoteHealth>> = RwLock::new(None);
-
 /// Why the relay last refused us, if it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteRejection {
@@ -101,101 +101,6 @@ impl RemoteRejection {
             Self::Other => "error",
         }
     }
-}
-
-/// A snapshot of relay reachability for operator-facing status.
-#[derive(Debug, Clone, Default)]
-pub struct RemoteHealth {
-    pub last_ok_unix: Option<i64>,
-    pub last_error_unix: Option<i64>,
-    pub last_status: Option<u16>,
-    pub last_kind: Option<&'static str>,
-    pub last_message: Option<String>,
-    /// The verdict of the most recent request: "ok" or "error". Both clocks
-    /// have one-second resolution, so a failure and a success inside the same
-    /// second cannot be ordered by time. This records which one came last.
-    pub last_verdict: Option<&'static str>,
-}
-
-const VERDICT_OK: &str = "ok";
-const VERDICT_ERROR: &str = "error";
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// Whether a successful request should rewrite the published snapshot.
-///
-/// The WebUI reads the file, so it must not keep reporting an outage that is
-/// over, and it must not inherit one from an earlier process: the first success
-/// after a restart publishes a clean snapshot. Every other success is silent —
-/// a healthy relay would otherwise rewrite the file on every request.
-///
-/// The verdict of the last request decides this, not the two clocks. A failure
-/// and a success inside the same second tie them, and a tie used to freeze the
-/// error in the published file for good: every later success then looked like
-/// a non-event and the panel kept reporting a failure that was long over.
-fn ok_snapshot_is_news(health: &RemoteHealth) -> bool {
-    health.last_verdict != Some(VERDICT_OK)
-}
-
-fn record_remote_ok() {
-    let publish = if let Ok(mut guard) = REMOTE_HEALTH.write() {
-        let health = guard.get_or_insert_with(RemoteHealth::default);
-        let publish = ok_snapshot_is_news(health);
-        health.last_ok_unix = Some(now_unix());
-        health.last_verdict = Some(VERDICT_OK);
-        publish
-    } else {
-        false
-    };
-    if publish {
-        write_health_snapshot();
-    }
-}
-
-fn record_remote_failure(status: Option<u16>, kind: &'static str, message: &str) {
-    if let Ok(mut guard) = REMOTE_HEALTH.write() {
-        let health = guard.get_or_insert_with(RemoteHealth::default);
-        health.last_error_unix = Some(now_unix());
-        health.last_status = status;
-        health.last_kind = Some(kind);
-        health.last_message = Some(message.chars().take(200).collect());
-        health.last_verdict = Some(VERDICT_ERROR);
-    }
-    write_health_snapshot();
-}
-
-/// Current relay health, for status reporting.
-pub fn remote_health() -> Option<RemoteHealth> {
-    REMOTE_HEALTH.read().ok().and_then(|g| g.clone())
-}
-
-/// Path the daemon publishes health to, so the separate WebUI process can show
-/// why remote attestation is failing without guessing.
-pub const REMOTE_HEALTH_PATH: &str = "/data/misc/keystore/ommega/remote-health.json";
-
-/// Publish the current health snapshot for the WebUI. Best-effort: a failure
-/// here must never disturb an attestation path.
-fn write_health_snapshot() {
-    let Some(health) = remote_health() else {
-        return;
-    };
-    let payload = json!({
-        "last_ok_unix": health.last_ok_unix,
-        "last_error_unix": health.last_error_unix,
-        "last_status": health.last_status,
-        "last_kind": health.last_kind,
-        "last_message": health.last_message,
-        "last_verdict": health.last_verdict,
-    });
-    if let Some(parent) = std::path::Path::new(REMOTE_HEALTH_PATH).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(REMOTE_HEALTH_PATH, payload.to_string());
 }
 
 /// Drop the cached identity profile so the next attestation re-reads it from
@@ -398,38 +303,43 @@ fn http_request(
 // ── RemoteRelay public API ─────────────────────────────────────────────
 
 impl RemoteRelay {
-    fn remote() -> Result<config::RemoteConfig> {
+    // Copy only the requested value while the lock is held. HTTP requests run
+    // after the guard has been released.
+    fn remote<T>(select: impl FnOnce(&config::RemoteConfig) -> Result<T>) -> Result<T> {
         let guard = config::config()
             .read()
             .map_err(|_| anyhow!("config lock poisoned"))?;
-        Ok(guard.remote.clone())
+        select(&guard.remote)
     }
 
     fn base_url() -> Result<String> {
-        let r = Self::remote()?;
-        if !r.enabled {
-            return Err(anyhow!("remote relay not enabled"));
-        }
-        if r.url.is_empty() {
-            return Err(anyhow!("remote url not configured"));
-        }
-        Ok(r.url.trim_end_matches('/').to_string())
+        Self::remote(|r| {
+            if !r.enabled {
+                return Err(anyhow!("remote relay not enabled"));
+            }
+            if r.url.is_empty() {
+                return Err(anyhow!("remote url not configured"));
+            }
+            Ok(r.url.trim_end_matches('/').to_string())
+        })
     }
 
     fn token() -> Result<String> {
-        let r = Self::remote()?;
-        if r.token.is_empty() {
-            return Err(anyhow!("remote token not configured"));
-        }
-        Ok(r.token)
+        Self::remote(|r| {
+            if r.token.is_empty() {
+                return Err(anyhow!("remote token not configured"));
+            }
+            Ok(r.token.clone())
+        })
     }
 
     fn device_id() -> Result<String> {
-        let r = Self::remote()?;
-        if r.device_id.is_empty() {
-            return Err(anyhow!("remote device_id not configured"));
-        }
-        Ok(r.device_id)
+        Self::remote(|r| {
+            if r.device_id.is_empty() {
+                return Err(anyhow!("remote device_id not configured"));
+            }
+            Ok(r.device_id.clone())
+        })
     }
 
     /// POST a JSON body to a relay endpoint. Returns `Ok(None)` only when both
@@ -542,11 +452,11 @@ impl RemoteRelay {
         });
         let response = Self::post_json("/api/profile/", &body)?
             .ok_or_else(|| anyhow!("remote profile unavailable after transport retry"))?;
-        let result = response.get("result").cloned().unwrap_or(response);
+        let result = response.get("result").unwrap_or(&response);
         if let Some(error) = result.get("error").and_then(Value::as_str) {
             return Err(anyhow!("remote profile failed: {error}"));
         }
-        parse_identity_profile(&result)
+        parse_identity_profile(result)
     }
 
     /// Forward an attestation request.  `challenge` is the caller's nonce.
@@ -988,228 +898,6 @@ pub fn remote_enabled() -> bool {
     }
 }
 
-/// Adapts [`RemoteRelay`] to the TA's [`kmr_ta::device::RemoteBackend`] trait.
-pub struct RemoteRelayBackend;
-
-impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
-    fn attest(
-        &self,
-        challenge: &[u8],
-        app_id_der: &[u8],
-        alias: &str,
-        cert_serial: Option<&[u8]>,
-        params: &kmr_ta::device::RemoteAttestParams,
-    ) -> Result<Option<kmr_ta::device::RemoteAttestation>, kmr_common::Error> {
-        let profile = match remote_identity_profile() {
-            Ok(profile) => profile,
-            Err(error)
-                if config::config()
-                    .read()
-                    .is_ok_and(|config| config.remote.fallback_local) =>
-            {
-                log::warn!(
-                    "remote identity profile unavailable with local fallback enabled: {error:#}"
-                );
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(kmr_common::km_err!(
-                    UnknownError,
-                    "remote identity profile unavailable: {error:#}"
-                ));
-            }
-        };
-        if params.security_level == Some(kmr_wire::keymint::SecurityLevel::Strongbox as i32)
-            && !profile.has_strongbox
-        {
-            return Err(kmr_common::km_err!(
-                HardwareTypeUnavailable,
-                "remote identity does not provide StrongBox"
-            ));
-        }
-        let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial)
-            .map_err(|e| remote_operation_error(e, "attest"))?;
-        let Some(resp) = resp else {
-            log::warn!("remote relay unavailable after transport retry");
-            return Ok(None);
-        };
-        // The relay wraps the result as `{ result: { cert_chain: [...] } }`.
-        let result = resp.get("result").cloned().unwrap_or(resp);
-        reject_strongbox_demotion(&result, params.security_level)?;
-        if let Some(result_profile) = result.get("remote_profile") {
-            let observed = parse_identity_profile(result_profile).map_err(|error| {
-                kmr_common::km_err!(
-                    VerificationFailed,
-                    "remote attest response has an invalid identity profile: {error:#}"
-                )
-            })?;
-            if observed != profile {
-                return Err(kmr_common::km_err!(
-                    VerificationFailed,
-                    "remote identity profile changed while minting"
-                ));
-            }
-        }
-        let certs = result
-            .get("cert_chain")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                kmr_common::km_err!(UnknownError, "remote attest response missing cert_chain")
-            })?;
-        if certs.is_empty() {
-            return Err(kmr_common::km_err!(
-                UnknownError,
-                "remote attest returned empty cert chain"
-            ));
-        }
-        let mut chain = Vec::with_capacity(certs.len());
-        for (index, cert) in certs.iter().enumerate() {
-            let encoded = cert.as_str().ok_or_else(|| {
-                kmr_common::km_err!(UnknownError, "remote cert_chain[{index}] is not a string")
-            })?;
-            let der = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|e| {
-                    kmr_common::km_err!(
-                        UnknownError,
-                        "remote cert_chain[{index}] has invalid base64: {e}"
-                    )
-                })?;
-            x509_cert::Certificate::from_der(&der).map_err(|e| {
-                kmr_common::km_err!(
-                    UnknownError,
-                    "remote cert_chain[{index}] is not a DER certificate: {e:?}"
-                )
-            })?;
-            chain.push(der);
-        }
-        if config::config()
-            .read()
-            .is_ok_and(|config| config.remote.debug_logging)
-        {
-            let tail_bytes: usize = chain.iter().skip(1).map(|cert| cert.len()).sum();
-            let layout = chain
-                .iter()
-                .enumerate()
-                .filter_map(|(index, der)| {
-                    x509_cert::Certificate::from_der(der).ok().map(|cert| {
-                        format!(
-                            "[{index}] len={} sig={} spki={}",
-                            der.len(),
-                            cert.signature_algorithm().oid,
-                            cert.tbs_certificate()
-                                .subject_public_key_info()
-                                .algorithm
-                                .oid
-                        )
-                    })
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            log::info!(
-                "event=remote_attest_chain alias={alias} key_algorithm={:?} certs={} tail_bytes={} {layout}",
-                params.key_algorithm,
-                chain.len(),
-                tail_bytes
-            );
-        }
-        Ok(Some(kmr_ta::device::RemoteAttestation {
-            cert_chain: chain,
-            // The relay may only confirm the level that was requested; its
-            // downgrade marker is rejected above.
-            effective_security_level: None,
-            profile: kmr_ta::device::RemoteKeyMintProfile {
-                interface_version: profile.interface_version,
-                interface_hash: profile.interface_hash,
-                profile_version: profile.profile_version,
-                hardware_version: profile.hardware_version,
-                security_level: kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
-                has_strongbox: profile.has_strongbox,
-                max_operations: profile.max_operations,
-            },
-        }))
-    }
-
-    fn sign(
-        &self,
-        alias: &str,
-        data: &[u8],
-        algorithm: &str,
-    ) -> Result<Option<Vec<u8>>, kmr_common::Error> {
-        let Some(resp) = RemoteRelay::sign(alias, data, algorithm)
-            .map_err(|e| remote_operation_error(e, "sign"))?
-        else {
-            return Ok(None);
-        };
-        let result = resp.get("result").cloned().unwrap_or(resp);
-        let sig_b64 = result
-            .get("signature")
-            .or_else(|| result.get("data"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                kmr_common::km_err!(UnknownError, "remote sign response missing signature")
-            })?;
-        let sig = base64::engine::general_purpose::STANDARD
-            .decode(sig_b64)
-            .map_err(|e| kmr_common::km_err!(UnknownError, "bad remote signature base64: {e}"))?;
-        Ok(Some(sig))
-    }
-
-    fn decrypt(
-        &self,
-        alias: &str,
-        data: &[u8],
-        algorithm: &str,
-    ) -> Result<Option<Vec<u8>>, kmr_common::Error> {
-        let Some(resp) = RemoteRelay::decrypt(alias, data, algorithm)
-            .map_err(|e| remote_operation_error(e, "decrypt"))?
-        else {
-            return Ok(None);
-        };
-        let result = resp.get("result").cloned().unwrap_or(resp);
-        let plain_b64 = result.get("data").and_then(Value::as_str).ok_or_else(|| {
-            kmr_common::km_err!(UnknownError, "remote decrypt response missing data")
-        })?;
-        let plain = base64::engine::general_purpose::STANDARD
-            .decode(plain_b64)
-            .map_err(|e| kmr_common::km_err!(UnknownError, "bad remote decrypt base64: {e}"))?;
-        Ok(Some(plain))
-    }
-
-    fn agree_key(
-        &self,
-        alias: &str,
-        peer_public_key: &[u8],
-    ) -> Result<Option<Vec<u8>>, kmr_common::Error> {
-        let Some(resp) = RemoteRelay::agree_key(alias, peer_public_key)
-            .map_err(|e| remote_operation_error(e, "agree"))?
-        else {
-            return Ok(None);
-        };
-        let result = resp.get("result").cloned().unwrap_or(resp);
-        let secret_b64 = result.get("data").and_then(Value::as_str).ok_or_else(|| {
-            kmr_common::km_err!(UnknownError, "remote key-agreement response missing data")
-        })?;
-        let secret = base64::engine::general_purpose::STANDARD
-            .decode(secret_b64)
-            .map_err(|e| {
-                kmr_common::km_err!(UnknownError, "bad remote key-agreement base64: {e}")
-            })?;
-        Ok(Some(secret))
-    }
-
-    fn enabled(&self) -> bool {
-        remote_enabled()
-    }
-
-    fn fallback_local(&self) -> bool {
-        match config::config().read() {
-            Ok(g) => g.remote.fallback_local,
-            Err(_) => true,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,98 +1026,6 @@ mod tests {
         for status in [200, 201, 204, 299] {
             assert_eq!(RemoteRejection::classify(status), None);
         }
-    }
-
-    #[test]
-    fn health_records_the_last_server_verdict() {
-        record_remote_failure(
-            Some(401),
-            "unauthorized",
-            "missing or invalid X-Relay-Token",
-        );
-        let health = remote_health().expect("health should be recorded");
-        assert_eq!(health.last_status, Some(401));
-        assert_eq!(health.last_kind, Some("unauthorized"));
-        assert_eq!(health.last_verdict, Some(VERDICT_ERROR));
-        assert!(health
-            .last_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("X-Relay-Token"));
-        assert!(health.last_error_unix.is_some());
-
-        record_remote_ok();
-        let health = remote_health().unwrap();
-        assert!(health.last_ok_unix.is_some());
-        // The verdict follows the last request, while the record of what went
-        // wrong stays available for diagnostics.
-        assert_eq!(health.last_verdict, Some(VERDICT_OK));
-        // A later success must not erase the record of what went wrong.
-        assert_eq!(health.last_status, Some(401));
-    }
-
-    #[test]
-    fn a_recovery_publishes_a_clean_snapshot_but_stays_quiet_after_that() {
-        // A fresh process: the first success has to be published, otherwise the
-        // WebUI keeps showing an outage inherited from the previous run.
-        let empty = RemoteHealth::default();
-        assert!(ok_snapshot_is_news(&empty));
-
-        // Failure then success: the recovery is news, because the panel is
-        // still claiming the relay is down.
-        let after_failure = RemoteHealth {
-            last_ok_unix: None,
-            last_error_unix: Some(1_000),
-            last_verdict: Some(VERDICT_ERROR),
-            ..RemoteHealth::default()
-        };
-        assert!(ok_snapshot_is_news(&after_failure));
-
-        // Already healthy: a success is not news, and rewriting the file on
-        // every request would be pure write amplification.
-        let healthy = RemoteHealth {
-            last_ok_unix: Some(2_000),
-            last_error_unix: Some(1_000),
-            last_verdict: Some(VERDICT_OK),
-            ..RemoteHealth::default()
-        };
-        assert!(!ok_snapshot_is_news(&healthy));
-
-        // Success before any failure: the snapshot is already accurate.
-        let never_failed = RemoteHealth {
-            last_ok_unix: Some(2_000),
-            last_error_unix: None,
-            last_verdict: Some(VERDICT_OK),
-            ..RemoteHealth::default()
-        };
-        assert!(!ok_snapshot_is_news(&never_failed));
-
-        // Interleaved: a failure newer than the last success is still pending,
-        // so the next success must clear it.
-        let failure_is_newer = RemoteHealth {
-            last_ok_unix: Some(1_000),
-            last_error_unix: Some(2_000),
-            last_verdict: Some(VERDICT_ERROR),
-            ..RemoteHealth::default()
-        };
-        assert!(ok_snapshot_is_news(&failure_is_newer));
-
-        // Same second: the clocks tie, so only the verdict can order the two
-        // events. A stale error must not survive the next good request.
-        let tied = RemoteHealth {
-            last_ok_unix: Some(1_000),
-            last_error_unix: Some(1_000),
-            last_verdict: Some(VERDICT_ERROR),
-            ..RemoteHealth::default()
-        };
-        assert!(ok_snapshot_is_news(&tied));
-        let recovered = RemoteHealth {
-            last_ok_unix: Some(1_300),
-            last_error_unix: Some(1_000),
-            last_verdict: Some(VERDICT_OK),
-            ..RemoteHealth::default()
-        };
-        assert!(!ok_snapshot_is_news(&recovered));
     }
 
     #[test]

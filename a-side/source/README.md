@@ -20,16 +20,18 @@ relay_server.
   startup retries until the remote profile is available instead of freezing a
   mismatched local profile. Profile or certificate mismatches fail closed;
   enabling local fallback does not bypass identity checks.
-- **Auth-bound keys** (502/504/505/506/507/508) are minted locally, even in
-  remote mode, except for packages that need B's hardware chain (Google/GMS,
-  Google Wallet/Vending, TrustAttestor, KeyAttestation, DuckDetector, and
-  EngineerMode). B has no A-side HardwareAuthToken and cannot validate A's
-  Gatekeeper token, so a remote auth-bound key would reject every signature
-  with `KeyUserNotAuthenticated` (-26). The local keybox chain keeps the
-  requested authorization list and the local Keystore performs the fingerprint
-  or credential check. `UNLOCKED_DEVICE_REQUIRED` (509) still uses B when its
-  user is unlocked. Caller-supplied attestation-key delegation keeps its
-  existing remote path.
+- **Authentication-signing policy** is configured at runtime in the WebUI.
+  The default **Auto** mode preserves B's requested authentication policy for
+  known detector probes, and uses A authorization with B signing for other
+  eligible EC/RSA authentication-signing keys. **Payment compatibility** always
+  uses that compatibility path; **Preserve authentication** keeps the requested
+  B policy, which may return `KeyUserNotAuthenticated` (-26) when A authenticates.
+  Every remote path returns B's certificate unchanged. Per-app exceptions work
+  in both list scope and global scope, without package-name heuristics.
+
+See [Authentication-signing policy](docs/AUTH-SIGNING-POLICY.md) for eligibility,
+probe recognition, configuration and the authentication trust boundary. Only
+newly created keys are affected; existing keys are never converted.
 
 The native Soter HAL has an independent relay. Enable the software Soter TA in
 the WebUI to take over `vendor.qti.hardware.soter.ISoter/default`; then configure
@@ -324,3 +326,68 @@ to four connections in one RPC session, preserving Binder identities. Ordinary
 remote signatures without pending authentication, trusted presence, confirmation
 or single-use key deletion execute network work outside the TA lock. Restricted
 operations retain the serialized finish path and existing authorization checks.
+
+## Relay client layout
+
+`src/remote.rs` owns relay requests, HTTP retries and identity-profile caching.
+`src/remote/health.rs` owns verdict state and status-file publication.
+`src/remote/backend.rs` adapts relay responses to the KeyMint
+`RemoteBackend` interface, validates certificate chains and decodes operation
+outputs. `RemoteRelayBackend` remains available through `crate::remote`.
+
+Response decoding borrows the result from the parsed JSON. Certificate debug
+metadata is collected during the same DER validation pass. Relay configuration reads
+copy only the requested value under a short-lived read guard; HTTP requests
+run after that guard is released.
+
+## Configuration layout
+
+`src/config.rs` defines configuration models, loading, migrations and atomic
+persistence. `src/config/runtime.rs` watches configuration paths and applies
+runtime updates. It resolves platform state after releasing the configuration
+read guard, then uses the KeyMint runtime-update path to install the result.
+Crypto seeds, the native StrongBox selection and trust settings beyond patch
+levels remain fixed until the daemon restarts.
+
+## Keybox layout
+
+`src/keybox/material.rs` parses and validates XML/PEM material, computes its
+identity, selects signing material by security level and serializes the batch
+keybox. `src/keybox/storage.rs` owns file persistence, bundled-template seeding
+and disk loading, including the optional dedicated StrongBox keybox.
+`src/keybox.rs` owns active state, reload locks, file watchers, retirement
+orchestration and the `KeyboxManager` adapter. Invalid or partial disk material
+falls back in memory without replacing the file. Database retirement stays
+limited to dedicated attestation keys bound to a previous keybox identity.
+
+## Build and validation
+
+Run the following from `a-side/source` with Python 3.11 or newer, Node.js 22,
+`protoc`, an Android NDK and the pinned Rust toolchain available. Set
+`RUSTUP_TOOLCHAIN=nightly-2026-09-01` in the build environment, matching CI.
+
+```sh
+rustup toolchain install nightly-2026-09-01 --profile minimal --component rustfmt --component clippy --target aarch64-linux-android
+python3 scripts/setup_cargo_config.py --ndk-root /path/to/android-ndk --api-level 26
+cargo clippy --locked --target aarch64-linux-android --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo test --locked --target aarch64-linux-android --workspace --no-run
+python3 scripts/webui-patch.py --check
+node --test scripts/webui-compat.test.mjs
+python3 build.py --release --abi arm64-v8a
+```
+
+Generate `.cargo/config.toml` once for the local NDK; use the setup script's
+`--force` option only when deliberately replacing that configuration. The
+build script uses the checked-in Cargo lockfile. Its `--platform` option is
+accepted for compatibility; the generated Cargo configuration selects the
+Android API level and linker.
+
+The release archive is written to
+`target/ommega-a-release-arm64-v8a-<version>-<commit>.zip`. It contains `keymint`,
+`ommega-auth-policy`, `ommega-inject` and `soterta-svc` for the selected ABI.
+The WebUI is packaged from `template/webroot` and runs through the module
+manager's WebUI bridge. Its bundle patch must pass the check above.
+
+`cargo test --no-run` compiles Android test binaries; it does not execute them.
+Device test execution and application acceptance are separate validation steps.

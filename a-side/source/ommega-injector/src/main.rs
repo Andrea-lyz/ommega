@@ -89,7 +89,6 @@ fn main() {
 }
 
 #[no_mangle]
-#[allow(unused)]
 pub extern "C" fn entry(handle: *const c_void) -> bool {
     // This runs inside the target process, so we must initialize logging again
     // for that process. On Android this enables both logcat and stdout logging.

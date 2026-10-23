@@ -87,54 +87,6 @@ fn equalize_to_remote_attest_duration(started: Instant) {
     }
 }
 
-/// Whether this request needs a locally enforced user-authentication policy.
-///
-/// The relay has no A-side `HardwareAuthToken`, and B cannot validate A's
-/// Gatekeeper token. A key minted on B with these tags would reject every
-/// signature with `KeyUserNotAuthenticated` (-26), even after A's fingerprint
-/// prompt succeeds. Keep these keys local: the local keybox chain carries the
-/// requested authorization list and the local Keystore performs the prompt.
-///
-/// `UNLOCKED_DEVICE_REQUIRED` (509) is intentionally not included. B can
-/// enforce that constraint while its user is unlocked, so those keys remain
-/// remote and their leaf still carries tag 509.
-fn requires_local_auth_key(params: &[KeyParam]) -> bool {
-    params.iter().any(|param| {
-        matches!(
-            param,
-            KeyParam::UserSecureId(_)
-                | KeyParam::UserAuthType(_)
-                | KeyParam::AuthTimeout(_)
-                | KeyParam::AllowWhileOnBody
-                | KeyParam::TrustedUserPresenceRequired
-                | KeyParam::TrustedConfirmationRequired
-        )
-    })
-}
-
-/// Packages that must keep B's hardware attestation chain for auth-bound keys.
-///
-/// The local keybox on A may be a software keybox (`DeviceID="sw"`); Google
-/// Wallet and hardware-integrity probes reject that chain. These packages keep
-/// the pre-existing remote path, while ordinary apps (including banking apps)
-/// use the local path so their fingerprint signature can succeed.
-fn app_id_requires_remote_auth(app_id: Option<&[u8]>) -> bool {
-    const PACKAGES: &[&[u8]] = &[
-        b"com.google.",
-        b"com.android.vending",
-        b"com.lingqing.trustattestor",
-        b"io.github.vvb2060.keyattestation",
-        b"com.eltavine.duckdetector",
-        b"com.oplus.engineermode",
-    ];
-    let Some(app_id) = app_id else {
-        return false;
-    };
-    PACKAGES
-        .iter()
-        .any(|needle| app_id.windows(needle.len()).any(|window| window == *needle))
-}
-
 /// Make remote key characteristics use the version tags from B's certificate.
 fn overlay_remote_version_tags(
     chars: &mut [KeyCharacteristics],
@@ -519,10 +471,20 @@ impl crate::KeyMintTa {
         try_to_vec(&tag[..16])
     }
 
+    #[cfg(test)]
+    fn generate_key_default(
+        &mut self,
+        params: &[KeyParam],
+        attestation_key: Option<AttestationKey>,
+    ) -> Result<KeyCreationResult, Error> {
+        self.generate_key(params, attestation_key, false)
+    }
+
     pub(crate) fn generate_key(
         &mut self,
         params: &[KeyParam],
         attestation_key: Option<AttestationKey>,
+        authorize_on_a: bool,
     ) -> Result<KeyCreationResult, Error> {
         // Remote mode: if a remote backend is enabled and attestation is
         // requested, mint the key on the B-side real TEE instead of locally.
@@ -561,17 +523,14 @@ impl crate::KeyMintTa {
         } else {
             None
         };
-        // Auth-bound keys without a caller-supplied attestation key are local:
-        // B has no A-side HAT, so such a key could never sign. The supplied-
-        // issuer path keeps its existing remote delegation behavior. Ordinary
-        // keys and UNLOCKED_DEVICE_REQUIRED-only keys continue through B.
-        let app_id = get_opt_tag_value!(params, AttestationApplicationId)?;
-        let local_auth_key = requires_local_auth_key(params)
+        // Resolve once per request, and recheck eligibility inside the TA.
+        let a_authorized_signing = has_challenge
+            && remote_enabled
             && attestation_key.is_none()
-            && !app_id_requires_remote_auth(app_id.map(|id| &id[..]));
+            && authorize_on_a
+            && kmr_common::auth_signing::eligible(params);
         let remote_attest = has_challenge
             && remote_enabled
-            && !local_auth_key
             && (attestation_key.is_none() || remote_issuer.is_some());
         let pad_local_attest_key =
             has_challenge && attestation_key.is_some() && remote_enabled && !remote_attest;
@@ -579,11 +538,14 @@ impl crate::KeyMintTa {
         if remote_attest {
             // `Ok(None)` from the remote backend means it was unavailable; fall
             // back to the local software keybox when `fallback_local` allows.
-            if let Some(result) = self.generate_key_remote(params, remote_issuer.as_ref())? {
+            if let Some(result) =
+                self.generate_key_remote(params, remote_issuer.as_ref(), a_authorized_signing)?
+            {
                 record_remote_attest_duration(started.elapsed());
                 return Ok(result);
             }
-            if remote_issuer.is_some()
+            if kmr_common::auth_signing::eligible(params)
+                || remote_issuer.is_some()
                 || !self.dev.remote.as_ref().is_some_and(|r| r.fallback_local())
             {
                 return Err(km_err!(
@@ -617,6 +579,7 @@ impl crate::KeyMintTa {
         &mut self,
         params: &[KeyParam],
         attestation_key: Option<&device::RemoteAttestationKey>,
+        a_authorized_signing: bool,
     ) -> Result<Option<KeyCreationResult>, Error> {
         let challenge = get_opt_tag_value!(params, AttestationChallenge)?
             .ok_or_else(|| km_err!(AttestationChallengeMissing, "remote attest needs challenge"))?;
@@ -642,6 +605,10 @@ impl crate::KeyMintTa {
         // attestation then overwrote the server session, so a later TBS signing
         // used a different leaf key than the one the A-side holds ("签名错误").
         let mut seed_input = challenge.clone();
+        if a_authorized_signing {
+            // A different policy must not reuse an existing auth-bound B alias.
+            seed_input.extend_from_slice(b"/auth-a-sign-b/v1");
+        }
         if let Some(s) = &serial {
             seed_input.extend_from_slice(s);
         }
@@ -678,6 +645,17 @@ impl crate::KeyMintTa {
         // mints serial 1 because keystore2 never sets the tag.
         let effective_serial = effective_remote_serial(serial.map(Vec::as_slice));
         let mut remote_params = extract_remote_attest_params(params);
+        if a_authorized_signing {
+            // Preserve the original params below for A's encrypted keyblob and
+            // its existing HAT/challenge/timeout checks. Only B is no-auth.
+            remote_params.user_auth.retain(|(tag, _)| *tag == 509);
+            remote_params.user_auth.push((503, 1));
+            log::info!(
+                "event=auth_signing authorization=A signer=B certificate_policy=B_no_auth auth_type={:?} auth_timeout={:?}",
+                get_opt_tag_value!(params, UserAuthType)?,
+                get_opt_tag_value!(params, AuthTimeout)?,
+            );
+        }
         remote_params.attestation_key = attestation_key.cloned();
         // Tag the relay-minted chain with the requesting security level so a
         // STRONGBOX request is not misreported as TEE by the relay's default.

@@ -11,6 +11,12 @@ const server = http.createServer(async(req,res) => {
   try {
     if (req.method !== 'GET') {res.writeHead(405).end();return;}
     const url = new URL(req.url,'http://localhost');
+    if (url.pathname === '/phone') {
+      const width = Math.min(1024,Math.max(320,Number(url.searchParams.get('width')) || 393));
+      const height = Math.min(1200,Math.max(400,Number(url.searchParams.get('height')) || 640));
+      const html = '<!doctype html><meta charset="utf-8"><title>Ommega mobile UI preview</title><style>body{margin:0;padding:12px;background:#dedee5;display:grid;justify-content:center}iframe{border:1px solid #777;border-radius:12px;width:'+width+'px;height:'+height+'px}</style><iframe title="Ommega mobile preview" src="/a/#om-settings"></iframe>';
+      res.writeHead(200,{'Content-Type':mime.html}).end(html); return;
+    }
     if (url.pathname === '/preview-bridge.js') { res.writeHead(200,{'Content-Type':mime.js}).end(mock);return; }
     const match = /^\/(a|b|openui)\/(.*)$/.exec(decodeURIComponent(url.pathname));
     if (!match || match[2].split('/').some(part=>part==='..') || match[2].includes('\\')) {res.writeHead(404).end();return;}

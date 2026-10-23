@@ -6,6 +6,33 @@
 // below. Applied by scripts/webui-patch.py to the prebuilt WebUI bundle.
 const OMMEGA_TARGET_COMPAT = "/data/adb/ommega/ommegadata/target-compat.toml";
 let ommegaCompatEnabled = false;
+let ommegaAppsBaseline = null;
+
+function ommegaAppSettingsSnapshot(packages) {
+  const selected = [...new Set(packages)].sort();
+  return JSON.stringify([selected.map(pkg => [pkg, ommegaTargetModes.get(pkg) || "global_default"]), ommegaCompatEnabled]);
+}
+
+function ommegaAppsHaveChanges() {
+  if (ommegaAppsBaseline === null) return false;
+  // Keep loaded selections until their cards exist. Loading, filtering and
+  // sorting the list must not look like an edit to the scope.
+  const selected = new Set(Qe);
+  for (const box of se.querySelectorAll("md-checkbox")) {
+    const pkg = box.closest(".card")?.getAttribute("data-package");
+    if (!pkg) continue;
+    if (box.checked) selected.add(pkg);
+    else selected.delete(pkg);
+  }
+  Dl.forEach(pkg => selected.add(pkg));
+  return ommegaAppSettingsSnapshot(selected) !== ommegaAppsBaseline;
+}
+
+// modern.js is a separate module, so expose the result through a synchronous
+// event rather than the visibility of the legacy Save button.
+document.addEventListener("ommega-app-changes", event => {
+  event.detail.dirty = ommegaAppsHaveChanges();
+});
 
 // Existing diagnostics keep their bilingual representation for tooling; the UI
 // presents the matching half using the same resolved preference as the shell.
@@ -83,7 +110,7 @@ function ommegaInstallCompatOption() {
   row.className = "mode-option";
   row.id = "mode-compat-row";
   row.innerHTML = '<md-checkbox id="mode-compat" touch-target="wrapper"></md-checkbox>' +
-    '<span data-i18n="mode_detector_compat">检测器兼容 / Detector compat</span>';
+    '<span>正数密钥 ID 兼容 / Positive key ID compatibility</span>';
   row.innerHTML = ommegaUiLocalizeHtml(row.innerHTML);
   container.appendChild(row);
   const hint = document.createElement("div");
@@ -125,7 +152,10 @@ const ommegaBaseAppLoadCompat = Mi;
 Mi = async function () {
   const {stdout} = await _('cat "' + OMMEGA_TARGET_COMPAT + '" 2>/dev/null || true');
   ommegaCompatEnabled = ommegaParseTargetCompat(stdout);
-  return ommegaBaseAppLoadCompat();
+  const result = await ommegaBaseAppLoadCompat();
+  // A successful scope save reloads Mi; a failed save leaves this baseline.
+  ommegaAppsBaseline = ommegaAppSettingsSnapshot(Qe);
+  return result;
 };
 
 const ommegaBaseSaveCompat = document.getElementById("save").onclick;
@@ -795,11 +825,12 @@ async function ommegaApplyGlobalScope() {
 
 function ommegaInstallGlobalScope() {
   const list = document.getElementById("apps-list");
-  if (!list || !list.parentElement || document.getElementById("ommega-global-scope")) return false;
+  const slot = document.getElementById("om-global-scope-slot");
+  if (!list || !slot || typeof slot.appendChild !== "function" || document.getElementById("ommega-global-scope")) return false;
   const panel = document.createElement("section");
   panel.id = "ommega-global-scope";
-  panel.style.cssText = "margin:12px 16px;padding:14px 16px;border-radius:16px;" +
-    "background:var(--md-sys-color-surface-container,#eee);color:var(--md-sys-color-on-surface,#222)";
+  panel.style.cssText = "margin:10px 0;padding:14px 18px;border:1px solid var(--om-line,#bbb);border-radius:18px;" +
+    "background:var(--om-surface,#eee);color:var(--om-ink,#222)";
   panel.innerHTML = ommegaUiLocalizeHtml('<style>#ommega-global-scope label{display:flex;align-items:center;gap:12px;min-height:48px;cursor:pointer}' +
     '#ommega-global-scope input{appearance:none;flex:none;width:48px;height:28px;border:2px solid currentColor;' +
     'border-radius:18px;position:relative;cursor:pointer;background:transparent;color:inherit}' +
@@ -813,7 +844,7 @@ function ommegaInstallGlobalScope() {
     '<label for="ommega-global-scope-enabled"><input type="checkbox" role="switch" id="ommega-global-scope-enabled" ' +
     'aria-describedby="ommega-global-scope-status" disabled><strong>全局作用域 / Global scope</strong></label>' +
     '<div id="ommega-global-scope-status" role="status" aria-live="polite" style="font-size:13px;line-height:1.5;margin-top:4px">正在读取… / Loading…</div>');
-  list.parentElement.insertBefore(panel, list);
+  slot.appendChild(panel);
   document.getElementById("ommega-global-scope-enabled").addEventListener("change", ommegaApplyGlobalScope);
   const baseLoad = Mi;
   Mi = async function () {
@@ -831,3 +862,4 @@ function ommegaInstallGlobalScope() {
 }
 
 ommegaInstallGlobalScope();
+if (typeof window !== "undefined") window.addEventListener("ommega-settings-ready", ommegaInstallGlobalScope);

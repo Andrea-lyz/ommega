@@ -631,34 +631,8 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let version_number = resolve_hardware_profile(self.security_level).version_number;
-        let key_parameters = key_parameters_to_km(keyParams, version_number)
-            .map_err(key_parameter_conversion_status)?;
-        let attestation_key = if let Some(ak) = attestation_key {
-            let key_parameters = key_parameters_to_km(&ak.attestKeyParams, version_number)
-                .map_err(key_parameter_conversion_status)?;
-            Some(AttestationKey {
-                key_blob: ak.keyBlob.clone(),
-                attest_key_params: key_parameters,
-                issuer_subject_name: ak.issuerSubjectName.clone(),
-            })
-        } else {
-            None
-        };
-
-        let req = PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
-            key_params: key_parameters,
-            attestation_key,
-        });
-        charge(TaOp::KeyGen);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
-        let result = match result.rsp {
-            Some(PerformOpRsp::DeviceGenerateKey(rsp)) => rsp.ret,
-            Some(_) => unreachable!("Unexpected response type"),
-            None => return Err(Status::new_service_specific_error(result.error_code, None)),
-        };
-
-        key_creation_result_to_aidl(result, version_number)
+        let decision = self.resolve_auth_signing(keyParams, attestation_key.is_some(), None)?;
+        self.generate_key_with_policy(keyParams, attestation_key, decision)
     }
 
     fn importKey(
@@ -920,6 +894,68 @@ impl IKeyMintDevice for KeyMintWrapper {
 }
 
 impl KeyMintWrapper {
+    pub fn resolve_auth_signing(
+        &self,
+        params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
+        supplied_issuer: bool,
+        alias: Option<&str>,
+    ) -> rsbinder::status::Result<bool> {
+        if !crate::remote::remote_enabled() {
+            return Ok(false);
+        }
+        let version = resolve_hardware_profile(self.security_level).version_number;
+        let params =
+            key_parameters_to_km(params, version).map_err(key_parameter_conversion_status)?;
+        crate::auth_signing::authorize_on_a(alias, &params, supplied_issuer).map_err(|error| {
+            log::error!("Cannot resolve auth-signing policy: {error:#}");
+            Status::new_service_specific_error(
+                kmr_wire::keymint::ErrorCode::UnknownError as i32,
+                None,
+            )
+        })
+    }
+
+    pub fn generate_key_with_policy(
+        &self,
+        key_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
+        attestation_key: Option<
+            &crate::android::hardware::security::keymint::AttestationKey::AttestationKey,
+        >,
+        authorize_on_a: bool,
+    ) -> rsbinder::status::Result<
+        crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
+    > {
+        let version_number = resolve_hardware_profile(self.security_level).version_number;
+        let key_parameters = key_parameters_to_km(key_params, version_number)
+            .map_err(key_parameter_conversion_status)?;
+        let attestation_key = if let Some(ak) = attestation_key {
+            let key_parameters = key_parameters_to_km(&ak.attestKeyParams, version_number)
+                .map_err(key_parameter_conversion_status)?;
+            Some(AttestationKey {
+                key_blob: ak.keyBlob.clone(),
+                attest_key_params: key_parameters,
+                issuer_subject_name: ak.issuerSubjectName.clone(),
+            })
+        } else {
+            None
+        };
+
+        let req = PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
+            key_params: key_parameters,
+            attestation_key,
+            authorize_on_a,
+        });
+        charge(TaOp::KeyGen);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = match result.rsp {
+            Some(PerformOpRsp::DeviceGenerateKey(rsp)) => rsp.ret,
+            Some(_) => unreachable!("Unexpected response type"),
+            None => return Err(Status::new_service_specific_error(result.error_code, None)),
+        };
+
+        key_creation_result_to_aidl(result, version_number)
+    }
+
     pub fn new(security_level: SecurityLevel) -> Result<Self> {
         if security_level == SecurityLevel::STRONGBOX
             && !crate::plat::keymint_profile::strongbox_keymint_present()
@@ -1800,6 +1836,7 @@ mod tests {
                 KeyParam::MaxUsesPerBoot(1),
             ],
             attestation_key: None,
+            authorize_on_a: false,
         }));
         assert_eq!(generated.error_code, 0);
         let key_blob = match generated.rsp {

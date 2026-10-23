@@ -125,10 +125,22 @@ export function healthMessage(health) {
 // The packaged A bundle opens its own dialogs, so the WebView back gesture has
 // to be routed to them: a back press closes the topmost dialog instead of
 // switching the dashboard view behind it.
-export function installDialogGuard(onChange = () => {}) {
+export function installDialogGuard(onChange = () => {}, {includeNative = false} = {}) {
   const tracked = [];
-  let sequence = 0, rewinding = false;
-  const openDialogs = () => [...document.querySelectorAll('md-dialog[open]')];
+  let sequence = 0, rewinding = false, pendingFocus = null;
+  const cancelBound = new WeakSet();
+  const openDialogs = () => [...document.querySelectorAll(includeNative ? 'md-dialog[open],dialog[open]' : 'md-dialog[open]')];
+  const restoreFocus = () => {
+    if (!pendingFocus || rewinding) return;
+    const target = document.getElementById(pendingFocus);
+    if (!target || target.disabled || !target.getClientRects().length) { pendingFocus=null; return; }
+    target.focus(); pendingFocus=null;
+  };
+  const scheduleFocus = () => {
+    if (!pendingFocus || rewinding) return;
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restoreFocus);
+    else queueMicrotask(restoreFocus);
+  };
   const sync = () => {
     const open = openDialogs();
     onChange(open.length > 0);
@@ -137,6 +149,7 @@ export function installDialogGuard(onChange = () => {}) {
     // entry. The resulting popstate must not close the parent as well.
     while (tracked.length && !tracked.at(-1).dialog.open) {
       const entry = tracked.pop();
+      pendingFocus = entry.returnFocus || pendingFocus;
       if (!entry.consumed && history.state?.omDialog === entry.token) {
         rewinding = true;
         history.back();
@@ -144,12 +157,21 @@ export function installDialogGuard(onChange = () => {}) {
       }
     }
     for (const dialog of open) {
+      if (includeNative && dialog.localName === 'dialog' && !cancelBound.has(dialog)) {
+        cancelBound.add(dialog);
+        dialog.addEventListener('cancel', event => {
+          event.preventDefault();
+          closeTop(false);
+        });
+      }
       if (!tracked.some(entry => entry.dialog === dialog)) {
-        const entry = {dialog, token: ++sequence, consumed: false, closing: false};
+        const entry = {dialog, token: ++sequence, consumed: false, closing: false,
+          returnFocus:dialog.getAttribute?.('data-om-return-focus') || null};
         tracked.push(entry);
         history.pushState({...history.state, omDialog: entry.token}, '');
       }
     }
+    scheduleFocus();
   };
   const closeTop = consumed => {
     const entry = [...tracked].reverse().find(item => item.dialog.open && !item.closing);
@@ -163,15 +185,24 @@ export function installDialogGuard(onChange = () => {}) {
   };
   window.addEventListener('popstate', () => {
     if (rewinding) { rewinding = false; sync(); return; }
+    // Forward traversal into an already closed dialog must not close its
+    // still-open parent. Native back and the matching history event also
+    // must not consume two dialog levels.
+    const token = history.state?.omDialog;
+    const top = [...tracked].reverse().find(entry => entry.dialog.open);
+    if (!top || token === top.token || (token != null && !tracked.some(entry => entry.token === token))) return;
     closeTop(true);
   });
   // KernelSU-style WebViews also dispatch a native back event. Handle it
   // before the packaged handler, which searches dialogs in DOM order.
-  window.addEventListener('back', event => {
+  const nativeBack = event => {
+    sync();
     if (!closeTop(false)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-  }, true);
+  };
+  window.addEventListener('back', nativeBack, true);
+  window.addEventListener('backbutton', nativeBack, true);
   const observer = new MutationObserver(sync);
   observer.observe(document.documentElement, {attributes: true, subtree: true, attributeFilter: ['open']});
   sync();

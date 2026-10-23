@@ -123,6 +123,8 @@ pub struct AddRngEntropyResponse {}
 pub struct GenerateKeyRequest {
     pub key_params: Vec<KeyParam>,
     pub attestation_key: Option<AttestationKey>,
+    /// Immutable creation-time decision, independent of concurrent requests.
+    pub authorize_on_a: bool,
 }
 #[derive(Debug, AsCborValue)]
 pub struct GenerateKeyResponse {

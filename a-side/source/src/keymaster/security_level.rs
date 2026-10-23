@@ -750,13 +750,25 @@ impl KeystoreSecurityLevel {
         &self,
         params: &[KeyParameter],
         attest_key: Option<&AttestationKey>,
+        alias: Option<&str>,
     ) -> Result<KeyCreationResult, Error> {
+        let authorize_on_a = match &self.keymint {
+            KeyMintBackend::Ommega(keymint) => {
+                map_km_error(keymint.resolve_auth_signing(params, attest_key.is_some(), alias))?
+            }
+            KeyMintBackend::System(_) => false,
+        };
         let result = map_km_error({
             let _wp = self.watch_millis(
                 "KeystoreSecurityLevel::generate_key: calling IKeyMintDevice::generateKey",
                 5000,
             );
-            self.keymint.generateKey(params, attest_key)
+            match &self.keymint {
+                KeyMintBackend::Ommega(keymint) => {
+                    keymint.generate_key_with_policy(params, attest_key, authorize_on_a)
+                }
+                KeyMintBackend::System(keymint) => keymint.generateKey(params, attest_key),
+            }
         });
 
         match &result {
@@ -803,7 +815,12 @@ impl KeystoreSecurityLevel {
                 ),
                 5000,
             );
-            self.keymint.generateKey(&swapped_params, attest_key)
+            match &self.keymint {
+                KeyMintBackend::Ommega(keymint) => {
+                    keymint.generate_key_with_policy(&swapped_params, attest_key, authorize_on_a)
+                }
+                KeyMintBackend::System(keymint) => keymint.generateKey(&swapped_params, attest_key),
+            }
         })
     }
 
@@ -908,6 +925,7 @@ impl KeystoreSecurityLevel {
                         self.generate_key_and_retry_on_att_id_mismatch(
                             &params,
                             Some(&attestation_key),
+                            key.alias.as_deref(),
                         )
                     },
                     |upgraded_blob| {
@@ -947,7 +965,11 @@ impl KeystoreSecurityLevel {
                             attestKeyParams: vec![],
                             issuerSubjectName: issuer_subject.clone(),
                         });
-                        self.generate_key_and_retry_on_att_id_mismatch(&params, attest_key.as_ref())
+                        self.generate_key_and_retry_on_att_id_mismatch(
+                            &params,
+                            attest_key.as_ref(),
+                            key.alias.as_deref(),
+                        )
                     },
                 )
                 .context(ks_err!(
@@ -957,7 +979,7 @@ impl KeystoreSecurityLevel {
                 ))
                 .map(|(result, _)| result),
             None => self
-                .generate_key_and_retry_on_att_id_mismatch(&params, None)
+                .generate_key_and_retry_on_att_id_mismatch(&params, None, key.alias.as_deref())
                 .context(ks_err!(
                     "While generating without a provided \
                  attestation key and params: {:?}.",
