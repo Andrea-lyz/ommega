@@ -127,6 +127,7 @@ def build_binary(
     release: bool,
     package: str | None,
     bin_name: str,
+    experimental_remote_auth_signing: bool = False,
 ) -> Path:
     build_type = "release" if release else "debug"
     print(f"Building {bin_name} for {abi} ({target}, {build_type})...")
@@ -138,6 +139,8 @@ def build_binary(
         cmd.extend(["--bin", bin_name])
     if release:
         cmd.append("--release")
+    if experimental_remote_auth_signing and package is None:
+        cmd.extend(["--features", "experimental-remote-auth-signing"])
 
     run(cmd)
 
@@ -319,6 +322,7 @@ def build_package_for_abi(
     version: str,
     git_count: str,
     git_hash: str,
+    experimental_remote_auth_signing: bool = False,
 ) -> Path:
     target = ABI_TO_TARGET[abi]
     stage_dir = TARGET_ROOT / "temp" / abi
@@ -339,6 +343,7 @@ def build_package_for_abi(
                         release=release,
                         package=spec["package"],
                         bin_name=spec["bin"],
+                        experimental_remote_auth_signing=experimental_remote_auth_signing,
                     ),
                     spec["output_name"],
                 )
@@ -354,6 +359,15 @@ def build_package_for_abi(
             copy_binary(binary, output_name, abi, stage_dir)
 
         modify_module_prop(stage_dir, version, git_count, git_hash)
+        if experimental_remote_auth_signing:
+            prop = stage_dir / "module.prop"
+            content = prop.read_text(encoding="utf-8")
+            content = content.replace("name=Ommega\n", "name=Ommega A (Auth A / Sign B EXP)\n")
+            content = content.replace(
+                "description=Ommega A-side relay: remote TEE attestation via real hardware TEE",
+                "description=EXPERIMENT: A authorizes signing; B uses a no-auth key. New keys only.",
+            )
+            write_text_lf(prop, content)
         normalize_module_text_files(stage_dir)
         generate_hash_files(stage_dir)
         return create_zip_package(
@@ -373,6 +387,11 @@ def main() -> None:
     parser.add_argument("--release", action="store_true", help="Build in release mode")
     parser.add_argument("--debug", action="store_true", help="Build in debug mode (default)")
     parser.add_argument(
+        "--experimental-remote-auth-signing",
+        action="store_true",
+        help="Build the opt-in Auth A / Sign B experiment (new signing keys only).",
+    )
+    parser.add_argument(
         "--abi",
         dest="abis",
         action="append",
@@ -391,6 +410,8 @@ def main() -> None:
     args = parser.parse_args()
 
     version = get_version_from_cargo_toml()
+    if args.experimental_remote_auth_signing:
+        version += "-auth-a-sign-b"
     git_count = get_git_commit_count()
     git_hash = get_git_commit_hash()
     selected_abis = args.abis or ["arm64-v8a"]
@@ -410,6 +431,7 @@ def main() -> None:
                 version=version,
                 git_count=git_count,
                 git_hash=git_hash,
+                experimental_remote_auth_signing=args.experimental_remote_auth_signing,
             )
         )
 

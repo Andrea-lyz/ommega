@@ -32,6 +32,11 @@ relay_server.
   user is unlocked. Caller-supplied attestation-key delegation keeps its
   existing remote path.
 
+The opt-in [Auth A / Sign B experiment](docs/EXPERIMENTAL-REMOTE-AUTH-SIGNING.md)
+keeps new authenticated signing keys on B with a no-auth hardware policy and
+enforces the original authentication policy in A. Build with
+`--experimental-remote-auth-signing`; ordinary builds leave it disabled.
+
 The native Soter HAL has an independent relay. Enable the software Soter TA in
 the WebUI to take over `vendor.qti.hardware.soter.ISoter/default`; then configure
 its own server, token, B device ID and optional `A=B` UID mapping in the Soter

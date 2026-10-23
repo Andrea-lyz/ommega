@@ -5,6 +5,10 @@ version = "1.9.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
+[features]
+# Explicit opt-in: A authorizes signing; B attests and uses a no-auth key.
+experimental-remote-auth-signing = []
+
 [[bin]]
 name = "keymint"
 path = "src/main.rs"

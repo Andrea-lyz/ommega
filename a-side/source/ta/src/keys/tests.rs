@@ -26,6 +26,9 @@ struct TestRemote {
     expected_purpose: Option<KeyPurpose>,
     expected_issuer: Option<String>,
     unavailable: bool,
+    auth_signing_on_b: bool,
+    expected_user_auth: Option<Vec<(u32, i64)>>,
+    sign_calls: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl device::RemoteBackend for TestRemote {
     fn attest(
@@ -36,6 +39,9 @@ impl device::RemoteBackend for TestRemote {
         _: Option<&[u8]>,
         params: &device::RemoteAttestParams,
     ) -> Result<Option<device::RemoteAttestation>, Error> {
+        if let Some(expected) = &self.expected_user_auth {
+            assert_eq!(&params.user_auth, expected);
+        }
         assert_eq!(
             params.purpose,
             [self.expected_purpose.unwrap_or(KeyPurpose::Sign) as i32]
@@ -69,7 +75,12 @@ impl device::RemoteBackend for TestRemote {
         }))
     }
     fn sign(&self, alias: &str, data: &[u8], algorithm: &str) -> Result<Option<Vec<u8>>, Error> {
-        assert_eq!(alias, "test-only", "unexpected remote certificate signing");
+        if let Some(calls) = &self.sign_calls {
+            assert!(alias.starts_with("ommega-remote-"));
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            assert_eq!(alias, "test-only", "unexpected remote certificate signing");
+        }
         assert_eq!(algorithm, "SHA256withECDSA");
         assert_eq!(data, [1, 2, 3]);
         Ok(Some(vec![1; 64]))
@@ -83,7 +94,12 @@ impl device::RemoteBackend for TestRemote {
     fn enabled(&self) -> bool {
         true
     }
+    fn auth_signing_on_b(&self) -> bool {
+        self.auth_signing_on_b
+    }
 }
+
+mod remote_auth;
 
 fn install_remote_sign(ta: &mut KeyMintTa) -> kmr_wire::FinishRequest {
     ta.operations[0] = Some(crate::operation::Operation {

@@ -1202,6 +1202,10 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         remote_enabled()
     }
 
+    fn auth_signing_on_b(&self) -> bool {
+        cfg!(feature = "experimental-remote-auth-signing")
+    }
+
     fn fallback_local(&self) -> bool {
         match config::config().read() {
             Ok(g) => g.remote.fallback_local,

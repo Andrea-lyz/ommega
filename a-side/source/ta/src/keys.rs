@@ -24,9 +24,9 @@ use kmr_common::{
 };
 use kmr_wire::{
     keymint::{
-        AttestationKey, Digest, EcCurve, ErrorCode, HardwareAuthenticatorType, KeyCharacteristics,
-        KeyCreationResult, KeyFormat, KeyOrigin, KeyParam, KeyPurpose, SecurityLevel,
-        UNDEFINED_NOT_AFTER, UNDEFINED_NOT_BEFORE,
+        Algorithm, AttestationKey, Digest, EcCurve, ErrorCode, HardwareAuthenticatorType,
+        KeyCharacteristics, KeyCreationResult, KeyFormat, KeyOrigin, KeyParam, KeyPurpose,
+        SecurityLevel, UNDEFINED_NOT_AFTER, UNDEFINED_NOT_BEFORE,
     },
     *,
 };
@@ -140,6 +140,36 @@ fn app_id_requires_remote_auth(app_id: Option<&[u8]>) -> bool {
     PACKAGES
         .iter()
         .any(|needle| app_id.windows(needle.len()).any(|window| window == *needle))
+}
+
+/// Scope the experiment to HAT-bound asymmetric signing keys. Do not change
+/// agreement/decryption, attestation issuers or trusted-presence/confirmation.
+fn supports_a_authorized_remote_signing(params: &[KeyParam]) -> bool {
+    params
+        .iter()
+        .any(|p| matches!(p, KeyParam::Purpose(KeyPurpose::Sign)))
+        && params
+            .iter()
+            .any(|p| matches!(p, KeyParam::Algorithm(Algorithm::Ec | Algorithm::Rsa)))
+        && params
+            .iter()
+            .any(|p| matches!(p, KeyParam::UserSecureId(_)))
+        && params
+            .iter()
+            .any(|p| matches!(p, KeyParam::UserAuthType(value) if *value != 0))
+        && !params.iter().any(|p| {
+            matches!(p,
+            KeyParam::Purpose(purpose) if !matches!(purpose, KeyPurpose::Sign | KeyPurpose::Verify))
+        })
+        && !params.iter().any(|p| {
+            matches!(
+                p,
+                KeyParam::NoAuthRequired
+                    | KeyParam::TrustedUserPresenceRequired
+                    | KeyParam::TrustedConfirmationRequired
+                    | KeyParam::AllowWhileOnBody
+            )
+        })
 }
 
 /// Make remote key characteristics use the version tags from B's certificate.
@@ -573,7 +603,17 @@ impl crate::KeyMintTa {
         // issuer path keeps its existing remote delegation behavior. Ordinary
         // keys and UNLOCKED_DEVICE_REQUIRED-only keys continue through B.
         let app_id = get_opt_tag_value!(params, AttestationApplicationId)?;
-        let local_auth_signing = requires_local_auth_signing(params)
+        let a_authorized_signing = has_challenge
+            && remote_enabled
+            && attestation_key.is_none()
+            && self
+                .dev
+                .remote
+                .as_ref()
+                .is_some_and(|r| r.auth_signing_on_b())
+            && supports_a_authorized_remote_signing(params);
+        let local_auth_signing = !a_authorized_signing
+            && requires_local_auth_signing(params)
             && attestation_key.is_none()
             && !app_id_requires_remote_auth(app_id.map(|id| &id[..]));
         let remote_attest = has_challenge
@@ -586,11 +626,14 @@ impl crate::KeyMintTa {
         if remote_attest {
             // `Ok(None)` from the remote backend means it was unavailable; fall
             // back to the local software keybox when `fallback_local` allows.
-            if let Some(result) = self.generate_key_remote(params, remote_issuer.as_ref())? {
+            if let Some(result) =
+                self.generate_key_remote(params, remote_issuer.as_ref(), a_authorized_signing)?
+            {
                 record_remote_attest_duration(started.elapsed());
                 return Ok(result);
             }
-            if remote_issuer.is_some()
+            if a_authorized_signing
+                || remote_issuer.is_some()
                 || !self.dev.remote.as_ref().is_some_and(|r| r.fallback_local())
             {
                 return Err(km_err!(
@@ -624,6 +667,7 @@ impl crate::KeyMintTa {
         &mut self,
         params: &[KeyParam],
         attestation_key: Option<&device::RemoteAttestationKey>,
+        a_authorized_signing: bool,
     ) -> Result<Option<KeyCreationResult>, Error> {
         let challenge = get_opt_tag_value!(params, AttestationChallenge)?
             .ok_or_else(|| km_err!(AttestationChallengeMissing, "remote attest needs challenge"))?;
@@ -649,6 +693,10 @@ impl crate::KeyMintTa {
         // attestation then overwrote the server session, so a later TBS signing
         // used a different leaf key than the one the A-side holds ("签名错误").
         let mut seed_input = challenge.clone();
+        if a_authorized_signing {
+            // A different policy must not reuse an existing auth-bound B alias.
+            seed_input.extend_from_slice(b"/auth-a-sign-b/v1");
+        }
         if let Some(s) = &serial {
             seed_input.extend_from_slice(s);
         }
@@ -685,6 +733,17 @@ impl crate::KeyMintTa {
         // mints serial 1 because keystore2 never sets the tag.
         let effective_serial = effective_remote_serial(serial.map(Vec::as_slice));
         let mut remote_params = extract_remote_attest_params(params);
+        if a_authorized_signing {
+            // Preserve the original params below for A's encrypted keyblob and
+            // its existing HAT/challenge/timeout checks. Only B is no-auth.
+            remote_params.user_auth.retain(|(tag, _)| *tag == 509);
+            remote_params.user_auth.push((503, 1));
+            log::warn!(
+                "event=experimental_auth_signing authorization=A signer=B certificate_policy=B_no_auth auth_type={:?} auth_timeout={:?}",
+                get_opt_tag_value!(params, UserAuthType)?,
+                get_opt_tag_value!(params, AuthTimeout)?,
+            );
+        }
         remote_params.attestation_key = attestation_key.cloned();
         // Tag the relay-minted chain with the requesting security level so a
         // STRONGBOX request is not misreported as TEE by the relay's default.

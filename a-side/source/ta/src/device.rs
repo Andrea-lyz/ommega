@@ -220,10 +220,10 @@ pub struct RemoteAttestParams {
     ///   only a presence marker,
     /// * `504` `USER_AUTH_TYPE` and `505` `AUTH_TIMEOUT` — integers.
     ///
-    /// A enforces this policy from the local keyblob. B cannot validate an
-    /// A-side authentication token, so the native relay generates a no-auth
-    /// physical key. Its certificate reports B's actual policy; forwarding
-    /// these tags does not provide hardware enforcement of A's policy.
+    /// These tags normally describe the requested B-side policy. In the
+    /// experimental A-authorized signing mode, A retains its original policy
+    /// in the encrypted keyblob and sends only NO_AUTH_REQUIRED (and, when
+    /// requested, UNLOCKED_DEVICE_REQUIRED). B's certificate is returned as-is.
     pub user_auth: Vec<(u32, i64)>,
 }
 
@@ -293,6 +293,12 @@ pub trait RemoteBackend: Send + Sync {
 
     /// Indicate whether the remote backend is currently enabled.
     fn enabled(&self) -> bool;
+
+    /// Opt in to A-authorized signing with a no-auth B-side physical key.
+    /// This does not claim that B verifies A's authentication tokens.
+    fn auth_signing_on_b(&self) -> bool {
+        false
+    }
 
     /// Whether the TA may fall back to the local software keybox when the
     /// remote is unavailable.  Defaults to `true`.
