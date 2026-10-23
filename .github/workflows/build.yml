@@ -49,6 +49,10 @@ jobs:
         run: python3 .github/scripts/test_bump_version.py
       - name: Test CI toolchain discovery
         run: python3 .github/scripts/test_ci_toolchain.py
+      - name: Prepare shared NDK cache
+        uses: ./.github/actions/android-ndk
+        with:
+          prepare-cache: 'true'
 
   ui:
     name: UI checks

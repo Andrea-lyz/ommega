@@ -17,12 +17,8 @@ runs:
         version: "29.3"
         repo-token: ${{ github.token }}
     - name: Setup Android NDK
-      uses: nttld/setup-ndk@v1
+      uses: ./.github/actions/android-ndk
       id: ndk
-      with:
-        ndk-version: r28c
-        link-to-sdk: false
-        local-cache: true
     - name: Configure Android cargo
       shell: bash
       env:
