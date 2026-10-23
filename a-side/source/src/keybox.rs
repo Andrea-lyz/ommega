@@ -299,22 +299,6 @@ impl KeyBox {
         })
     }
 
-    pub fn update_rsa_keybox(
-        &mut self,
-        key_der: Vec<u8>,
-        chain: Vec<keymint::Certificate>,
-    ) -> Result<()> {
-        self.update_keybox(KeyAlgorithm::Rsa, key_der, chain)
-    }
-
-    pub fn update_ec_keybox(
-        &mut self,
-        key_der: Vec<u8>,
-        chain: Vec<keymint::Certificate>,
-    ) -> Result<()> {
-        self.update_keybox(KeyAlgorithm::Ec, key_der, chain)
-    }
-
     fn update_keybox(
         &mut self,
         algorithm: KeyAlgorithm,

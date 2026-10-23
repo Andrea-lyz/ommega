@@ -326,3 +326,15 @@ to four connections in one RPC session, preserving Binder identities. Ordinary
 remote signatures without pending authentication, trusted presence, confirmation
 or single-use key deletion execute network work outside the TA lock. Restricted
 operations retain the serialized finish path and existing authorization checks.
+
+## Relay client layout
+
+`src/remote.rs` owns relay requests, HTTP retries, identity-profile caching and
+health reporting. `src/remote/backend.rs` adapts those responses to the KeyMint
+`RemoteBackend` interface, validates certificate chains and decodes operation
+outputs. `RemoteRelayBackend` remains available through `crate::remote`.
+
+Response decoding borrows the result from the parsed JSON. Certificate debug
+metadata is collected during the same DER validation pass. Configuration reads
+copy only the requested value under a short-lived read guard; HTTP requests
+run after that guard is released.

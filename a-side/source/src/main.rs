@@ -39,7 +39,6 @@ pub mod utils;
 pub mod watchdog;
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
-// include!( "./aidl.rs"); // for development only
 
 fn storage_warn(message: String) {
     if log::log_enabled!(log::Level::Warn) {
