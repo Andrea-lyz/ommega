@@ -348,3 +348,14 @@ runtime updates. It resolves platform state after releasing the configuration
 read guard, then uses the KeyMint runtime-update path to install the result.
 Crypto seeds, the native StrongBox selection and trust settings beyond patch
 levels remain fixed until the daemon restarts.
+
+## Keybox layout
+
+`src/keybox/material.rs` parses and validates XML/PEM material, computes its
+identity, selects signing material by security level and serializes the batch
+keybox. `src/keybox/storage.rs` owns file persistence, bundled-template seeding
+and disk loading, including the optional dedicated StrongBox keybox.
+`src/keybox.rs` owns active state, reload locks, file watchers, retirement
+orchestration and the `KeyboxManager` adapter. Invalid or partial disk material
+falls back in memory without replacing the file. Database retirement stays
+limited to dedicated attestation keys bound to a previous keybox identity.
