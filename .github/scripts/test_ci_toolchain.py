@@ -8,6 +8,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("resolve_libclang.sh")
+NDK_SCRIPT = Path(__file__).with_name("resolve_ndk.sh")
 BASH = shutil.which("bash")
 TAR = shutil.which("tar")
 
@@ -83,6 +84,7 @@ class LibclangTests(unittest.TestCase):
         compiler.write_text(f"#!{BASH}\nprintf 'fixture clang\\n'\n", encoding="utf-8")
         compiler.chmod(0o755)
         (binary_dir / "clang").symlink_to(compiler)
+        (version / "x64" / "source.properties").write_text("Pkg.Revision=28.2.13676358\n")
         (version / "x64.complete").touch()
         archive = self.root / "ndk.tar"
         subprocess.run([TAR, "-cf", str(archive), "-C", str(version.parent), version.name],
@@ -93,6 +95,29 @@ class LibclangTests(unittest.TestCase):
         result = subprocess.run([str(binary_dir / "clang"), "--version"],
                                 capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout, "fixture clang\n")
+        env = dict(self.environment, CACHE_HIT="true", NDK_VERSION="r28c", RUNNER_ARCH="X64",
+                   RUNNER_TOOL_CACHE=str(self.root / "tool-cache"),
+                   INSTALLED_NDK_PATH="/must-not-use-the-installer-on-a-hit")
+        selected = subprocess.run([BASH, str(NDK_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        self.assertEqual(self.output.read_text(), f"ndk-path={version / 'x64'}\n")
+
+    def test_ndk_cache_miss_uses_installed_path(self):
+        installed = self.root / "installed-ndk"
+        installed.mkdir()
+        (installed / "source.properties").touch()
+        env = dict(self.environment, CACHE_HIT="false", INSTALLED_NDK_PATH=str(installed))
+        result = subprocess.run([BASH, str(NDK_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.output.read_text(), f"ndk-path={installed}\n")
+
+    def test_incomplete_ndk_cache_is_rejected(self):
+        env = dict(self.environment, CACHE_HIT="true", NDK_VERSION="r28c", RUNNER_ARCH="X64",
+                   RUNNER_TOOL_CACHE=str(self.root / "missing-tool-cache"))
+        result = subprocess.run([BASH, str(NDK_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("completion marker", result.stderr)
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":
