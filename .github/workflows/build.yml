@@ -123,6 +123,15 @@ jobs:
           cargo clippy --locked --target aarch64-linux-android --workspace --all-targets -- -D warnings
           cargo fmt --all -- --check
           cargo test --locked --target aarch64-linux-android --workspace --no-run
+      - name: Test A-side SOTER and grant lifetime helpers
+        if: matrix.component == 'a'
+        working-directory: a-side/source
+        run: |
+          env -u BINDGEN_EXTRA_CLANG_ARGS cargo test --locked --target x86_64-unknown-linux-gnu -p soter-ta --lib
+          grant_test="$(mktemp --tmpdir ommega-grant-lifetime.XXXXXX)"
+          trap 'rm -f "$grant_test"' EXIT
+          rustc --edition=2021 --test src/keymaster/delegation.rs -o "$grant_test"
+          "$grant_test"
       - name: Check A-side WebUI bundle patch
         if: matrix.component == 'a'
         working-directory: a-side/source

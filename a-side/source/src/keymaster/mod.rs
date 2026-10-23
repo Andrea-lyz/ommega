@@ -7,6 +7,7 @@ pub mod boot_key;
 pub mod crypto;
 pub mod database;
 pub mod db;
+mod delegation;
 pub mod enforcements;
 pub mod entropy;
 pub mod error;

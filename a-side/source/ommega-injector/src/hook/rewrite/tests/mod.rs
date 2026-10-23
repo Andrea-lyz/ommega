@@ -300,11 +300,166 @@ fn application_global_scope_excluded_uids_never_probe_grant_descriptors() {
 }
 
 #[test]
+fn isolated_grantee_enters_one_caller_scope_in_global_and_list_modes() {
+    let caller = CallerInfo {
+        uid: 99_014,
+        pid: 4242,
+        sid: "u:r:isolated_app:s0".into(),
+    };
+    for list_mode in [false, true] {
+        let mut cfg = config::InjectorConfig::default();
+        cfg.filter.enabled = list_mode;
+        let mut decision = if list_mode {
+            filter::evaluate(
+                &cfg.scoop,
+                &cfg.filter,
+                caller.uid as u32,
+                PackageResolution::Unknown,
+            )
+        } else {
+            evaluate_caller(&caller, &cfg)
+        };
+        assert!(!decision.allowed);
+        apply_delegated_caller_scope_with_probe(&mut decision, &caller, &cfg, |actual| {
+            assert_eq!(
+                (actual.uid, actual.pid, actual.sid.as_str()),
+                (99_014, 4242, "u:r:isolated_app:s0")
+            );
+            Ok(true)
+        })
+        .unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, FilterReason::AllowedDelegatedGrant);
+        assert!(decision.packages.is_empty());
+        for request in sample_service_requests() {
+            assert_eq!(
+                route_for_service_request(&request, &cfg.intercept),
+                RouteTarget::Ommega
+            );
+        }
+        assert!(security_level_scoop_enabled(&cfg.intercept));
+        assert!(!should_allow_ommega_grant_descriptor_with_probe(
+            &sample_key_descriptor(),
+            &decision,
+            &caller,
+            |_, _| panic!("delegated caller scope must not inspect the request descriptor")
+        )
+        .unwrap());
+    }
+}
+
+#[test]
+fn isolated_scope_requires_an_active_delegation_and_propagates_lookup_errors() {
+    let caller = CallerInfo {
+        uid: 99_014,
+        pid: 4242,
+        sid: "u:r:isolated_app:s0".into(),
+    };
+    let mut cfg = config::InjectorConfig::default();
+    cfg.filter.enabled = false;
+    let mut decision = evaluate_caller(&caller, &cfg);
+    apply_delegated_caller_scope_with_probe(&mut decision, &caller, &cfg, |_| Ok(false)).unwrap();
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, FilterReason::RejectedNonApplicationUid);
+    assert!(apply_delegated_caller_scope_with_probe(
+        &mut decision,
+        &caller,
+        &cfg,
+        |_| anyhow::bail!("database lookup failed")
+    )
+    .is_err());
+    assert!(
+        !decision.allowed,
+        "a failed lookup must not publish delegated scope"
+    );
+    let grant = KeyDescriptor {
+        domain: Domain::GRANT,
+        nspace: 7,
+        ..Default::default()
+    };
+    let unknown = filter::FilterDecision {
+        allowed: false,
+        reason: FilterReason::RejectedUnknownPackage,
+        packages: Vec::new(),
+    };
+    assert!(!should_allow_ommega_grant_descriptor_with_probe(
+        &grant,
+        &unknown,
+        &caller,
+        |_, _| panic!("an isolated caller cannot gain scope from a descriptor")
+    )
+    .unwrap());
+}
+
+#[test]
+fn delegated_scope_does_not_include_core_sandbox_or_forged_process_contexts() {
+    let cfg = config::InjectorConfig::default();
+    for (uid, sid) in [
+        (0, "u:r:init:s0"),
+        (1000, "u:r:system_server:s0"),
+        (1017, "u:r:keystore:s0"),
+        (20_000, "u:r:sdk_sandbox:s0"),
+        (99_014, "u:r:untrusted_app:s0"),
+    ] {
+        let caller = CallerInfo {
+            uid,
+            pid: 4242,
+            sid: sid.into(),
+        };
+        let mut decision = filter::FilterDecision {
+            allowed: false,
+            reason: FilterReason::RejectedNonApplicationUid,
+            packages: Vec::new(),
+        };
+        apply_delegated_caller_scope_with_probe(&mut decision, &caller, &cfg, |_| {
+            panic!("non-isolated identities must not probe delegation")
+        })
+        .unwrap();
+        assert!(!decision.allowed);
+    }
+}
+
+#[test]
+fn delegated_scope_respects_a_disabled_keystore_surface() {
+    let caller = CallerInfo {
+        uid: 99_014,
+        pid: 4242,
+        sid: "u:r:isolated_app:s0".into(),
+    };
+    let mut cfg = config::InjectorConfig::default();
+    cfg.filter.enabled = false;
+    cfg.intercept = config::InterceptConfig {
+        get_security_level: false,
+        get_key_entry: false,
+        update_subcomponent: false,
+        list_entries: false,
+        delete_key: false,
+        grant: false,
+        ungrant: false,
+        get_number_of_entries: false,
+        list_entries_batched: false,
+        get_supplementary_attestation_info: false,
+    };
+    let mut decision = evaluate_caller(&caller, &cfg);
+    apply_delegated_caller_scope_with_probe(&mut decision, &caller, &cfg, |_| {
+        panic!("disabled interception must not query delegation")
+    })
+    .unwrap();
+    assert!(!decision.allowed);
+    for request in sample_service_requests() {
+        assert_eq!(
+            route_for_service_request(&request, &cfg.intercept),
+            RouteTarget::System
+        );
+    }
+}
+
+#[test]
 fn ommega_grant_descriptor_rule_covers_grant_and_key_id() {
     let _guard = route_state_test_guard();
     let caller = CallerInfo {
-        uid: 99_014,
-        sid: "u:r:isolated_app:s0".to_string(),
+        uid: 11_014,
+        sid: "u:r:untrusted_app:s0".to_string(),
         pid: 4242,
     };
     let unknown_package = filter::FilterDecision {

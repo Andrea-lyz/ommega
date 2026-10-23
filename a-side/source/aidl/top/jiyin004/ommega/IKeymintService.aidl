@@ -49,4 +49,6 @@ interface IKeymintService {
     void updateRsaKeybox(in @nullable CallerInfo ctx, in byte[] key, in List<Certificate> chain);
 
     boolean isGrant(in @nullable CallerInfo ctx, in KeyDescriptor grant);
+
+    boolean hasDelegatedScope(in @nullable CallerInfo ctx);
 }

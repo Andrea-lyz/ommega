@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use kmr_common::consts::{AID_KEYSTORE, AID_ROOT, AID_SYSTEM};
+use kmr_common::consts::{is_isolated_uid, AID_KEYSTORE, AID_ROOT, AID_SYSTEM};
 
 use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
@@ -35,6 +35,7 @@ use crate::keymaster::audit_log::log_key_deleted;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::db::KEYSTORE_UUID;
 use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType};
+use crate::keymaster::delegation::ProcessIdentity;
 use crate::keymaster::error::{into_logged_binder, KsError as Error};
 use crate::keymaster::id_rotation::IdRotationState;
 use crate::keymaster::permission::{
@@ -575,12 +576,21 @@ impl KeystoreService {
             .unwrap()
             .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
+        let scope = if u32::try_from(grantee_uid).is_ok_and(is_isolated_uid) {
+            Some(
+                ProcessIdentity::for_uid(i64::from(grantee_uid))
+                    .context("Cannot bind grant to a live isolated grantee.")?,
+            )
+        } else {
+            None
+        };
         DB.with(|db| {
             db.borrow_mut().grant(
                 key,
                 caller_uid,
                 AppUid(grantee_uid as i64),
                 access_vector,
+                scope.as_ref(),
                 |k, av| check_grant_permission(*av, k, ctx),
             )
         })
@@ -639,6 +649,35 @@ impl KeystoreService {
                 _ => Err(error).context(err!("KeystoreService::is_grant.")),
             },
         }
+    }
+
+    fn has_delegated_scope(&self, caller: &CallerInfo) -> Result<bool> {
+        if !u32::try_from(caller.uid).is_ok_and(is_isolated_uid) {
+            return Ok(false);
+        }
+        let scopes = DB.with(|db| db.borrow_mut().delegated_grant_scopes(AppUid(caller.uid)))?;
+        if scopes.is_empty() {
+            return Ok(false);
+        }
+        let Some(current) = ProcessIdentity::for_pid(caller.pid, caller.uid)
+            .context("Cannot verify isolated caller identity.")?
+        else {
+            return Ok(false);
+        };
+        for scope in scopes {
+            if scope.boot_id != current.boot_id {
+                continue;
+            }
+            if scope == current
+                || ProcessIdentity::for_pid(scope.pid, caller.uid)
+                    .context("Cannot verify isolated grant lifetime.")?
+                    .as_ref()
+                    == Some(&scope)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn enforce_keybox_admin(&self, ctx: &CallerInfo) -> Result<()> {
@@ -917,5 +956,11 @@ impl IKeymintService for KeystoreService {
         let _wp = wd::watch("IKeymintService::isGrant");
         let ctx = Some(require_ommega_ctx(ctx, "IKeymintService::isGrant")?);
         self.is_grant(ctx, grant).map_err(into_logged_binder)
+    }
+
+    fn hasDelegatedScope(&self, ctx: Option<&CallerInfo>) -> Result<bool, Status> {
+        let _wp = wd::watch("IKeymintService::hasDelegatedScope");
+        let caller = require_ommega_ctx(ctx, "IKeymintService::hasDelegatedScope")?;
+        self.has_delegated_scope(caller).map_err(into_logged_binder)
     }
 }

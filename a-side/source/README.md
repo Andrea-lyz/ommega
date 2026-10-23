@@ -94,6 +94,11 @@ software TA switch is turned off.
    per-app policies. The WebUI disables list editing while global scope is on.
    Existing keys and descriptors are not migrated between System and Ommega.
 
+   An explicit Ommega grant can delegate scope to a live isolated process. Its
+   real UID and grant access vector remain authoritative; process-bound scope
+   expires when the anchor exits or its last grant is revoked. See
+   [Isolated grant scope](docs/GRANT-SCOPE.md) for routing and lifetime rules.
+
    In list mode, two lists feed routing and are merged when the injector config is read:
    `scoop` in `/data/misc/keystore/ommega/injector.toml` (the shipped defaults
    plus anything added by hand) and `target.txt` (what the WebUI writes). A
