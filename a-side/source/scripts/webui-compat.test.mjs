@@ -37,6 +37,8 @@ function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
     _: async () => ({ stdout: "" }),
     se: { querySelectorAll: () => [] },
     Dl: new Set(),
+    Qe: [],
+    ommegaTargetModes: new Map(),
     navigator: {language},
     localStorage: {getItem: () => preference},
     document: {
@@ -60,6 +62,45 @@ function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
 
 test("the glue evaluates without the WebUI globals", () => {
   loadGlue();
+});
+
+test("language changes warn only for real unsaved app selections and modes", async () => {
+  const ctx = loadGlue();
+  ctx.Qe = ["com.example.wallet", "com.example.checker"];
+  ctx.ommegaTargetModes.set("com.example.wallet", "tee");
+  const box = {checked:true, closest:()=>({getAttribute:()=>"com.example.wallet"})};
+  ctx.se.querySelectorAll = () => [box];
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "initial load has no draft");
+  await ctx.Mi();
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "unrendered or filtered cards are not edits");
+  ctx.Qe.reverse();
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "sorting is not an edit");
+  box.checked = false;
+  assert.equal(ctx.ommegaAppsHaveChanges(), true);
+  box.checked = true;
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "reverting a selection is clean");
+  ctx.ommegaTargetModes.set("com.example.wallet", "strongbox");
+  assert.equal(ctx.ommegaAppsHaveChanges(), true);
+  ctx.ommegaTargetModes.set("com.example.wallet", "tee");
+  assert.equal(ctx.ommegaAppsHaveChanges(), false);
+  ctx.ommegaTargetModes.set("com.unselected.app", "strongbox");
+  assert.equal(ctx.ommegaAppsHaveChanges(), false, "unselected modes are not saved");
+  ctx.Dl.add("com.retained.app");
+  assert.equal(ctx.ommegaAppsHaveChanges(), true, "retained scope selections count");
+});
+
+test("compatibility drafts remain dirty until the successfully saved settings reload", async () => {
+  const ctx = loadGlue();
+  ctx.Qe = ["com.example.wallet"];
+  await ctx.Mi();
+  vm.runInContext('ommegaCompatEnabled = true', ctx);
+  assert.equal(ctx.ommegaAppsHaveChanges(), true);
+  ctx._ = async () => ({errno:1, stdout:"", stderr:"write failed"});
+  await ctx.ommegaWriteTargetCompat();
+  assert.equal(ctx.ommegaAppsHaveChanges(), true, "failed writes do not clear the baseline");
+  ctx._ = async () => ({errno:0, stdout:"[positive_key_id]\nenabled=true\n"});
+  await ctx.Mi();
+  assert.equal(ctx.ommegaAppsHaveChanges(), false);
 });
 
 test("auth policy round-trips default and app exceptions and rejects ambiguous configs", () => {

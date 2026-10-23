@@ -80,8 +80,9 @@ function install() {
     else setText('om-action-message',text('界面尚未就绪，请稍后重试。','The interface is still loading. Try again shortly.'));
   };
   bindAppearance(() => {
-    const save = document.getElementById('save');
-    return !save || save.classList.contains('hide') || window.confirm(text('尚有未保存的应用设置，切换语言会重新加载。继续？','You have unsaved app changes. Changing language reloads the page. Continue?'));
+    const changes = {dirty:false};
+    document.dispatchEvent(new CustomEvent('ommega-app-changes', {detail:changes}));
+    return !changes.dirty || window.confirm(text('尚有未保存的应用设置，切换语言会重新加载。继续？','You have unsaved app changes. Changing language reloads the page. Continue?'));
   });
   const refreshButton = document.getElementById('om-refresh');
   const refresh = pollWhenVisible(readStatus, 10000, refreshButton);

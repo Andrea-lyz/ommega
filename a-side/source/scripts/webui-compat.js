@@ -6,6 +6,33 @@
 // below. Applied by scripts/webui-patch.py to the prebuilt WebUI bundle.
 const OMMEGA_TARGET_COMPAT = "/data/adb/ommega/ommegadata/target-compat.toml";
 let ommegaCompatEnabled = false;
+let ommegaAppsBaseline = null;
+
+function ommegaAppSettingsSnapshot(packages) {
+  const selected = [...new Set(packages)].sort();
+  return JSON.stringify([selected.map(pkg => [pkg, ommegaTargetModes.get(pkg) || "global_default"]), ommegaCompatEnabled]);
+}
+
+function ommegaAppsHaveChanges() {
+  if (ommegaAppsBaseline === null) return false;
+  // Keep loaded selections until their cards exist. Loading, filtering and
+  // sorting the list must not look like an edit to the scope.
+  const selected = new Set(Qe);
+  for (const box of se.querySelectorAll("md-checkbox")) {
+    const pkg = box.closest(".card")?.getAttribute("data-package");
+    if (!pkg) continue;
+    if (box.checked) selected.add(pkg);
+    else selected.delete(pkg);
+  }
+  Dl.forEach(pkg => selected.add(pkg));
+  return ommegaAppSettingsSnapshot(selected) !== ommegaAppsBaseline;
+}
+
+// modern.js is a separate module, so expose the result through a synchronous
+// event rather than the visibility of the legacy Save button.
+document.addEventListener("ommega-app-changes", event => {
+  event.detail.dirty = ommegaAppsHaveChanges();
+});
 
 // Existing diagnostics keep their bilingual representation for tooling; the UI
 // presents the matching half using the same resolved preference as the shell.
@@ -125,7 +152,10 @@ const ommegaBaseAppLoadCompat = Mi;
 Mi = async function () {
   const {stdout} = await _('cat "' + OMMEGA_TARGET_COMPAT + '" 2>/dev/null || true');
   ommegaCompatEnabled = ommegaParseTargetCompat(stdout);
-  return ommegaBaseAppLoadCompat();
+  const result = await ommegaBaseAppLoadCompat();
+  // A successful scope save reloads Mi; a failed save leaves this baseline.
+  ommegaAppsBaseline = ommegaAppSettingsSnapshot(Qe);
+  return result;
 };
 
 const ommegaBaseSaveCompat = document.getElementById("save").onclick;
