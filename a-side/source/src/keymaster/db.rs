@@ -53,6 +53,7 @@ use crate::err as ks_err;
 use crate::impl_metadata;
 use crate::keymaster::crypto::ZVec;
 use crate::keymaster::database::{perboot, utils, versioning};
+use crate::keymaster::delegation::ProcessIdentity;
 use crate::keymaster::gc::Gc;
 use crate::keymaster::key_parameter::{KeyParameter, KeyParameterValue, KeyPurpose, Tag};
 use crate::keymaster::permission::KeyPermSet;
@@ -1382,6 +1383,19 @@ impl KeystoreDB {
             [],
         )
         .context("Failed to initialize \"grant\" table.")?;
+
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS persistent.grant_scope (
+                grant_id INTEGER PRIMARY KEY,
+                grantee_pid INTEGER NOT NULL,
+                start_time INTEGER NOT NULL,
+                boot_id TEXT NOT NULL);
+             CREATE TRIGGER IF NOT EXISTS persistent.grant_scope_delete
+             AFTER DELETE ON grant BEGIN
+                DELETE FROM grant_scope WHERE grant_id = OLD.id;
+             END;",
+        )
+        .context("Failed to initialize isolated grant scope.")?;
 
         Ok(())
     }
@@ -3461,15 +3475,20 @@ impl KeystoreDB {
     /// it inserts the `grantee_uid`, `key_id`, and `access_vector` into the
     /// grant table. The new row will have a randomized id, which is used as
     /// grant id in the namespace field of the resulting KeyDescriptor.
-    pub fn grant(
+    pub(super) fn grant(
         &mut self,
         key: &KeyDescriptor,
         caller_uid: AppUid,
         grantee_uid: AppUid,
         access_vector: KeyPermSet,
+        scope: Option<&ProcessIdentity>,
         check_permission: impl Fn(&KeyDescriptor, &KeyPermSet) -> Result<()>,
     ) -> Result<KeyDescriptor> {
         let _wp = wd::watch("KeystoreDB::grant");
+        anyhow::ensure!(
+            scope.is_none_or(|identity| identity.uid == grantee_uid.0),
+            "grant scope UID mismatch"
+        );
 
         self.with_transaction(Immediate("TX_grant"), |tx| {
             // Load the key_id and complete the access control tuple.
@@ -3491,6 +3510,18 @@ impl KeystoreDB {
             // expressed in `access_vector`.
             check_permission(&access.descriptor, &access_vector)
                 .context(ks_err!("check_permission failed"))?;
+
+            if let Some(scope) = scope {
+                // A new explicit grant starts a new isolated-process lifetime.
+                // Old grants must not become usable when Android recycles its UID.
+                tx.execute(
+                    "DELETE FROM persistent.grant WHERE grantee = ? AND id NOT IN (
+                        SELECT grant_id FROM persistent.grant_scope
+                        WHERE grantee_pid = ? AND start_time = ? AND boot_id = ?);",
+                    params![grantee_uid.0, scope.pid, scope.start_time, scope.boot_id],
+                )
+                .context("Failed to expire grants from an old isolated process.")?;
+            }
 
             let grant_id = if let Some(grant_id) = tx
                 .query_row(
@@ -3524,6 +3555,15 @@ impl KeystoreDB {
                 .context(ks_err!())?
             };
 
+            if let Some(scope) = scope {
+                tx.execute(
+                    "INSERT OR REPLACE INTO persistent.grant_scope
+                        (grant_id, grantee_pid, start_time, boot_id) VALUES (?, ?, ?, ?);",
+                    params![grant_id, scope.pid, scope.start_time, scope.boot_id],
+                )
+                .context("Failed to bind isolated grant scope.")?;
+            }
+
             Ok(KeyDescriptor {
                 domain: Domain::GRANT,
                 nspace: grant_id,
@@ -3532,6 +3572,32 @@ impl KeystoreDB {
             })
             .no_gc()
         })
+    }
+
+    /// Effective delegation is a property of the caller, independent of the
+    /// descriptor in its next request. Key permissions remain checked on access.
+    pub(super) fn delegated_grant_scopes(&mut self, uid: AppUid) -> Result<Vec<ProcessIdentity>> {
+        self.with_transaction(TransactionBehavior::Deferred, |tx| {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT s.grantee_pid, s.start_time, s.boot_id
+                 FROM persistent.grant AS g
+                 JOIN persistent.grant_scope AS s ON s.grant_id = g.id
+                 JOIN persistent.keyentry AS k ON k.id = g.keyentryid
+                 WHERE g.grantee = ? AND k.state = ? AND k.key_type = ?;",
+            )?;
+            let scopes = stmt
+                .query_map(params![uid.0, KeyLifeCycle::Live, KeyType::Client], |row| {
+                    Ok(ProcessIdentity {
+                        uid: uid.0,
+                        pid: row.get(0)?,
+                        start_time: row.get(1)?,
+                        boot_id: row.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(scopes).no_gc()
+        })
+        .context("Failed to query isolated grant scope.")
     }
 
     /// This function checks permissions like `grant` and `load_key_entry`
@@ -4315,5 +4381,237 @@ mod tests {
             .is_err(),
             "a caller without a grant must not resolve the key id"
         );
+    }
+
+    fn make_grant_scope_db() -> (KeystoreDB, [KeyDescriptor; 2], ProcessIdentity) {
+        let mut db = make_test_db();
+        let tx = db.conn.transaction().unwrap();
+        insert_live_client_key(&tx, 4242, KEYSTORE_UUID, "grant-one");
+        insert_live_client_key(&tx, 4243, KEYSTORE_UUID, "grant-two");
+        tx.commit().unwrap();
+        let keys = [4242, 4243].map(|nspace| KeyDescriptor {
+            domain: Domain::KEY_ID,
+            nspace,
+            ..Default::default()
+        });
+        let scope = ProcessIdentity {
+            uid: 99_014,
+            pid: 42,
+            start_time: 123,
+            boot_id: "boot-a".into(),
+        };
+        (db, keys, scope)
+    }
+
+    #[test]
+    fn isolated_grant_scope_survives_schema_init_and_last_grant_controls_revocation() {
+        let (mut db, keys, scope) = make_grant_scope_db();
+        for key in &keys {
+            db.grant(
+                key,
+                AppUid(TEST_NAMESPACE),
+                AppUid(scope.uid),
+                260.into(),
+                Some(&scope),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        }
+        let tx = db.conn.transaction().unwrap();
+        KeystoreDB::init_tables(&tx).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            db.delegated_grant_scopes(AppUid(scope.uid)).unwrap(),
+            vec![scope.clone()]
+        );
+        assert!(db
+            .delegated_grant_scopes(AppUid(scope.uid + 1))
+            .unwrap()
+            .is_empty());
+        db.ungrant(&keys[0], AppUid(TEST_NAMESPACE), AppUid(scope.uid), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            db.delegated_grant_scopes(AppUid(scope.uid)).unwrap(),
+            vec![scope.clone()]
+        );
+        db.ungrant(&keys[1], AppUid(TEST_NAMESPACE), AppUid(scope.uid), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(db
+            .delegated_grant_scopes(AppUid(scope.uid))
+            .unwrap()
+            .is_empty());
+        let count: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM persistent.grant_scope;", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "all grant deletion paths must remove their bindings"
+        );
+    }
+
+    #[test]
+    fn recycled_isolated_uid_cannot_reactivate_old_grants() {
+        for replacement in [
+            ProcessIdentity {
+                uid: 99_014,
+                pid: 43,
+                start_time: 124,
+                boot_id: "boot-a".into(),
+            },
+            ProcessIdentity {
+                uid: 99_014,
+                pid: 42,
+                start_time: 124,
+                boot_id: "boot-a".into(),
+            },
+            ProcessIdentity {
+                uid: 99_014,
+                pid: 42,
+                start_time: 123,
+                boot_id: "boot-b".into(),
+            },
+        ] {
+            let (mut db, keys, original) = make_grant_scope_db();
+            let old_grant = db
+                .grant(
+                    &keys[0],
+                    AppUid(TEST_NAMESPACE),
+                    AppUid(original.uid),
+                    260.into(),
+                    Some(&original),
+                    |_, _| Ok(()),
+                )
+                .unwrap();
+            db.grant(
+                &keys[1],
+                AppUid(TEST_NAMESPACE),
+                AppUid(replacement.uid),
+                260.into(),
+                Some(&replacement),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                db.delegated_grant_scopes(AppUid(replacement.uid)).unwrap(),
+                vec![replacement.clone()]
+            );
+            for key in [&old_grant, &keys[0]] {
+                assert!(db
+                    .load_key_entry(
+                        key,
+                        KeyType::Client,
+                        KeyEntryLoadBits::NONE,
+                        AppUid(replacement.uid),
+                        |_, av| {
+                            anyhow::ensure!(av.is_some(), "no grant for the replacement process");
+                            Ok(())
+                        }
+                    )
+                    .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_scope_does_not_replace_get_info_permissions_or_grant_permission_checks() {
+        use crate::keymaster::permission::KeyPerm;
+        let (mut db, keys, scope) = make_grant_scope_db();
+        let grant = db
+            .grant(
+                &keys[0],
+                AppUid(TEST_NAMESPACE),
+                AppUid(scope.uid),
+                256.into(),
+                Some(&scope),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            db.delegated_grant_scopes(AppUid(scope.uid)).unwrap(),
+            vec![scope.clone()]
+        );
+        let require_info = |_: &KeyDescriptor, av: Option<KeyPermSet>| {
+            anyhow::ensure!(
+                av.is_some_and(|av| av.includes(KeyPerm::GetInfo)),
+                "GET_INFO denied"
+            );
+            Ok(())
+        };
+        for key in [&grant, &keys[0]] {
+            assert!(db
+                .load_key_entry(
+                    key,
+                    KeyType::Client,
+                    KeyEntryLoadBits::NONE,
+                    AppUid(scope.uid),
+                    require_info
+                )
+                .is_err());
+        }
+        let updated = db
+            .grant(
+                &keys[0],
+                AppUid(TEST_NAMESPACE),
+                AppUid(scope.uid),
+                260.into(),
+                Some(&scope),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(updated.nspace, grant.nspace);
+        for key in [&grant, &keys[0]] {
+            assert!(db
+                .load_key_entry(
+                    key,
+                    KeyType::Client,
+                    KeyEntryLoadBits::NONE,
+                    AppUid(scope.uid),
+                    require_info
+                )
+                .is_ok());
+            assert!(db
+                .load_key_entry(
+                    key,
+                    KeyType::Client,
+                    KeyEntryLoadBits::NONE,
+                    AppUid(scope.uid + 1),
+                    require_info
+                )
+                .is_err());
+        }
+        assert!(db
+            .grant(
+                &keys[1],
+                AppUid(TEST_NAMESPACE),
+                AppUid(scope.uid),
+                260.into(),
+                Some(&scope),
+                |_, _| anyhow::bail!("grant denied")
+            )
+            .is_err());
+        let count: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM persistent.grant_scope;", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        db.conn
+            .execute(
+                "UPDATE persistent.keyentry SET state = ? WHERE id = ?;",
+                params![KeyLifeCycle::Unreferenced, keys[0].nspace],
+            )
+            .unwrap();
+        assert!(db
+            .delegated_grant_scopes(AppUid(scope.uid))
+            .unwrap()
+            .is_empty());
     }
 }

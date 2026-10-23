@@ -136,6 +136,9 @@ pub struct TaState {
     /// consumes with the sign it releases.
     #[serde(default)]
     pub bio_watermark: u64,
+    /// Caller policy and opaque sign handles share this ledger's durability.
+    #[serde(default)]
+    pub(crate) routing: crate::routing::Routing,
 }
 
 impl TaState {
@@ -152,6 +155,7 @@ impl TaState {
             next_session: 0,
             fingerprints: BTreeMap::new(),
             bio_watermark: 0,
+            routing: crate::routing::Routing::default(),
         })
     }
 

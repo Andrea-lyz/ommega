@@ -22,6 +22,7 @@ pub mod ffi;
 pub mod parcel;
 pub mod platform;
 pub mod remote;
+mod routing;
 pub mod state;
 
 pub use error::{

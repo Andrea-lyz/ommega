@@ -17,6 +17,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::dispatch::{self, Outcome, Request};
 use crate::platform::{self, Platform};
 use crate::remote;
+use crate::routing::Backend;
 use crate::state::TaState;
 
 /// Reply kinds, mirrored by `SOTERTA_KIND_*` in the daemon.
@@ -261,8 +262,9 @@ pub unsafe extern "C" fn soterta_init(state_path: *const c_char) -> i32 {
             return SOTERTA_ERROR;
         }
     }
+    let remote_was_active = state.routing.remote_was_active();
     *lock(&SHARED) = Some(Shared { path, state });
-    REMOTE_WAS_ACTIVE.store(false, Ordering::Release);
+    REMOTE_WAS_ACTIVE.store(remote_was_active, Ordering::Release);
     clear_error();
     if created {
         1
@@ -321,7 +323,12 @@ pub unsafe extern "C" fn soterta_handle(
         set_error("state is not initialized");
         return SOTERTA_ERROR;
     }
+    #[cfg(not(test))]
     let remote_config = remote::Config::load();
+    // Native unit tests must not pick up a real device's relay credentials.
+    // Relay cases use answer_request with an explicit config and mock transport.
+    #[cfg(test)]
+    let remote_config = Ok(remote::Config::default());
     let relay_active = match &remote_config {
         Ok(config) if config.enabled => {
             REMOTE_WAS_ACTIVE.store(true, Ordering::Release);
@@ -334,84 +341,128 @@ pub unsafe extern "C" fn soterta_handle(
         Ok(_) => REMOTE_WAS_ACTIVE.load(Ordering::Acquire),
         Err(_) => true,
     };
-    // The ATTK trio is this device's own factory key pair, not a relayed
-    // operation: the relay protocol has no ATTK operation (the QTI B-side HAL
-    // exposes no verified ATTK), while the vendor engineering-mode key check
-    // reads `verifyAttkKeyPair` on *this* device through cryptoeng. Answer those
-    // three codes from the local ledger even while the relay is active, so the
-    // engineering mode sees a present device key instead of a relayed failure.
-    let use_remote = relays(relay_active, tx);
-    if use_remote {
-        // The relay server mints its built-in fallback answers with this
-        // ledger's `cpu_id` and routes real SOTER applications to the real
-        // device by the caller's package names (`remote::forward` resolves
-        // them). Passing both keeps probe answers on one stable identity and
-        // keeps real applications off the server's built-in material.
-        let cpu_id = lock(&SHARED)
-            .as_ref()
-            .map(|shared| shared.state.cpu_id.clone())
-            .unwrap_or_default();
-        let answer = match remote_config {
-            Ok(config) if config.enabled => remote::forward(&config, tx, &request, &cpu_id),
-            Ok(_) => Err("SOTER remote config disappeared while active".to_string()),
-            Err(error) => Err(error),
-        };
-        let outcome = match answer {
-            Ok(Some(outcome)) => {
-                clear_error();
-                Some(outcome)
-            }
-            Ok(None) => {
-                // The relay explicitly asked this TA to answer the transaction
-                // locally. That is how probes and callers outside its real-SOTER
-                // allowlist are kept off the physical device; handing the
-                // synthetic -1001 up would make every such client see a broken
-                // local SOTER instead.
-                None
-            }
-            Err(error) => {
-                eprintln!("soterta remote: {error}");
-                set_error(error);
-                let Some(dead) = dispatch::dead_reply(tx) else {
-                    return SOTERTA_UNHANDLED;
-                };
-                Some(dead)
-            }
-        };
-        if let Some(outcome) = outcome {
+    match answer_request(tx, request, remote_config, relay_active, remote::forward) {
+        Ok(Some(outcome)) => {
             fill(&mut *reply, outcome);
-            return SOTERTA_HANDLED;
+            clear_error();
+            SOTERTA_HANDLED
+        }
+        Ok(None) => SOTERTA_UNHANDLED,
+        Err(error) => {
+            eprintln!("soterta routing: {error}");
+            set_error(error);
+            let Some(outcome) = dispatch::dead_reply(tx) else {
+                return SOTERTA_UNHANDLED;
+            };
+            fill(&mut *reply, outcome);
+            SOTERTA_HANDLED
         }
     }
-    // The sign transactions read the platform before the ledger lock is taken:
-    // the hooks spawn a platform dump, and that must not stall every other
-    // transaction the daemon serves.
+}
+
+pub(crate) fn answer_request(
+    tx: u32,
+    request: Request,
+    remote_config: Result<remote::Config, String>,
+    relay_active: bool,
+    forward: impl FnOnce(&remote::Config, u32, &Request, &str) -> Result<Option<Outcome>, String>,
+) -> Result<Option<Outcome>, String> {
+    // ATTK stays local, including when a remote configuration is unreadable.
+    let relay = relays(relay_active, tx);
+    let scope = match &remote_config {
+        Ok(config) if config.enabled => Some(config.route_scope()),
+        Ok(_) if !relay_active => Some("local".to_owned()),
+        _ if relay => return Err("SOTER remote config is unavailable while active".into()),
+        _ => None,
+    };
+    let (mut route, cpu_id, scope_changed) = {
+        let mut slot = lock(&SHARED);
+        let shared = slot.as_mut().ok_or("state is not initialized")?;
+        let changed = scope
+            .as_ref()
+            .is_some_and(|scope| !shared.state.routing.is_scope(scope));
+        if let Some(scope) = &scope {
+            shared.state.routing.configure(scope);
+        }
+        (
+            shared.state.routing.prepare(relay, tx, request)?,
+            shared.state.cpu_id.clone(),
+            changed,
+        )
+    };
+    if route.backend == Backend::Remote {
+        let config = remote_config?;
+        match forward(&config, tx, &route.request, &cpu_id)? {
+            Some(outcome) => {
+                let mut slot = lock(&SHARED);
+                let shared = slot.as_mut().ok_or("state is not initialized")?;
+                if scope
+                    .as_ref()
+                    .is_some_and(|scope| !shared.state.routing.is_scope(scope))
+                {
+                    return Err("SOTER relay configuration changed during the request".into());
+                }
+                let outcome = shared.state.routing.complete(tx, &route, outcome)?;
+                if scope_changed
+                    || matches!(
+                        tx,
+                        dispatch::TX_INIT_SIGN
+                            | dispatch::TX_FINISH_SIGN
+                            | dispatch::TX_REMOVE_ALL_UID_KEY
+                    )
+                {
+                    shared
+                        .state
+                        .store(&shared.path)
+                        .map_err(|error| error.to_string())?;
+                }
+                return Ok(Some(outcome));
+            }
+            None => {
+                let mut slot = lock(&SHARED);
+                let shared = slot.as_mut().ok_or("state is not initialized")?;
+                if scope
+                    .as_ref()
+                    .is_some_and(|scope| !shared.state.routing.is_scope(scope))
+                {
+                    return Err("SOTER relay configuration changed during the request".into());
+                }
+                let policy = shared.state.routing.local_only(tx, &mut route);
+                // Persist the verdict even when this transaction must fail:
+                // no AuthKey can succeed until the client receives a local ASK.
+                shared
+                    .state
+                    .store(&shared.path)
+                    .map_err(|error| error.to_string())?;
+                policy?;
+            }
+        }
+    }
+    // Platform hooks can block on Binder; never hold the ledger lock here.
     let platform = if dispatch::consults_platform(tx) {
         platform::current()
     } else {
         Platform::default()
     };
-    let outcome = {
-        let mut slot = lock(&SHARED);
-        let Some(shared) = slot.as_mut() else {
-            set_error("state is not initialized");
-            return SOTERTA_ERROR;
-        };
-        dispatch::handle_request(&mut shared.state, tx, request, platform)
-    };
-    let Some(outcome) = outcome else {
-        return SOTERTA_UNHANDLED;
-    };
-    fill(&mut *reply, outcome);
-    if let Err(error) = persist() {
-        // Do not hand out material the ledger cannot keep: a device id or a
-        // signature that does not survive a restart would be worse than none.
-        set_error(format!("cannot persist state: {error}"));
-        soterta_free(reply);
-        return SOTERTA_ERROR;
+    let mut slot = lock(&SHARED);
+    let shared = slot.as_mut().ok_or("state is not initialized")?;
+    if scope
+        .as_ref()
+        .is_some_and(|scope| !shared.state.routing.is_scope(scope))
+    {
+        return Err("SOTER relay configuration changed during the request".into());
     }
-    clear_error();
-    SOTERTA_HANDLED
+    let Some(outcome) =
+        dispatch::handle_request(&mut shared.state, tx, route.request.clone(), platform)
+    else {
+        return Ok(None);
+    };
+    let outcome = shared.state.routing.complete(tx, &route, outcome)?;
+    shared
+        .state
+        .store(&shared.path)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(outcome))
 }
 
 /// The answer the stock HAL gives for `tx` while its TA is dead.

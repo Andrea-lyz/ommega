@@ -16,6 +16,11 @@ pub const AID_USER_OFFSET: u32 = 100_000;
 pub const KEYSTORE_UID: libc::uid_t = AID_KEYSTORE as libc::uid_t;
 pub const KEYSTORE_GID: libc::gid_t = AID_KEYSTORE as libc::gid_t;
 
+/// Includes both app-zygote and ordinary isolated process IDs, for every user.
+pub const fn is_isolated_uid(uid: u32) -> bool {
+    uid % AID_USER_OFFSET >= 90_000
+}
+
 pub const ANDROID_SYSTEM_KEYSTORE2_LATEST_AIDL_VERSION: i32 = 6;
 
 pub const ANDROID_SYSTEM_KEYSTORE2_AIDL_VERSION_HASHES: &[AidlVersionHash] = &[
@@ -70,6 +75,18 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn isolated_uid_ranges_include_app_zygotes_and_other_users() {
+        for uid in [90_000, 98_999, 99_000, 99_999, 190_000, 299_999] {
+            assert!(is_isolated_uid(uid));
+        }
+        for uid in [
+            0, 1000, 1017, 10_000, 19_999, 20_000, 89_999, 100_000, 110_000,
+        ] {
+            assert!(!is_isolated_uid(uid));
+        }
+    }
 
     #[test]
     fn android_system_keystore2_hashes_cover_all_frozen_versions() {

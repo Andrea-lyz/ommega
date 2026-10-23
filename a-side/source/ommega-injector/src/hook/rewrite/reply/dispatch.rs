@@ -395,7 +395,21 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
     };
     let caller = synthetic_transaction_caller(fallback, tr, caller_sid);
     if kind == SyntheticTargetKind::SecurityLevel {
-        let decision = evaluate_caller(&caller, &cfg);
+        let mut decision = evaluate_caller(&caller, &cfg);
+        if let Err(error) = apply_delegated_caller_scope_with_probe(
+            &mut decision,
+            &caller,
+            &cfg,
+            probe_ommega_delegated_scope,
+        ) {
+            warn!(
+                "event=synthetic isolated delegation lookup failed uid={} pid={}: {:#}",
+                caller.uid, caller.pid, error
+            );
+            return Ok(synthetic_parcel_reply(build_service_specific_reply(
+                ResponseCode::SYSTEM_ERROR.0,
+            )?));
+        }
         let request = match parcel::parse_security_level_request(
             data,
             data_size,

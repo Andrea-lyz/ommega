@@ -11,7 +11,7 @@ pub(super) fn target_from_transaction(tr: &binder_transaction_data) -> Option<Lo
     })
 }
 
-fn route_for_service_request(
+pub(super) fn route_for_service_request(
     _request: &ParsedServiceRequest,
     intercept: &config::InterceptConfig,
 ) -> RouteTarget {
@@ -364,7 +364,13 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
     }
 
     if request_interface == identify::KEYSTORE_SERVICE_INTERFACE {
-        let decision = evaluate_caller(&caller, &cfg);
+        let mut decision = evaluate_caller(&caller, &cfg);
+        let delegation_result = apply_delegated_caller_scope_with_probe(
+            &mut decision,
+            &caller,
+            &cfg,
+            probe_ommega_delegated_scope,
+        );
         let mut request =
             match parcel::parse_service_request(data, data_size, offsets, offsets_size, tr.code) {
                 Ok(request) => request,
@@ -433,12 +439,14 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                 );
             }
         }
-        let allow_ommega_grant = match should_allow_ommega_grant_service_request_with_probe(
-            &request,
-            &decision,
-            &caller,
-            probe_ommega_grant,
-        ) {
+        let allow_ommega_grant = match delegation_result.and_then(|()| {
+            should_allow_ommega_grant_service_request_with_probe(
+                &request,
+                &decision,
+                &caller,
+                probe_ommega_grant,
+            )
+        }) {
             Ok(allow) => allow,
             Err(error) => {
                 warn!(
@@ -581,7 +589,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
     };
 
     if request_interface == identify::KEYSTORE_SECURITY_LEVEL_INTERFACE {
-        let decision = evaluate_caller(&caller, &cfg);
+        let mut decision = evaluate_caller(&caller, &cfg);
         let Some(target_info) = tracker::lookup_security_level_target(target) else {
             debug!(
                 "event=decision skipping IKeystoreSecurityLevel request for unmapped target ptr=0x{:x} cookie=0x{:x}",
@@ -608,39 +616,46 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        let allow_unknown_ommega_route =
-            match should_allow_ommega_grant_security_level_request_with_probe(
+        let delegation_result = apply_delegated_caller_scope_with_probe(
+            &mut decision,
+            &caller,
+            &cfg,
+            probe_ommega_delegated_scope,
+        );
+        let allow_unknown_ommega_route = match delegation_result.and_then(|()| {
+            should_allow_ommega_grant_security_level_request_with_probe(
                 &request,
                 &decision,
                 &caller,
                 probe_ommega_grant,
-            ) {
-                Ok(allow) => allow,
-                Err(error) => {
-                    warn!(
+            )
+        }) {
+            Ok(allow) => allow,
+            Err(error) => {
+                warn!(
                     "event=decision ommega grant ownership probe failed for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
                     caller.uid, caller.pid, error
                 );
-                    block_system_request(tr);
-                    if expects_reply {
-                        let pending = PendingSecurityLevelCall {
-                            request,
-                            caller,
-                            packages: decision.packages,
-                            route: RouteTarget::Ommega,
-                            security_level: target_info.security_level,
-                        };
-                        replace_top_pending(
-                            connection,
-                            PendingCall::PrecomputedSecurityLevel(
-                                pending,
-                                Box::new(Some(synthetic_fallback_reply())),
-                            ),
-                        );
-                    }
-                    return true;
+                block_system_request(tr);
+                if expects_reply {
+                    let pending = PendingSecurityLevelCall {
+                        request,
+                        caller,
+                        packages: decision.packages,
+                        route: RouteTarget::Ommega,
+                        security_level: target_info.security_level,
+                    };
+                    replace_top_pending(
+                        connection,
+                        PendingCall::PrecomputedSecurityLevel(
+                            pending,
+                            Box::new(Some(synthetic_fallback_reply())),
+                        ),
+                    );
                 }
-            };
+                return true;
+            }
+        };
         // Keystore2 shares each security-level Binder between getSecurityLevel and getKeyEntry.
         let scoop_enabled = security_level_scoop_enabled(&cfg.intercept);
         let route = if allow_unknown_ommega_route || decision.allowed && scoop_enabled {

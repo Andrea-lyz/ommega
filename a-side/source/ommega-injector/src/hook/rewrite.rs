@@ -144,6 +144,44 @@ fn evaluate_caller(
     filter::evaluate(&cfg.scoop, &cfg.filter, uid, package_resolution)
 }
 
+fn apply_delegated_caller_scope_with_probe(
+    decision: &mut filter::FilterDecision,
+    caller: &CallerInfo,
+    cfg: &config::InjectorConfig,
+    mut probe: impl FnMut(&CallerInfo) -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
+    if decision.allowed
+        || !identify::is_ommega_service_route_enabled(&cfg.intercept)
+        || !matches!(
+            decision.reason,
+            FilterReason::RejectedNonApplicationUid
+                | FilterReason::RejectedUnknownPackage
+                | FilterReason::RejectedNotInScope
+        )
+        || !u32::try_from(caller.uid).is_ok_and(kmr_common::consts::is_isolated_uid)
+        || !matches!(
+            caller.sid.split(':').nth(2),
+            Some("isolated_app" | "isolated_compute_app")
+        )
+    {
+        return Ok(());
+    }
+    if probe(caller)? {
+        decision.allowed = true;
+        decision.reason = FilterReason::AllowedDelegatedGrant;
+    }
+    Ok(())
+}
+
+fn probe_ommega_delegated_scope(caller: &CallerInfo) -> anyhow::Result<bool> {
+    let _guard = BypassGuard::enter();
+    match ipc::with_ommega_retry(|ommega| Ok(ommega.r#hasDelegatedScope(Some(caller))?)) {
+        Ok(delegated) => Ok(delegated),
+        Err(error) if ommega_unavailable_error(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn service_request_key(request: &ParsedServiceRequest) -> Option<&KeyDescriptor> {
     match request {
         ParsedServiceRequest::GetKeyEntry { key }
@@ -190,12 +228,13 @@ fn should_allow_ommega_grant_descriptor_with_probe(
                 // System route because ommega.isGrant() returns false for them.
                 | FilterReason::RejectedAndroidPackage
         )
+        || u32::try_from(caller.uid).is_ok_and(kmr_common::consts::is_isolated_uid)
     {
         return Ok(false);
     }
 
-    // A key that lives in ommega's plane is reached by a caller whose package
-    // cannot be resolved (an isolated process, or an app outside the scoop). Both
+    // A key that lives in ommega's plane is reached by an app outside the scoop.
+    // Isolated callers use their explicit process-bound scope instead. Both
     // descriptor shapes matter: the grant itself, and the key id a reply handed
     // out for it, which AOSP resolves through the grant table as well.
     if !matches!(grant.domain, Domain::GRANT | Domain::KEY_ID) {

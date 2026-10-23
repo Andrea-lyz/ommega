@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::dispatch::{self, Outcome, Request};
 
@@ -100,6 +101,16 @@ impl Config {
             Err(error) => Err(format!("cannot read SOTER remote config: {error}")),
         }
     }
+
+    pub(crate) fn route_scope(&self) -> String {
+        let mut digest = Sha256::new();
+        for field in [&self.url, &self.token, &self.device_id, &self.uid_map] {
+            digest.update((field.len() as u64).to_le_bytes());
+            digest.update(field.as_bytes());
+        }
+        digest.update([u8::from(self.tls_insecure)]);
+        hex::encode(digest.finalize())
+    }
 }
 
 fn parse_bool(value: &str) -> Result<bool, String> {
@@ -136,7 +147,7 @@ fn is_soter_cpu_id(text: &str) -> bool {
 /// application. The relay server therefore treats the resolved packages as a
 /// label for who is calling - used to keep real SOTER applications on the real
 /// device while probes and test traffic are answered from built-in material.
-fn request_uid(request: &Request) -> Option<u32> {
+pub(crate) fn request_uid(request: &Request) -> Option<u32> {
     match request {
         Request::Uid(uid) => Some(*uid),
         Request::UidKey { uid, .. } => Some(*uid),

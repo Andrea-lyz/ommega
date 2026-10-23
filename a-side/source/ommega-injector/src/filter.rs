@@ -12,6 +12,7 @@ pub enum PackageResolution {
 pub enum FilterReason {
     Disabled,
     Allowed,
+    AllowedDelegatedGrant,
     // Application-global UID exclusion must not enter descriptor grant probing.
     RejectedNonApplicationUid,
     RejectedAndroidPackage,
