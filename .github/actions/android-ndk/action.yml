@@ -1,13 +1,16 @@
 name: Cached Android NDK
 description: Cache the pinned NDK in its stable runner tool-cache path
 inputs:
+  ndk-version:
+    description: Pinned Android NDK version
+    default: r28c
   prepare-cache:
     description: Populate a missing cache without downloading an existing cache
     default: 'false'
 outputs:
   ndk-path:
     description: Installed NDK path for compilation
-    value: ${{ steps.ndk.outputs.ndk-path }}
+    value: ${{ steps.path.outputs.ndk-path }}
 runs:
   using: composite
   steps:
@@ -15,21 +18,30 @@ runs:
       id: cache
       uses: actions/cache/restore@v4
       with:
-        path: ${{ runner.tool_cache }}/ndk/r28c
-        key: ndk-toolcache-v1-${{ runner.os }}-${{ runner.arch }}-r28c
+        path: ${{ runner.tool_cache }}/ndk/${{ inputs.ndk-version }}
+        key: ndk-toolcache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.ndk-version }}
         lookup-only: ${{ inputs.prepare-cache }}
     - name: Setup pinned NDK
       id: ndk
-      if: inputs.prepare-cache != 'true' || steps.cache.outputs.cache-hit != 'true'
+      if: steps.cache.outputs.cache-hit != 'true'
       uses: nttld/setup-ndk@v1
       with:
-        ndk-version: r28c
+        ndk-version: ${{ inputs.ndk-version }}
         link-to-sdk: false
+    - name: Select NDK path
+      id: path
+      if: inputs.prepare-cache != 'true' || steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        NDK_VERSION: ${{ inputs.ndk-version }}
+        INSTALLED_NDK_PATH: ${{ steps.ndk.outputs.ndk-path }}
+      run: bash .github/scripts/resolve_ndk.sh
     - name: Check restored NDK tools
       if: inputs.prepare-cache != 'true' || steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
-        NDK_PATH: ${{ steps.ndk.outputs.ndk-path }}
+        NDK_PATH: ${{ steps.path.outputs.ndk-path }}
       run: |
         bin="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
         for tool in clang clang++ ld.lld llvm-ar; do
@@ -39,5 +51,5 @@ runs:
       if: steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
-        path: ${{ runner.tool_cache }}/ndk/r28c
+        path: ${{ runner.tool_cache }}/ndk/${{ inputs.ndk-version }}
         key: ${{ steps.cache.outputs.cache-primary-key }}

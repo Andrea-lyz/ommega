@@ -10,7 +10,8 @@ cached at its stable runner tool-cache path, including compiler symlinks and
 the tool-cache completion marker. The preparation job fills a missing entry
 once; both Android jobs then restore it and execute the compiler, linker and
 archiver before using Rust caches. On a hit, preparation only looks up the
-entry without downloading it. Protoc, Rust and Android API versions remain
+entry without downloading it. Cache hits use the restored directory directly
+without invoking the installer. Protoc, Rust and Android API versions remain
 pinned in the workflow/actions.
 
 Rust caches remain separated by component, target toolchain and dependency
