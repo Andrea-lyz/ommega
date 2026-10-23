@@ -329,12 +329,22 @@ operations retain the serialized finish path and existing authorization checks.
 
 ## Relay client layout
 
-`src/remote.rs` owns relay requests, HTTP retries, identity-profile caching and
-health reporting. `src/remote/backend.rs` adapts those responses to the KeyMint
+`src/remote.rs` owns relay requests, HTTP retries and identity-profile caching.
+`src/remote/health.rs` owns verdict state and status-file publication.
+`src/remote/backend.rs` adapts relay responses to the KeyMint
 `RemoteBackend` interface, validates certificate chains and decodes operation
 outputs. `RemoteRelayBackend` remains available through `crate::remote`.
 
 Response decoding borrows the result from the parsed JSON. Certificate debug
-metadata is collected during the same DER validation pass. Configuration reads
+metadata is collected during the same DER validation pass. Relay configuration reads
 copy only the requested value under a short-lived read guard; HTTP requests
 run after that guard is released.
+
+## Configuration layout
+
+`src/config.rs` defines configuration models, loading, migrations and atomic
+persistence. `src/config/runtime.rs` watches configuration paths and applies
+runtime updates. It resolves platform state after releasing the configuration
+read guard, then uses the KeyMint runtime-update path to install the result.
+Crypto seeds, the native StrongBox selection and trust settings beyond patch
+levels remain fixed until the daemon restarts.
