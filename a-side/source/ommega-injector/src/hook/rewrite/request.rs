@@ -11,7 +11,7 @@ pub(super) fn target_from_transaction(tr: &binder_transaction_data) -> Option<Lo
     })
 }
 
-fn route_for_service_request(
+pub(super) fn route_for_service_request(
     _request: &ParsedServiceRequest,
     intercept: &config::InterceptConfig,
 ) -> RouteTarget {
