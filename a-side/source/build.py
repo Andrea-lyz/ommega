@@ -316,15 +316,12 @@ def build_package_for_abi(
     *,
     abi: str,
     release: bool,
-    platform: int,
     version: str,
     git_count: str,
     git_hash: str,
 ) -> Path:
     target = ABI_TO_TARGET[abi]
     stage_dir = TARGET_ROOT / "temp" / abi
-    # Kept for compatibility with old invocations; plain Cargo uses .cargo/config.toml.
-    _ = platform
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -407,7 +404,6 @@ def main() -> None:
             build_package_for_abi(
                 abi=abi,
                 release=args.release,
-                platform=args.platform,
                 version=version,
                 git_count=git_count,
                 git_hash=git_hash,

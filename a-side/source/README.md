@@ -359,3 +359,35 @@ and disk loading, including the optional dedicated StrongBox keybox.
 orchestration and the `KeyboxManager` adapter. Invalid or partial disk material
 falls back in memory without replacing the file. Database retirement stays
 limited to dedicated attestation keys bound to a previous keybox identity.
+
+## Build and validation
+
+Run the following from `a-side/source` with Python 3.11 or newer, Node.js 22,
+`protoc`, an Android NDK and the pinned Rust toolchain available. Set
+`RUSTUP_TOOLCHAIN=nightly-2026-09-01` in the build environment, matching CI.
+
+```sh
+rustup toolchain install nightly-2026-09-01 --profile minimal --component rustfmt --component clippy --target aarch64-linux-android
+python3 scripts/setup_cargo_config.py --ndk-root /path/to/android-ndk --api-level 26
+cargo clippy --locked --target aarch64-linux-android --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo test --locked --target aarch64-linux-android --workspace --no-run
+python3 scripts/webui-patch.py --check
+node --test scripts/webui-compat.test.mjs
+python3 build.py --release --abi arm64-v8a
+```
+
+Generate `.cargo/config.toml` once for the local NDK; use the setup script's
+`--force` option only when deliberately replacing that configuration. The
+build script uses the checked-in Cargo lockfile. Its `--platform` option is
+accepted for compatibility; the generated Cargo configuration selects the
+Android API level and linker.
+
+The release archive is written to
+`target/ommega-a-release-arm64-v8a-<version>-<commit>.zip`. It contains `keymint`,
+`ommega-auth-policy`, `ommega-inject` and `soterta-svc` for the selected ABI.
+The WebUI is packaged from `template/webroot` and runs through the module
+manager's WebUI bridge. Its bundle patch must pass the check above.
+
+`cargo test --no-run` compiles Android test binaries; it does not execute them.
+Device test execution and application acceptance are separate validation steps.
