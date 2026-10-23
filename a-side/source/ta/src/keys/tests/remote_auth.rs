@@ -31,7 +31,6 @@ impl Fixture {
         let calls = Arc::new(AtomicUsize::new(0));
         source.ta.dev.remote = Some(Arc::new(TestRemote {
             cert_chain: Some(source.chain.clone()),
-            auth_signing_on_b: true,
             expected_user_auth: Some(vec![(503, 1)]),
             sign_calls: Some(calls.clone()),
             ..TestRemote::default()
@@ -46,7 +45,7 @@ impl Fixture {
         if let Some(timeout) = timeout {
             params.push(KeyParam::AuthTimeout(timeout));
         }
-        let key = source.ta.generate_key(&params, None).unwrap();
+        let key = source.ta.generate_key(&params, None, true).unwrap();
         // The B certificate must remain byte-for-byte the no-auth fixture.
         assert_eq!(
             key.certificate_chain[0].encoded_certificate,
@@ -199,7 +198,7 @@ fn device_credential_fallback_can_authorize_the_same_remote_signing_path() {
     let mut f = Fixture::new(None);
     f.params.retain(|p| !matches!(p, KeyParam::UserAuthType(_)));
     f.params.push(KeyParam::UserAuthType(3));
-    f.key = f.ta.generate_key(&f.params, None).unwrap();
+    f.key = f.ta.generate_key(&f.params, None, true).unwrap();
     let begin = f.begin(None).unwrap();
     let mut token = f.token(begin.challenge);
     token.authenticator_type = HardwareAuthenticatorType::Password;
@@ -222,13 +221,13 @@ fn experiment_is_not_used_for_other_purposes_or_presence_policies() {
     ] {
         let mut params = f.params.clone();
         params.push(extra);
-        assert!(!supports_a_authorized_remote_signing(&params));
+        assert!(!kmr_common::auth_signing::eligible(&params));
     }
     for auth_type in [1, 2, 3] {
         let mut params = f.params.clone();
         params.retain(|p| !matches!(p, KeyParam::UserAuthType(_)));
         params.push(KeyParam::UserAuthType(auth_type));
-        assert!(supports_a_authorized_remote_signing(&params));
+        assert!(kmr_common::auth_signing::eligible(&params));
     }
 }
 
@@ -236,14 +235,67 @@ fn experiment_is_not_used_for_other_purposes_or_presence_policies() {
 fn remote_unavailability_never_changes_the_experiment_to_a_local_key() {
     let mut f = Fixture::new(None);
     f.ta.dev.remote = Some(Arc::new(TestRemote {
-        auth_signing_on_b: true,
         unavailable: true,
         expected_user_auth: Some(vec![(503, 1)]),
         ..TestRemote::default()
     }));
-    let err = f.ta.generate_key(&f.params, None).unwrap_err();
+    let err = f.ta.generate_key(&f.params, None, true).unwrap_err();
     assert!(matches!(
         err.kind(),
         ErrorKind::Hal(ErrorCode::UnknownError, _)
     ));
+}
+
+#[test]
+fn preserve_and_compatibility_decisions_remain_per_key() {
+    let mut fixture = Fixture::new(None);
+    let compatible_blob = fixture.key.key_blob.clone();
+    let chain: Vec<_> = fixture
+        .key
+        .certificate_chain
+        .iter()
+        .map(|c| c.encoded_certificate.clone())
+        .collect();
+    fixture.ta.dev.remote = Some(Arc::new(TestRemote {
+        cert_chain: Some(chain.clone()),
+        expected_user_auth: Some(vec![(502, 42), (504, 2)]),
+        ..TestRemote::default()
+    }));
+    let preserved = fixture
+        .ta
+        .generate_key(&fixture.params, None, false)
+        .unwrap();
+    let (compatible, _) = fixture
+        .ta
+        .keyblob_parse_decrypt(&compatible_blob, &[])
+        .unwrap();
+    let (preserved_blob, _) = fixture
+        .ta
+        .keyblob_parse_decrypt(&preserved.key_blob, &[])
+        .unwrap();
+    let (KeyMaterial::Remote(compatible), KeyMaterial::Remote(preserved_blob)) =
+        (compatible.key_material, preserved_blob.key_material)
+    else {
+        panic!("both keys must remain remote")
+    };
+    assert_ne!(
+        compatible.alias, preserved_blob.alias,
+        "different B policies cannot reuse a remote alias"
+    );
+    assert_eq!(
+        preserved.certificate_chain[0].encoded_certificate, chain[0],
+        "never rewrite the B certificate"
+    );
+    fixture.ta.dev.remote = Some(Arc::new(TestRemote {
+        unavailable: true,
+        expected_user_auth: Some(vec![(502, 42), (504, 2)]),
+        ..TestRemote::default()
+    }));
+    assert!(
+        fixture
+            .ta
+            .generate_key(&fixture.params, None, false)
+            .is_err(),
+        "preserve must not fall back to a local keybox"
+    );
 }

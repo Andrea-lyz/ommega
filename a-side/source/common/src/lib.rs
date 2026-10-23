@@ -26,6 +26,7 @@ pub use kmr_wire as wire;
 
 pub mod android_version;
 pub mod apex;
+pub mod auth_signing;
 pub mod consts;
 pub mod crypto;
 pub mod keyblob;

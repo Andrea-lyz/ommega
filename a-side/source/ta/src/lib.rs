@@ -943,7 +943,7 @@ impl KeyMintTa {
                 Err(e) => op_error_rsp(AddRngEntropyRequest::CODE, e),
             },
             PerformOpReq::DeviceGenerateKey(req) => {
-                match self.generate_key(&req.key_params, req.attestation_key) {
+                match self.generate_key(&req.key_params, req.attestation_key, req.authorize_on_a) {
                     Ok(ret) => {
                         op_ok_rsp(PerformOpRsp::DeviceGenerateKey(GenerateKeyResponse { ret }))
                     }

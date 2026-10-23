@@ -83,7 +83,7 @@ function ommegaInstallCompatOption() {
   row.className = "mode-option";
   row.id = "mode-compat-row";
   row.innerHTML = '<md-checkbox id="mode-compat" touch-target="wrapper"></md-checkbox>' +
-    '<span data-i18n="mode_detector_compat">检测器兼容 / Detector compat</span>';
+    '<span>正数密钥 ID 兼容 / Positive key ID compatibility</span>';
   row.innerHTML = ommegaUiLocalizeHtml(row.innerHTML);
   container.appendChild(row);
   const hint = document.createElement("div");

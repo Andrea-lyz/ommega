@@ -20,22 +20,18 @@ relay_server.
   startup retries until the remote profile is available instead of freezing a
   mismatched local profile. Profile or certificate mismatches fail closed;
   enabling local fallback does not bypass identity checks.
-- **Auth-bound signing keys** (502/504/505/506/507/508 + `PURPOSE_SIGN`) are
-  minted locally, even in remote mode, except for packages that need B's
-  hardware chain (Google/GMS, Google Wallet/Vending, TrustAttestor,
-  KeyAttestation, DuckDetector, and EngineerMode). Auth-bound decrypt/agreement
-  keys stay remote. B has no A-side HardwareAuthToken and cannot validate A's
-  Gatekeeper token, so a remote auth-bound key would reject every signature
-  with `KeyUserNotAuthenticated` (-26). The local keybox chain keeps the
-  requested authorization list and the local Keystore performs the fingerprint
-  or credential check. `UNLOCKED_DEVICE_REQUIRED` (509) still uses B when its
-  user is unlocked. Caller-supplied attestation-key delegation keeps its
-  existing remote path.
+- **Authentication-signing policy** is configured at runtime in the WebUI.
+  The default **Auto** mode preserves B's requested authentication policy for
+  known detector probes, and uses A authorization with B signing for other
+  eligible EC/RSA authentication-signing keys. **Payment compatibility** always
+  uses that compatibility path; **Preserve authentication** keeps the requested
+  B policy, which may return `KeyUserNotAuthenticated` (-26) when A authenticates.
+  Every remote path returns B's certificate unchanged. Per-app exceptions work
+  in both list scope and global scope, without package-name heuristics.
 
-The opt-in [Auth A / Sign B experiment](docs/EXPERIMENTAL-REMOTE-AUTH-SIGNING.md)
-keeps new authenticated signing keys on B with a no-auth hardware policy and
-enforces the original authentication policy in A. Build with
-`--experimental-remote-auth-signing`; ordinary builds leave it disabled.
+See [Authentication-signing policy](docs/AUTH-SIGNING-POLICY.md) for eligibility,
+probe recognition, configuration and the authentication trust boundary. Only
+newly created keys are affected; existing keys are never converted.
 
 The native Soter HAL has an independent relay. Enable the software Soter TA in
 the WebUI to take over `vendor.qti.hardware.soter.ISoter/default`; then configure
