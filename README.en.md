@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > Community fork of [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega),
-> not an official upstream release or hosted service. Product version: **1.9.0**.
+> not an official upstream release or hosted service. Product version: **2.0.0**.
 > Module authors: `jiyin004, Andrea-lyz`.
 
 > [!WARNING]
@@ -30,23 +30,39 @@ A also provides the software TA, local storage and application authentication ch
 This fork targets a dedicated **one-A / one-B** deployment; adapting one B for
 multiple A devices is outside its maintenance target.
 
-## 1.9.0 downloads and interface
+## 2.0.0 downloads and interface
 
-[Download and bilingual release notes](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-1.9.0) ·
-[Release CI](https://github.com/Andrea-lyz/ommega/actions/runs/39620299331)
+[Download and bilingual release notes](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.0.0) ·
+[Release CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
 
 | Release asset | Purpose |
 |---|---|
-| `ommega-a-release-arm64-v8a-1.9.0-<commit>.zip` | A root module, including WebUI |
-| `ommegaclient-b-release-arm64-v8a-1.9.0-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
+| `ommega-a-release-arm64-v8a-2.0.0-<commit>.zip` | A root module, including WebUI |
+| `ommegaclient-b-release-arm64-v8a-2.0.0-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
 | `relay_rs-linux-x86_64-musl` | Self-hosted Linux Server; updated separately |
-| `Ommega-B-app-1.9.0-debug-signed.apk` | Optional B client, separate from both A and the native B module |
-| `StrongBoxCapabilityMask-1.9.0-debug-signed.apk` | Optional A-side LSPosed module |
+| `Ommega-B-app-2.0.0-debug-signed.apk` | Optional B client, separate from both A and the native B module |
+| `StrongBoxCapabilityMask-2.0.0-debug-signed.apk` | Optional A-side LSPosed module |
 | `SHA256SUMS` / `build-info.json` | Download checksums, version, source commit and signing information |
 
 GitHub's generated Source code archives are not installable modules. Both APKs
 are debug-signed; compare certificates before upgrading. Updating A/B module ZIPs
 does not update the running Server or install optional APKs.
+
+### What is new in 2.0.0
+
+- The authentication signing policy decides per app whether an auth-bound key stays local.
+  Global scope covers ordinary apps only (app ids 10000-19999 per user), and engineering mode
+  requires its matching Binder SELinux context and exact process name. The policy and global
+  scope live in Settings; the Apps page and Overview no longer repeat those cards.
+- SOTER keeps ASK, AuthKey and sign sessions on one backend. A `local_only` choice is written
+  to the ledger and survives reloads, and sessions use an opaque handle assigned by A. Network
+  and remote authentication errors never turn into a local signature.
+- A valid grant brings an isolated process into the same Ommega caller scope. The delegation
+  binds the real UID, anchor PID, start time and boot ID, and key access still enforces the
+  grant `GET_INFO` / `USE` vector. Revocation, process exit or UID reuse ends it.
+- Also: App AttestKey returns only the delegated leaf, local auth-key signing, GMS auth
+  windows, system_server grant probing, nested settings dialogs and back gestures, and faster
+  CI caching and toolchain setup.
 
 The WebUIs offer simplified Chinese and English, system-aware language selection,
 and light/dark themes. OpenUI is used for development previews; device UIs use
@@ -296,7 +312,7 @@ Java/native replies and different transaction-number layouts.
 CI builds A, B, Linux musl Server and APKs in parallel, with A/B workspace, Server,
 B ELF, WebUI, version-sync and Mask unit checks. Rust is pinned to
 `nightly-2026-09-01`, with committed Cargo.lock and component Rust/Gradle caches.
-Version is **1.9.0**, with no automatic bump commits; manual `release_version`
+Version is **2.0.0**, with no automatic bump commits; manual `release_version`
 only overrides that build. Currently only Markdown-only changes are ignored; TXT
 changes trigger CI. Artifacts include both ZIPs, Server, B-app, Mask,
 `SHA256SUMS` and `build-info.json`. Both APKs use a cached Android debug signing
@@ -407,14 +423,15 @@ Complete distributions: [Build workflow](https://github.com/Andrea-lyz/ommega/ac
 
 ## Validation limits
 
-1.9.0 passed 50 host JavaScript tests, five browser cases and the
-[release CI](https://github.com/Andrea-lyz/ommega/actions/runs/39620299331).
+2.0.0 passed the host WebUI suites, browser checks, the Android workspace Clippy and
+test-compile gates, 34 host SOTER tests, 4 process-lifetime tests and the
+[release CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml).
 Release assets were checked for SHA-256, module versions, bundled UI resources,
 APK signatures and source commit. These are build/presentation checks; device
 gestures, network behavior and application flows still require device acceptance.
 
 <details>
-<summary>Historical implementation and test records; not 1.9.0 device acceptance</summary>
+<summary>Historical implementation and test records; not 2.0.0 device acceptance</summary>
 
 1.6.0 fixes three A-side KeyMint implementation problems that broke applications outright: an ommega-routed call is no longer answered with `SYSTEM_ERROR` while a mirror replay is in flight (the gate now waits, bounded, and stays fail-closed only for poisoned lanes); EC key generation restores AOSP semantics (EC plus ENCRYPT warns instead of failing with `INCOMPATIBLE_PURPOSE`); and RSA and ECDSA select their signature scheme from the digest the key was created for (the PKCS#1/PSS scheme was hardcoded to SHA-256 and ECDSA signed with the curve default digest, so a non-SHA-256 RSA key could not sign at all and a mismatched digest produced a silently wrong signature). The B side refuses SPL and OS version downgrades, and the A side logs `event=local_sign` with the padding and digest of every local signing operation. Verified on devices: HDFC RSA-SHA512 biometric login, Google Pay EC key generation and fingerprint flows interrupted by a lock-state replay all work again; A-side mirror 12/12, tag 12/12 and crypto 7/7 unit tests plus 13 B-side spl-control cases pass and CI is green. The Server differs from 1.5.3 by the version string only; the B module additionally ships the downgrade guard.
 
