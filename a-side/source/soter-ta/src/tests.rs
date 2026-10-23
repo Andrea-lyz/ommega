@@ -389,6 +389,11 @@ fn state_json_round_trip_preserves_the_ledger() {
     let (_, before) = state.export_auth(UID, KNAME);
 
     let encoded = state.to_json();
+    let mut legacy: serde_json::Value = serde_json::from_slice(&encoded).expect("JSON");
+    legacy.as_object_mut().expect("ledger").remove("routing");
+    let legacy = TaState::from_json(legacy.to_string().as_bytes()).expect("pre-routing ledger");
+    assert_eq!(legacy.cpu_id, state.cpu_id);
+    assert_eq!(legacy.has_auth(UID, KNAME), SOTER_OK);
     let mut restored = TaState::from_json(&encoded).expect("round trip");
     assert_eq!(restored.cpu_id, state.cpu_id);
     assert_eq!(restored.has_ask(UID), SOTER_OK);
@@ -837,6 +842,175 @@ fn ffi_serves_the_daemon_path_end_to_end() {
     assert!(text.contains("key name"), "{text}");
 
     assert_eq!(ffi::soterta_save(), ffi::SOTERTA_HANDLED);
+
+    // Exercise the daemon dispatch with the relay sequence that previously
+    // returned a remote ASK followed by a successful, unrelated local AuthKey.
+    let config = crate::remote::Config::parse(
+        "enabled=true\nurl=http://127.0.0.1\ntoken=test-token\ndevice_id=test-device",
+    )
+    .expect("relay config");
+    let caller = UID + 1;
+    let remote_ask = dispatch::Outcome::Buffer {
+        code: SOTER_OK,
+        data: b"remote ASK".to_vec(),
+        field: 10,
+    };
+    assert_eq!(
+        ffi::answer_request(
+            dispatch::TX_EXPORT_ASK,
+            dispatch::Request::Uid(caller),
+            Ok(config.clone()),
+            true,
+            |_, _, _, _| Ok(Some(remote_ask.clone())),
+        )
+        .unwrap(),
+        Some(remote_ask)
+    );
+    let auth_request = dispatch::Request::UidKey {
+        uid: caller,
+        kname: KNAME.into(),
+    };
+    assert!(ffi::answer_request(
+        dispatch::TX_GENERATE_AUTH,
+        auth_request.clone(),
+        Ok(config.clone()),
+        true,
+        |_, _, _, _| Ok(None),
+    )
+    .unwrap_err()
+    .contains("local ASK"));
+    assert_eq!(unsafe { ffi::soterta_init(path_arg.as_ptr()) }, 0);
+    assert_eq!(
+        ffi::answer_request(
+            dispatch::TX_HAS_ASK,
+            dispatch::Request::Uid(caller),
+            Ok(config.clone()),
+            true,
+            |_, _, _, _| panic!("local-only policy must survive a reload"),
+        )
+        .unwrap(),
+        Some(dispatch::Outcome::Code(SOTER_ERR_NO_KEY))
+    );
+    assert_eq!(
+        ffi::answer_request(
+            dispatch::TX_GENERATE_ASK,
+            dispatch::Request::Uid(caller),
+            Ok(config.clone()),
+            true,
+            |_, _, _, _| panic!("local ASK generation must not reach the relay"),
+        )
+        .unwrap(),
+        Some(dispatch::Outcome::Code(SOTER_OK))
+    );
+    assert_eq!(
+        ffi::answer_request(
+            dispatch::TX_HAS_ASK,
+            dispatch::Request::Uid(caller),
+            Ok(config.clone()),
+            true,
+            |_, _, _, _| panic!("local ASK presence check must not reach the relay"),
+        )
+        .unwrap(),
+        Some(dispatch::Outcome::Code(SOTER_OK))
+    );
+    let Some(dispatch::Outcome::Buffer {
+        code: SOTER_OK,
+        data: local_ask,
+        ..
+    }) = ffi::answer_request(
+        dispatch::TX_EXPORT_ASK,
+        dispatch::Request::Uid(caller),
+        Ok(config.clone()),
+        true,
+        |_, _, _, _| panic!("local ASK export must not reach the relay"),
+    )
+    .unwrap()
+    else {
+        panic!("local ASK export failed")
+    };
+    assert_eq!(
+        ffi::answer_request(
+            dispatch::TX_GENERATE_AUTH,
+            auth_request.clone(),
+            Ok(config.clone()),
+            true,
+            |_, _, _, _| panic!("local AuthKey generation must not reach the relay"),
+        )
+        .unwrap(),
+        Some(dispatch::Outcome::Code(SOTER_OK))
+    );
+    let Some(dispatch::Outcome::Buffer {
+        code: SOTER_OK,
+        data: local_auth,
+        ..
+    }) = ffi::answer_request(
+        dispatch::TX_EXPORT_AUTH,
+        auth_request,
+        Ok(config.clone()),
+        true,
+        |_, _, _, _| panic!("local AuthKey export must not reach the relay"),
+    )
+    .unwrap()
+    else {
+        panic!("local AuthKey export failed")
+    };
+    assert_eq!(
+        json_field(&local_ask, "cpu_id"),
+        json_field(&local_auth, "cpu_id")
+    );
+    let ask_key = blob::public_key_from_pem(&json_field(&local_ask, "pub_key")).expect("ASK");
+    let (auth_json, auth_signature) = blob::parse(&local_auth).expect("AuthKey blob");
+    assert!(blob::verify(&ask_key, auth_json, auth_signature));
+
+    let Some(dispatch::Outcome::Init {
+        code: SOTER_OK,
+        session,
+    }) = ffi::answer_request(
+        dispatch::TX_INIT_SIGN,
+        dispatch::Request::InitSign {
+            uid: caller,
+            kname: KNAME.into(),
+            challenge: "local".into(),
+        },
+        Ok(config.clone()),
+        true,
+        |_, _, _, _| panic!("local initSign must not reach the relay"),
+    )
+    .unwrap()
+    else {
+        panic!("local initSign failed")
+    };
+    let finished = ffi::answer_request(
+        dispatch::TX_FINISH_SIGN,
+        dispatch::Request::Session(session),
+        Ok(config.clone()),
+        true,
+        |_, _, _, _| panic!("local finishSign must not reach the relay"),
+    )
+    .expect("local finishSign dispatch");
+    assert!(finished.is_some());
+    assert!(ffi::answer_request(
+        dispatch::TX_EXPORT_ASK,
+        dispatch::Request::Uid(caller + 1),
+        Ok(config.clone()),
+        true,
+        |_, _, _, _| Err("transport unavailable".into()),
+    )
+    .is_err());
+    assert_eq!(
+        ffi::answer_request(
+            dispatch::TX_GENERATE_AUTH,
+            dispatch::Request::UidKey {
+                uid: caller + 1,
+                kname: KNAME.into()
+            },
+            Ok(config),
+            true,
+            |_, _, _, _| Ok(Some(dispatch::Outcome::Code(-26))),
+        )
+        .unwrap(),
+        Some(dispatch::Outcome::Code(-26))
+    );
 
     // An identity file that exists but cannot be read is not a fresh device: the
     // previous revision is restored when possible, and a real failure refuses to

@@ -45,8 +45,14 @@ to installed packages, the caller's `caller_pkg` list; the relay server mints
 its built-in fallback answers with that id and keeps real SOTER applications on
 the real device by the package list. A transport or server failure returns a
 failed HAL result rather than silently switching that key slot to local
-material. The stock Soter HAL is restored when the software TA switch is turned
-off.
+material. An explicit `local_only` reply selects the local ledger for that UID
+across subsequent ASK, AuthKey and signing calls. Before local AuthKey operations
+can succeed, the client must export the local ASK; an earlier remote ASK is not
+reused. This policy and opaque sign handles persist in the existing ledger and
+are scoped to the relay configuration. `finishSign` returns to the backend that
+opened its session; unknown sessions fail. See [SOTER routing](docs/SOTER-ROUTING.md)
+for the trust and recovery boundary. The stock Soter HAL is restored when the
+software TA switch is turned off.
 
 ## Install and configure
 
