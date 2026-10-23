@@ -1,0 +1,2 @@
+# CI shell helpers also run through WSL from Windows checkouts.
+scripts/*.sh text eol=lf

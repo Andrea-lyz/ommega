@@ -7,11 +7,10 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install clang libraries
+    - name: Resolve host libclang
+      id: clang
       shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends clang libclang-dev llvm-dev
+      run: bash .github/scripts/resolve_libclang.sh
     - name: Install protoc
       uses: arduino/setup-protoc@v3
       with:
@@ -23,23 +22,24 @@ runs:
       with:
         ndk-version: r28c
         link-to-sdk: false
+        local-cache: true
     - name: Configure Android cargo
       shell: bash
       env:
         NDK_PATH: ${{ steps.ndk.outputs.ndk-path }}
+        LIBCLANG_PATH: ${{ steps.clang.outputs.libclang-path }}
         WORKSPACE: ${{ inputs.workspace }}
       run: |
         llvm="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
         sysroot="$llvm/sysroot"
         resource_dir="$(find "$llvm/lib/clang" -mindepth 1 -maxdepth 1 -type d | sort | tail -n1)"
         test -n "$resource_dir"
-        libclang_path="$(llvm-config --libdir)"
         bindgen="--target=aarch64-linux-android${ANDROID_PLATFORM} --sysroot=$sysroot -resource-dir=$resource_dir -isystem $resource_dir/include -isystem $sysroot/usr/include -isystem $sysroot/usr/include/aarch64-linux-android"
         {
           echo "ANDROID_NDK_HOME=$NDK_PATH"
           echo "ANDROID_NDK_ROOT=$NDK_PATH"
           echo "ANDROID_NDK=$NDK_PATH"
-          echo "LIBCLANG_PATH=$libclang_path"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH"
           echo "BINDGEN_EXTRA_CLANG_ARGS=$bindgen"
           echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=$bindgen"
         } >> "$GITHUB_ENV"
