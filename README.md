@@ -28,7 +28,7 @@ Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬
 ## 2.0.0 下载与界面
 
 [下载与完整中英更新说明](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.0.0) ·
-[发布 CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
+[发布 CI](https://github.com/Andrea-lyz/ommega/actions/runs/40031340033)
 
 | 发布资产 | 用途 |
 |---|---|
@@ -500,7 +500,7 @@ cd StrongBoxCapabilityMask
 
 2.0.0 已通过主机 WebUI 测试、浏览器检查、Android 全工作区 Clippy、测试编译、
 34 项 SOTER 主机测试、4 项进程生命周期测试及
-[发布 CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)。
+[发布 CI](https://github.com/Andrea-lyz/ommega/actions/runs/40031340033)。
 发布资产已核对 SHA-256、模块版本、UI 资源、APK 签名与源提交。这些是构建与界面检查；
 手机手势、实际网络和应用流程仍需安装新版后验收。
 

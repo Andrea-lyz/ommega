@@ -33,7 +33,7 @@ multiple A devices is outside its maintenance target.
 ## 2.0.0 downloads and interface
 
 [Download and bilingual release notes](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.0.0) ·
-[Release CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
+[Release CI](https://github.com/Andrea-lyz/ommega/actions/runs/40031340033)
 
 | Release asset | Purpose |
 |---|---|
@@ -425,7 +425,7 @@ Complete distributions: [Build workflow](https://github.com/Andrea-lyz/ommega/ac
 
 2.0.0 passed the host WebUI suites, browser checks, the Android workspace Clippy and
 test-compile gates, 34 host SOTER tests, 4 process-lifetime tests and the
-[release CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml).
+[release CI](https://github.com/Andrea-lyz/ommega/actions/runs/40031340033).
 Release assets were checked for SHA-256, module versions, bundled UI resources,
 APK signatures and source commit. These are build/presentation checks; device
 gestures, network behavior and application flows still require device acceptance.
