@@ -49,7 +49,7 @@ Set `ANDROID_HOME` or create `local.properties`, then run:
 ```
 
 The Ommega root CI also runs `:app:testDebugUnitTest :app:assembleRelease` and
-bundles `StrongBoxCapabilityMask-1.9.0-debug-signed.apk` with A/B/Server artifacts.
+bundles `StrongBoxCapabilityMask-2.0.0-debug-signed.apk` with A/B/Server artifacts.
 The Release build uses the standard Android debug signing configuration.
 This module shares the product version; its runtime feature-mask behavior stays global.
 
