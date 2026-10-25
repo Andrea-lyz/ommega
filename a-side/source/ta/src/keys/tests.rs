@@ -242,6 +242,46 @@ fn key_params(purpose: KeyPurpose) -> Vec<KeyParam> {
     ]
 }
 
+#[test]
+fn remote_properties_preserve_requested_values_and_other_key_params() {
+    let mut params = key_params(KeyPurpose::Sign);
+    params.extend([
+        KeyParam::AttestationIdBrand(b"OnePlus".to_vec()),
+        KeyParam::AttestationIdDevice(b"OP591BL1".to_vec()),
+        KeyParam::AttestationIdProduct(b"PHB110".to_vec()),
+        KeyParam::AttestationIdManufacturer(b"OnePlus".to_vec()),
+        KeyParam::AttestationIdModel(b"PHB110".to_vec()),
+    ]);
+    let forwarded = extract_remote_attest_params(&params);
+    assert_eq!(
+        forwarded.device_properties,
+        vec![
+            (710, b"OnePlus".to_vec()),
+            (711, b"OP591BL1".to_vec()),
+            (712, b"PHB110".to_vec()),
+            (716, b"OnePlus".to_vec()),
+            (717, b"PHB110".to_vec()),
+        ]
+    );
+    assert_eq!(forwarded.purpose, vec![KeyPurpose::Sign as i32]);
+    assert_eq!(forwarded.user_auth, vec![(503, 1)]);
+}
+
+#[test]
+fn remote_properties_keep_absence_subset_and_empty_values() {
+    assert!(extract_remote_attest_params(&key_params(KeyPurpose::Sign))
+        .device_properties
+        .is_empty());
+    let forwarded = extract_remote_attest_params(&[
+        KeyParam::AttestationIdModel(vec![0, 255, 65]),
+        KeyParam::AttestationIdBrand(Vec::new()),
+    ]);
+    assert_eq!(
+        forwarded.device_properties,
+        vec![(717, vec![0, 255, 65]), (710, Vec::new())]
+    );
+}
+
 fn remote_rot() -> crypto::RemoteRootOfTrust {
     crypto::RemoteRootOfTrust {
         verified_boot_key: vec![5; 32],

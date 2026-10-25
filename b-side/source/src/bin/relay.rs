@@ -873,6 +873,7 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
         cert_serial: get("certificate_serial")
             .map(|v| b64_decode(v).with_context(|| "decode certificate_serial"))
             .transpose()?,
+        device_properties: parse_device_properties(get("device_properties"))?,
         // User-authentication / authorization-list entries forwarded by the
         // A-side as `[tag, value]` pairs (502 USER_SECURE_ID, 503
         // NO_AUTH_REQUIRED, 504 USER_AUTH_TYPE, 505 AUTH_TIMEOUT, 506
@@ -908,6 +909,43 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
             tags
         },
     })
+}
+
+/// Decode only the five public attestation IDs; malformed requests must fail
+/// before a hardware lookup instead of silently losing a requested property.
+fn parse_device_properties(value: Option<&Value>) -> Result<Vec<kmr_wire::keymint::KeyParam>> {
+    use kmr_wire::keymint::KeyParam;
+
+    let invalid = || keymint_error(KmErrorCode::InvalidArgument, "invalid device_properties");
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let entries = value.as_array().ok_or_else(invalid)?;
+    let mut properties = Vec::new();
+    for entry in entries {
+        let pair = entry
+            .as_array()
+            .filter(|pair| pair.len() == 2)
+            .ok_or_else(invalid)?;
+        let tag = pair[0].as_u64().ok_or_else(invalid)?;
+        let bytes = b64_decode(&pair[1]).map_err(|_| invalid())?;
+        let property = match tag {
+            710 => KeyParam::AttestationIdBrand(bytes),
+            711 => KeyParam::AttestationIdDevice(bytes),
+            712 => KeyParam::AttestationIdProduct(bytes),
+            716 => KeyParam::AttestationIdManufacturer(bytes),
+            717 => KeyParam::AttestationIdModel(bytes),
+            _ => return Err(invalid()),
+        };
+        if properties
+            .iter()
+            .any(|existing: &KeyParam| existing.tag() == property.tag())
+        {
+            return Err(invalid());
+        }
+        properties.push(property);
+    }
+    Ok(properties)
 }
 
 fn parse_attestation_key(value: Option<&Value>) -> Result<Option<AttestationKeyRef>> {
@@ -1510,6 +1548,87 @@ fn main() {
     // behind a single HTTP round-trip after each TEE op.
     let tx = spawn_tee_workers();
     run_poll_loop(shared, tx);
+}
+
+#[cfg(test)]
+mod device_properties_tests {
+    use super::*;
+    use kmr_wire::keymint::KeyParam;
+    use ommegaclient_b::keymaster::relay_tee::relay_error_result;
+
+    #[test]
+    fn decode_preserves_absence_subset_and_bytes() {
+        assert!(parse_key_spec(&json!({}))
+            .unwrap()
+            .device_properties
+            .is_empty());
+        let spec = parse_key_spec(&json!({"device_attest_context": {"device_properties": [
+            [710, "T25lUGx1cw=="], [711, "T1A1OTFCTDE="], [712, "UEhCMTEw"],
+            [716, "T25lUGx1cw=="], [717, "UEhCMTEw"]
+        ]}}))
+        .unwrap();
+        assert_eq!(
+            spec.device_properties,
+            vec![
+                KeyParam::AttestationIdBrand(b"OnePlus".to_vec()),
+                KeyParam::AttestationIdDevice(b"OP591BL1".to_vec()),
+                KeyParam::AttestationIdProduct(b"PHB110".to_vec()),
+                KeyParam::AttestationIdManufacturer(b"OnePlus".to_vec()),
+                KeyParam::AttestationIdModel(b"PHB110".to_vec()),
+            ]
+        );
+        let spec =
+            parse_key_spec(&json!({"device_properties": [[717, "AP9B"], [710, ""]]})).unwrap();
+        assert_eq!(
+            spec.device_properties,
+            vec![
+                KeyParam::AttestationIdModel(vec![0, 255, 65]),
+                KeyParam::AttestationIdBrand(Vec::new())
+            ]
+        );
+    }
+
+    #[test]
+    fn properties_coexist_with_native_issuer_and_explicit_no_auth() {
+        let spec = parse_key_spec(&json!({"device_attest_context": {
+            "attestation_key": {"alias": "native-parent", "issuer_subject_name": "MAA="},
+            "user_auth": [[503, 1]],
+            "device_properties": [[717, "UEhCMTEw"]]
+        }}))
+        .unwrap();
+        assert_eq!(spec.attestation_key.unwrap().alias, "native-parent");
+        assert_eq!(spec.user_auth, vec![(503, 1)]);
+        assert_eq!(
+            spec.device_properties,
+            vec![KeyParam::AttestationIdModel(b"PHB110".to_vec())]
+        );
+    }
+
+    #[test]
+    fn invalid_properties_are_rejected_before_hardware() {
+        for properties in [
+            json!(null),
+            json!({}),
+            json!(["bad"]),
+            json!([[710]]),
+            json!([[710, "", "extra"]]),
+            json!([[710, 42]]),
+            json!([[710, "%%%"]]),
+            json!([[713, ""]]),
+            json!([[715, ""]]),
+            json!([[-1, ""]]),
+            json!([[710, ""], [710, ""]]),
+        ] {
+            let error = parse_key_spec(
+                &json!({"device_attest_context": {"device_properties": properties}}),
+            )
+            .unwrap_err();
+            assert_eq!(
+                relay_error_result(&error)["keymint_error_code"],
+                KmErrorCode::InvalidArgument as i32
+            );
+        }
+    }
 }
 
 #[cfg(test)]

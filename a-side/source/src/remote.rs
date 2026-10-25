@@ -594,6 +594,9 @@ impl RemoteRelay {
                 ),
             );
         }
+        if let Some(properties) = encode_device_properties(&params.device_properties) {
+            ctx.insert("device_properties".to_string(), properties);
+        }
         let profile = remote_identity_profile()?;
         ctx.insert(
             "attest_record_version".to_string(),
@@ -721,6 +724,19 @@ impl RemoteRelay {
         });
         Self::post_json("/api/agree/", &body)
     }
+}
+
+/// Keep public attestation IDs byte-exact across the JSON relay boundary.
+fn encode_device_properties(properties: &[(u32, Vec<u8>)]) -> Option<Value> {
+    if properties.is_empty() {
+        return None;
+    }
+    Some(Value::Array(
+        properties
+            .iter()
+            .map(|(tag, bytes)| json!([tag, base64_encode(bytes)]))
+            .collect(),
+    ))
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -1088,6 +1104,19 @@ mod tests {
                 body
             );
         }
+    }
+
+    #[test]
+    fn device_property_context_is_absent_unless_requested_and_byte_exact() {
+        assert_eq!(encode_device_properties(&[]), None);
+        assert_eq!(
+            encode_device_properties(&[
+                (710, b"OnePlus".to_vec()),
+                (717, vec![0, 255, 65]),
+                (711, Vec::new()),
+            ]),
+            Some(json!([[710, "T25lUGx1cw=="], [717, "AP9B"], [711, ""]]))
+        );
     }
 
     #[test]

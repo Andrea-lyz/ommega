@@ -1472,6 +1472,17 @@ fn extract_remote_attest_params(params: &[KeyParam]) -> device::RemoteAttestPara
             KeyParam::RsaOaepMgfDigest(digest) => out.mgf_digest = Some(*digest as i32),
             KeyParam::Padding(padding) => out.padding.push(*padding as i32),
             KeyParam::RsaPublicExponent(exponent) => out.rsa_public_exponent = Some(exponent.0),
+            KeyParam::AttestationIdBrand(value) => out.device_properties.push((710, value.clone())),
+            KeyParam::AttestationIdDevice(value) => {
+                out.device_properties.push((711, value.clone()))
+            }
+            KeyParam::AttestationIdProduct(value) => {
+                out.device_properties.push((712, value.clone()))
+            }
+            KeyParam::AttestationIdManufacturer(value) => {
+                out.device_properties.push((716, value.clone()))
+            }
+            KeyParam::AttestationIdModel(value) => out.device_properties.push((717, value.clone())),
             KeyParam::CertificateSubject(subject) => {
                 out.certificate_subject = Some(subject.clone())
             }

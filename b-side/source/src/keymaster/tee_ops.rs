@@ -129,6 +129,8 @@ pub struct KeySpec {
     /// attestation. A also enforces its local policy, but its HAT cannot
     /// authorize an operation on an auth-bound B-side key.
     pub user_auth: Vec<(u32, i64)>,
+    /// Public attestation-ID parameters explicitly requested by the app.
+    pub device_properties: Vec<KeyParam>,
 }
 
 #[derive(Clone, Debug)]
@@ -754,6 +756,7 @@ fn build_attestation_params(
         KeyParam::AttestationChallenge(challenge.to_vec()),
         KeyParam::AttestationApplicationId(app_id_der.to_vec()),
     ];
+    params.extend(spec.device_properties.iter().cloned());
 
     // A SIGN certificate is not an attestation issuer: it lacks CA/keyCertSign.
     // Preserve ATTEST_KEY and let the HAL report unsupported purposes instead
@@ -1310,6 +1313,73 @@ fn spki_from_cert_der(der: &[u8]) -> Result<Vec<u8>> {
 fn is_dead_object_status(status: &rsbinder::Status) -> bool {
     status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
         && status.transaction_error() == rsbinder::StatusCode::DeadObject
+}
+
+#[cfg(test)]
+mod device_property_forwarding_tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::KeyParameterValue::KeyParameterValue;
+
+    // Only constructs AIDL values; never connects to Binder or invokes a TEE.
+    fn request_properties(properties: Vec<KeyParam>, version: i32) -> Vec<(u32, Vec<u8>)> {
+        let spec = KeySpec {
+            purposes: vec![KmKeyPurpose::Sign, KmKeyPurpose::Verify],
+            digests: vec![KmDigest::Sha256],
+            device_properties: properties,
+            ..Default::default()
+        };
+        build_attestation_params(&[1], &[2], &spec, version)
+            .unwrap()
+            .into_iter()
+            .filter_map(|param| {
+                let tag = param.tag.0 as u32 & 0x0fff_ffff;
+                if (710..=717).contains(&tag) {
+                    let KeyParameterValue::Blob(bytes) = param.value else {
+                        panic!("device ID must be a blob")
+                    };
+                    Some((tag, bytes))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn requested_properties_reach_aidl_without_implicit_ids() {
+        for version in [100, 200, 300, 400, 500] {
+            assert!(request_properties(Vec::new(), version).is_empty());
+            assert_eq!(
+                request_properties(
+                    vec![
+                        KeyParam::AttestationIdBrand(b"OnePlus".to_vec()),
+                        KeyParam::AttestationIdDevice(b"OP591BL1".to_vec()),
+                        KeyParam::AttestationIdProduct(b"PHB110".to_vec()),
+                        KeyParam::AttestationIdManufacturer(b"OnePlus".to_vec()),
+                        KeyParam::AttestationIdModel(b"PHB110".to_vec()),
+                    ],
+                    version
+                ),
+                vec![
+                    (710, b"OnePlus".to_vec()),
+                    (711, b"OP591BL1".to_vec()),
+                    (712, b"PHB110".to_vec()),
+                    (716, b"OnePlus".to_vec()),
+                    (717, b"PHB110".to_vec()),
+                ]
+            );
+            assert_eq!(
+                request_properties(
+                    vec![
+                        KeyParam::AttestationIdModel(vec![0, 255, 65]),
+                        KeyParam::AttestationIdBrand(Vec::new())
+                    ],
+                    version
+                ),
+                vec![(717, vec![0, 255, 65]), (710, Vec::new())]
+            );
+        }
+    }
 }
 
 #[cfg(test)]
