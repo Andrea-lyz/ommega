@@ -225,6 +225,9 @@ pub struct RemoteAttestParams {
     /// in the encrypted keyblob and sends only NO_AUTH_REQUIRED (and, when
     /// requested, UNLOCKED_DEVICE_REQUIRED). B's certificate is returned as-is.
     pub user_auth: Vec<(u32, i64)>,
+    /// Requested public device properties as (tag number, original bytes).
+    /// Only 710/711/712/716/717 are forwarded; absent fields stay absent.
+    pub device_properties: Vec<(u32, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone)]

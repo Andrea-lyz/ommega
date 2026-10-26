@@ -106,6 +106,12 @@ impl RemoteRejection {
 /// Drop the cached identity profile so the next attestation re-reads it from
 /// the relay. Called when the runtime config is applied.
 pub fn invalidate_identity_profile() {
+    // A different relay route must never leave the previous B's application view active.
+    if let Err(error) = std::fs::remove_file(kmr_common::cpu_mask::PROFILE_PATH) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("could not invalidate CPU property snapshot: {error}");
+        }
+    }
     if let Ok(mut guard) = REMOTE_IDENTITY_PROFILE.write() {
         if guard.take().is_some() {
             log::info!("remote identity profile cache cleared after config change");
@@ -456,7 +462,38 @@ impl RemoteRelay {
         if let Some(error) = result.get("error").and_then(Value::as_str) {
             return Err(anyhow!("remote profile failed: {error}"));
         }
-        parse_identity_profile(result)
+        let profile = parse_identity_profile(result)?;
+        // Piggyback on the existing profile exchange; app startup has no network or HAL work.
+        let app_profile = result
+            .get("app_identity")
+            .cloned()
+            .ok_or_else(|| anyhow!("B has not supplied an exp6 property profile"))
+            .and_then(|value| {
+                serde_json::from_value::<kmr_common::cpu_mask::Profile>(value).map_err(Into::into)
+            })
+            .and_then(|value| value.text().map_err(|error| anyhow!(error)));
+        let saved = app_profile.and_then(|contents| {
+            let path = std::path::Path::new(kmr_common::cpu_mask::PROFILE_PATH);
+            let previous = match std::fs::read(path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            kmr_common::runtime::fs::atomic_compare_replace_preserving_metadata(
+                path,
+                previous.as_deref(),
+                contents.as_bytes(),
+                0o600,
+                kmr_common::consts::KEYSTORE_UID,
+                kmr_common::consts::KEYSTORE_GID,
+            )
+            .context("cache B property snapshot")
+        });
+        if let Err(error) = saved {
+            let _ = std::fs::remove_file(kmr_common::cpu_mask::PROFILE_PATH);
+            log::warn!("CPU property view unavailable: {error:#}");
+        }
+        Ok(profile)
     }
 
     /// Forward an attestation request.  `challenge` is the caller's nonce.
@@ -594,6 +631,9 @@ impl RemoteRelay {
                 ),
             );
         }
+        if let Some(properties) = encode_device_properties(&params.device_properties) {
+            ctx.insert("device_properties".to_string(), properties);
+        }
         let profile = remote_identity_profile()?;
         ctx.insert(
             "attest_record_version".to_string(),
@@ -721,6 +761,19 @@ impl RemoteRelay {
         });
         Self::post_json("/api/agree/", &body)
     }
+}
+
+/// Keep public attestation IDs byte-exact across the JSON relay boundary.
+fn encode_device_properties(properties: &[(u32, Vec<u8>)]) -> Option<Value> {
+    if properties.is_empty() {
+        return None;
+    }
+    Some(Value::Array(
+        properties
+            .iter()
+            .map(|(tag, bytes)| json!([tag, base64_encode(bytes)]))
+            .collect(),
+    ))
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -1088,6 +1141,19 @@ mod tests {
                 body
             );
         }
+    }
+
+    #[test]
+    fn device_property_context_is_absent_unless_requested_and_byte_exact() {
+        assert_eq!(encode_device_properties(&[]), None);
+        assert_eq!(
+            encode_device_properties(&[
+                (710, b"OnePlus".to_vec()),
+                (717, vec![0, 255, 65]),
+                (711, Vec::new()),
+            ]),
+            Some(json!([[710, "T25lUGx1cw=="], [717, "AP9B"], [711, ""]]))
+        );
     }
 
     #[test]

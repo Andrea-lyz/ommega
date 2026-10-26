@@ -112,6 +112,8 @@ if [ "$ARCH" = "x64" ] || [ "$ARCH" = "x86_64" ]; then
   BINDIR="$MODPATH/libs/x86_64"
   extract "$ZIPFILE" 'libs/x86_64/keymint' "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/ommega-auth-policy' "$MODPATH"
+  extract "$ZIPFILE" 'libs/x86_64/ommega-cpu-policy' "$MODPATH"
+  extract "$ZIPFILE" 'zygisk/x86_64.so' "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/ommega-inject'  "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/soterta-svc'   "$MODPATH"
 elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "arm64-v8a" ]; then
@@ -119,6 +121,8 @@ elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "arm64-v8a" ]; then
   BINDIR="$MODPATH/libs/arm64-v8a"
   extract "$ZIPFILE" 'libs/arm64-v8a/keymint' "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/ommega-auth-policy' "$MODPATH"
+  extract "$ZIPFILE" 'libs/arm64-v8a/ommega-cpu-policy' "$MODPATH"
+  extract "$ZIPFILE" 'zygisk/arm64-v8a.so' "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/ommega-inject'  "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/soterta-svc'   "$MODPATH"
 else
@@ -127,9 +131,15 @@ fi
 
 [ -f "$BINDIR/keymint" ] || abort "! Missing $BINDIR/keymint"
 [ -f "$BINDIR/ommega-auth-policy" ] || abort "! Missing $BINDIR/ommega-auth-policy"
+[ -f "$BINDIR/ommega-cpu-policy" ] || abort "! Missing $BINDIR/ommega-cpu-policy"
 [ -f "$BINDIR/ommega-inject" ] || abort "! Missing $BINDIR/ommega-inject"
 [ -f "$BINDIR/soterta-svc" ] || abort "! Missing $BINDIR/soterta-svc"
-chmod 755 "$BINDIR/keymint" "$BINDIR/ommega-auth-policy" "$BINDIR/ommega-inject" "$BINDIR/soterta-svc"
+chmod 755 "$BINDIR/keymint" "$BINDIR/ommega-auth-policy" "$BINDIR/ommega-cpu-policy" "$BINDIR/ommega-inject" "$BINDIR/soterta-svc"
+find "$MODPATH/zygisk" -name '*.so' -exec chmod 0644 {} \;
+ui_print "- CPU view: exp6 (requires Zygisk; configure its own scope in Settings)"
+if [ -d /data/adb/modules/zygisk_maskcpu ] && [ ! -e /data/adb/modules/zygisk_maskcpu/disable ] && [ ! -e /data/adb/modules/zygisk_maskcpu/remove ]; then
+  ui_print "! Disable the standalone MaskCPU module before using the integrated CPU view."
+fi
 
 # Extract the WebUI webroot. KernelSU/APatch manager auto-detects this folder,
 # serves it in-app and injects the window.ksu bridge; Magisk has no built-in WebUI.

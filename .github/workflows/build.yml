@@ -138,6 +138,10 @@ jobs:
         run: |
           python3 scripts/webui-patch.py --check
           node --test scripts/webui-compat.test.mjs
+      - name: Test exp6 scope and readonly property records
+        if: matrix.component == 'a'
+        working-directory: a-side/source
+        run: sh cpu-mask/tests/run-pure-tests.sh
       - name: Build Android module
         working-directory: ${{ matrix.component }}-side/source
         run: |
