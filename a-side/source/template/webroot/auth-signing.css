@@ -61,3 +61,19 @@
 #ommega-cpu-app-list input{appearance:auto;width:22px;height:22px;margin:0;accent-color:var(--om-accent,#465b91)}
 #ommega-cpu-more{width:calc(100% - 32px);margin:8px 16px calc(8px + env(safe-area-inset-bottom,0px));flex-shrink:0}
 @media(prefers-reduced-motion:reduce){#ommega-cpu-enabled::before,#ommega-cpu-system::before{transition:none}}
+
+/* Global system capability controls share the existing modal and theme tokens. */
+#ommega-capability-dialog{width:calc(100% - 32px);max-width:560px;max-height:90vh;max-height:calc(100dvh - 32px)}
+#ommega-capability-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
+.ommega-capability-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:80px;padding:12px 0;border-bottom:1px solid var(--om-line,#bbb);cursor:pointer}
+.ommega-capability-row>span{min-width:0;line-height:1.5;overflow-wrap:anywhere}
+.ommega-capability-row strong{font-size:16px;font-weight:600}
+.ommega-capability-id{font-family:ui-monospace,monospace;margin-top:4px;overflow-wrap:anywhere}
+#ommega-capability-dialog .ommega-capability-switch{box-sizing:border-box;appearance:none;position:relative;flex:none;display:block;width:44px;height:28px;min-height:28px;padding:0;margin:0;border:2px solid var(--om-muted,#666);border-radius:18px;background:transparent;color:var(--om-muted,#666);cursor:pointer}
+#ommega-capability-dialog .ommega-capability-switch::before{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:currentColor;transition:transform .15s}
+#ommega-capability-dialog .ommega-capability-switch:checked{background:var(--om-accent,#465b91);border-color:var(--om-accent,#465b91);color:var(--om-on-accent,#fff)}
+#ommega-capability-dialog .ommega-capability-switch:checked::before{transform:translateX(16px)}
+#ommega-capability-status{font-size:14px;line-height:1.5;color:var(--om-ink,#222);overflow-wrap:anywhere;margin-top:12px}
+#ommega-capability-dialog .ommega-auth-actions .om-button{min-height:48px}
+#ommega-capability-dialog .ommega-auth-policy-content{padding-bottom:calc(20px + env(safe-area-inset-bottom,0px))}
+@media(prefers-reduced-motion:reduce){#ommega-capability-dialog .ommega-capability-switch::before{transition:none}}

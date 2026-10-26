@@ -64,6 +64,93 @@ test("the glue evaluates without the WebUI globals", () => {
   loadGlue();
 });
 
+function capabilityFixture(ctx, config = {strongbox:false, device_id_attestation:false}) {
+  const elements = {
+    "ommega-capability-dialog": {open:true, setAttribute() {}, querySelectorAll:() => []},
+    "ommega-capability-status": {}, "ommega-capability-summary": {},
+    "ommega-capability-mount-note": {}, "ommega-capability-strongbox": {},
+    "ommega-capability-device-id": {},
+  };
+  const original = "version=1\r\nstrongbox=false\r\ndevice_id_attestation=false\r\n";
+  const state = {original, config, mounted:{strongbox:false, device_id_attestation:false}, mount_error:null};
+  ctx.document.getElementById = id => elements[id] || null;
+  ctx.capabilityFixtureState = state;
+  vm.runInContext('ommegaCapabilityState = capabilityFixtureState; ommegaCapabilityDraft = {...capabilityFixtureState.config}', ctx);
+  return {elements, state};
+}
+
+test("system capabilities save independently and never issue a live apply or restart", () => {
+  const ctx = loadGlue();
+  for (const strongbox of [false, true]) for (const device_id_attestation of [false, true]) {
+    const replacement = ctx.ommegaCapabilityText({strongbox, device_id_attestation});
+    const expected = "version=1\r\nstrongbox=false\r\ndevice_id_attestation=false\r\n";
+    const command = ctx.ommegaCapabilityCommand("write", {expected, replacement});
+    const payload = JSON.parse(Buffer.from(command.match(/printf '%s' '([^']+)'/)[1], "base64").toString("utf8"));
+    assert.equal(payload.expected, expected);
+    assert.equal(payload.replacement, `version=1\nstrongbox=${strongbox}\ndevice_id_attestation=${device_id_attestation}\n`);
+    assert.doesNotMatch(command, /\b(?:prepare|reboot|restart|kill|mount|setprop)\b|\badb\s|injector\.toml|cpu-mask\.conf/);
+  }
+  assert.throws(() => ctx.ommegaCapabilityCommand("prepare"), /Unsupported/);
+  assert.throws(() => ctx.ommegaCapabilityCommand("write"), /Unsupported/);
+  assert.throws(() => ctx.ommegaCapabilityText({strongbox:true, device_id_attestation:"false"}), /Invalid/);
+});
+
+test("capability save verifies readback and keeps the restart notice visible in the open dialog", async () => {
+  const ctx = loadGlue();
+  const f = capabilityFixture(ctx);
+  vm.runInContext('ommegaCapabilityDraft.strongbox = true', ctx);
+  let calls = 0;
+  ctx._ = async command => {
+    calls++;
+    if (command.endsWith('"$ommega_capability_writer" write')) return {errno:0, stdout:"saved"};
+    return {errno:0, stdout:JSON.stringify({...f.state, original:"saved", config:{strongbox:true, device_id_attestation:false}})};
+  };
+  await ctx.ommegaCapabilitySave();
+  assert.equal(calls, 2);
+  assert.equal(f.elements["ommega-capability-dialog"].open, true);
+  assert.match(f.elements["ommega-capability-status"].textContent, /Saved.*Restart/);
+  assert.match(f.elements["ommega-capability-summary"].textContent, /1 \/ 2/);
+  assert.equal(vm.runInContext('ommegaCapabilityDraft.device_id_attestation', ctx), false);
+});
+
+test("capability write failures and mismatching readbacks retain the user's draft and report failure", async () => {
+  for (const writeFails of [true, false]) {
+    const ctx = loadGlue();
+    const f = capabilityFixture(ctx);
+    vm.runInContext('ommegaCapabilityDraft.device_id_attestation = true', ctx);
+    ctx._ = async command => command.endsWith('"$ommega_capability_writer" write') ?
+      {errno:writeFails ? 1 : 0, stderr:"another editor changed the file"} :
+      {errno:0, stdout:JSON.stringify(f.state)};
+    await ctx.ommegaCapabilitySave();
+    assert.match(f.elements["ommega-capability-status"].textContent, /Could not save/);
+    assert.equal(vm.runInContext('ommegaCapabilityDraft.device_id_attestation', ctx), true);
+    assert.equal(vm.runInContext('ommegaCapabilityBusy', ctx), false);
+    assert.equal(f.elements["ommega-capability-dialog"].open, true);
+  }
+});
+
+test("capability status distinguishes an absent system mount from an off switch", async () => {
+  const ctx = loadGlue();
+  const f = capabilityFixture(ctx, {strongbox:true, device_id_attestation:false});
+  ctx._ = async () => ({errno:0, stdout:JSON.stringify({...f.state, mounted:null})});
+  await ctx.ommegaCapabilityRefresh();
+  assert.match(f.elements["ommega-capability-mount-note"].textContent, /not mounted/);
+  assert.equal(f.elements["ommega-capability-strongbox"].checked, true);
+  assert.equal(f.elements["ommega-capability-device-id"].checked, false);
+});
+
+test("a capability read completing after cancellation does not replace a later draft", async () => {
+  const ctx = loadGlue();
+  const f = capabilityFixture(ctx);
+  let finish;
+  ctx._ = () => new Promise(resolve => { finish = resolve; });
+  const read = ctx.ommegaCapabilityRefresh();
+  vm.runInContext('++ommegaCapabilitySession; ommegaCapabilityBusy = false; ommegaCapabilityDraft = {strongbox:true,device_id_attestation:true}', ctx);
+  finish({errno:0, stdout:JSON.stringify(f.state)});
+  await read;
+  assert.equal(vm.runInContext('ommegaCapabilityDraft.strongbox && ommegaCapabilityDraft.device_id_attestation', ctx), true);
+});
+
 test("CPU scope is independent, strictly validates packages and preserves source bytes", () => {
   const ctx = loadGlue();
   const config = {enabled:true, packages:["com.user.wallet", "com.example.detector"]};

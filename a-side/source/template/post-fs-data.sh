@@ -10,6 +10,19 @@ STATE_DIR=/data/adb/ommega
 # A-side config directory (webroot UI writes here; `ommegadata` is a symlink to
 # $TARGET_DIR, so the UI and the keystore process (uid 1017) share one copy).
 CLIENTA_DIR=/data/adb/ommega
+
+# Prepare declarations before the module's system tree is mounted and Zygote starts.
+# Saving from WebUI only changes the policy for the next boot.
+for capability_writer in "$MODDIR/libs/arm64-v8a/ommega-capability-policy" \
+                         "$MODDIR/libs/x86_64/ommega-capability-policy"; do
+  [ -x "$capability_writer" ] || continue
+  if ! "$capability_writer" prepare "$MODDIR"; then
+    log -t ommega "System capability policy could not be prepared; keeping defaults"
+  fi
+  chcon u:object_r:system_file:s0 "$MODDIR/system/etc/permissions/ommega-capability-mask.xml" 2>/dev/null || true
+  break
+done
+
 # --- Boot-state property normalization ---------------------------------------
 # Values that only an unlocked / tampered device reports are rewritten here, in
 # the post-fs-data stage, before the framework or any detector app can read

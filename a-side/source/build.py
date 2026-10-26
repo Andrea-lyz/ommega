@@ -40,6 +40,7 @@ BINARY_SPECS = (
     {"package": None, "bin": "keymint", "output_name": "keymint"},
     {"package": None, "bin": "ommega-auth-policy", "output_name": "ommega-auth-policy"},
     {"package": None, "bin": "ommega-cpu-policy", "output_name": "ommega-cpu-policy"},
+    {"package": None, "bin": "ommega-capability-policy", "output_name": "ommega-capability-policy"},
     {"package": "ommega-injector", "bin": "ommega-inject", "output_name": "ommega-inject"},
 )
 
@@ -76,6 +77,7 @@ MODULE_TEXT_FILES = (
     "verify.sh",
     "webui-trust.sh",
     "META-INF/com/google/android/update-binary",
+    "system/etc/permissions/ommega-capability-mask.xml",
     "META-INF/com/google/android/updater-script",
 )
 

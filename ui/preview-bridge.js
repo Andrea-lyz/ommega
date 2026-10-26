@@ -5,6 +5,8 @@ const apps = [{packageName:'com.example.wallet',appLabel:'Wallet',isSystem:false
   {packageName:'com.android.settings',appLabel:'Android Settings',isSystem:true,uid:1000},
   {packageName:'com.google.android.gms',appLabel:'Google Play services',isSystem:true,uid:10106}];
 let authPolicy = null;
+let capabilityPolicy = null;
+let capabilityConfig = {strongbox:false, device_id_attestation:false};
 let injectorConfig = 'version = 1\n[filter]\nenabled = true\n';
 const utf8Base64 = value => btoa(String.fromCharCode(...new TextEncoder().encode(value)));
 const utf8Decode = value => new TextDecoder().decode(Uint8Array.from(atob(value), c=>c.charCodeAt(0)));
@@ -23,7 +25,23 @@ window.ksu = {
     window.__previewCommands.push(command);
     const now = Math.floor(Date.now()/1000);
     let stdout = '', errno = 0;
-    if (command.includes('ommega-auth-policy') && command.includes('base64 -d')) {
+    if (command.includes('ommega-capability-policy')) {
+      if (command.includes('base64 -d')) {
+        const match = command.match(/printf '%s' '([^']+)'/);
+        const request = match && JSON.parse(utf8Decode(match[1]));
+        if (!request || request.expected !== capabilityPolicy) {errno=75; stdout='';}
+        else {
+          capabilityPolicy = request.replacement;
+          capabilityConfig = {
+            strongbox:/^strongbox=true$/m.test(capabilityPolicy),
+            device_id_attestation:/^device_id_attestation=true$/m.test(capabilityPolicy),
+          };
+          stdout='saved';
+        }
+      } else stdout = JSON.stringify({original:capabilityPolicy, config:capabilityConfig,
+        mounted:window.__OM_CAPABILITY_MOUNT__ === undefined ? {strongbox:false,device_id_attestation:false} : window.__OM_CAPABILITY_MOUNT__, mount_error:null});
+    }
+    else if (command.includes('ommega-auth-policy') && command.includes('base64 -d')) {
       const match = command.match(/printf '%s' '([^']+)'/);
       const request = match && JSON.parse(utf8Decode(match[1]));
       if (!request || request.expected !== authPolicy) {errno=75; stdout='';}

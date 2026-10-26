@@ -16,6 +16,13 @@ Language defaults to the system: Chinese locales use simplified Chinese; other l
 
 A's Settings places Global scope directly below Language/Appearance. Authentication signing opens a policy dialog, then a full-screen App exceptions list with user app icons, names and packages; a switch adds system apps. These two settings do not appear in Overview or Apps. The two modal levels return independently through Back buttons, Escape, browser history and native WebView back events.
 
+A's System capability mask entry opens a dialog with independent StrongBox and
+device ID attestation mask switches. Both default to off. Saving verifies the
+stored policy and keeps the restart notice visible. The dialog uses the existing
+theme, scroll and back handling, wraps feature names on narrow screens and shows
+when its system configuration is not mounted. See the
+[capability mask contract](../a-side/source/docs/SYSTEM-CAPABILITY-MASK.md).
+
 A's Apps overflow menu contains only app operations. Global configuration, language, help and about are in Settings. The original dialog bindings stay hidden behind those Settings actions. A packages only the English and simplified Chinese translation files.
 
 The A/B refresh buttons show a busy state while reading status and reject duplicate clicks until the read finishes. A failed read releases the button for retry. Refresh motion follows the system's reduced-motion preference.
@@ -47,6 +54,10 @@ node ui/tests/browser-smoke.mjs
 ```
 
 It checks Chinese/English, light/dark, 320–1024 px layout, refresh loading/duplicate-click/error/retry behavior, reduced-motion support, A remote/SOTER dialogs, B form loading and token visibility, B SPL minimum/applied-target display, and the OpenUI prototype. Screenshots and results are written to ignored `ui/test-results/`.
+
+`node ui/tests/capability-smoke.mjs` checks the A capability dialog with the same
+Playwright setup. It loads packaged assets directly with an in-memory bridge,
+requires no preview server and writes screenshots to `ui/test-results/`.
 
 ## Android preview and validation
 
