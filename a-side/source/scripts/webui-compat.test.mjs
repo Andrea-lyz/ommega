@@ -99,12 +99,14 @@ function cpuAppsFixture(ctx) {
 test("app icons use the manager scheme without requiring the newer package-info API", () => {
   const ctx = loadGlue();
   const listeners = {};
-  const image = {style:{}, addEventListener:(name,callback)=>{listeners[name]=callback;}};
+  const placeholder = {hidden:false};
+  const image = {style:{}, previousElementSibling:placeholder, addEventListener:(name,callback)=>{listeners[name]=callback;}};
   ctx.ksu = {exec(){}};
   ctx.ommegaAuthLoadIcon(image, "com.user.app");
   assert.equal(image.src, "ksu://icon/com.user.app");
   listeners.load();
   assert.equal(image.hidden, false); assert.equal(image.style.opacity, "1");
+  assert.equal(placeholder.hidden, true, "transparent icons must not overlap a fallback letter");
 });
 
 test("a failed app icon scheme falls back to the native drawable before hiding the image", async () => {

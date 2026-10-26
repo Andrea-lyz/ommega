@@ -186,7 +186,11 @@ function ommegaAuthLoadIcon(image, packageName) {
   // Both settings lists share the actual app icon pipeline. A failed manager
   // scheme may still have a PackageManager drawable available.
   let schemeTried = false, drawableTried = false;
-  const source = value => { image.hidden = false; image.style.opacity = "0"; image.src = value; };
+  const source = value => {
+    image.hidden = false; image.style.opacity = "0";
+    if (image.previousElementSibling) image.previousElementSibling.hidden = false;
+    image.src = value;
+  };
   const next = () => {
     if (!schemeTried && typeof globalThis.ksu?.exec === "function") {
       schemeTried = true; source("ksu://icon/" + packageName); return;
@@ -202,8 +206,12 @@ function ommegaAuthLoadIcon(image, packageName) {
       return;
     }
     image.hidden = true;
+    if (image.previousElementSibling) image.previousElementSibling.hidden = false;
   };
-  image.addEventListener("load", () => { image.hidden = false; image.style.opacity = "1"; });
+  image.addEventListener("load", () => {
+    image.hidden = false; image.style.opacity = "1";
+    if (image.previousElementSibling) image.previousElementSibling.hidden = true;
+  });
   image.addEventListener("error", next);
   if (typeof dr !== "undefined" && dr.has(packageName)) source(dr.get(packageName));
   else next();
