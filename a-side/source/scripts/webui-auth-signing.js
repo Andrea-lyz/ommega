@@ -183,19 +183,30 @@ function ommegaAuthFilteredApps(query) {
 }
 
 function ommegaAuthLoadIcon(image, packageName) {
-  image.addEventListener("error", () => { image.hidden = true; }, {once:true});
-  if (typeof globalThis.ksu?.getPackagesInfo === "function") {
-    image.src = "ksu://icon/" + packageName;
-  } else if (typeof dr !== "undefined" && dr.has(packageName)) {
-    image.src = dr.get(packageName);
-  } else if (typeof $packageManager !== "undefined" && typeof ks === "function") {
-    Promise.resolve().then(() => ks($packageManager.getApplicationIcon(packageName, 0, 0)))
-      .then(response => response.arrayBuffer()).then(buffer => {
-        const source = "data:image/png;base64," + Ts(buffer);
-        if (typeof dr !== "undefined") dr.set(packageName, source);
-        image.src = source;
-      }).catch(() => { image.hidden = true; });
-  } else image.hidden = true;
+  // Both settings lists share the actual app icon pipeline. A failed manager
+  // scheme may still have a PackageManager drawable available.
+  let schemeTried = false, drawableTried = false;
+  const source = value => { image.hidden = false; image.style.opacity = "0"; image.src = value; };
+  const next = () => {
+    if (!schemeTried && typeof globalThis.ksu?.exec === "function") {
+      schemeTried = true; source("ksu://icon/" + packageName); return;
+    }
+    if (!drawableTried && typeof $packageManager !== "undefined" && typeof ks === "function") {
+      drawableTried = true;
+      Promise.resolve().then(() => ks($packageManager.getApplicationIcon(packageName, 0, 0)))
+        .then(response => response.arrayBuffer()).then(buffer => {
+          const value = "data:image/png;base64," + Ts(buffer);
+          if (typeof dr !== "undefined") dr.set(packageName, value);
+          source(value);
+        }).catch(next);
+      return;
+    }
+    image.hidden = true;
+  };
+  image.addEventListener("load", () => { image.hidden = false; image.style.opacity = "1"; });
+  image.addEventListener("error", next);
+  if (typeof dr !== "undefined" && dr.has(packageName)) source(dr.get(packageName));
+  else next();
 }
 
 function ommegaAuthRenderApps() {

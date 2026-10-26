@@ -1159,6 +1159,7 @@ fn handle_profile(_task_type: &str, _payload: &Value) -> Result<Value> {
         "keymint_name": profile.keymint_name,
         "keymint_author": profile.keymint_author,
         "has_strongbox": profile.has_strongbox,
+        "app_identity": kmr_common::cpu_mask::Profile::read_device(),
     }))
 }
 

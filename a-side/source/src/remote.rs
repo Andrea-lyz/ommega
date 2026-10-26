@@ -106,6 +106,12 @@ impl RemoteRejection {
 /// Drop the cached identity profile so the next attestation re-reads it from
 /// the relay. Called when the runtime config is applied.
 pub fn invalidate_identity_profile() {
+    // A different relay route must never leave the previous B's application view active.
+    if let Err(error) = std::fs::remove_file(kmr_common::cpu_mask::PROFILE_PATH) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("could not invalidate CPU property snapshot: {error}");
+        }
+    }
     if let Ok(mut guard) = REMOTE_IDENTITY_PROFILE.write() {
         if guard.take().is_some() {
             log::info!("remote identity profile cache cleared after config change");
@@ -456,7 +462,38 @@ impl RemoteRelay {
         if let Some(error) = result.get("error").and_then(Value::as_str) {
             return Err(anyhow!("remote profile failed: {error}"));
         }
-        parse_identity_profile(result)
+        let profile = parse_identity_profile(result)?;
+        // Piggyback on the existing profile exchange; app startup has no network or HAL work.
+        let app_profile = result
+            .get("app_identity")
+            .cloned()
+            .ok_or_else(|| anyhow!("B has not supplied an exp6 property profile"))
+            .and_then(|value| {
+                serde_json::from_value::<kmr_common::cpu_mask::Profile>(value).map_err(Into::into)
+            })
+            .and_then(|value| value.text().map_err(|error| anyhow!(error)));
+        let saved = app_profile.and_then(|contents| {
+            let path = std::path::Path::new(kmr_common::cpu_mask::PROFILE_PATH);
+            let previous = match std::fs::read(path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            kmr_common::runtime::fs::atomic_compare_replace_preserving_metadata(
+                path,
+                previous.as_deref(),
+                contents.as_bytes(),
+                0o600,
+                kmr_common::consts::KEYSTORE_UID,
+                kmr_common::consts::KEYSTORE_GID,
+            )
+            .context("cache B property snapshot")
+        });
+        if let Err(error) = saved {
+            let _ = std::fs::remove_file(kmr_common::cpu_mask::PROFILE_PATH);
+            log::warn!("CPU property view unavailable: {error:#}");
+        }
+        Ok(profile)
     }
 
     /// Forward an attestation request.  `challenge` is the caller's nonce.

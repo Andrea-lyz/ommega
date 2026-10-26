@@ -28,6 +28,7 @@ pub mod android_version;
 pub mod apex;
 pub mod auth_signing;
 pub mod consts;
+pub mod cpu_mask;
 pub mod crypto;
 pub mod keyblob;
 pub mod rpc;

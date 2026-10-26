@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "template" / "webroot" / "assets"
 GLUE = ROOT / "scripts" / "webui-compat.js"
 AUTH_GLUE = ROOT / "scripts" / "webui-auth-signing.js"
+CPU_GLUE = ROOT / "scripts" / "webui-cpu-mask.js"
 MARKER = "OMMEGA_TARGET_COMPAT"
 GLUE_HEADER = "\n// ── Ommega detector compatibility policy"
 
@@ -73,7 +74,8 @@ def main() -> int:
 
     path = bundle_path()
     text = path.read_bytes().decode("utf-8")
-    glue = GLUE.read_text(encoding="utf-8") + AUTH_GLUE.read_text(encoding="utf-8")
+    glue = (GLUE.read_text(encoding="utf-8") + AUTH_GLUE.read_text(encoding="utf-8")
+            + CPU_GLUE.read_text(encoding="utf-8"))
     digest = sha256(path)
     patched = MARKER in text
 

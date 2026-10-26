@@ -64,6 +64,111 @@ test("the glue evaluates without the WebUI globals", () => {
   loadGlue();
 });
 
+test("CPU scope is independent, strictly validates packages and preserves source bytes", () => {
+  const ctx = loadGlue();
+  const config = {enabled:true, packages:["com.user.wallet", "com.example.detector"]};
+  const expected = "version=1\nenabled=false\n";
+  assert.equal(ctx.ommegaCpuText(config), "version=1\nenabled=true\npackage=com.example.detector\npackage=com.user.wallet\n");
+  const command = ctx.ommegaCpuCommand("write", {expected, replacement:ctx.ommegaCpuText(config)});
+  const payload = JSON.parse(Buffer.from(command.match(/printf '%s' '([^']+)'/)[1], "base64").toString("utf8"));
+  assert.equal(payload.expected, expected);
+  assert.equal(payload.replacement, ctx.ommegaCpuText(config));
+  assert.doesNotMatch(command, /injector\.toml|auth-signing|kill|restart|setprop|\badb\s/);
+  for (const packages of [["com.safe", "com.safe"], ["com.bad.$(id)"], ["../data"], ["com"]])
+    assert.throws(() => ctx.ommegaCpuText({enabled:true, packages}), /Invalid/);
+  assert.throws(() => ctx.ommegaCpuText({enabled:"true", packages:[]}), /Invalid/);
+  vm.runInContext('ommegaGlobalScopeEnabled = true; ommegaAuthConfig = {version:1,default:"preserve",apps:{}}', ctx);
+  assert.equal(ctx.ommegaCpuText(config).includes("package=com.example.detector"), true);
+  assert.equal(vm.runInContext('ommegaAuthConfig.default', ctx), "preserve");
+});
+
+function cpuAppsFixture(ctx) {
+  const dialog = {open:false, showModal() {this.open=true;}, querySelectorAll:()=>[]};
+  const elements = {"ommega-cpu-app-dialog":dialog, "ommega-cpu-system":{checked:false},
+    "ommega-cpu-search":{value:""}, "ommega-cpu-app-status":{}, "ommega-cpu-more":{},
+    "ommega-cpu-app-list":{replaceChildren(){}}};
+  ctx.document.getElementById = id => elements[id] || null;
+  ctx.ommegaCpuSync = () => {};
+  vm.runInContext('ommegaCpuDraft = {enabled:false,packages:["com.system.saved"]}', ctx);
+  ctx.ommegaNames = async packages => packages.map(packageName => ({packageName,appName:packageName}));
+  let renders = 0;
+  ctx.ommegaCpuRenderApps = () => {renders++;};
+  return {dialog,elements,renders:()=>renders};
+}
+
+test("app icons use the manager scheme without requiring the newer package-info API", () => {
+  const ctx = loadGlue();
+  const listeners = {};
+  const image = {style:{}, addEventListener:(name,callback)=>{listeners[name]=callback;}};
+  ctx.ksu = {exec(){}};
+  ctx.ommegaAuthLoadIcon(image, "com.user.app");
+  assert.equal(image.src, "ksu://icon/com.user.app");
+  listeners.load();
+  assert.equal(image.hidden, false); assert.equal(image.style.opacity, "1");
+});
+
+test("a failed app icon scheme falls back to the native drawable before hiding the image", async () => {
+  const ctx = loadGlue();
+  const listeners = {};
+  const image = {style:{}, addEventListener:(name,callback)=>{listeners[name]=callback;}};
+  ctx.ksu = {exec(){}}; ctx.dr = new Map();
+  ctx.$packageManager = {getApplicationIcon:pkg=>pkg};
+  ctx.ks = async () => ({arrayBuffer:async()=>Uint8Array.from([1,2,3]).buffer});
+  ctx.Ts = buffer => Buffer.from(buffer).toString("base64");
+  ctx.ommegaAuthLoadIcon(image, "com.user.app"); listeners.error();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(image.src, "data:image/png;base64,AQID");
+  assert.equal(ctx.dr.get("com.user.app"), image.src);
+  listeners.load(); assert.equal(image.hidden, false);
+  listeners.error(); assert.equal(image.hidden, true);
+});
+
+test("CPU scope retains selected apps hidden by the system-app filter", async () => {
+  const ctx = loadGlue(), f = cpuAppsFixture(ctx), calls = [];
+  ctx.Zo = async type => {calls.push(type); return type === "user" ? ["com.user.wallet"] : ["com.system.saved"];};
+  await ctx.ommegaCpuOpenApps();
+  assert.deepEqual(calls, ["user"]);
+  f.elements["ommega-cpu-system"].checked = true;
+  await ctx.ommegaCpuToggleSystem();
+  f.elements["ommega-cpu-system"].checked = false;
+  await ctx.ommegaCpuToggleSystem();
+  assert.deepEqual(calls, ["user", "system"]);
+  assert.equal(vm.runInContext('ommegaCpuAppsDraft.has("com.system.saved")', ctx), true);
+  assert.equal(vm.runInContext('ommegaCpuDraft.packages.join()', ctx), "com.system.saved");
+});
+
+test("CPU scope returning during inventory load never reopens or renders the closed dialog", async () => {
+  const ctx = loadGlue(), f = cpuAppsFixture(ctx);
+  let resolvePackages;
+  ctx.Zo = () => new Promise(resolve => {resolvePackages=resolve;});
+  const opening = ctx.ommegaCpuOpenApps();
+  f.dialog.open = false;
+  resolvePackages(["com.user.wallet"]);
+  await opening;
+  assert.equal(f.dialog.open, false); assert.equal(f.renders(), 0);
+  assert.equal(vm.runInContext('ommegaCpuInventory.length',ctx), 0);
+});
+
+test("CPU write failure and mismatching readback keep the dialog open and the draft intact", async () => {
+  const ctx = loadGlue();
+  let closes = 0;
+  const elements = {"ommega-cpu-status":{}, "ommega-cpu-policy-dialog":{close(){closes++;}}};
+  ctx.document.getElementById = id => elements[id] || null;
+  ctx.ommegaCpuSync = () => {};
+  vm.runInContext('ommegaCpuDraft = {enabled:false,packages:["com.new.app"]}; ommegaCpuState = {original:null,config:{enabled:false,packages:[]}}', ctx);
+  ctx._ = async () => ({errno:75,stderr:"Config changed; reload"});
+  await ctx.ommegaCpuSave();
+  assert.match(elements["ommega-cpu-status"].textContent, /Could not save.*Config changed/);
+  assert.equal(closes, 0);
+  ctx._ = async command => command.endsWith('"$ommega_cpu_writer" status')
+    ? {errno:0,stdout:JSON.stringify({original:"version=1\nenabled=false\n",config:{enabled:false,packages:[]},engine:"exp6",standalone_active:false})}
+    : {errno:0,stdout:"saved"};
+  await ctx.ommegaCpuSave();
+  assert.match(elements["ommega-cpu-status"].textContent, /readback did not match/);
+  assert.equal(closes, 0);
+  assert.equal(vm.runInContext('ommegaCpuDraft.packages.join()', ctx), "com.new.app");
+});
+
 test("language changes warn only for real unsaved app selections and modes", async () => {
   const ctx = loadGlue();
   ctx.Qe = ["com.example.wallet", "com.example.checker"];

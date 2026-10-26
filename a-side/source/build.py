@@ -39,6 +39,7 @@ ABI_TO_MODULE_ARCHES = {
 BINARY_SPECS = (
     {"package": None, "bin": "keymint", "output_name": "keymint"},
     {"package": None, "bin": "ommega-auth-policy", "output_name": "ommega-auth-policy"},
+    {"package": None, "bin": "ommega-cpu-policy", "output_name": "ommega-cpu-policy"},
     {"package": "ommega-injector", "bin": "ommega-inject", "output_name": "ommega-inject"},
 )
 
@@ -346,6 +347,16 @@ def build_package_for_abi(
         )
 
         copy_template_files(stage_dir)
+        scripts_dir = str(REPO_ROOT / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from build_cpu_mask import build_cpu_mask
+
+        zygisk_dir = stage_dir / "zygisk"
+        zygisk_dir.mkdir(exist_ok=True)
+        shutil.copy2(build_cpu_mask(abi, release), zygisk_dir / f"{abi}.so")
+        shutil.copy2(REPO_ROOT / "cpu-mask" / "LICENSE", stage_dir / "LICENSE.cpu-mask")
+        shutil.copy2(REPO_ROOT / "cpu-mask" / "THIRD_PARTY_NOTICES.md", stage_dir / "NOTICE.cpu-mask.md")
         normalize_module_text_files(stage_dir)
         configure_template_for_abi(stage_dir, abi)
         for binary, output_name in built_binaries:
