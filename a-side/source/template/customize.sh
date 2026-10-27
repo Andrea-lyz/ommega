@@ -113,6 +113,7 @@ if [ "$ARCH" = "x64" ] || [ "$ARCH" = "x86_64" ]; then
   extract "$ZIPFILE" 'libs/x86_64/keymint' "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/ommega-auth-policy' "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/ommega-cpu-policy' "$MODPATH"
+  extract "$ZIPFILE" 'libs/x86_64/ommega-capability-policy' "$MODPATH"
   extract "$ZIPFILE" 'zygisk/x86_64.so' "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/ommega-inject'  "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/soterta-svc'   "$MODPATH"
@@ -122,6 +123,7 @@ elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "arm64-v8a" ]; then
   extract "$ZIPFILE" 'libs/arm64-v8a/keymint' "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/ommega-auth-policy' "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/ommega-cpu-policy' "$MODPATH"
+  extract "$ZIPFILE" 'libs/arm64-v8a/ommega-capability-policy' "$MODPATH"
   extract "$ZIPFILE" 'zygisk/arm64-v8a.so' "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/ommega-inject'  "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/soterta-svc'   "$MODPATH"
@@ -132,9 +134,13 @@ fi
 [ -f "$BINDIR/keymint" ] || abort "! Missing $BINDIR/keymint"
 [ -f "$BINDIR/ommega-auth-policy" ] || abort "! Missing $BINDIR/ommega-auth-policy"
 [ -f "$BINDIR/ommega-cpu-policy" ] || abort "! Missing $BINDIR/ommega-cpu-policy"
+[ -f "$BINDIR/ommega-capability-policy" ] || abort "! Missing $BINDIR/ommega-capability-policy"
 [ -f "$BINDIR/ommega-inject" ] || abort "! Missing $BINDIR/ommega-inject"
 [ -f "$BINDIR/soterta-svc" ] || abort "! Missing $BINDIR/soterta-svc"
 chmod 755 "$BINDIR/keymint" "$BINDIR/ommega-auth-policy" "$BINDIR/ommega-cpu-policy" "$BINDIR/ommega-inject" "$BINDIR/soterta-svc"
+chmod 755 "$BINDIR/ommega-capability-policy"
+extract "$ZIPFILE" 'system/etc/permissions/ommega-capability-mask.xml' "$MODPATH"
+set_perm_recursive "$MODPATH/system" 0 0 0755 0644 u:object_r:system_file:s0
 find "$MODPATH/zygisk" -name '*.so' -exec chmod 0644 {} \;
 ui_print "- CPU view: exp6 (requires Zygisk; configure its own scope in Settings)"
 if [ -d /data/adb/modules/zygisk_maskcpu ] && [ ! -e /data/adb/modules/zygisk_maskcpu/disable ] && [ ! -e /data/adb/modules/zygisk_maskcpu/remove ]; then

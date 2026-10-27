@@ -15,9 +15,9 @@ console.log(check ? 'Shared UI assets verified.' : 'Shared UI assets copied to A
 const indexPath = new URL('a-side/source/template/webroot/index.html', root);
 const original = await readFile(indexPath, 'utf8');
 // Set the legacy translation preference before its deferred bundle starts.
-const integration = `<!--ommega-modern--><script>try{var l=localStorage.getItem('ommega.ui.language')||'auto';localStorage.setItem('trickyAddonLanguage',l==='auto'?(/^zh\\b/i.test(navigator.language)?'zh-CN':'en'):l);document.documentElement.dataset.theme=localStorage.getItem('ommega.ui.theme')||'auto'}catch(e){}</script><link rel="stylesheet" href="./modern.css?v=cpu-exp6-1"><link rel="stylesheet" href="./a-modern.css?v=cpu-exp6-1"><script type="module" src="./modern.js?v=cpu-exp6-1"></script><!--/ommega-modern-->`;
+const integration = `<!--ommega-modern--><script>try{var l=localStorage.getItem('ommega.ui.language')||'auto';localStorage.setItem('trickyAddonLanguage',l==='auto'?(/^zh\\b/i.test(navigator.language)?'zh-CN':'en'):l);document.documentElement.dataset.theme=localStorage.getItem('ommega.ui.theme')||'auto'}catch(e){}</script><link rel="stylesheet" href="./modern.css?v=capability-mask-1"><link rel="stylesheet" href="./a-modern.css?v=capability-mask-1"><script type="module" src="./modern.js?v=capability-mask-1"></script><!--/ommega-modern-->`;
 let clean = original.replace(/<!--ommega-modern-->[\s\S]*?<!--\/ommega-modern-->/g, '')
-  .replace(/(src="\.\/assets\/index-[^"]+\.js)(?:\?[^\"]*)?"/, '$1?v=cpu-exp6-1"');
+  .replace(/(src="\.\/assets\/index-[^"]+\.js)(?:\?[^\"]*)?"/, '$1?v=capability-mask-1"');
 // Keep the original dialog bindings available to the Settings view. The Apps
 // overflow menu contains only app-selection actions, including its refresh.
 const settingsActions = [];

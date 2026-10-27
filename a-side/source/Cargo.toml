@@ -17,6 +17,10 @@ path = "src/bin/auth-policy.rs"
 name = "ommega-cpu-policy"
 path = "src/bin/cpu-policy.rs"
 
+[[bin]]
+name = "ommega-capability-policy"
+path = "src/bin/capability-policy.rs"
+
 [dependencies]
 kmr-common = { path = "common" }
 kmr-crypto-ommega = { path = "crypto" }
