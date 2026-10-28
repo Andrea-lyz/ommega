@@ -166,6 +166,38 @@ Each poll, config reload, task receipt, task outcome (with duration), and
 
 B-side protocol implemented: `GET /api/b/poll/` + `POST /api/b/result/`.
 
+### Battery heartbeat telemetry
+
+The existing authenticated poll carries optional `battery_percent=0..100` and
+`battery_charging=true|false` query fields. The relay reads only the standard
+`/sys/class/power_supply/battery/{present,capacity,status}` sysfs attributes in
+Rust. It samples at most once every five seconds (an in-memory cache, not a new
+thread or persistent file), avoiding sysfs reads on every 80ms short poll.
+Unreadable, absent, unsupported and malformed attributes are omitted; a failed
+refresh clears the previous reading. Both 0% and 100% are valid. `Charging`
+means true; `Discharging`, `Not charging` and `Full` mean false (active charging,
+not simply plugged in); `Unknown` and unrecognized states remain unknown. There
+are no shell commands, Binder/HAL/TEE calls, sysfs writes or configuration changes.
+
+The server publishes these additive fields on `GET /api/status/` in each
+`online_b_devices` row, and on the admin connected-device list:
+
+- `battery_percent`: integer 0..100, or JSON null.
+- `battery_charging`: boolean, or JSON null, independent of percent availability.
+- `battery_updated_at_ms`: server Unix-millisecond receipt time of the accepted
+  poll when at least one battery value is valid; otherwise JSON null. It is not
+  the B clock or a measurement timestamp (the sample may be up to five seconds
+  old), and long-poll wake-ups must not refresh it.
+
+A later missing/invalid attribute clears that attribute instead of retaining a
+last-good value. Old relays and the B APK may omit both query fields and continue
+to receive the unchanged task response; their battery fields are null. Older
+servers ignore the added query fields. Consumers must select the exact configured
+B device, enforce freshness against server time, and never substitute zero or
+another device's battery. Devices absent from the online list have no current
+battery report. B and server binaries both need an explicitly approved update
+before this telemetry is available; UI changes alone cannot create readings.
+
 Task types handled: `profile`, `attest`, `sign`, `decrypt`, `agree` and `soter`.
 SOTER calls are serialized. Protocol entries are not a guarantee that every
 algorithm/firmware combination has device acceptance; new direct attested

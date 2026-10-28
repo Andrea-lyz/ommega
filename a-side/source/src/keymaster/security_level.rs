@@ -758,6 +758,7 @@ impl KeystoreSecurityLevel {
             }
             KeyMintBackend::System(_) => false,
         };
+        crate::remote::attestation_metrics::clear_attempt();
         let result = map_km_error({
             let _wp = self.watch_millis(
                 "KeystoreSecurityLevel::generate_key: calling IKeyMintDevice::generateKey",
@@ -807,6 +808,7 @@ impl KeystoreSecurityLevel {
                 new_p
             })
             .collect();
+        crate::remote::attestation_metrics::clear_attempt();
         map_km_error({
             let _wp = self.watch_millis(
                 concat!(
@@ -907,6 +909,7 @@ impl KeystoreSecurityLevel {
             .context(ks_err!("Trying to get aaid."))?;
 
         let keybox_attestation_allowed = attestation_key_info.is_none();
+        let attestation_count = crate::remote::attestation_metrics::begin_request();
         let creation_result = match attestation_key_info {
             Some(AttestationKeyInfo::RkpdProvisioned { key: rkp_key }) => {
                 let original_blob = &rkp_key.attestation_key.keyBlob;
@@ -996,14 +999,19 @@ impl KeystoreSecurityLevel {
         // both chains, which breaks chain-order verification ("签名错误").
 
         let user = caller_uid.owning_user();
-        self.store_new_key(
-            key,
-            creation_result,
-            user,
-            Some(flags),
-            keybox_attestation_allowed,
-        )
-        .context(ks_err!())
+        let result = self
+            .store_new_key(
+                key,
+                creation_result,
+                user,
+                Some(flags),
+                keybox_attestation_allowed,
+            )
+            .context(ks_err!());
+        if result.is_ok() {
+            attestation_count.commit();
+        }
+        result
     }
 
     fn import_key(

@@ -75,9 +75,14 @@ The relay daemon supports every task type the relay_server can dispatch:
 
 ### Relay Protocol
 
-- Long-poll `GET /api/b/poll/` (query: `device_id`, `machine_id`, `timeout`,
+- Poll `GET /api/b/poll/` (query: `device_id`, `machine_id`, `timeout`, optional
+  `caps`, `ver`, `battery_percent=0..100`, `battery_charging=true|false`;
   header `X-Relay-Token`); a `200` returns `{task_id, task_type, payload,
-  target_device_id}`, a `204` means no task.
+  target_device_id}`, a `204` means no task. Battery data comes from read-only
+  primary-battery sysfs with a five-second in-memory sample cache, never HAL/TEE.
+  Unsupported attributes are omitted, not zero. Server status rows expose nullable
+  `battery_percent`, `battery_charging`, `battery_updated_at_ms` (server receipt
+  time, not B sample time); missing/invalid telemetry clears previous values.
 - Submit results with `POST /api/b/result/` body `{task_id, result, device_id}`.
 - `OMMEGA_RELAY_SERVER`, `OMMEGA_RELAY_DEVICE_ID`, `OMMEGA_RELAY_TOKEN` are required
   (loaded from `/data/adb/ommega/relay.conf` by `template/service.sh`).

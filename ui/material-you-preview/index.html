@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-side="a">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f6fb">
+  <title>Ommega · A/B 界面设计预览</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.8 19 5.5v5.7c0 4.4-2.6 7.8-7 10-4.4-2.2-7-5.6-7-10V5.5L12 2.8Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-shield-error" viewBox="0 0 24 24"><path d="M12 2.8 19 5.5v5.7c0 4.4-2.6 7.8-7 10-4.4-2.2-7-5.6-7-10V5.5L12 2.8Z"/><path d="m9.5 9.5 5 5m0-5-5 5"/></symbol>
+    <symbol id="i-shield-alert" viewBox="0 0 24 24"><path d="M12 2.8 19 5.5v5.7c0 4.4-2.6 7.8-7 10-4.4-2.2-7-5.6-7-10V5.5L12 2.8Z"/><path d="M12 8v4.5m0 3h.01"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></symbol>
+    <symbol id="i-apps" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2.5"/><rect x="13" y="3" width="8" height="8" rx="2.5"/><rect x="3" y="13" width="8" height="8" rx="2.5"/><rect x="13" y="13" width="8" height="8" rx="2.5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5"/><circle cx="15" cy="17" r="2.5"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m9.5 14.5 5-5M7 16.8l-1 .9a3.7 3.7 0 0 1-5.2-5.2l3-3a3.7 3.7 0 0 1 5.2 0M17 7.2l1-.9a3.7 3.7 0 1 1 5.2 5.2l-3 3a3.7 3.7 0 0 1-5.2 0" transform="translate(0 .2) scale(.92)"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M20 12H4m7-7-7 7 7 7"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-5-5 5 5-5 5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 8A8 8 0 0 0 5.3 6.5L3.5 9M4.5 16A8 8 0 0 0 18.7 17.5L20.5 15M3.5 4.5V9H8M20.5 19.5V15H16"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.3 14.5A8.7 8.7 0 0 1 9.5 3.7a8.7 8.7 0 1 0 10.8 10.8Z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M19 5l-1.4 1.4M6.4 17.6 5 19"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="3"/><path d="M9 9h6v6H9zM9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="12" r="4"/><path d="M12 12h9m-3 0v3m-3-3v2"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="7" rx="2"/><rect x="4" y="13.5" width="16" height="7" rx="2"/><path d="M7.5 7h.1m-.1 10h.1M12 7h5m-5 10h5"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M10 5h4m-3 13h2"/></symbol>
+    <symbol id="i-battery" viewBox="0 0 24 24"><rect x="3" y="7" width="16" height="10" rx="2.5"/><path d="M21 10v4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4.5 4.5L19 7"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.6"/></symbol>
+    <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18h1.4a2 2 0 0 0 1.5-3.3 2 2 0 0 1 1.5-3.2H19A2 2 0 0 0 21 12a9 9 0 0 0-9-9Z"/><path d="M7.5 10h.01M10 7h.01M14 7h.01M17 10h.01"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M5 4v16m7-16v16m7-16v16"/><circle cx="5" cy="9" r="2"/><circle cx="12" cy="15" r="2"/><circle cx="19" cy="8" r="2"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v3"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3.5h8l4 4V20a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z"/><path d="M14 3.5V8h4M8 12h8m-8 4h8"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10.5v6m0-9h.01"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 4 2c-1 .7-1.5 1.1-1.5 2.3M12 17h.01"/></symbol>
+  </svg>
+
+  <div class="preview-bar">
+    <div class="preview-mark"><span class="preview-dot"></span><span>本地设计预览 <b>·</b> 示例数据</span></div>
+    <div class="side-picker" role="group" aria-label="选择预览端">
+      <button type="button" data-side-choice="a" aria-pressed="true">A 请求端</button>
+      <button type="button" data-side-choice="b" aria-pressed="false">B 设备端</button>
+    </div>
+  </div>
+
+  <div class="app-shell">
+    <aside class="side-rail">
+      <div class="identity"><span class="identity-icon"><svg class="icon"><use href="#i-shield"></use></svg></span><span><strong>Ommega <em data-side-letter>A</em></strong><small data-side-subtitle>请求端</small></span></div>
+      <nav class="rail-navigation" aria-label="主导航" data-navigation></nav>
+      <div class="rail-note"><span class="rail-note-icon"><svg class="icon"><use href="#i-info"></use></svg></span><span>界面方案预览<br><small>所有数据均为示例</small></span></div>
+    </aside>
+    <main class="main-content" id="main-content" tabindex="-1">
+      <header class="topbar">
+        <div class="mobile-identity"><span class="identity-icon"><svg class="icon"><use href="#i-shield"></use></svg></span><span><strong>Ommega <em data-side-letter>A</em></strong><small data-side-subtitle>请求端</small></span></div>
+        <div class="top-actions">
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="切换深色主题" title="切换主题"><svg class="icon"><use href="#i-moon"></use></svg></button>
+          <button class="icon-button" id="refresh" type="button" aria-label="刷新示例状态" title="刷新"><svg class="icon"><use href="#i-refresh"></use></svg></button>
+        </div>
+      </header>
+      <div id="page" class="page"></div>
+      <p class="page-footnote">本地预览 · 示例数据不会连接或修改设备</p>
+    </main>
+  </div>
+  <nav class="bottom-navigation" aria-label="主导航" data-navigation></nav>
+
+  <dialog id="sheet" aria-labelledby="sheet-title">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-header"><div><span class="section-kicker" id="sheet-kicker">设置</span><h2 id="sheet-title"></h2></div><button class="icon-button" type="button" data-close-sheet aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></div>
+    <div id="sheet-body" class="sheet-body"></div>
+    <div id="sheet-actions" class="sheet-actions"></div>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

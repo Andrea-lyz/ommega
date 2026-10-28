@@ -6,6 +6,8 @@
 //!   * `GET  /api/b/poll/?device_id=..&machine_id=..&timeout=N` (X-Relay-Token)
 //!     -> 200: {task_id, task_type, payload, target_device_id}
 //!     -> 204: no task (long poll timed out)
+//!     Optional heartbeat query: battery_percent=0..100, battery_charging=true|false.
+//!     Unsupported readings are omitted; server status adds receipt-time freshness.
 //!   * `POST /api/b/result/` body {task_id, result, device_id}
 //!     -> {status: ok}
 //!
@@ -60,6 +62,7 @@ use kmr_wire::keymint::{
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
+use ommegaclient_b::battery::BatteryTelemetry;
 use ommegaclient_b::keymaster::attest_proxy::{check_app_id_der, SYSTEM_KEYMINT_STRONGBOX};
 use ommegaclient_b::keymaster::relay_tee::keymint_error;
 use ommegaclient_b::keymaster::tee_ops::{self, AttestationKeyRef, KeyAlgorithm, KeySpec};
@@ -608,9 +611,10 @@ fn reported_caps(cfg: &RelayConfig) -> String {
 
 fn poll_tasks(
     cfg: &RelayConfig,
+    battery: &mut BatteryTelemetry,
 ) -> std::result::Result<Option<(String, String, Value)>, PollError> {
     let caps = reported_caps(cfg);
-    let url = format!(
+    let mut url = format!(
         "{}/api/b/poll/?device_id={}&machine_id={}&timeout={}&caps={}&ver={}",
         cfg.server,
         cfg.device_id,
@@ -619,6 +623,7 @@ fn poll_tasks(
         caps,
         env!("CARGO_PKG_VERSION")
     );
+    battery.append_query(&mut url);
     let headers = vec![("X-Relay-Token".to_string(), cfg.token.clone())];
     let response = http_request_with_timeout("GET", &url, &headers, None, Some(POLL_WALL_LIMIT))
         .with_context(|| "b/poll failed")
@@ -1375,6 +1380,7 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
     let mut transient_ms = POLL_BACKOFF_MIN_MS;
     let mut rejected_ms = AUTH_BACKOFF_MIN_MS;
     let mut endpoint = String::new();
+    let mut battery = BatteryTelemetry::default();
     loop {
         let cfg = match shared.read() {
             Ok(g) => g.clone(),
@@ -1397,7 +1403,7 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
             rejected_ms = AUTH_BACKOFF_MIN_MS;
         }
         let poll_started = std::time::Instant::now();
-        match poll_tasks(&cfg) {
+        match poll_tasks(&cfg, &mut battery) {
             Ok(Some((task_id, task_type, payload))) => {
                 transient_ms = POLL_BACKOFF_MIN_MS;
                 rejected_ms = AUTH_BACKOFF_MIN_MS;

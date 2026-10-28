@@ -3,7 +3,7 @@ import {readFile, writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 const root = new URL('../', import.meta.url);
 const check = process.argv.includes('--check');
-for (const side of ['a', 'b']) for (const name of ['ui-kit.js', 'modern.css']) {
+for (const side of ['a', 'b']) for (const name of ['ui-kit.js', 'modern.css', 'material-you.css', 'icons.js']) {
   const source = Buffer.from((await readFile(new URL(`ui/shared/${name}`, root), 'utf8')).replaceAll('\r\n', '\n'));
   const destination = new URL(`${side}-side/source/template/webroot/${name}`, root);
   if (check) {
@@ -15,9 +15,10 @@ console.log(check ? 'Shared UI assets verified.' : 'Shared UI assets copied to A
 const indexPath = new URL('a-side/source/template/webroot/index.html', root);
 const original = await readFile(indexPath, 'utf8');
 // Set the legacy translation preference before its deferred bundle starts.
-const integration = `<!--ommega-modern--><script>try{var l=localStorage.getItem('ommega.ui.language')||'auto';localStorage.setItem('trickyAddonLanguage',l==='auto'?(/^zh\\b/i.test(navigator.language)?'zh-CN':'en'):l);document.documentElement.dataset.theme=localStorage.getItem('ommega.ui.theme')||'auto'}catch(e){}</script><link rel="stylesheet" href="./modern.css?v=capability-mask-1"><link rel="stylesheet" href="./a-modern.css?v=capability-mask-1"><script type="module" src="./modern.js?v=capability-mask-1"></script><!--/ommega-modern-->`;
+const assetVersion = 'material-ui-9';
+const integration = `<!--ommega-modern--><script>try{var l=localStorage.getItem('ommega.ui.language')||'auto';localStorage.setItem('trickyAddonLanguage',l==='auto'?(/^zh\\b/i.test(navigator.language)?'zh-CN':'en'):l);document.documentElement.dataset.theme=localStorage.getItem('ommega.ui.theme')||'auto'}catch(e){}</script><link rel="stylesheet" href="./modern.css?v=${assetVersion}"><link rel="stylesheet" href="./material-you.css?v=${assetVersion}"><link rel="stylesheet" href="./a-modern.css?v=${assetVersion}"><script type="module" src="./modern.js?v=${assetVersion}"></script><!--/ommega-modern-->`;
 let clean = original.replace(/<!--ommega-modern-->[\s\S]*?<!--\/ommega-modern-->/g, '')
-  .replace(/(src="\.\/assets\/index-[^"]+\.js)(?:\?[^\"]*)?"/, '$1?v=capability-mask-1"');
+  .replace(/(src="\.\/assets\/index-[^"]+\.js)(?:\?[^\"]*)?"/, `$1?v=${assetVersion}"`);
 // Keep the original dialog bindings available to the Settings view. The Apps
 // overflow menu contains only app-selection actions, including its refresh.
 const settingsActions = [];

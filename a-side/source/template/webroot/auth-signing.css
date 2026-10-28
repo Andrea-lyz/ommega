@@ -65,7 +65,7 @@
 /* Global system capability controls share the existing modal and theme tokens. */
 #ommega-capability-dialog{width:calc(100% - 32px);max-width:560px;max-height:90vh;max-height:calc(100dvh - 32px)}
 #ommega-capability-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
-.ommega-capability-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:80px;padding:12px 0;border-bottom:1px solid var(--om-line,#bbb);cursor:pointer}
+.ommega-capability-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:72px;padding:10px 0;border-bottom:1px solid var(--om-line,#bbb);cursor:pointer}
 .ommega-capability-row>span{min-width:0;line-height:1.5;overflow-wrap:anywhere}
 .ommega-capability-row strong{font-size:16px;font-weight:600}
 .ommega-capability-id{font-family:ui-monospace,monospace;margin-top:4px;overflow-wrap:anywhere}
@@ -74,6 +74,19 @@
 #ommega-capability-dialog .ommega-capability-switch:checked{background:var(--om-accent,#465b91);border-color:var(--om-accent,#465b91);color:var(--om-on-accent,#fff)}
 #ommega-capability-dialog .ommega-capability-switch:checked::before{transform:translateX(16px)}
 #ommega-capability-status{font-size:14px;line-height:1.5;color:var(--om-ink,#222);overflow-wrap:anywhere;margin-top:12px}
-#ommega-capability-dialog .ommega-auth-actions .om-button{min-height:48px}
-#ommega-capability-dialog .ommega-auth-policy-content{padding-bottom:calc(20px + env(safe-area-inset-bottom,0px))}
+#ommega-capability-dialog .ommega-auth-toolbar{padding:14px 16px}
+#ommega-capability-dialog .ommega-auth-actions{margin-top:12px;gap:8px}
+#ommega-capability-dialog .ommega-auth-actions .om-button{min-height:44px}
+#ommega-capability-dialog .ommega-auth-policy-content{padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+@media(max-width:760px){
+  #ommega-auth-policy-dialog,
+  #ommega-cpu-policy-dialog,
+  #ommega-capability-dialog{
+    width:min(560px,calc(100% - 32px));
+    max-width:560px;
+    max-height:calc(100dvh - 32px);
+    margin:auto;
+    border-radius:24px;
+  }
+}
 @media(prefers-reduced-motion:reduce){#ommega-capability-dialog .ommega-capability-switch::before{transition:none}}

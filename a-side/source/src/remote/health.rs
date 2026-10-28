@@ -77,6 +77,32 @@ pub(super) fn record_remote_ok() {
     }
 }
 
+fn set_attestation_failure(health: &mut RemoteHealth, now: i64) -> bool {
+    // Preserve a more specific transport or server error when a retry fails.
+    if health.last_verdict == Some(VERDICT_ERROR) {
+        return false;
+    }
+    health.last_error_unix = Some(now);
+    health.last_status = None;
+    health.last_kind = Some("attestation");
+    health.last_message =
+        Some("Remote attestation response could not be validated or saved".into());
+    health.last_verdict = Some(VERDICT_ERROR);
+    true
+}
+
+pub(super) fn record_attestation_failure() {
+    let publish = if let Ok(mut guard) = REMOTE_HEALTH.write() {
+        let health = guard.get_or_insert_with(RemoteHealth::default);
+        set_attestation_failure(health, now_unix())
+    } else {
+        false
+    };
+    if publish {
+        write_health_snapshot();
+    }
+}
+
 pub(super) fn record_remote_failure(status: Option<u16>, kind: &'static str, message: &str) {
     if let Ok(mut guard) = REMOTE_HEALTH.write() {
         let health = guard.get_or_insert_with(RemoteHealth::default);
@@ -121,6 +147,25 @@ fn write_health_snapshot() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_attestation_is_a_failure_without_hiding_a_server_error() {
+        let mut health = RemoteHealth {
+            last_ok_unix: Some(10),
+            last_verdict: Some(VERDICT_OK),
+            ..RemoteHealth::default()
+        };
+        assert!(set_attestation_failure(&mut health, 11));
+        assert_eq!(health.last_error_unix, Some(11));
+        assert_eq!(health.last_kind, Some("attestation"));
+        assert_eq!(health.last_verdict, Some(VERDICT_ERROR));
+
+        health.last_status = Some(401);
+        health.last_kind = Some("unauthorized");
+        assert!(!set_attestation_failure(&mut health, 12));
+        assert_eq!(health.last_status, Some(401));
+        assert_eq!(health.last_kind, Some("unauthorized"));
+    }
 
     #[test]
     fn health_records_the_last_server_verdict() {

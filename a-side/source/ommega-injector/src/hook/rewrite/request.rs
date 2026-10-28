@@ -22,6 +22,27 @@ pub(super) fn route_for_service_request(
     }
 }
 
+/// Resolve app identities only for a global-scope security-level policy. This
+/// does not change the caller's already-computed scope decision.
+fn resolve_global_policy_packages(
+    decision: &mut filter::FilterDecision,
+    config: &config::InjectorConfig,
+    request: &ParsedServiceRequest,
+    resolve: impl FnOnce() -> PackageResolution,
+) {
+    if decision.allowed
+        && decision.reason == FilterReason::Disabled
+        && decision.packages.is_empty()
+        && !config.target_security_modes.is_empty()
+        && config.intercept.get_security_level
+        && matches!(request, ParsedServiceRequest::GetSecurityLevel { .. })
+    {
+        if let PackageResolution::Known(packages) = resolve() {
+            decision.packages = packages;
+        }
+    }
+}
+
 fn apply_target_security_policy(
     request: &mut ParsedServiceRequest,
     decision: &filter::FilterDecision,
@@ -389,6 +410,10 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             ParsedServiceRequest::GetSecurityLevel { security_level } => Some(*security_level),
             _ => None,
         };
+        resolve_global_policy_packages(&mut decision, &cfg, &request, || {
+            let _guard = BypassGuard::enter();
+            ipc::resolve_packages_for_uid(caller.uid as u32)
+        });
         if let Some(reply) = apply_target_security_policy(&mut request, &decision, &cfg) {
             info!(
                 "event=compat command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} action=strongbox_unavailable error_code={}",

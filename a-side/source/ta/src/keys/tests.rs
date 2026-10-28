@@ -28,8 +28,14 @@ struct TestRemote {
     unavailable: bool,
     expected_user_auth: Option<Vec<(u32, i64)>>,
     sign_calls: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    verified_calls: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl device::RemoteBackend for TestRemote {
+    fn attestation_verified(&self, _: &[u8], _: Option<u64>) {
+        if let Some(calls) = &self.verified_calls {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     fn attest(
         &self,
         _: &[u8],
@@ -61,6 +67,7 @@ impl device::RemoteBackend for TestRemote {
             .expect("unexpected remote generation");
         Ok(Some(device::RemoteAttestation {
             cert_chain: cert_chain.clone(),
+            relay_latency_ms: None,
             effective_security_level: Some(SecurityLevel::TrustedEnvironment),
             profile: device::RemoteKeyMintProfile {
                 interface_version: 5,
@@ -475,6 +482,29 @@ fn native_remote_delegation_returns_only_the_child_certificate() {
         panic!("remote child")
     };
     assert_ne!(reference.alias, fixture.issuer_alias);
+}
+
+#[test]
+fn remote_attestation_observer_runs_only_after_chain_validation() {
+    let mut fixture = DelegationFixture::new();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(fixture.chain.clone()),
+        expected_issuer: Some(fixture.issuer_alias.clone()),
+        verified_calls: Some(calls.clone()),
+        ..TestRemote::default()
+    }));
+    fixture.generate().unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(fixture.batch_chain.clone()),
+        expected_issuer: Some(fixture.issuer_alias.clone()),
+        verified_calls: Some(calls.clone()),
+        ..TestRemote::default()
+    }));
+    assert!(fixture.generate().is_err());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]

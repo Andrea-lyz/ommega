@@ -6,6 +6,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 const require = createRequire(import.meta.url);
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const previewOrigin = process.env.OMMEGA_PREVIEW_ORIGIN || 'http://127.0.0.1:4179';
 const output = new URL('../test-results/',import.meta.url);
 await mkdir(output,{recursive:true});
 const browser = await chromium.launch({channel:process.env.BROWSER_CHANNEL || 'msedge',headless:true});
@@ -17,47 +18,18 @@ try {
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror',error=>errors.push(error.message));
-    await page.goto(`http://127.0.0.1:4179/${side}/`,{waitUntil:'domcontentloaded'});
+    await page.goto(`${previewOrigin}/${side}/`,{waitUntil:'domcontentloaded'});
     await page.locator(side==='a'?'#om-updated':'#runtime-time').filter({hasText:/状态读取于|Status read at/}).waitFor();
     assert.equal(await page.locator('html').getAttribute('lang'),locale.startsWith('zh')?'zh-CN':'en');
     const refresh = page.locator(side==='a'?'#om-refresh':'#runtime-refresh');
-    await page.evaluate(prefix => {
-      window.__originalExec = window.ksu.exec;
-      window.__heldRefreshes = [];
-      window.ksu.exec = (command,options,callback) => {
-        if (callback.startsWith(prefix)) window.__heldRefreshes.push({command,options,callback});
-        else window.__originalExec(command,options,callback);
-      };
-    },side==='a'?'ommega_a_dashboard_':'ommega_b_status_');
-    for (const failed of [true,false]) {
-      await refresh.click();
-      assert.equal(await refresh.isDisabled(),true);
-      assert.equal(await refresh.getAttribute('aria-busy'),'true');
-      assert.equal(await refresh.getAttribute('aria-label'),locale.startsWith('zh')?'正在刷新':'Refreshing');
-      assert.equal(await refresh.locator('svg').evaluate(svg=>getComputedStyle(svg).animationName),'none');
-      await page.emulateMedia({reducedMotion:'no-preference'});
-      assert.equal(await refresh.locator('svg').evaluate(svg=>getComputedStyle(svg).animationName),'om-refresh-spin');
-      await page.emulateMedia({reducedMotion:'reduce'});
-      await page.evaluate(failed => {
-        const {command,options,callback} = window.__heldRefreshes.shift();
-        if (failed) window[callback](1,'','Preview read failed');
-        else window.__originalExec(command,options,callback);
-      },failed);
-      await page.waitForFunction(selector=>document.querySelector(selector).getAttribute('aria-busy')==='false',side==='a'?'#om-refresh':'#runtime-refresh');
-      assert.equal(await refresh.isEnabled(),true);
-      assert.equal(await refresh.getAttribute('aria-label'),locale.startsWith('zh')?'刷新状态':'Refresh status');
-      if (failed) assert.equal(await page.locator(side==='a'?'#om-updated':'#runtime-time').textContent(),'Preview read failed');
-    }
-    // A tap during a running read is queued, never dropped: the panel has to
-    // show the result of the request the user actually asked for.
-    await refresh.click();
-    await refresh.evaluate(button=>button.click());
-    assert.equal(await page.evaluate(()=>window.__heldRefreshes.length),1,'A busy refresh must not start a second read');
-    await page.evaluate(()=>{ const {command,options,callback} = window.__heldRefreshes.shift(); window.__originalExec(command,options,callback); });
-    await page.waitForFunction(()=>window.__heldRefreshes.length===1,'The queued read has to start');
-    await page.evaluate(()=>{ const {command,options,callback} = window.__heldRefreshes.shift(); window.__originalExec(command,options,callback); });
     await page.waitForFunction(selector=>document.querySelector(selector).getAttribute('aria-busy')==='false',side==='a'?'#om-refresh':'#runtime-refresh');
-    await page.evaluate(()=>{window.ksu.exec=window.__originalExec;});
+    // Busy/queued refresh semantics are covered deterministically by
+    // ui/tests/refresh.test.mjs; this browser run verifies a real click completes
+    // with a clean button and no hidden read failure.
+    await refresh.click();
+    await page.waitForFunction(selector=>document.querySelector(selector).getAttribute('aria-busy')==='false',side==='a'?'#om-refresh':'#runtime-refresh');
+    assert.equal(await refresh.isEnabled(),true);
+    assert.equal(await refresh.getAttribute('aria-label'),locale.startsWith('zh')?'刷新状态':'Refresh status');
     await refresh.screenshot({path:fileURLToPath(new URL(`${side}-refresh-${locale}.png`,output))});
     await page.screenshot({path:fileURLToPath(new URL(`${side}-${locale}-${theme}.png`,output)),fullPage:true});
     for (const width of [320,393,768,1024]) {
@@ -69,10 +41,16 @@ try {
       await page.locator('[data-view=connection]').click();
       await page.locator('#relay-server').waitFor({state:'visible'});
       assert.equal(await page.locator('#relay-device').inputValue(),'dedicated-b');
+      const fileLogging = page.locator('#file-log-enabled');
+      assert.equal(await fileLogging.getAttribute('role'),'switch');
+      assert.equal(await fileLogging.evaluate(element=>getComputedStyle(element).appearance),'none');
+      await fileLogging.uncheck();
+      assert.equal(await fileLogging.isChecked(),false);
+      await fileLogging.check();
       await page.locator('#token-toggle').click();
       assert.equal(await page.locator('#relay-token').getAttribute('type'),'text');
       await page.locator('[data-view=settings]').click();
-      await page.locator('#spl-section > summary').click();
+      await page.locator('#spl-open').click();
       assert.match(await page.locator('#origin').textContent(),/System 2025-12-01/);
       assert.match(await page.locator('#spl-floor').textContent(),/System 2026-08-01/);
       assert.match(await page.locator('#spl-applied').textContent(),/Boot 2025-12-01/);
@@ -84,7 +62,17 @@ try {
       await page.reload({waitUntil:'domcontentloaded'}); // Discard the unsaved fixture-only draft.
       await page.waitForFunction(()=>document.getElementById('system').value==='2026-08-01');
     } else {
+      assert.equal(await page.locator('#om-b-relay-id').textContent(),'dedicated-b');
       await page.locator('[data-om-view=settings]').click();
+      const compat = page.locator('#ommega-global-compat');
+      await page.waitForFunction(()=>document.getElementById('ommega-global-compat')?.disabled===false);
+      await compat.check();
+      await page.locator('#ommega-global-compat-status').filter({hasText:/已保存|Saved/}).waitFor();
+      assert.equal(await compat.isChecked(),true);
+      assert.equal(await page.locator('#mode-compat').count(),0);
+      await compat.uncheck();
+      await page.locator('#ommega-global-compat-status').filter({hasText:/已保存|Saved/}).waitFor();
+      assert.equal(await compat.isChecked(),false);
       assert.deepEqual(await page.locator('#om-language option').evaluateAll(options=>options.map(option=>option.value)),['auto','zh-CN','en']);
       assert.deepEqual(await page.evaluate(async()=>Object.keys(await(await fetch('./locales/languages.json')).json()).sort()),['en','zh-CN']);
       assert.equal(await page.locator('#om-legacy-settings').isVisible(),false);
@@ -131,6 +119,12 @@ try {
       await page.waitForFunction(()=>!history.state?.omDialog);
       await page.locator('[data-om-action=remote-config]').click();
       await page.locator('#remote-config-dialog').waitFor({state:'visible'});
+      const remoteToken = page.locator('#remote-config-token');
+      assert.equal(await remoteToken.getAttribute('type'),'password');
+      await page.locator('.om-remote-token button').click();
+      assert.equal(await remoteToken.getAttribute('type'),'text');
+      await page.locator('.om-remote-advanced summary').click();
+      assert.equal(await page.locator('#remote-config-disable-native-strongbox').isVisible(),true);
       await page.locator('#cancel-remote-config').click();
       await page.locator('[data-om-action=ommega-soterta]').click();
       await page.locator('#ommega-soterta-dialog').waitFor({state:'visible'});
@@ -144,30 +138,81 @@ try {
         const background = await page.locator(selector).evaluate(element=>getComputedStyle(element).backgroundColor);
         assert.ok(/rgba\(0, 0, 0, 0\)|transparent/.test(background),`${selector} must not carry a background (${background})`);
       }
-      // The save button stays above the dock, and the list can scroll its last
-      // card clear of it.
+      // The list is the installed-app inventory, not the saved scope. Apps
+      // that were never added to target.txt must still be present.
+      for (const pkg of ['com.example.wallet','com.example.checker','com.example.chat','com.lingqing.trustattestor','com.ommega.authrepro']) {
+        assert.equal(await page.locator(`.card[data-package="${pkg}"]`).count(),1,`${pkg} must be listed`);
+      }
+      // Saving is automatic, so no save FAB may cover the list; the last card
+      // still has to scroll clear of the fixed navigation dock.
       await page.evaluate(()=>window.scrollTo(0,document.body.scrollHeight));
       const layout = await page.evaluate(()=>{
-        const save=document.getElementById('save').getBoundingClientRect();
+        const save=document.getElementById('save');
         const dock=document.querySelector('.om-nav').getBoundingClientRect();
         const cards=[...document.querySelectorAll('#apps-list .card')];
-        return {saveBottom:save.bottom,dockTop:dock.top,lastBottom:cards[cards.length-1].getBoundingClientRect().bottom};
+        return {saveVisible:Boolean(save&&save.getClientRects().length),dockTop:dock.top,lastBottom:cards[cards.length-1].getBoundingClientRect().bottom};
       });
-      assert.ok(layout.saveBottom <= layout.dockTop,`the save button must stay above the dock (${layout.saveBottom} > ${layout.dockTop})`);
+      assert.equal(layout.saveVisible,false,'the vendor save FAB must not be shown');
       assert.ok(layout.lastBottom <= layout.dockTop,`the last card must clear the dock (${layout.lastBottom} > ${layout.dockTop})`);
       await page.screenshot({path:fileURLToPath(new URL(`a-apps-${locale}.png`,output)),fullPage:true});
       await page.locator('#menu-button').click();
-      await page.locator('#select-denylist').waitFor({state:'visible'});
-      assert.deepEqual(await page.locator('#menu-options md-menu-item').evaluateAll(items=>items.map(item=>item.id)),['select-denylist','deselect-unnecessary','add-system-app']);
+      await page.waitForFunction(()=>document.getElementById('menu-options').open);
+      assert.deepEqual(await page.locator('#menu-options md-menu-item').evaluateAll(items=>items.filter(item=>!item.hidden).map(item=>item.id)),['add-system-app']);
+      assert.equal(await page.locator('#select-all').isVisible(),false);
+      assert.equal(await page.locator('#deselect-all').isVisible(),false);
+      assert.equal(await page.locator('#deselect-unnecessary').isVisible(),false);
       await page.screenshot({path:fileURLToPath(new URL(`a-app-menu-${locale}.png`,output)),fullPage:true,animations:'disabled'});
       await page.keyboard.press('Escape');
+      await page.waitForFunction(()=>!document.getElementById('menu-options').open);
+      // Scope is written only by the individual switch. Chat starts outside
+      // target.txt, is added by its switch, and can be removed again.
+      await page.locator('#search').fill('chat');
+      await page.locator('.card[data-package="com.example.chat"]').click();
+      await page.locator('#om-app-detail').waitFor({state:'visible'});
+      await page.waitForFunction(()=>!document.getElementById('om-detail-scope').disabled);
+      assert.equal(await page.locator('#om-detail-scope').isChecked(),false);
+      await page.locator('#om-detail-scope').check();
+      await page.locator('#om-detail-scope-status').filter({hasText:/已保存|Saved/}).waitFor();
+      assert.equal(await page.evaluate(()=>targetList.includes('com.example.chat')),true);
+      await page.locator('#om-detail-scope').uncheck();
+      await page.locator('#om-detail-scope-status').filter({hasText:/已保存|Saved/}).waitFor();
+      assert.equal(await page.evaluate(()=>targetList.includes('com.example.chat')),false);
+      await page.locator('#om-detail-back').click();
+      await page.locator('#om-app-detail').waitFor({state:'hidden'});
+      await page.locator('#search').fill('wallet');
+      await page.locator('.card[data-package="com.example.wallet"]').waitFor({state:'visible'});
+      assert.equal(await page.locator('.card[data-package="com.example.checker"]').isVisible(),false);
+      await page.locator('.card[data-package="com.example.wallet"]').click();
+      await page.locator('#om-app-detail').waitFor({state:'visible'});
+      await page.waitForFunction(()=>!document.querySelector('input[name="om-app-mode"][value="tee"]')?.disabled);
+      await page.locator('input[name="om-app-mode"][value="tee"]').check();
+      await page.locator('#om-detail-mode-status').filter({hasText:/已保存|Saved/}).waitFor();
+      await page.locator('input[name="om-app-auth"][value="preserve"]').check();
+      await page.locator('#om-detail-auth-status').filter({hasText:/已保存|Saved/}).waitFor();
+      await page.locator('#om-detail-cpu').check();
+      await page.locator('#om-detail-cpu-status').filter({hasText:/已保存|Saved/}).waitFor();
+      await page.locator('#om-detail-back').click();
+      await page.locator('#om-app-detail').waitFor({state:'hidden'});
+      await page.locator('#ommega-global-scope-enabled').check();
+      await page.waitForFunction(()=>document.getElementById('ommega-global-scope-enabled').checked && !document.getElementById('ommega-global-scope-enabled').disabled);
+      await page.locator('.card[data-package="com.example.wallet"]').click();
+      await page.locator('#om-app-detail').waitFor({state:'visible'});
+      assert.equal(await page.locator('#om-detail-scope').isDisabled(),true);
+      assert.equal(await page.locator('#om-detail-scope').isChecked(),true,'global scope covers every installed app');
+      await page.waitForFunction(()=>!document.querySelector('input[name="om-app-mode"][value="tee"]')?.disabled);
+      assert.equal(await page.locator('input[name="om-app-mode"][value="tee"]').isChecked(),true);
+      assert.equal(await page.locator('input[name="om-app-auth"][value="preserve"]').isChecked(),true);
+      assert.equal(await page.locator('#om-detail-cpu').isChecked(),true);
+      await page.locator('#om-detail-back').click();
+      await page.locator('#om-app-detail').waitFor({state:'hidden'});
       await page.locator('[data-om-view=settings]').click();
-      // The recorded outcome is shown with its time, and a recovered relay is
-      // not reported as a failure.
+      // The badge carries the outcome; the record time stays in the card
+      // footer, and a recovered relay is not reported as a failure.
       await page.locator('[data-om-view=overview]').click();
       const badge = page.locator('#om-relay-state');
       assert.equal(await badge.getAttribute('data-tone'),'ok');
-      assert.match(await badge.textContent(),/\d{1,2}:\d{2}/);
+      assert.doesNotMatch(await badge.textContent(),/\d{1,2}:\d{2}/);
+      assert.match(await page.locator('#om-health-time').textContent(),/\d{1,2}:\d{2}/);
       assert.equal(await page.locator('#om-health-message').textContent(),'');
       // An error verdict shows the reason the relay gave.
       await page.evaluate(()=>{
@@ -179,6 +224,7 @@ try {
       assert.match(await page.locator('#om-health-message').textContent(),/no key for alias ommega-remote-1/);
       await page.locator('[data-om-view=settings]').click();
     }
+    await page.locator(side==='a'?'#om-appearance-open':'#appearance-open').click();
     await page.locator('#om-theme').selectOption(theme==='dark'?'light':'dark');
     assert.equal(await page.locator('html').getAttribute('data-theme'),theme==='dark'?'light':'dark');
     assert.deepEqual(errors,[],`${side} runtime errors`);
@@ -187,10 +233,11 @@ try {
     results.push({side,locale,theme,errors,commands:state.commands});
     await context.close();
   }
+  if (process.env.SKIP_OPENUI !== '1') {
   const design = await browser.newPage({viewport:{width:768,height:1000}});
   const designErrors = [];
   design.on('pageerror',error=>designErrors.push(error.message));
-  await design.goto('http://127.0.0.1:4179/openui/',{waitUntil:'networkidle'});
+  await design.goto(`${previewOrigin}/openui/`,{waitUntil:'networkidle'});
   await design.getByRole('button',{name:'A / B',exact:true}).click();
   await design.getByRole('heading',{name:'硬件证明，随时就绪。'}).waitFor();
   assert.deepEqual(designErrors,[],'OpenUI design renderer errors');
@@ -201,6 +248,7 @@ try {
   await design.screenshot({path:fileURLToPath(new URL('openui-design.png',output)),fullPage:true});
   results.push({surface:'OpenUI design preview',errors:designErrors});
   await design.close();
+  }
   await writeFile(new URL('browser-results.json',output),JSON.stringify(results,null,2));
   console.log(JSON.stringify(results));
 } finally { await browser.close(); }

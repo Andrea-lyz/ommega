@@ -10,6 +10,7 @@
 
 #![recursion_limit = "256"]
 
+pub mod battery;
 pub mod caps;
 pub mod keymaster;
 pub mod logging;

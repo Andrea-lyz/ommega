@@ -70,6 +70,41 @@ pub struct DeviceEntry {
     pub soter_nosign: Option<bool>,
     /// Relay version from the heartbeat. `None` means an older relay.
     pub version: Option<String>,
+    pub battery_percent: Option<u8>,
+    pub battery_charging: Option<bool>,
+    /// Server receipt time, not the relay's clock or a long-poll wake-up time.
+    pub battery_updated_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceBattery {
+    pub percent: Option<u8>,
+    pub charging: Option<bool>,
+}
+
+impl DeviceBattery {
+    /// Malformed optional metadata must not stop task polling or become zero.
+    pub fn parse(percent: Option<&str>, charging: Option<&str>) -> Self {
+        let percent = percent.map(str::trim).and_then(|raw| {
+            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            raw.parse::<u8>().ok().filter(|value| *value <= 100)
+        });
+        let charging = charging.and_then(|raw| match raw.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        });
+        Self { percent, charging }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeviceMetadata<'a> {
+    pub caps: DeviceCaps,
+    pub version: Option<&'a str>,
+    pub battery: DeviceBattery,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -325,6 +360,36 @@ impl TaskStore {
         caps: DeviceCaps,
         version: Option<&str>,
     ) -> Option<Task> {
+        self.pop_for_b_with_metadata(
+            device_id,
+            machine_id,
+            timeout,
+            DeviceMetadata {
+                caps,
+                version,
+                ..DeviceMetadata::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn pop_for_b_with_metadata(
+        &self,
+        device_id: &str,
+        machine_id: &str,
+        timeout: Duration,
+        metadata: DeviceMetadata<'_>,
+    ) -> Option<Task> {
+        let DeviceMetadata {
+            caps,
+            version,
+            battery,
+        } = metadata;
+        // Capture once per received poll, outside wait_until's repeated checks.
+        // Queue notifications or a long-poll timeout are not new telemetry.
+        let received_at_ms = Self::now_ms();
+        let battery_updated_at_ms =
+            (battery.percent.is_some() || battery.charging.is_some()).then_some(received_at_ms);
         let assignment_timeout = self.assignment_timeout;
         let pending_ttl = self.pending_ttl;
         let completed_ttl = self.completed_ttl;
@@ -345,6 +410,11 @@ impl TaskStore {
                     soter_sign: caps.soter_sign,
                     soter_nosign: caps.soter_nosign,
                     version: version.map(str::to_string).or(known_version),
+                    // Do not carry stale battery data across unknown/legacy
+                    // polls or a different machine serving the same device.
+                    battery_percent: battery.percent,
+                    battery_charging: battery.charging,
+                    battery_updated_at_ms,
                 },
             );
             if !machine_id.is_empty() {
@@ -823,6 +893,101 @@ impl TaskStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn battery_parser_preserves_boundaries_and_rejects_bogus_metadata() {
+        assert_eq!(
+            DeviceBattery::parse(Some("0"), Some("false")),
+            DeviceBattery {
+                percent: Some(0),
+                charging: Some(false)
+            }
+        );
+        assert_eq!(
+            DeviceBattery::parse(Some("100"), Some("true")),
+            DeviceBattery {
+                percent: Some(100),
+                charging: Some(true)
+            }
+        );
+        assert_eq!(DeviceBattery::parse(None, None), DeviceBattery::default());
+        for percent in [
+            "",
+            "-1",
+            "+1",
+            "101",
+            "256",
+            "999999999999",
+            "5.5",
+            "80%",
+            "NaN",
+        ] {
+            assert_eq!(DeviceBattery::parse(Some(percent), None).percent, None);
+        }
+        for charging in ["", "yes", "0", "1", "unknown", "TRUE"] {
+            assert_eq!(DeviceBattery::parse(None, Some(charging)).charging, None);
+        }
+        assert_eq!(
+            DeviceBattery::parse(Some("bad"), Some("false")),
+            DeviceBattery {
+                percent: None,
+                charging: Some(false)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn battery_receipt_timestamp_is_not_extended_by_long_poll_checks() {
+        let store = store();
+        store
+            .pop_for_b_with_metadata(
+                "dev",
+                "m1",
+                Duration::from_millis(30),
+                DeviceMetadata {
+                    battery: DeviceBattery::parse(Some("0"), Some("false")),
+                    ..DeviceMetadata::default()
+                },
+            )
+            .await;
+        let inner = store.inner.lock().await;
+        let device = inner.devices.get("dev").unwrap();
+        assert_eq!(device.battery_percent, Some(0));
+        assert_eq!(device.battery_charging, Some(false));
+        assert!(
+            device.battery_updated_at_ms.unwrap() < device.last_seen_ms,
+            "a timeout re-check is not a newly received battery sample"
+        );
+    }
+
+    #[tokio::test]
+    async fn battery_unknown_poll_clears_snapshot_and_offline_devices_are_omitted() {
+        let store = store();
+        store
+            .pop_for_b_with_metadata(
+                "dev",
+                "m1",
+                Duration::ZERO,
+                DeviceMetadata {
+                    battery: DeviceBattery::parse(Some("100"), Some("true")),
+                    ..DeviceMetadata::default()
+                },
+            )
+            .await;
+        assert!(store.get_connected_devices().await[0]
+            .battery_updated_at_ms
+            .is_some());
+        store.pop_for_b("dev", "m1", Duration::ZERO).await;
+        let device = &store.get_connected_devices().await[0];
+        assert_eq!(device.battery_percent, None);
+        assert_eq!(device.battery_charging, None);
+        assert_eq!(device.battery_updated_at_ms, None);
+        {
+            let mut inner = store.inner.lock().await;
+            inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
+        }
+        assert!(store.get_connected_devices().await.is_empty());
+    }
 
     #[test]
     fn soter_caps_distinguish_unreported_from_disabled_and_sign_limited() {

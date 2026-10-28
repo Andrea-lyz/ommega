@@ -1,4 +1,6 @@
 //! Fixed-path CPU scope writer and status reader. No service or hardware calls.
+#[path = "../attestation_counts.rs"]
+pub mod attestation_counts;
 use anyhow::{anyhow, Context, Result};
 use kmr_common::{
     cpu_mask::{Config, Profile, CONFIG_PATH, PROFILE_PATH},
@@ -44,10 +46,15 @@ fn execute() -> Result<()> {
             let standalone_active = standalone.is_dir()
                 && !standalone.join("disable").exists()
                 && !standalone.join("remove").exists();
+            let stats =
+                attestation_counts::read_at(Path::new(attestation_counts::DATABASE_PATH)).ok();
             println!(
                 "{}",
                 json!({"original": original, "config": config, "profile": profile,
-                "engine": "exp6", "standalone_active": standalone_active})
+                "engine": "exp6", "standalone_active": standalone_active,
+                "attestation_counts": stats.as_ref().and_then(|value| value.counts.as_ref()),
+                "last_b_latency_ms": stats.as_ref().and_then(|value| value.last_b_latency_ms),
+                "attestation_completed_at_ms": stats.as_ref().and_then(|value| value.completed_at_ms)})
             );
         }
         [command] if command == "write" => {

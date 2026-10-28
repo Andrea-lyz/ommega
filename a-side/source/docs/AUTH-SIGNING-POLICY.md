@@ -49,25 +49,23 @@ the default auth-signing mode only for callers already in scope. Exceptions
 remain saved and effective when global scope is enabled, and do not enroll an
 out-of-scope app. Core system-service exclusions remain unchanged.
 
-Package identities come from Keystore's caller AAID at key creation. Global
-interception does not add a per-transaction PackageManager lookup. For a shared
-UID, all package records in the AAID are considered. If explicit overrides
+Package identities for authentication signing come from Keystore's caller AAID
+at key creation. In global scope, the separate takeover-mode policy resolves a
+caller package only for `getSecurityLevel` when explicit modes are configured;
+the scope decision itself does not depend on that lookup. For a shared UID, all
+package records in the AAID are considered. If explicit overrides
 conflict, Preserve wins over Auto, which wins over Compatibility; packages
 without an override inherit without canceling an explicit override.
 
-Settings places **Global scope** directly below Language/Appearance. These
-settings appear only in Settings, not Overview or Apps. **Authentication signing**
-opens a policy dialog; **App exceptions** opens a second, full-screen application
-list. The list shows user apps with icons, names and package IDs by default.
-**Show system apps** loads system apps on demand. Search matches name or package,
-and **Use default** removes an explicit exception. Hidden system-app exceptions
-remain saved. The list stays accessible when the scope list is paused.
-
-Browser history, native WebView back events, Escape and the visible Back buttons
-close only the topmost dialog. Returning from the application list preserves
-the policy dialog and its draft selection. Saving exceptions does not save an
-uncommitted default mode. Each page has its own explicit Save action.
-The **Positive key ID compatibility** checkbox is a separate feature.
+The Apps page places **Global scope** below its search bar. Each app has an
+individual policy page with Auto, Payment compatibility and Preserve authentication
+choices. An app with no explicit override displays its inherited global default;
+choosing a mode writes only that app's exception and preserves the global default
+and all other exceptions. The policy page remains accessible in global scope.
+Browser history, native WebView back events, Escape and the Back button return
+to the application list.
+The **Positive key ID compatibility** switch is a separate global setting in
+Settings and is saved independently of the application scope list.
 
 ## Storage and saving
 
@@ -92,9 +90,11 @@ service restart. Neither TEE nor StrongBox reads a separate copy.
 The WebUI uses the packaged Rust `ommega-auth-policy` writer. It validates the
 replacement, locks the data directory across the source-byte comparison and
 atomic rename, preserves metadata, fsyncs the file and directory, and rejects
-stale input or a concurrent editor. Locks release when the process exits. It
-has a fixed destination and does not initialize Binder, HALs or a daemon. The
-UI verifies the saved policy by reading it back. Other config writers and
+stale input or a concurrent editor. Locks release when the process exits. Its
+operations use fixed destinations and do not initialize Binder, HALs or a daemon.
+The same executable separately writes the app scope, system-app list and security-mode files;
+its auth operation writes only the auth policy. The UI verifies the saved
+policy by reading it back. Other config writers and
 global-scope changes do not rewrite this file. Read/parse/save failures remain
 visible and do not report successful payment or detector validation.
 

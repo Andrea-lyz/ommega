@@ -671,6 +671,7 @@ impl crate::KeyMintTa {
         else {
             return Ok(None);
         };
+        let relay_latency_ms = remote_attestation.relay_latency_ms;
         let remote_profile = remote_attestation.profile;
         if remote_profile.profile_version != self.aidl_version as i32 {
             return Err(km_err!(
@@ -815,6 +816,10 @@ impl crate::KeyMintTa {
             keyblob::SlotPurpose::KeyGeneration,
         )?;
         let serialized_keyblob = encrypted_keyblob.into_vec()?;
+
+        if let Some(remote) = self.dev.remote.as_ref() {
+            remote.attestation_verified(app_id, relay_latency_ms);
+        }
 
         Ok(Some(KeyCreationResult {
             key_blob: serialized_keyblob,

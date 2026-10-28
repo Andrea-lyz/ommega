@@ -726,6 +726,10 @@ pub struct PollQuery {
     pub caps: Option<String>,
     /// Relay version (module version). Missing on older relays.
     pub ver: Option<String>,
+    /// Optional metadata remains text until validated, so a bad reading cannot
+    /// reject an otherwise valid task poll. Older relays omit both fields.
+    pub battery_percent: Option<String>,
+    pub battery_charging: Option<String>,
 }
 
 pub async fn b_poll(
@@ -756,12 +760,18 @@ pub async fn b_poll(
 
     match state
         .store
-        .pop_for_b_with_caps_and_version(
+        .pop_for_b_with_metadata(
             &q.device_id,
             &machine_id,
             timeout,
-            crate::queue::DeviceCaps::parse(q.caps.as_deref()),
-            q.ver.as_deref(),
+            crate::queue::DeviceMetadata {
+                caps: crate::queue::DeviceCaps::parse(q.caps.as_deref()),
+                version: q.ver.as_deref(),
+                battery: crate::queue::DeviceBattery::parse(
+                    q.battery_percent.as_deref(),
+                    q.battery_charging.as_deref(),
+                ),
+            },
         )
         .await
     {
@@ -912,6 +922,102 @@ pub async fn admin_cancel_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn battery_query(query: &str) -> Query<PollQuery> {
+        Query::try_from_uri(&query.parse().unwrap()).unwrap()
+    }
+
+    async fn battery_status(state: &AppState) -> Value {
+        let response = crate::admin::public_status(State(state.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let status: Value = serde_json::from_slice(&bytes).unwrap();
+        status["online_b_devices"][0].clone()
+    }
+
+    #[tokio::test]
+    async fn battery_poll_to_public_status_round_trip_is_typed_and_server_timestamped() {
+        let state = soter_state(false);
+        for (percent, charging) in [(0, false), (100, true)] {
+            let before = chrono::Utc::now().timestamp_millis() as u64;
+            let response = b_poll(
+                State(state.clone()), agreement_headers(),
+                battery_query(&format!("/api/b/poll/?device_id=synthetic-b&machine_id=mock&timeout=0&battery_percent={percent}&battery_charging={charging}")),
+            ).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let device = battery_status(&state).await;
+            assert_eq!(device["device_id"], "synthetic-b");
+            assert_eq!(device["battery_percent"], percent);
+            assert_eq!(device["battery_charging"], charging);
+            let received = device["battery_updated_at_ms"].as_u64().unwrap();
+            assert!(received >= before);
+            assert!(received <= chrono::Utc::now().timestamp_millis() as u64);
+            assert!(device.get("machine_id").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn battery_invalid_and_legacy_polls_clear_unknowns_without_changing_task_shape() {
+        let state = soter_state(false);
+        let task_id = state
+            .store
+            .create_task("profile", json!({}), "synthetic-b", None)
+            .await;
+        let response = b_poll(
+            State(state.clone()), agreement_headers(),
+            battery_query("/api/b/poll/?device_id=synthetic-b&machine_id=mock&timeout=0&battery_percent=101&battery_charging=bogus"),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let task: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            task,
+            json!({
+                "task_id": task_id, "task_type": "profile", "payload": {}, "target_device_id": "synthetic-b"
+            })
+        );
+        let device = battery_status(&state).await;
+        assert!(device["battery_percent"].is_null());
+        assert!(device["battery_charging"].is_null());
+        assert!(device["battery_updated_at_ms"].is_null());
+
+        let response = b_poll(
+            State(state.clone()), agreement_headers(),
+            battery_query("/api/b/poll/?device_id=synthetic-b&machine_id=mock&timeout=0&battery_percent=bad&battery_charging=false"),
+        ).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let device = battery_status(&state).await;
+        assert!(device["battery_percent"].is_null());
+        assert_eq!(device["battery_charging"], false);
+        assert!(device["battery_updated_at_ms"].as_u64().is_some());
+
+        let response = b_poll(
+            State(state.clone()),
+            agreement_headers(),
+            battery_query("/api/b/poll/?device_id=synthetic-b&machine_id=mock&timeout=0"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let device = battery_status(&state).await;
+        assert!(device["battery_percent"].is_null());
+        assert!(device["battery_charging"].is_null());
+        assert!(device["battery_updated_at_ms"].is_null());
+    }
+
+    #[tokio::test]
+    async fn battery_unauthenticated_poll_cannot_update_device_metadata() {
+        let state = soter_state(false);
+        let response = b_poll(
+            State(state.clone()), HeaderMap::new(),
+            battery_query("/api/b/poll/?device_id=synthetic-b&timeout=0&battery_percent=88&battery_charging=true"),
+        ).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(state.store.get_connected_devices().await.is_empty());
+    }
 
     #[test]
     fn aaid_package_extracts_the_package_name() {

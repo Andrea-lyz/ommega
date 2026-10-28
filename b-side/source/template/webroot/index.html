@@ -5,56 +5,83 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <title>Ommega B</title>
-  <link rel="stylesheet" href="./modern.css">
-  <link rel="stylesheet" href="./b-modern.css">
+  <link rel="stylesheet" href="./modern.css?v=material-ui-6">
+  <link rel="stylesheet" href="./material-you.css?v=material-ui-6">
+  <link rel="stylesheet" href="./b-modern.css?v=material-ui-6">
 </head>
 <body class="om-modern">
-  <header class="om-topbar"><div class="om-brand"><span class="om-logo" data-icon="shield"></span><div><div class="om-title">Ommega <span class="om-caption">B</span></div><div class="om-eyebrow">ATTESTATION / PROVIDER</div></div></div><button id="runtime-refresh" type="button" class="om-button secondary om-icon-button" data-label="刷新状态" data-icon="refresh"></button></header>
+  <div class="om-rail-brand"><span class="om-logo" data-icon="shield"></span><div><div class="om-title">Ommega <span class="om-caption">B</span></div><small data-msg="设备端"></small></div></div>
+  <header class="om-topbar"><div class="om-brand"><span class="om-logo" data-icon="shield"></span><div><div class="om-title">Ommega <span class="om-caption">B</span></div><small data-msg="设备端"></small></div></div><div class="om-top-actions"><button id="theme-toggle" type="button" class="om-button secondary om-icon-button" aria-label="切换深色主题"></button><button id="runtime-refresh" type="button" class="om-button secondary om-icon-button" data-label="刷新状态" data-icon="refresh"></button></div></header>
   <main class="om-content" id="main" tabindex="-1">
+    <p id="refresh-message" class="om-updated" role="status" aria-live="polite" aria-atomic="true" hidden></p>
     <section class="om-view" id="overview-view">
-      <div class="om-hero"><span id="relay-status" class="om-status" data-msg="正在读取 relay 状态…"></span><h1 data-msg="硬件证明，随时就绪。"></h1><p data-msg="管理专用 B 端的连接与设备信息。"></p><div class="om-flow" aria-label="A → Server → B"><div class="om-node">A<small data-msg="请求端"></small></div><span class="om-connector" data-icon="arrow"></span><div class="om-node">Server<small data-msg="转发"></small></div><span class="om-connector" data-icon="arrow"></span><div class="om-node">B<small data-msg="硬件 TEE"></small></div></div></div>
-      <div class="om-grid">
-        <article class="om-card"><div class="om-eyebrow" data-msg="设备 ID"></div><div class="om-stat om-stat-small" id="summary-device">—</div><p class="om-description" data-msg="专用设备"></p></article>
-        <article class="om-card"><div class="om-eyebrow">SYSTEM SPL</div><div class="om-stat om-stat-small" id="summary-spl">—</div><p class="om-description" data-msg="当前系统属性"></p></article>
-        <article class="om-card"><div class="om-eyebrow">ANDROID</div><div class="om-stat" id="summary-os">—</div><p class="om-description" data-msg="当前系统版本"></p></article>
+      <div class="page-heading"><div><span class="section-kicker">OVERVIEW</span><h1 data-msg="概览"></h1><p data-msg="查看设备端的本机状态与连接配置。"></p></div></div>
+      <div class="dashboard-grid" data-dashboard-side="b">
+        <article class="panel status-panel" id="runtime-panel" data-tone="unknown">
+          <div class="status-head"><div class="panel-label"><span data-icon="cpu"></span><span data-msg="本机 Relay 进程"></span></div><span id="relay-status" class="badge unknown" data-msg="正在读取 relay 状态…"></span></div>
+          <div class="status-body"><div><h2 data-msg="硬件证明设备"></h2><p data-msg="进程状态来自本机读取，不代表服务器已连接。"></p></div><span id="runtime-emblem" class="status-emblem unknown" data-tone="unknown" data-icon="cpu"></span></div>
+          <div class="status-footer"><div><small data-msg="本机进程"></small><strong id="runtime-pid">—</strong></div><div><small data-msg="设备标识"></small><strong id="runtime-device">—</strong></div></div>
+        </article>
+        <article class="panel metric-card" id="server-panel">
+          <div><div class="panel-label"><span data-icon="server"></span><span data-msg="服务器连接"></span></div><h2 id="server-state" data-msg="连接状态未知">连接状态未知</h2><p id="server-note" class="note" data-msg="正在读取服务器状态…">正在读取服务器状态…</p></div>
+          <div class="metric-chips"><span class="chip" id="summary-server">—</span><span class="chip" data-msg="专用设备"></span></div>
+        </article>
+        <article class="panel compact-card"><div class="card-meta"><div class="panel-label"><span data-icon="phone"></span><span>ANDROID</span></div><span class="tiny-icon" data-icon="phone"></span></div><div><h2 id="summary-os">—</h2><p class="note" data-msg="当前系统版本"></p></div></article>
+        <article class="panel compact-card"><div class="card-meta"><div class="panel-label"><span data-icon="shield"></span><span>SYSTEM SPL</span></div><span class="tiny-icon" data-icon="shield"></span></div><div><h2 id="summary-spl">—</h2><p class="note" data-msg="当前系统属性"></p></div></article>
+        <article class="panel compact-card"><div class="card-meta"><div class="panel-label"><span data-icon="phone"></span><span data-msg="设备 ID"></span></div><span class="tiny-icon" data-icon="phone"></span></div><div><h2 id="summary-device">—</h2><p class="note" data-msg="专用设备"></p></div></article>
+        <article class="panel wide-card"><div class="card-heading"><h2 data-msg="证明路径"></h2><small data-msg="示意图"></small></div><div class="route" aria-label="A → Server → B"><div class="route-node"><strong>A</strong><span data-msg="请求端"></span></div><span class="route-arrow" data-icon="arrow"></span><div class="route-node"><strong>Server</strong><span data-msg="转发"></span></div><span class="route-arrow" data-icon="arrow"></span><div class="route-node"><strong>B</strong><span data-msg="硬件 TEE"></span></div></div><p class="dashboard-note" data-msg="路径仅展示组成，不表示各节点当前的连接状态。"></p></article>
       </div>
-      <article class="om-card"><h2 data-msg="服务器"></h2><p id="summary-server" class="om-description">—</p><p class="om-note" data-msg="进程状态来自本机读取，不代表服务器已连接。"></p></article>
       <p id="runtime-time" class="om-updated" role="status" aria-live="polite"></p>
     </section>
     <section class="om-view" id="connection-view" hidden>
-      <div class="om-row"><h1 class="om-section-title" data-msg="远程连接"></h1><button id="relay-reload" class="om-button secondary" type="button" data-msg="重新读取"></button></div>
-      <p class="om-note" data-msg="连接参数保存后自动加载，正在处理的任务沿用原连接。"></p>
+      <div class="page-heading"><div><span class="section-kicker">CONNECTION</span><h1 data-msg="远程连接"></h1><p data-msg="配置 B 端与转发服务器的连接。"></p></div><button id="relay-reload" class="secondary-button" type="button" data-msg="重新读取"></button></div>
       <form id="relay-form" novalidate autocomplete="off"><fieldset id="relay-fields" disabled>
-        <article class="om-card">
+        <div class="stack"><section class="panel form-card"><h2 data-msg="Relay 配置"></h2><p class="note" data-msg="连接参数保存后自动加载，正在处理的任务沿用原连接。"></p>
           <label class="field" for="relay-server"><span data-msg="服务器地址"></span><input id="relay-server" type="url" inputmode="url" placeholder="https://relay.example.com:8443" spellcheck="false" autocapitalize="none" required></label>
           <label class="field" for="relay-device"><span data-msg="设备 ID"></span><input id="relay-device" data-placeholder="与 Server 注册的设备 ID 一致" spellcheck="false" autocapitalize="none" required></label>
-          <label class="field" for="relay-token">Token</label><div class="om-row"><input id="relay-token" type="password" aria-label="Token" data-placeholder="B 端连接凭据" autocomplete="new-password" spellcheck="false" autocapitalize="none" required><button id="token-toggle" type="button" class="om-button secondary" aria-pressed="false" data-msg="显示"></button></div>
+          <label class="field" for="relay-token">Token</label><div class="input-action"><input id="relay-token" type="password" aria-label="Token" data-placeholder="B 端连接凭据" autocomplete="new-password" spellcheck="false" autocapitalize="none" required><button id="token-toggle" type="button" class="secondary-button" aria-pressed="false" data-msg="显示"></button></div>
           <details class="om-advanced"><summary data-msg="高级连接选项"></summary><label class="field" for="relay-machine"><span data-msg="机器 ID · 可选"></span><input id="relay-machine" data-placeholder="未分配时留空" spellcheck="false" autocapitalize="none"></label></details>
-        </article>
-        <article class="om-card"><h2 data-msg="日志"></h2><p class="om-note" data-msg="日志开关和级别在 relay 下次启动时生效。"></p><div class="logging">
-          <div class="log-sink"><label class="toggle" for="file-log-enabled"><span data-msg="文件日志"></span><input id="file-log-enabled" type="checkbox"></label><label class="field" for="file-log-level"><span data-msg="记录级别"></span><select id="file-log-level" class="om-select"></select></label></div>
-          <div class="log-sink"><label class="toggle" for="logcat-enabled"><span data-msg="系统日志（logcat）"></span><input id="logcat-enabled" type="checkbox"></label><label class="field" for="logcat-level"><span data-msg="记录级别"></span><select id="logcat-level" class="om-select"></select></label></div>
-        </div></article>
-        <button id="relay-save" type="submit" class="om-button" data-msg="保存 Relay 配置"></button>
+          <div id="relay-message" class="om-message" role="status" aria-live="polite"></div>
+          <div class="form-actions"><button id="relay-save" type="submit" class="primary-button" data-msg="保存 Relay 配置"></button></div>
+        </section></div>
+        <div class="stack"><section class="panel settings-group"><div class="group-header"><h2 class="group-heading" data-msg="日志"></h2><p data-msg="日志开关和级别在 relay 下次启动时生效。"></p></div>
+          <div class="logging">
+            <div class="toggle-row"><div class="toggle-copy"><strong data-msg="文件日志"></strong><small data-msg="记录至本机日志文件"></small></div><span class="switch"><input id="file-log-enabled" type="checkbox" role="switch"><span></span></span></div>
+            <label class="field" for="file-log-level"><span data-msg="记录级别"></span><select id="file-log-level" class="om-select"></select></label>
+            <div class="toggle-row"><div class="toggle-copy"><strong data-msg="系统日志（logcat）"></strong><small data-msg="记录至 Android 系统日志"></small></div><span class="switch"><input id="logcat-enabled" type="checkbox" role="switch"><span></span></span></div>
+            <label class="field" for="logcat-level"><span data-msg="记录级别"></span><select id="logcat-level" class="om-select"></select></label>
+          </div>
+        </section><div class="notice"><strong data-msg="服务器连接"></strong><span data-msg="进程状态来自本机读取，不代表服务器已连接。"></span></div></div>
       </fieldset></form>
-      <div id="relay-message" class="om-message" role="status" aria-live="polite"></div>
     </section>
     <section class="om-view" id="settings-view" hidden>
-      <h1 class="om-section-title" data-msg="设置与设备信息"></h1><div id="appearance"></div>
-      <details class="om-card" id="spl-section"><summary data-msg="设备属性（SPL 与 OS 版本）"></summary>
-        <p class="om-note" data-msg="修改 SPL 或 OS 版本会重载 KeyMint 与 keystore2。日期与 OS 版本只能升不能降；下限取设备原始值、设备当前上报值与已生效目标值三者中最新者，留空即保持当前生效值。"></p>
-        <p class="om-note" data-msg="已上报过的日期不会被收回；恢复出厂日期需要恢复出厂设置。"></p>
-        <label class="field" for="system">System SPL<input id="system" placeholder="YYYY-MM-DD"></label>
-        <label class="field" for="boot">Boot SPL<input id="boot" placeholder="YYYY-MM-DD"></label>
-        <label class="field" for="vendor">Vendor SPL<input id="vendor" placeholder="YYYY-MM-DD"></label>
-        <label class="field" for="osversion"><span data-msg="OS 版本"></span><input id="osversion" inputmode="numeric" data-placeholder="如 17，留空保持当前生效值"></label>
-        <p class="om-note" data-msg="OS 版本只影响 ro.build.version.release 与证明 OS_VERSION；SDK 等级不变。"></p>
-        <div class="actions"><button id="save" type="button" class="om-button" disabled data-msg="保存并应用"></button><button id="same" type="button" class="om-button secondary" data-msg="三项使用 System 值"></button><button id="auto" type="button" class="om-button secondary" data-msg="留空保持当前值"></button></div>
-        <div id="message" class="om-message" role="status" aria-live="polite"></div><p class="om-note" id="origin"></p><p class="om-note" id="spl-floor"></p><p class="om-note" id="spl-applied"></p><p class="om-note" data-msg="Boot SPL 是否被硬件接受，以新生成的证明证书为准。"></p><pre id="status" class="om-raw"></pre>
-      </details>
+      <div class="page-heading"><div><span class="section-kicker">PREFERENCES</span><h1 data-msg="设置"></h1><p data-msg="查看外观与设备属性。"></p></div></div>
+      <div class="content-columns"><div class="stack">
+        <section class="panel settings-group"><div class="group-header"><h2 class="group-heading" data-msg="常用设置"></h2><p data-msg="调整界面显示"></p></div>
+          <button id="appearance-open" type="button" class="action-row"><span class="row-icon" data-icon="palette"></span><span class="row-text"><strong data-msg="语言与外观"></strong><small data-msg="选择界面语言与配色"></small></span><span class="icon" data-icon="chevron"></span></button>
+          <dialog id="appearance-dialog" class="om-preference-dialog" aria-labelledby="appearance-title" data-om-return-focus="appearance-open"><div class="sheet-handle" aria-hidden="true"></div><h2 id="appearance-title" data-msg="语言与外观"></h2><div id="appearance"></div><div class="sheet-actions"><button id="appearance-close" type="button" class="primary-button" data-msg="完成"></button></div></dialog>
+        </section>
+        <section class="panel settings-group"><div class="group-header"><h2 class="group-heading" data-msg="设备信息"></h2><p data-msg="本机报告的版本与日期"></p></div>
+          <button id="spl-open" type="button" class="action-row"><span class="row-icon" data-icon="shield"></span><span class="row-text"><strong data-msg="设备属性（SPL 与 OS 版本）"></strong><small data-msg="SPL 与 OS 版本"></small></span><span class="icon" data-icon="chevron"></span></button>
+          <dialog class="om-preference-dialog" id="spl-dialog" aria-labelledby="spl-title" data-om-return-focus="spl-open"><div class="sheet-handle" aria-hidden="true"></div><h2 id="spl-title" data-msg="设备属性（SPL 与 OS 版本）"></h2>
+            <p class="note" data-msg="修改 SPL 或 OS 版本会重载 KeyMint 与 keystore2。日期与 OS 版本只能升不能降；下限取设备原始值、设备当前上报值与已生效目标值三者中最新者，留空即保持当前生效值。"></p>
+            <p class="note" data-msg="已上报过的日期不会被收回；恢复出厂日期需要恢复出厂设置。"></p>
+            <label class="field" for="system">System SPL<input id="system" placeholder="YYYY-MM-DD"></label>
+            <label class="field" for="boot">Boot SPL<input id="boot" placeholder="YYYY-MM-DD"></label>
+            <label class="field" for="vendor">Vendor SPL<input id="vendor" placeholder="YYYY-MM-DD"></label>
+            <label class="field" for="osversion"><span data-msg="OS 版本"></span><input id="osversion" inputmode="numeric" data-placeholder="如 17，留空保持当前生效值"></label>
+            <p class="note" data-msg="OS 版本只影响 ro.build.version.release 与证明 OS_VERSION；SDK 等级不变。"></p>
+            <div class="form-actions"><button id="save" type="button" class="primary-button" disabled data-msg="保存并应用"></button><button id="same" type="button" class="secondary-button" data-msg="三项使用 System 值"></button><button id="auto" type="button" class="secondary-button" data-msg="留空保持当前值"></button></div>
+            <div id="message" class="om-message" role="status" aria-live="polite"></div><p class="note" id="origin"></p><p class="note" id="spl-floor"></p><p class="note" id="spl-applied"></p><p class="note" data-msg="Boot SPL 是否被硬件接受，以新生成的证明证书为准。"></p><pre id="status" class="om-raw"></pre><div class="form-actions"><button id="spl-reload" type="button" class="secondary-button" data-msg="重新读取"></button><button id="spl-close" type="button" class="secondary-button" data-msg="关闭"></button></div>
+          </dialog>
+          <button id="about-open" type="button" class="action-row"><span class="row-icon" data-icon="info"></span><span class="row-text"><strong data-msg="关于 Ommega"></strong><small data-msg="版本与项目说明"></small></span><span class="icon" data-icon="chevron"></span></button>
+          <dialog id="about-dialog" class="om-preference-dialog" aria-labelledby="about-title" data-om-return-focus="about-open"><div class="sheet-handle" aria-hidden="true"></div><h2 id="about-title" data-msg="关于 Ommega"></h2><p class="om-description">Ommega B</p><p class="om-description"><span data-msg="模块版本"></span> · <strong id="summary-version">—</strong></p><div class="sheet-actions"><button id="about-close" type="button" class="primary-button" data-msg="关闭"></button></div></dialog>
+        </section>
+      </div><div class="stack"><div class="notice"><span data-icon="info"></span><strong data-msg="设备属性说明"></strong><span data-msg="已上报过的日期不会被收回；恢复出厂日期需要恢复出厂设置。"></span></div>
+        <article class="panel form-card"><h2 data-msg="显示原则"></h2><p class="note" data-msg="Boot SPL 是否被硬件接受，以新生成的证明证书为准。"></p></article></div></div>
     </section>
   </main>
-  <nav class="om-nav" data-label="主导航"><button type="button" data-view="overview" aria-current="page"><span data-icon="overview"></span><span data-msg="概览"></span></button><button type="button" data-view="connection" aria-current="false"><span data-icon="settings"></span><span data-msg="连接"></span></button><button type="button" data-view="settings" aria-current="false"><span data-icon="apps"></span><span data-msg="设置"></span></button></nav>
-  <script type="module" src="./app.js"></script>
+  <nav class="om-nav" data-label="主导航"><button type="button" data-view="overview" aria-current="page"><span data-icon="overview"></span><span data-msg="概览"></span></button><button type="button" data-view="connection" aria-current="false"><span data-icon="link"></span><span data-msg="连接"></span></button><button type="button" data-view="settings" aria-current="false"><span data-icon="settings"></span><span data-msg="设置"></span></button></nav>
+  <script type="module" src="./app.js?v=material-ui-6"></script>
 </body>
 </html>
