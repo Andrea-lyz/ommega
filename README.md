@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
-> 不是上游官方发行版或官方在线服务。当前产品版本为 **2.0.1**，模块作者信息为
+> 不是上游官方发行版或官方在线服务。当前产品版本为 **2.1.0**，模块作者信息为
 > `jiyin004, Andrea-lyz`。
 
 > [!WARNING]
@@ -25,31 +25,50 @@ Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬
 本 fork 面向专用 **1A / 1B** 部署，维护远程身份一致性、原生 StrongBox、冷启动
 生命周期、WebUI 配置和 B 端服务级运维；不以一个 B 服务多个 A 为适配目标。
 
-## 2.0.1 下载与界面
+## 2.1.0 下载与界面
 
-[下载与完整中英更新说明](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.0.1) ·
+[下载与完整中英更新说明](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.0) ·
 [发布 CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
 
 | 发布资产 | 用途 |
 |---|---|
-| `ommega-a-release-arm64-v8a-2.0.1-<commit>.zip` | A 端 root 模块，含 WebUI |
-| `ommegaclient-b-release-arm64-v8a-2.0.1-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
+| `ommega-a-release-arm64-v8a-2.1.0-<commit>.zip` | A 端 root 模块，含 WebUI |
+| `ommegaclient-b-release-arm64-v8a-2.1.0-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
 | `relay_rs-linux-x86_64-musl` | 自建 Linux Server，独立更新 |
-| `Ommega-B-app-2.0.1-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同原生 B 模块 |
-| `StrongBoxCapabilityMask-2.0.1-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
+| `Ommega-B-app-2.1.0-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同原生 B 模块 |
+| `StrongBoxCapabilityMask-2.1.0-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
 | `SHA256SUMS` / `build-info.json` | 下载校验和、产品版本、源提交与签名说明 |
 
 GitHub 自动生成的 Source code 压缩包不是可安装模块。两个 APK 均为 debug 签名；
 覆盖安装前应核对签名。更新 A/B ZIP 不会替你更新 Server 或安装可选 APK。
 
-### 2.0.1 更新要点
+### 2.1.0 更新要点
 
-- A 端新增独立的“CPU 与设备属性”设置入口。可在二级应用列表中按名称或包名搜索、查看
-  应用图标并自定义作用域，也可选择是否包含系统应用；此作用域独立于 KeyMint 应用列表和全局开关。
-- 属性值由 B 端自动提供，A 端不再写死设备型号，也不提供手工改值入口。集成保留 exp6
-  的 Zygisk 属性视图逻辑；配置默认关闭且作用域为空，缺失或无效配置会跳过应用。
-- 调整应用图标加载与缺省图标显示，并统一弹窗的系统返回手势、浏览器返回和 Escape 行为。
-- 从独立 `zygisk_maskcpu` 模块迁移时，先停用该模块，再启用 Ommega 内置功能；A 端安装更新后需重启 A 使 Zygisk 加载新库。
+- A/B 双端 WebUI 统一为 Material You 设计系统：共享色调、圆角、状态卡、底部导航/侧栏和
+  表单组件，覆盖概览、应用、设置、连接页及多级弹窗；保留简体中文 / English 和浅色 / 深色，
+  在 320–1024 px 宽度下自适应。
+- A 应用页改为系统已安装应用列表，启动和手动刷新都会重新枚举，不再按 `target.txt` 过滤。
+  每个应用进入独立策略页，可分别设置作用域、接管模式（全局默认 / StrongBox / TEE）、
+  认证签名（自动 / 支付兼容 / 保持认证要求）和 CPU/设备属性。
+- 作用域写入收敛为单应用开关：只有打开或关闭某个应用的“启用作用域”才改写 `target.txt`；
+  列表不再提供批量写入、“显示全部”或已卸载应用清理。卸载后刷新只移除列表项，文件条目保留。
+  全局作用域开启时忽略 `target.txt`，单应用作用域暂停，其他应用策略仍可用。
+- A 新增每应用认证计数和最近一次 B 端延迟。只在证书链验证和密钥保存成功后计数，数据存入
+  现有 `keymaster.db`；共享 UID 显示共享标记，失败调用和内部重试不计数。
+- A 新增系统能力掩码弹窗，可独立关闭 StrongBox 与 device ID attestation capability，
+  保留 `app_attest_key`；CPU/设备属性继续使用 exp6 的 Zygisk 视图，属性由 B 端提供，
+  不提供手工改值。认证签名策略改为应用页内按应用保存，正数密钥 ID 兼容仍是独立全局开关。
+- B 端 WebUI 重做，并以只读方式读取 SPL/OS 状态；连接草稿、Token 掩码、语言和主题行为保留。
+  B 端新增只读电池遥测，经现有认证 poll 上报；Server 在状态接口中增加
+  `battery_percent`、`battery_charging`、`battery_updated_at_ms`。缺失、非法或过期数据显示
+  未知，不补 0，也不沿用上一个读数。
+- Server 对电池字段做独立校验并更新队列元数据，兼容旧 B 与旧 Server；B/Server 的协议、
+  负值/越界/非法状态测试和 `server/source/README.md` 一并补齐。A/B 顶部刷新现在等待完整
+  状态读取、显示忙碌状态，显式刷新在读取期间只排队一次，失败后可重试。
+- 新增共享 UI 资源、设计预览与离线浏览器 smoke，覆盖 A/B 双语和浅深色、320–1024 px、
+  应用列表/作用域、刷新、电池、能力弹窗；新增 WebUI bundle 补丁校验和发布包校验脚本。
+- 升级时分别更新 A/B 模块与 Server；A 安装后重启以加载 Zygisk 新库。旧 `target.txt`
+  条目会保留，可在应用页按应用重新开关。
 
 ### 2.0.0 更新要点（上一版本）
 
@@ -70,15 +89,16 @@ OpenUI 用于开发预览；设备端界面使用包内本地资源，无需在�
 | 端 | 页面 | 主要内容 |
 |---|---|---|
 | A | 概览 | 最近中继结果、KeyMint 进程、SOTER 软件 TA 与账本状态 |
-| A | 应用 | 勾选目标应用，选择安全级别并保存 |
-| A | 设置 | 远程配置、SOTER、自动化、证明参数、语言、主题、帮助与关于 |
-| B | 概览 | relay 本机进程、连接证据与当前系统属性 |
+| A | 应用 | 系统已安装应用列表；单应用作用域、接管模式、认证签名与 CPU/设备属性 |
+| A | 设置 | 远程配置、SOTER、自动化、证明参数、系统能力掩码、语言、主题、帮助与关于 |
+| B | 概览 | relay 本机进程、连接证据、当前系统属性与 B 电量 |
 | B | 连接 | Server、设备 ID、Token 与日志配置 |
-| B | 设置 | SPL / OS 版本、语言与主题 |
+| B | 设置 | SPL / OS 只读状态、语言与主题 |
 
-A 的刷新按钮重新读取状态文件，**不会发起硬件证明或清空失败记录**。最近请求结果带有
-时间戳，不能当作实时连通性探测；B 的进程存在也不等于 Server 已连接。1.9.0 修复同秒
-成功/失败导致状态停更、按钮图标与配色、保存按钮和列表底部遮挡，以及弹窗遮罩和返回行为。
+A/B 的刷新按钮重新读取状态文件，**不会发起硬件证明或清空失败记录**；读取期间显示忙碌，
+显式刷新只排队一次，失败后可重试。最近请求结果带有时间戳，不能当作实时连通性探测；
+B 的进程存在也不等于 Server 已连接。2.1.0 同时移除应用页保存按钮，作用域和策略开关直接
+保存并回读确认。
 
 顶部 TXT 使用说明保留较早的操作示例；配置路径、界面入口与 SPL 规则以本文和当前源码为准。
 
@@ -327,7 +347,7 @@ GitHub Actions 并行构建 A 模块、B 模块、Linux musl Server 和 Android 
 StrongBoxCapabilityMask 单元测试。Rust 固定到已验证的 `nightly-2026-09-01`，
 A/B/Server 提交 Cargo.lock，按组件缓存 Rust 构建并复用 Gradle 缓存。
 
-当前统一版本为 **2.0.1**。CI 默认使用源码版本，不自动递增或提交版本；
+当前统一版本为 **2.1.0**。CI 默认使用源码版本，不自动递增或提交版本；
 手动 `release_version` 仅覆盖本次构建。当前工作流只忽略纯 `*.md` 修改；TXT 修改仍会触发构建。
 全部构建成功后生成 `ommega-<版本>` artifact，包含 A/B 模块 ZIP、Server、
 B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
@@ -507,13 +527,13 @@ cd StrongBoxCapabilityMask
 
 ## 验证范围与限制
 
-2.0.1 已通过主机 WebUI 检查、CPU 配置与属性记录测试、Android 全工作区 Clippy 和测试编译，
+2.1.0 已通过主机 WebUI 检查、CPU 配置与属性记录测试、Android 全工作区 Clippy 和测试编译，
 并由 [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml) 构建发布资产。
 这些是构建与界面检查；
 手机手势、实际网络和应用流程仍需安装新版后验收。
 
 <details>
-<summary>历史实现与测试记录，不代表 2.0.1 已完成实机验收</summary>
+<summary>历史实现与测试记录，不代表 2.1.0 已完成实机验收</summary>
 
 1.6.0 修复三处会直接打断应用的 A 端 KeyMint 实现问题：镜像重放期间不再把 ommega 路由调用打成 `SYSTEM_ERROR`（改为有界等待，`poisoned` 仍 fail-closed）；EC 密钥生成恢复 AOSP 语义（EC + ENCRYPT 只警告不拒绝，不再硬报 `INCOMPATIBLE_PURPOSE`）；RSA 与 ECDSA 按密钥请求的摘要选择签名方案（此前 RSA 的 PKCS#1/PSS 写死 SHA-256、ECDSA 用曲线默认摘要：前者让非 SHA-256 的 RSA 密钥签名直接失败，后者产生摘要不匹配的静默错误签名）。B 端 `spl-control.sh` 拒绝 SPL/OS 版本降级，A 端新增 `event=local_sign` 诊断日志（记录本地签名的 padding/digest）。实机验证：HDFC 的 RSA-SHA512 指纹登录、Google Pay 的 EC 密钥生成、以及锁屏令牌重放窗口内被打断的指纹流程均恢复正常；A 端 mirror 12/12、tag 12/12、crypto 7/7 单测与 B 端 13 个 spl-control 用例通过，CI 全绿。Server 相对 1.5.3 只有版本号变化；B 端模块额外包含降级防护脚本。
 
