@@ -45,17 +45,9 @@ export function formatTime(seconds) {
   return Number(seconds) > 1000000000 ? new Intl.DateTimeFormat(language, {dateStyle:'short', timeStyle:'medium'}).format(new Date(seconds * 1000)) : text('暂无记录', 'No record');
 }
 export function setText(id, value) { const element = document.getElementById(id); if (element) element.textContent = String(value ?? '—'); }
-export function icon(name) {
-  const paths = {
-    overview:'<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
-    apps:'<rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 8h8M8 12h8M8 16h4"/>',
-    settings:'<path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/>',
-    refresh:'<path d="M3 12a9 9 0 0 1 9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M16 8h5V3"/><path d="M21 12a9 9 0 0 1-9 9c-2.52 0-4.93-1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
-    arrow:'<path d="m9 5 7 7-7 7"/>',
-    shield:'<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/>',
-  };
-  return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.shield}</svg>`;
-}
+// The icon set is shared with the design prototype; see icons.js.
+export {icon} from './icons.js';
+
 export function createBridge(scope) {
   let sequence = 0;
   return command => new Promise(resolve => {
@@ -70,7 +62,7 @@ export function createBridge(scope) {
   });
 }
 export function pollWhenVisible(refresh, delay = 10000, button = null) {
-  let busy = false, stopped = false, queued = false;
+  let running = null, queued = null, stopped = false;
   const label = button?.getAttribute('aria-label') || text('刷新状态', 'Refresh status');
   const setBusy = value => {
     if (!button) return;
@@ -81,30 +73,34 @@ export function pollWhenVisible(refresh, delay = 10000, button = null) {
     button.title = description;
   };
   setBusy(false);
-  const run = async (forced = false) => {
-    if (stopped) return;
-    if (busy) {
-      // A tap during a running read is queued, never dropped: the panel has to
-      // show the result of the request the user actually asked for.
-      if (forced) queued = true;
-      return;
+  const run = (forced = false) => {
+    if (stopped || document.hidden && !forced) return Promise.resolve();
+    if (running) {
+      if (!forced) return running;
+      // Coalesce taps during a read into one fresh follow-up. Its promise waits
+      // for that follow-up (even if the preceding automatic read failed).
+      if (!queued) queued = running.catch(() => {}).then(() => {
+        queued = null;
+        return run(true);
+      });
+      return queued;
     }
-    if (document.hidden && !forced) return;
-    busy = true;
     setBusy(true);
-    try { await refresh(); }
-    finally {
-      busy = false;
-      setBusy(false);
-      if (queued) { queued = false; run(true); }
-    }
+    running = Promise.resolve().then(() => refresh(forced)).finally(() => {
+      running = null;
+      if (!queued) setBusy(false);
+    });
+    return running;
   };
-  const timer = setInterval(() => run(false), delay);
-  const onVisibility = () => run(false);
+  // Read callbacks own their error feedback. Automatic retries must not create
+  // unhandled rejections, while callers of the manual action can await errors.
+  const automatic = () => { void run(false).catch(() => {}); };
+  const timer = setInterval(automatic, delay);
+  const onVisibility = automatic;
   document.addEventListener('visibilitychange', onVisibility);
   window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVisibility); }, {once:true});
   window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
-  run(false);
+  automatic();
   // The returned function is the button action: it always produces a fresh
   // read, and the panel is never left with a button that does nothing.
   return () => run(true);
@@ -113,6 +109,7 @@ export function pollWhenVisible(refresh, delay = 10000, button = null) {
 // The relay reports why a request failed as a JSON object. The text inside is
 // what an operator needs; the wrapper only adds noise.
 export function healthMessage(health) {
+  if (health?.last_kind === 'attestation') return text('证书链验证或密钥保存失败。', 'Certificate validation or key storage failed.');
   const raw = String(health?.last_message || '').trim();
   if (!raw) return '';
   try {
