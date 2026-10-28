@@ -122,6 +122,9 @@
 
     <!-- About -->
 
+
+    <string name="about_title">About Ommega</string>
+
     <string name="about_module_name_line1">Ommega</string>
 
     <string name="about_module_name_line2">Remote Attestation Relay</string>

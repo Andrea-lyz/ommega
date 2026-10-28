@@ -43,6 +43,7 @@ use serde_json::{json, Value};
 
 use crate::config;
 
+pub(crate) mod attestation_metrics;
 mod backend;
 mod health;
 pub use backend::RemoteRelayBackend;
@@ -503,7 +504,7 @@ impl RemoteRelay {
         app_id_der: &[u8],
         params: &kmr_ta::device::RemoteAttestParams,
         cert_serial: Option<&[u8]>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<(Value, Duration)>> {
         let mut ctx = serde_json::Map::new();
         if let Some(issuer) = &params.attestation_key {
             ctx.insert(
@@ -707,7 +708,9 @@ impl RemoteRelay {
             "device_id": Self::device_id()?,
             "device_attest_context": Value::Object(ctx),
         });
+        let started = Instant::now();
         Self::post_json("/api/attest/", &body)
+            .map(|result| result.map(|value| (value, started.elapsed())))
     }
 
     /// Millis since epoch (used for `creation_datetime_ms`).

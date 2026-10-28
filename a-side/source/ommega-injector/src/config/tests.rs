@@ -223,7 +223,7 @@ system_app_contexts = { "com.example.engineer" = "u:r:factory_app:s0" }
 }
 
 #[test]
-fn global_scope_uses_global_security_policy_and_restores_saved_app_policy() {
+fn global_scope_uses_explicit_modes_without_enrolling_new_callers() {
     let mut config = InjectorConfig::default();
     let package = "com.example.app".to_owned();
     config.target_packages.push(package.clone());
@@ -237,13 +237,47 @@ fn global_scope_uses_global_security_policy_and_restores_saved_app_policy() {
     );
     assert_eq!(
         config.target_security_mode_for(std::slice::from_ref(&package)),
+        Some(TargetSecurityMode::Tee),
+    );
+    config.target_packages.clear();
+    assert_eq!(
+        config.target_security_mode_for(std::slice::from_ref(&package)),
+        Some(TargetSecurityMode::Tee),
+    );
+    assert_eq!(
+        config.target_security_mode_for(&["com.other.app".to_string()]),
         Some(TargetSecurityMode::GlobalDefault),
     );
     config.filter.enabled = true;
     assert_eq!(
         config.target_security_mode_for(std::slice::from_ref(&package)),
+        None
+    );
+    config.target_packages.push(package.clone());
+    assert_eq!(
+        config.target_security_mode_for(std::slice::from_ref(&package)),
         Some(TargetSecurityMode::Tee),
     );
+}
+
+#[test]
+fn security_modes_load_independently_of_the_scope_list_only_for_global_scope() {
+    let input = r#"
+version = 1
+[packages]
+"com.selected.app" = "strongbox"
+"com.unselected.app" = "tee"
+"../invalid" = "tee"
+"#;
+    let selected = vec!["com.selected.app".to_string()];
+    let listed = parse_target_security_modes(input, &selected, false);
+    let global = parse_target_security_modes(input, &selected, true);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed["com.selected.app"], TargetSecurityMode::Strongbox);
+    assert_eq!(global.len(), 2);
+    assert_eq!(global["com.unselected.app"], TargetSecurityMode::Tee);
+    assert!(!global.contains_key("../invalid"));
+    assert!(parse_target_security_modes("version = 9", &selected, true).is_empty());
 }
 
 #[test]

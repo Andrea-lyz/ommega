@@ -288,12 +288,14 @@ pub fn get() -> Arc<InjectorConfig> {
 
 /// Merges the legacy A-side `/data/adb/ommega/target.txt` package list into the
 /// effective scoop, so apps toggled in the webroot UI are intercepted exactly as
-/// under the old client-a module.  Returns `base` unchanged if the file is absent
-/// or unreadable (only package names are added; deny/scope details still come from
-/// `injector.toml`).
+/// under the old client-a module. Only package names are added; deny/scope
+/// details still come from `injector.toml`. Global scope can use explicit app
+/// modes even when the separate target list has not been created.
 fn merge_clienta_target_state(base: Arc<InjectorConfig>) -> Arc<InjectorConfig> {
-    let Ok(contents) = fs::read_to_string(CLIENTA_TARGET_PATH) else {
-        return base;
+    let contents = match fs::read_to_string(CLIENTA_TARGET_PATH) {
+        Ok(contents) => contents,
+        Err(_) if !base.filter.enabled => String::new(),
+        Err(_) => return base,
     };
     let mut targets: Vec<String> = Vec::new();
     for line in contents.lines() {
@@ -312,8 +314,11 @@ fn merge_clienta_target_state(base: Arc<InjectorConfig>) -> Arc<InjectorConfig> 
         }
     }
 
-    let target_security_modes =
-        load_target_security_modes(&targets, &base.compat.legacy_strongbox_unavailable_packages);
+    let target_security_modes = load_target_security_modes(
+        &targets,
+        &base.compat.legacy_strongbox_unavailable_packages,
+        !base.filter.enabled,
+    );
     let disable_native_strongbox = load_disable_native_strongbox();
     let mut merged = (*base).clone();
     for package in &targets {
@@ -330,6 +335,7 @@ fn merge_clienta_target_state(base: Arc<InjectorConfig>) -> Arc<InjectorConfig> 
 fn load_target_security_modes(
     targets: &[String],
     legacy_tee_packages: &[String],
+    global_scope: bool,
 ) -> BTreeMap<String, TargetSecurityMode> {
     let Ok(contents) = fs::read_to_string(CLIENTA_TARGET_SECURITY_PATH) else {
         return legacy_tee_packages
@@ -338,7 +344,15 @@ fn load_target_security_modes(
             .map(|package| (package.clone(), TargetSecurityMode::Tee))
             .collect();
     };
-    let parsed: TargetSecurityFile = match toml::from_str(&contents) {
+    parse_target_security_modes(&contents, targets, global_scope)
+}
+
+fn parse_target_security_modes(
+    contents: &str,
+    targets: &[String],
+    global_scope: bool,
+) -> BTreeMap<String, TargetSecurityMode> {
+    let parsed: TargetSecurityFile = match toml::from_str(contents) {
         Ok(parsed) => parsed,
         Err(error) => {
             log::warn!("failed to parse target security policy: {error}");
@@ -357,7 +371,12 @@ fn load_target_security_modes(
         .into_iter()
         .filter_map(|(package, mode)| {
             let package = package.trim().to_string();
-            targets.contains(&package).then_some((package, mode))
+            // Only globally scoped, ordinary allowed app callers can use a
+            // saved override outside the selected target list. List mode keeps
+            // the existing target-package restriction.
+            (targets.contains(&package)
+                || (global_scope && kmr_common::cpu_mask::valid_package(&package)))
+            .then_some((package, mode))
         })
         .collect()
 }
@@ -384,13 +403,10 @@ fn load_disable_native_strongbox() -> bool {
 
 impl InjectorConfig {
     pub fn target_security_mode_for(&self, packages: &[String]) -> Option<TargetSecurityMode> {
-        if !self.filter.enabled {
-            return Some(TargetSecurityMode::GlobalDefault);
-        }
-        let mut targeted = false;
+        let mut targeted = !self.filter.enabled;
         let mut strongbox = false;
         for package in packages {
-            if !self.target_packages.contains(package) {
+            if self.filter.enabled && !self.target_packages.contains(package) {
                 continue;
             }
             targeted = true;

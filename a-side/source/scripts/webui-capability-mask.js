@@ -28,7 +28,7 @@ function ommegaCapabilityCommand(command, payload = null) {
 }
 
 async function ommegaCapabilityRead() {
-  const response = await _(ommegaCapabilityCommand("status"));
+  const response = await ommegaReadOnly(ommegaCapabilityCommand("status"));
   if (Number(response.errno) !== 0) throw new Error(response.stderr || "Could not read system capability settings");
   const state = JSON.parse(response.stdout);
   ommegaCapabilityValidate(state.config);
@@ -119,9 +119,10 @@ function ommegaInstallCapabilityMask() {
   if (!slot || typeof slot.appendChild !== "function" || document.getElementById("ommega-capability-mask")) return false;
   const panel = document.createElement("section"); panel.id = "ommega-capability-mask";
   const back = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m14 5-7 7 7 7"/></svg>';
-  const forward = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>';
+  const forward = '<svg class="icon" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>';
+  const shield = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.8 19 5.5v5.7c0 4.4-2.6 7.8-7 10-4.4-2.2-7-5.6-7-10V5.5L12 2.8Z"/><path d="m9 12 2 2 4-4"/></svg>';
   panel.innerHTML = ommegaUiLocalizeHtml(
-    '<button type="button" id="ommega-capability-open" class="om-action"><span>系统能力屏蔽 / System capability mask<small id="ommega-capability-summary">正在读取… / Loading…</small></span>' + forward + '</button>' +
+    '<button type="button" id="ommega-capability-open" class="action-row"><span class="row-icon">' + shield + '</span><span class="row-text"><strong>系统能力屏蔽 / System capability mask</strong><small id="ommega-capability-summary">正在读取… / Loading…</small></span>' + forward + '</button>' +
     '<dialog id="ommega-capability-dialog" class="ommega-auth-modal" aria-labelledby="ommega-capability-heading" aria-describedby="ommega-capability-note" data-om-return-focus="ommega-capability-open">' +
     '<header class="ommega-auth-toolbar"><button type="button" id="ommega-capability-back" class="om-button secondary">' + back + '<span>返回 / Back</span></button><h2 id="ommega-capability-heading">系统能力屏蔽 / System capability mask</h2></header>' +
     '<div class="ommega-auth-policy-content"><p id="ommega-capability-note" class="ommega-auth-note">开启开关以隐藏对应能力声明，对所有应用生效。保存后需重启设备。 / Turn on a switch to hide that capability from all apps. Restart the device after saving.</p>' +

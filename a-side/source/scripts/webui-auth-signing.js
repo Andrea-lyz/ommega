@@ -66,7 +66,7 @@ function ommegaAuthReadCommand() {
 }
 
 async function ommegaAuthRead() {
-  const response = await _(ommegaAuthReadCommand());
+  const response = await ommegaReadOnly(ommegaAuthReadCommand());
   if (Number(response.errno) !== 0) throw new Error(response.stderr || "Could not read auth-signing policy");
   const encoded = String(response.stdout).replace(/\s/g, "");
   if (encoded === "M:") return {contents: null, config: ommegaAuthParse(null)};

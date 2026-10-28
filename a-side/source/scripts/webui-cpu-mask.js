@@ -30,7 +30,7 @@ function ommegaCpuCommand(command, payload = null) {
 }
 
 async function ommegaCpuRead() {
-  const response = await _(ommegaCpuCommand("status"));
+  const response = await ommegaReadOnly(ommegaCpuCommand("status"));
   if (Number(response.errno) !== 0) throw new Error(response.stderr || "Could not read CPU scope");
   const state = JSON.parse(response.stdout);
   ommegaCpuValidate(state.config);

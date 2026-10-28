@@ -2,15 +2,29 @@
 // ── Ommega detector compatibility policy (target-compat.toml) ────────────────
 // One global switch: every target app gets positive key ids, for clients that
 // treat a non-positive key id as "unspecified". It is off by default, so the
-// stock id distribution is kept until it is turned on from the mode dialog
-// below. Applied by scripts/webui-patch.py to the prebuilt WebUI bundle.
+// stock id distribution is kept until it is turned on in Settings.
+// Applied by scripts/webui-patch.py to the prebuilt WebUI bundle.
 const OMMEGA_TARGET_COMPAT = "/data/adb/ommega/ommegadata/target-compat.toml";
-let ommegaCompatEnabled = false;
+let ommegaCompatEnabled = false, ommegaCompatSaving = false, ommegaCompatRevision = 0;
 let ommegaAppsBaseline = null;
+
+// The modern shell supplies the shared bounded read bridge. Mutations keep the
+// original bridge: a UI timeout must never interrupt or retry a device write.
+function ommegaReadOnly(command) {
+  const detail = {command, promise:null};
+  if (typeof CustomEvent === "function") document.dispatchEvent(new CustomEvent("ommega-readonly", {detail}));
+  if (detail.promise) return detail.promise;
+  // Startup may precede the modern module. Bound only the wait for this read;
+  // a late original callback settles its own promise and cannot repaint state.
+  let timer;
+  return Promise.race([_(command), new Promise(resolve => {
+    timer = setTimeout(() => resolve({errno:1,stdout:"",stderr:ommegaUiLocalize("读取超时，请刷新重试。 / Read timed out. Refresh to retry."),timedOut:true}), 12000);
+  })]).finally(() => clearTimeout(timer));
+}
 
 function ommegaAppSettingsSnapshot(packages) {
   const selected = [...new Set(packages)].sort();
-  return JSON.stringify([selected.map(pkg => [pkg, ommegaTargetModes.get(pkg) || "global_default"]), ommegaCompatEnabled]);
+  return JSON.stringify(selected.map(pkg => [pkg, ommegaTargetModes.get(pkg) || "global_default"]));
 }
 
 function ommegaAppsHaveChanges() {
@@ -57,13 +71,13 @@ function ommegaParseTargetCompat(contents) {
   for (const rawLine of String(contents || "").split(/\r?\n/)) {
     const line = rawLine.trim();
     if (line.startsWith("[")) {
-      inSection = line === "[positive_key_id]";
+      inSection = /^\[\s*(?:positive_key_id|"positive_key_id"|'positive_key_id')\s*\]\s*(?:#.*)?$/.test(line);
       continue;
     }
     if (!inSection || line === "" || line.startsWith("#")) continue;
-    if (/^enabled\s*=\s*true\b/.test(line)) enabled = true;
+    if (/^(?:enabled|"enabled"|'enabled')\s*=\s*true\b/.test(line)) enabled = true;
     // A legacy per-package list means the switch was on before it went global.
-    if (/^packages\s*=\s*\[.*"[^"]+"/.test(line)) enabled = true;
+    if (/^(?:packages|"packages"|'packages')\s*=\s*\[.*["'][^"']+["']/.test(line)) enabled = true;
   }
   return enabled;
 }
@@ -81,94 +95,118 @@ function ommegaTargetCompatToml(enabled) {
   ].join("\n");
 }
 
-function ommegaCompatDialogPackage() {
-  const element = document.getElementById("mode-dialog-appname");
-  if (!element) return null;
-  const parts = element.innerHTML
-    .split(/<br\s*\/?>/i)
-    .map(part => part.replace(/<[^>]*>/g, "").trim())
-    .filter(Boolean);
-  return parts.length > 1 ? parts[parts.length - 1] : null;
+function ommegaTargetCompatUpdate(original, enabled) {
+  if (original === null) return ommegaTargetCompatToml(enabled);
+  const lines = String(original).split("\n");
+  let section = -1, inSection = false, enabledLine = -1, packagesLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("[")) {
+      inSection = /^\[\s*(?:positive_key_id|"positive_key_id"|'positive_key_id')\s*\]\s*(?:#.*)?$/.test(line);
+      if (inSection) {
+        if (section !== -1) throw new Error("Duplicate positive_key_id section");
+        section = i;
+      }
+      continue;
+    }
+    if (!inSection) continue;
+    if (/^(?:enabled|"enabled"|'enabled')\s*=/.test(line)) {
+      if (enabledLine !== -1 || !/^(?:enabled|"enabled"|'enabled')\s*=\s*(?:true|false)\s*(?:#.*)?$/.test(line)) throw new Error("Unsupported positive_key_id enabled value");
+      enabledLine = i;
+    } else if (/^(?:packages|"packages"|'packages')\s*=/.test(line)) {
+      if (packagesLine !== -1 || !/^(?:packages|"packages"|'packages')\s*=\s*\[[^\]]*\]\s*(?:#.*)?$/.test(line)) throw new Error("Unsupported legacy package list");
+      packagesLine = i;
+    }
+  }
+  const newline = String(original).includes("\r\n") ? "\r" : "";
+  if (packagesLine !== -1 && !enabled) lines[packagesLine] = lines[packagesLine].replace(/^(\s*(?:packages|"packages"|'packages')\s*=\s*)\[[^\]]*\]/, "$1[]");
+  if (enabledLine !== -1) lines[enabledLine] = lines[enabledLine].replace(/^(\s*(?:enabled|"enabled"|'enabled')\s*=\s*)(true|false)/, "$1" + enabled);
+  else if (section !== -1) lines.splice(section + 1, 0, "enabled = " + enabled + newline);
+  else return String(original) + (String(original).endsWith("\n") ? "" : "\n") + "\n[positive_key_id]\nenabled = " + enabled + "\n";
+  return lines.join("\n");
 }
 
-function ommegaCompatSyncOption() {
-  const box = document.getElementById("mode-compat");
-  if (!box) return;
-  box.checked = ommegaCompatEnabled;
-}
-
-function ommegaApplyCompatToggle() {
-  const box = document.getElementById("mode-compat");
-  if (!box) return;
-  ommegaCompatEnabled = box.checked;
-}
-
-function ommegaInstallCompatOption() {
-  const container = document.querySelector("#mode-dialog .mode-options");
-  if (!container || document.getElementById("mode-compat-row")) return;
-  const row = document.createElement("label");
-  row.className = "mode-option";
-  row.id = "mode-compat-row";
-  row.innerHTML = '<md-checkbox id="mode-compat" touch-target="wrapper"></md-checkbox>' +
-    '<span>正数密钥 ID 兼容 / Positive key ID compatibility</span>';
-  row.innerHTML = ommegaUiLocalizeHtml(row.innerHTML);
-  container.appendChild(row);
-  const hint = document.createElement("div");
-  hint.id = "mode-compat-hint";
-  hint.setAttribute("data-i18n", "mode_detector_compat_hint");
-  hint.textContent = ommegaUiLocalize("对所有目标应用生效 / Applies to every target application");
-  hint.style.cssText = "font-size:11px;line-height:1.4;opacity:.7;margin:-4px 0 8px 4px";
-  container.parentElement.appendChild(hint);
-  const box = row.querySelector("md-checkbox");
-  box.addEventListener("click", ommegaApplyCompatToggle);
-  row.querySelector("span").addEventListener("click", event => {
-    event.preventDefault();
-    box.checked = !box.checked;
-    ommegaApplyCompatToggle();
-  });
-  // The mode dialog opens 500 ms after a long press on a card; mirror that delay
-  // to show the state of the package that is about to be displayed.
-  document.addEventListener("pointerdown", event => {
-    if (!event.target || !event.target.closest || !event.target.closest(".card")) return;
-    setTimeout(ommegaCompatSyncOption, 520);
-  }, true);
-}
-
-async function ommegaWriteTargetCompat() {
-  const body = ommegaTargetCompatToml(ommegaCompatEnabled);
-  const command = [
-    "set -e",
-    "mkdir -p /data/adb/ommega/ommegadata",
-    "cat > /data/adb/ommega/ommegadata/target-compat.toml.tmp << 'OMMEGA_COMPAT_EOF'",
-    body + "OMMEGA_COMPAT_EOF",
-    "chmod 0644 /data/adb/ommega/ommegadata/target-compat.toml.tmp",
-    "chown 1017:1017 /data/adb/ommega/ommegadata/target-compat.toml.tmp 2>/dev/null || true",
-    "mv /data/adb/ommega/ommegadata/target-compat.toml.tmp /data/adb/ommega/ommegadata/target-compat.toml",
-  ].join("\n");
-  return _(command);
+function ommegaCompatWriteCommand(original, enabled) {
+  const before = original === null ? "M:" : "F:" + ommegaSoterRemoteBase64(original);
+  const after = ommegaSoterRemoteBase64(ommegaTargetCompatUpdate(original, enabled));
+  return ["set -e", 'ommega_compat_file="' + OMMEGA_TARGET_COMPAT + '"',
+    'ommega_compat_tmp="$ommega_compat_file.$$"', 'trap \'rm -f "$ommega_compat_tmp"\' EXIT',
+    'if [ ! -e "$ommega_compat_file" ]; then ommega_compat_current="M:"; elif [ -f "$ommega_compat_file" ]; then ommega_compat_current="F:$(base64 < "$ommega_compat_file" | tr -d \'\\r\\n\')"; else exit 1; fi',
+    `[ "$ommega_compat_current" = '${before}' ] || { echo "Config changed; retry" >&2; exit 75; }`,
+    "printf '%s' '" + after + "' | base64 -d > \"$ommega_compat_tmp\"",
+    'chmod 0644 "$ommega_compat_tmp"', 'chown 1017:1017 "$ommega_compat_tmp"',
+    'mv -f "$ommega_compat_tmp" "$ommega_compat_file"', 'trap - EXIT'].join("\n");
 }
 
 const ommegaBaseAppLoadCompat = Mi;
 Mi = async function () {
   const {stdout} = await _('cat "' + OMMEGA_TARGET_COMPAT + '" 2>/dev/null || true');
   ommegaCompatEnabled = ommegaParseTargetCompat(stdout);
+  const setting = document.getElementById("ommega-global-compat");
+  if (setting && !setting.disabled) setting.checked = ommegaCompatEnabled;
   const result = await ommegaBaseAppLoadCompat();
   // A successful scope save reloads Mi; a failed save leaves this baseline.
   ommegaAppsBaseline = ommegaAppSettingsSnapshot(Qe);
   return result;
 };
 
-const ommegaBaseSaveCompat = document.getElementById("save").onclick;
-document.getElementById("save").onclick = async event => {
-  try {
-    await ommegaWriteTargetCompat();
-  } catch (error) {
-    console.error("Ommega compat policy write failed:", error);
-  }
-  return ommegaBaseSaveCompat ? ommegaBaseSaveCompat.call(event.currentTarget, event) : undefined;
-};
+async function ommegaReadTargetCompat() {
+  const result = await ommegaReadOnly('if [ ! -e "' + OMMEGA_TARGET_COMPAT + '" ]; then printf "M:"; elif [ -f "' + OMMEGA_TARGET_COMPAT + '" ]; then printf "F:"; base64 < "' + OMMEGA_TARGET_COMPAT + '"; else exit 1; fi');
+  if (Number(result.errno) !== 0) throw new Error(result.stderr || "Could not read compatibility policy");
+  const encoded = String(result.stdout).replace(/\s/g, "");
+  if (encoded === "M:") return {original:null, enabled:false};
+  if (!encoded.startsWith("F:")) throw new Error("Invalid compatibility policy response");
+  const bytes = Uint8Array.from(atob(encoded.slice(2)), c => c.charCodeAt(0));
+  const original = new TextDecoder("utf-8", {fatal:true, ignoreBOM:true}).decode(bytes);
+  ommegaTargetCompatUpdate(original, true); // Reject ambiguous policy syntax before displaying an editable state.
+  return {original, enabled:ommegaParseTargetCompat(original)};
+}
 
-ommegaInstallCompatOption();
+async function ommegaGlobalCompatChange() {
+  const box = document.getElementById("ommega-global-compat");
+  const status = document.getElementById("ommega-global-compat-status");
+  if (!box || !status || box.disabled) return;
+  const requested = box.checked;
+  ommegaCompatSaving = true; ++ommegaCompatRevision;
+  box.disabled = true;
+  status.textContent = ommegaUiLocalize("正在保存… / Saving…");
+  try {
+    const before = await ommegaReadTargetCompat();
+    const written = await _(ommegaCompatWriteCommand(before.original, requested));
+    if (Number(written.errno) !== 0) throw new Error(written.stderr || "Write failed");
+    const {enabled:actual} = await ommegaReadTargetCompat();
+    if (actual !== requested) throw new Error("Saved policy did not match on readback");
+    ommegaCompatEnabled = actual;
+    status.textContent = ommegaUiLocalize("已保存，对所有调用者生效。 / Saved; applies to all callers.");
+  } catch (error) {
+    try { ({enabled:ommegaCompatEnabled} = await ommegaReadTargetCompat()); }
+    catch (_) { ommegaCompatSaving = false; box.checked = ommegaCompatEnabled; box.disabled = true; status.textContent = ommegaUiLocalize("读取失败，请刷新后重试。 / Read failed; refresh and try again."); return; }
+    status.textContent = ommegaUiLocalize("保存失败 / Save failed") + ": " + error.message;
+  }
+  box.checked = ommegaCompatEnabled;
+  box.disabled = false;
+  ommegaCompatSaving = false;
+}
+
+async function ommegaInstallGlobalCompat() {
+  const slot = document.getElementById("om-compat-settings-slot");
+  if (!slot || typeof slot.appendChild !== "function" || document.getElementById("ommega-global-compat")) return;
+  const panel = document.createElement("section");
+  panel.className = "om-action om-compat-settings";
+  panel.innerHTML = ommegaUiLocalizeHtml('<label for="ommega-global-compat"><span><strong>正数密钥 ID 兼容 / Positive key ID compatibility</strong><small>对所有调用者生效 / Applies to all callers</small></span><input id="ommega-global-compat" type="checkbox" role="switch" disabled></label><div id="ommega-global-compat-status" role="status" aria-live="polite">正在读取… / Loading…</div>');
+  slot.appendChild(panel);
+  const box = document.getElementById("ommega-global-compat");
+  const status = document.getElementById("ommega-global-compat-status");
+  box.addEventListener("change", ommegaGlobalCompatChange);
+  try {
+    ({enabled:ommegaCompatEnabled} = await ommegaReadTargetCompat());
+    box.checked = ommegaCompatEnabled;
+    box.disabled = false;
+    status.textContent = "";
+  } catch (error) { status.textContent = ommegaUiLocalize("读取失败 / Could not read settings") + ": " + error.message; }
+}
+if (typeof window !== "undefined") window.addEventListener("ommega-settings-ready", ommegaInstallGlobalCompat);
 
 // ── Ommega relay verdict (remote-health.json) ───────────────────────────────
 // The keymint daemon records the last relay verdict, but this prebuilt bundle
@@ -178,6 +216,9 @@ ommegaInstallCompatOption();
 const OMMEGA_REMOTE_HEALTH = "/data/misc/keystore/ommega/remote-health.json";
 
 function ommegaHealthAdvice(kind) {
+  if (kind === "attestation") {
+    return "证书链验证或密钥保存失败。 / Certificate validation or key storage failed.";
+  }
   if (kind === "unauthorized") {
     return "服务器拒绝了这个 Token（HTTP 401/403）。请检查 Token 与卡片有效期；" +
       "重新勾选 enable remote 不会改变结果。 / The server rejected this token " +
@@ -263,7 +304,8 @@ async function ommegaRefreshHealth() {
   if (!panel) return;
   let report = "";
   try {
-    const {errno, stdout} = await _(`cat "${OMMEGA_REMOTE_HEALTH}" 2>/dev/null || true`);
+    const {errno, stdout, stderr} = await ommegaReadOnly(`cat "${OMMEGA_REMOTE_HEALTH}" 2>/dev/null || true`);
+    if (errno !== 0) throw new Error(stderr || "Could not read relay status");
     const raw = String(stdout === undefined || stdout === null ? "" : stdout).trim();
     if (errno === 0 && raw !== "") report = ommegaHealthReport(JSON.parse(raw));
   } catch (error) {
@@ -417,10 +459,11 @@ function ommegaSotertaReport(known, enabled, status) {
 
 // One round trip: the flag marker first, then the published status.
 async function ommegaSotertaRead() {
-  const {stdout} = await _(
+  const {errno, stdout, stderr} = await ommegaReadOnly(
     'if [ -f "' + OMMEGA_SOTERTA_FLAG + '" ]; then echo OMMEGA_FLAG=1; else echo OMMEGA_FLAG=0; fi\n' +
     'cat "' + OMMEGA_SOTERTA_STATUS + '" 2>/dev/null'
   );
+  if (errno && !String(stdout).startsWith("OMMEGA_FLAG=")) throw new Error(stderr || "Could not read Soter state");
   const text = String(stdout === undefined || stdout === null ? "" : stdout);
   const lines = text.split(/\r?\n/);
   const marker = (lines.shift() || "").trim();
@@ -435,21 +478,21 @@ async function ommegaSotertaRead() {
 async function ommegaSotertaRefresh(pending) {
   const report = document.getElementById("ommega-soterta-report");
   const box = document.getElementById("ommega-soterta-enabled");
+  const refresh = document.getElementById("ommega-soterta-refresh");
   if (!report) return;
-  let state;
+  if (refresh) { refresh.disabled = true; refresh.setAttribute?.("aria-busy", "true"); }
   try {
-    state = await ommegaSotertaRead();
-  } catch (error) {
-    report.textContent = "读取 Soter 状态失败 / Could not read the Soter state: " + error;
-    return;
-  }
-  if (box) box.checked = state.enabled;
-  const lines = [ommegaSotertaReport(state.known, state.enabled, state.status)];
-  if (pending) {
-    lines.push("开关已写入，看门狗会在几秒内接管（要先停掉原厂 HAL）/ " +
+    const state = await ommegaSotertaRead();
+    if (box) box.checked = state.enabled;
+    const lines = [ommegaSotertaReport(state.known, state.enabled, state.status)];
+    if (pending) lines.push("开关已写入，看门狗会在几秒内接管（要先停掉原厂 HAL）/ " +
       "Switch written; the watchdog applies it within a few seconds (it stops the stock HAL first).");
+    report.textContent = ommegaUiLocalize(lines.join("\n\n"));
+  } catch (error) {
+    report.textContent = ommegaUiLocalize("读取 Soter 状态失败 / Could not read the Soter state") + ": " + error;
+  } finally {
+    if (refresh) { refresh.disabled = false; refresh.setAttribute?.("aria-busy", "false"); }
   }
-  report.textContent = ommegaUiLocalize(lines.join("\n\n"));
 }
 
 // The flag is the request; the watchdog reacts within its poll interval and the
@@ -497,34 +540,25 @@ function ommegaSotertaDialog() {
   dialog.style.cssText = "max-width:min(560px,calc(100vw - 24px));max-height:calc(100dvh - 24px)";
   dialog.innerHTML =
     '<div slot="headline">Soter HAL</div>' +
-    '<div slot="content" style="display:flex;flex-direction:column;gap:12px;max-height:min(60dvh,520px);min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-bottom:8px">' +
+    '<div slot="content" style="display:flex;flex-direction:column;gap:12px;max-height:min(60dvh,520px);min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-bottom:20px">' +
       '<div id="ommega-soterta-report" style="font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;opacity:.85"></div>' +
-      '<md-text-button id="ommega-soterta-refresh" style="align-self:flex-end">刷新 / Refresh</md-text-button>' +
-      '<label class="config-option" style="display:flex;align-items:center;gap:8px">' +
-        '<md-checkbox id="ommega-soterta-enabled" touch-target="wrapper"></md-checkbox>' +
-        '<span>启用软件 TA / Enable software TA</span>' +
-      '</label>' +
+      '<button type="button" id="ommega-soterta-refresh" class="text-button" style="align-self:flex-end">刷新 / Refresh</button>' +
+      '<label class="config-option sheet-switch-row"><span class="toggle-copy"><strong>启用软件 TA / Enable software TA</strong></span><span class="switch"><input id="ommega-soterta-enabled" type="checkbox" role="switch"><span></span></span></label>' +
       '<div style="font-size:11px;line-height:1.4;opacity:.7">' +
         '软件 TA 接管原生 Soter HAL。远程关闭时使用本地自洽账本；远程开启后使用下方独立服务器，远程失败不会混用本地密钥。 / ' +
         'The software TA owns the native HAL. Remote off uses its local ledger; remote on uses the separate server below and fails closed if that relay fails.' +
       '</div>' +
-      '<label class="config-option" style="display:flex;align-items:center;gap:8px">' +
-        '<md-checkbox id="ommega-soter-remote-enabled" touch-target="wrapper"></md-checkbox>' +
-        '<span>Soter 远程中继 / Remote Soter relay</span>' +
-      '</label>' +
+      '<label class="config-option sheet-switch-row"><span class="toggle-copy"><strong>Soter 远程中继 / Remote Soter relay</strong></span><span class="switch"><input id="ommega-soter-remote-enabled" type="checkbox" role="switch"><span></span></span></label>' +
       '<md-outlined-text-field id="ommega-soter-remote-url" label="Soter 服务器 URL" type="url"></md-outlined-text-field>' +
       '<md-outlined-text-field id="ommega-soter-remote-device" label="Soter B 设备 ID"></md-outlined-text-field>' +
       '<md-outlined-text-field id="ommega-soter-remote-token" label="Soter Token" type="password"></md-outlined-text-field>' +
       '<md-outlined-text-field id="ommega-soter-remote-uid-map" label="UID 映射（A=B，可留空）"></md-outlined-text-field>' +
-      '<label class="config-option" style="display:flex;align-items:center;gap:8px">' +
-        '<md-checkbox id="ommega-soter-remote-tls-insecure" touch-target="wrapper"></md-checkbox>' +
-        '<span>允许自签 TLS 证书 / Accept self-signed TLS</span>' +
-      '</label>' +
+      '<label class="config-option sheet-switch-row"><span class="toggle-copy"><strong>允许自签 TLS 证书 / Accept self-signed TLS</strong></span><span class="switch"><input id="ommega-soter-remote-tls-insecure" type="checkbox" role="switch"><span></span></span></label>' +
       '<div id="ommega-soter-remote-result" style="font-size:12px;white-space:pre-wrap;word-break:break-word"></div>' +
     '</div>' +
     '<div slot="actions">' +
-      '<md-text-button id="ommega-soter-remote-save">保存 / Save</md-text-button>' +
-      '<md-text-button id="ommega-soterta-close">关闭 / Close</md-text-button>' +
+      '<button type="button" id="ommega-soter-remote-save" class="primary-button">保存 / Save</button>' +
+      '<button type="button" id="ommega-soterta-close" class="secondary-button">关闭 / Close</button>' +
     '</div>';
   dialog.innerHTML = ommegaUiLocalizeHtml(dialog.innerHTML);
   const englishLabels = {url:"Soter server URL",device:"Soter B device ID","uid-map":"UID mapping (A=B, optional)"};
@@ -596,7 +630,8 @@ function ommegaSoterRemoteField(id) {
 async function ommegaSoterRemoteLoad() {
   const result = document.getElementById("ommega-soter-remote-result");
   try {
-    const {stdout} = await _('cat "' + OMMEGA_SOTER_REMOTE_CONFIG + '" 2>/dev/null || true');
+    const {errno, stdout, stderr} = await ommegaReadOnly('cat "' + OMMEGA_SOTER_REMOTE_CONFIG + '" 2>/dev/null || true');
+    if (errno) throw new Error(stderr || "Could not read Soter relay config");
     const cfg = ommegaSoterRemoteParse(stdout);
     for (const key of ["url", "token", "uid_map"]) {
       const element = document.getElementById("ommega-soter-remote-" + key.replaceAll("_", "-"));
@@ -760,26 +795,29 @@ function ommegaScopeSync() {
   if (!box || !report || !list) return;
   if (!ommegaGlobalScopePending) box.checked = ommegaGlobalScopeEnabled;
   box.disabled = !ommegaGlobalScopeKnown || ommegaGlobalScopePending;
-  const blocked = !ommegaGlobalScopeKnown || ommegaGlobalScopeEnabled || ommegaGlobalScopePending;
-  list.inert = blocked;
-  list.setAttribute("aria-disabled", String(blocked));
-  list.style.opacity = blocked ? "0.45" : "";
-  list.style.pointerEvents = blocked ? "none" : "";
-  for (const id of ["select-all", "deselect-all", "select-denylist",
-      "deselect-unnecessary", "add-system-app", "save"]) {
+  const unavailable = !ommegaGlobalScopeKnown || ommegaGlobalScopePending;
+  list.inert = unavailable;
+  list.setAttribute("aria-disabled", String(unavailable));
+  list.style.opacity = unavailable ? "0.45" : "";
+  list.style.pointerEvents = unavailable ? "none" : "";
+  for (const id of ["select-all", "deselect-all", "select-denylist"]) {
     const control = document.getElementById(id);
-    if (control) control.disabled = blocked || ommegaGlobalScopePending;
+    if (control) control.disabled = unavailable || ommegaGlobalScopeEnabled;
+  }
+  for (const id of ["deselect-unnecessary", "add-system-app", "save"]) {
+    const control = document.getElementById(id);
+    if (control) control.disabled = unavailable;
   }
   report.textContent = ommegaGlobalScopeMessage || ommegaUiLocalize(ommegaGlobalScopeEnabled
-    ? "已开启：覆盖用户应用和普通系统应用，排除核心系统服务。列表暂不生效，关闭后恢复。 / On: user apps and regular system apps are in scope; core system services are excluded. The saved list is paused."
-    : "已关闭：按原作用域列表生效。 / Off: the saved scope list applies.");
+    ? "已开启：覆盖用户应用和普通系统应用，排除核心系统服务；target.txt 不参与作用域判断，单独作用域设置暂不生效。应用策略仍可使用。 / On: user apps and regular system apps are in scope; core system services are excluded. target.txt is ignored and individual scope is paused; app policies remain available."
+    : "已关闭：按各应用的作用域开关生效。 / Off: each application's scope switch applies.");
 }
 
 async function ommegaScopeRead() {
   // The manager's exec bridge joins stdout lines and drops their terminators.
   // Transport the file as base64 so CRLF and the final newline survive exactly;
   // the atomic writer compares these original bytes before replacing the file.
-  const result = await _('base64 < "' + OMMEGA_SCOPE_CONFIG + '"');
+  const result = await ommegaReadOnly('base64 < "' + OMMEGA_SCOPE_CONFIG + '"');
   if (Number(result.errno) !== 0) throw new Error(result.stderr || "Could not read injector.toml");
   const bytes = Uint8Array.from(atob(String(result.stdout).replace(/\s/g, "")), byte => byte.charCodeAt(0));
   const contents = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);
@@ -804,6 +842,7 @@ async function ommegaRefreshGlobalScope() {
 async function ommegaApplyGlobalScope() {
   if (ommegaGlobalScopePending || !ommegaGlobalScopeKnown) return;
   const requested = document.getElementById("ommega-global-scope-enabled").checked;
+  ++ommegaTargetSnapshotGeneration;
   ommegaGlobalScopePending = true;
   ommegaGlobalScopeMessage = ommegaUiLocalize("正在保存… / Saving…");
   ommegaScopeSync();
@@ -846,18 +885,13 @@ function ommegaInstallGlobalScope() {
     '<div id="ommega-global-scope-status" role="status" aria-live="polite" style="font-size:13px;line-height:1.5;margin-top:4px">正在读取… / Loading…</div>');
   slot.appendChild(panel);
   document.getElementById("ommega-global-scope-enabled").addEventListener("change", ommegaApplyGlobalScope);
-  const baseLoad = Mi;
-  Mi = async function () {
-    await ommegaRefreshGlobalScope();
-    return baseLoad();
-  };
   const save = document.getElementById("save");
   const baseSave = save.onclick;
   save.onclick = function (event) {
-    if (!ommegaGlobalScopeKnown || ommegaGlobalScopeEnabled || ommegaGlobalScopePending) return;
+    if (!ommegaGlobalScopeKnown || ommegaGlobalScopePending) return;
     return baseSave ? baseSave.call(this, event) : undefined;
   };
-  ommegaRefreshGlobalScope();
+  ommegaScopeSync();
   return true;
 }
 

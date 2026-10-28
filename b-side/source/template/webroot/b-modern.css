@@ -4,13 +4,31 @@ fieldset { margin:0; padding:0; border:0; min-width:0; }
 fieldset .om-card { margin:18px 0; }
 .om-row input { flex:1; }
 .om-row #token-toggle { margin-top:7px; flex-shrink:0; }
-.logging { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+.logging { display:grid; grid-template-columns:1fr; gap:10px; margin-top:14px; }
 .log-sink { padding:14px; border:1px solid var(--om-line); border-radius:16px; }
 .log-sink .field { margin-bottom:0; }
+/* A native sheet can be taller than the phone. Keep the background fixed and
+   let the sheet itself own the vertical gesture. */
+body.om-dialog-open { overflow:hidden; }
+.om-modern .om-preference-dialog[open] { overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; touch-action:pan-y; }
+#server-state[data-tone=online] { color:var(--success); }
+#server-state[data-tone=offline] { color:var(--error); }
+.om-modern select:focus-visible,
+.om-modern textarea:focus-visible,
+.om-modern input:not([type=checkbox]):not([type=radio]):focus-visible { outline:2px solid var(--om-accent); outline-offset:-2px; }
 .toggle { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:44px; font-size:14px; }
+.om-modern .toggle input[type=checkbox] { appearance:none; position:relative; flex:none; width:48px; height:28px; margin:0; border:2px solid var(--om-muted); border-radius:18px; background:transparent; color:var(--om-muted); cursor:pointer; }
+.om-modern .toggle input[type=checkbox]::before { content:''; position:absolute; left:3px; top:3px; width:18px; height:18px; border-radius:50%; background:currentColor; transition:transform .15s; }
+.om-modern .toggle input[type=checkbox]:checked { background:var(--om-accent); border-color:var(--om-accent); color:var(--om-on-accent); }
+.om-modern .toggle input[type=checkbox]:checked::before { transform:translateX(20px); }
+.om-modern .toggle input[type=checkbox]:disabled { opacity:.5; cursor:wait; }
 summary { cursor:pointer; min-height:44px; padding:10px 0; font-weight:650; }
 .om-advanced { margin-top:20px; border-top:1px solid var(--om-line); }
 .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
 #relay-fields>.om-button { width:100%; }
 #main { outline:none; }
+#relay-fields { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr); gap:14px; align-items:start; }
+#relay-fields .om-card { margin:0; }
+#relay-fields > .om-button { grid-column:1; }
+@media(max-width:760px) { #relay-fields { grid-template-columns:minmax(0,1fr); gap:10px; } #relay-fields > .om-button { grid-column:1; } }
 @media(max-width:390px) { .logging { grid-template-columns:1fr; } }

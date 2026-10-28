@@ -16,6 +16,7 @@
 
 use base64::Engine as _;
 use serde_json::Value;
+use std::time::Duration;
 use x509_cert::der::Decode as _;
 
 use super::{
@@ -27,7 +28,27 @@ use crate::config;
 /// Adapts [`RemoteRelay`] to the TA's [`kmr_ta::device::RemoteBackend`] trait.
 pub struct RemoteRelayBackend;
 
+fn b_task_latency_ms(result: &Value, response: &Value, elapsed: Duration) -> Option<u64> {
+    let source = result
+        .get("source")
+        .or_else(|| response.get("source"))
+        .and_then(Value::as_str);
+    if source == Some("server_keybox") {
+        return None;
+    }
+    result
+        .get("task_id")
+        .or_else(|| response.get("task_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(|_| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
 impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
+    fn attestation_verified(&self, app_id_der: &[u8], relay_latency_ms: Option<u64>) {
+        super::attestation_metrics::mark_verified(app_id_der, relay_latency_ms);
+    }
+
     fn attest(
         &self,
         challenge: &[u8],
@@ -65,12 +86,17 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         }
         let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial)
             .map_err(|e| remote_operation_error(e, "attest"))?;
-        let Some(resp) = resp else {
+        let Some((resp, elapsed)) = resp else {
             log::warn!("remote relay unavailable after transport retry");
             return Ok(None);
         };
+        // HTTP success alone does not prove the returned chain or saved key is valid.
+        super::attestation_metrics::mark_response_received();
         // The relay wraps the result as `{ result: { cert_chain: [...] } }`.
         let result = resp.get("result").unwrap_or(&resp);
+        // A physical B response carries the Server task ID. Server-keybox
+        // results lack it, and must never be labelled as B-device latency.
+        let relay_latency_ms = b_task_latency_ms(result, &resp, elapsed);
         reject_strongbox_demotion(result, params.security_level)?;
         if let Some(result_profile) = result.get("remote_profile") {
             let observed = parse_identity_profile(result_profile).map_err(|error| {
@@ -147,6 +173,7 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         }
         Ok(Some(kmr_ta::device::RemoteAttestation {
             cert_chain: chain,
+            relay_latency_ms,
             // The relay may only confirm the level that was requested; its
             // downgrade marker is rejected above.
             effective_security_level: None,
@@ -239,5 +266,22 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
             Ok(g) => g.remote.fallback_local,
             Err(_) => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_a_confirmed_b_task_produces_a_device_latency() {
+        let elapsed = Duration::from_millis(123);
+        let b = json!({"task_id":"task-1", "cert_chain":["x"]});
+        assert_eq!(b_task_latency_ms(&b, &b, elapsed), Some(123));
+        let keybox = json!({"source":"server_keybox", "task_id":"ignored"});
+        assert_eq!(b_task_latency_ms(&keybox, &keybox, elapsed), None);
+        let unknown = json!({"cert_chain":["x"]});
+        assert_eq!(b_task_latency_ms(&unknown, &unknown, elapsed), None);
     }
 }

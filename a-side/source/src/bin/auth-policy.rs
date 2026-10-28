@@ -14,10 +14,47 @@ struct WriteRequest {
     replacement: String,
 }
 
-fn write_request() -> Result<()> {
-    if !std::env::args().skip(1).eq(["write"]) {
-        return Err(anyhow!("usage: ommega-auth-policy write < request.json"));
+fn policy_destination(command: &str, replacement: &str) -> Result<(&'static str, u32)> {
+    match command {
+        "write" => {
+            let config: Config =
+                toml::from_str(replacement).context("parse auth-signing policy")?;
+            config.validate().map_err(|error| anyhow!(error))?;
+            Ok((PATH, 0o600))
+        }
+        "write-target" => Ok(("/data/misc/keystore/ommega/target.txt", 0o644)),
+        "write-system-apps" => Ok(("/data/misc/keystore/ommega/system_app", 0o644)),
+        "write-target-security" => {
+            let table: toml::Table =
+                toml::from_str(replacement).context("parse target security policy")?;
+            let valid_version = table.get("version").and_then(toml::Value::as_integer) == Some(1);
+            let valid_packages = table
+                .get("packages")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|packages| {
+                    packages.iter().all(|(package, mode)| {
+                        kmr_common::cpu_mask::valid_package(package)
+                            && mode.as_str().is_some_and(|value| {
+                                matches!(value, "global_default" | "strongbox" | "tee")
+                            })
+                    })
+                });
+            if table.len() != 2 || !valid_version || !valid_packages {
+                return Err(anyhow!("invalid target security policy"));
+            }
+            Ok(("/data/misc/keystore/ommega/target-security.toml", 0o644))
+        }
+        _ => Err(anyhow!("unknown policy operation")),
     }
+}
+
+fn write_request() -> Result<()> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let [command] = args.as_slice() else {
+        return Err(anyhow!(
+            "usage: ommega-auth-policy write|write-target|write-target-security|write-system-apps < request.json"
+        ));
+    };
     let mut contents = Vec::new();
     std::io::stdin()
         .take((3 * MAX_CONFIG) as u64)
@@ -35,20 +72,18 @@ fn write_request() -> Result<()> {
     {
         return Err(anyhow!("policy file too large"));
     }
-    let config: Config =
-        toml::from_str(&request.replacement).context("parse auth-signing policy")?;
-    config.validate().map_err(|error| anyhow!(error))?;
-    // The normal daemon creates the data directory with Keystore ownership.
-    // Never create a parallel store in a manager-accessible fallback path.
+    let (path, mode) = policy_destination(command, &request.replacement)?;
+    // Only the selected fixed destination is writable. The normal daemon
+    // prepares the parent directory with Keystore ownership.
     atomic_compare_replace_preserving_metadata(
-        Path::new(PATH),
+        Path::new(path),
         request.expected.as_deref().map(str::as_bytes),
         request.replacement.as_bytes(),
-        0o600,
+        mode,
         kmr_common::consts::KEYSTORE_UID,
         kmr_common::consts::KEYSTORE_GID,
     )
-    .context("save auth-signing policy")
+    .context("save policy")
 }
 
 fn main() {
@@ -57,4 +92,34 @@ fn main() {
         std::process::exit(1);
     }
     println!("saved");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_policy_destinations_are_fixed_and_security_toml_is_checked() {
+        assert_eq!(
+            policy_destination("write-target", "com.example.app\n").unwrap(),
+            ("/data/misc/keystore/ommega/target.txt", 0o644)
+        );
+        assert_eq!(
+            policy_destination("write-target-security", "version = 1\n[packages]\n").unwrap(),
+            ("/data/misc/keystore/ommega/target-security.toml", 0o644)
+        );
+        assert!(policy_destination("write-target-security", "[invalid").is_err());
+        assert!(policy_destination("write-target-security", "version = 2\n[packages]\n").is_err());
+        assert!(policy_destination(
+            "write-target-security",
+            "version = 1\n[packages]\n\"com.example.app\" = \"bad\"\n"
+        )
+        .is_err());
+        assert_eq!(
+            policy_destination("write-system-apps", "").unwrap().0,
+            "/data/misc/keystore/ommega/system_app"
+        );
+        assert!(policy_destination("/tmp/unrelated", "").is_err());
+        assert!(policy_destination("write", "[invalid").is_err());
+    }
 }

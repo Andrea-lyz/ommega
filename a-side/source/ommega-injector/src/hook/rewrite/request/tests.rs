@@ -156,6 +156,70 @@ fn tee_wins_for_conflicting_shared_uid_modes() {
 }
 
 #[test]
+fn global_mode_lookup_keeps_scope_decision_and_uses_explicit_app_mode() {
+    let mut config = policy_config("com.example.app", config::TargetSecurityMode::Tee);
+    config.filter.enabled = false;
+    config.target_packages.clear();
+    let mut decision = filter::FilterDecision {
+        allowed: true,
+        reason: filter::FilterReason::Disabled,
+        packages: Vec::new(),
+    };
+    let mut request = strongbox_request();
+    resolve_global_policy_packages(&mut decision, &config, &request, || {
+        PackageResolution::Known(vec!["com.example.app".to_string()])
+    });
+    assert!(decision.allowed);
+    assert_eq!(decision.reason, filter::FilterReason::Disabled);
+    assert!(apply_target_security_policy(&mut request, &decision, &config).is_none());
+    assert!(matches!(
+        request,
+        ParsedServiceRequest::GetSecurityLevel {
+            security_level: SecurityLevel::TRUSTED_ENVIRONMENT
+        }
+    ));
+
+    decision.packages.clear();
+    resolve_global_policy_packages(&mut decision, &config, &strongbox_request(), || {
+        PackageResolution::Unknown
+    });
+    assert!(decision.allowed);
+    assert!(decision.packages.is_empty());
+    assert_eq!(
+        config.target_security_mode_for(&decision.packages),
+        Some(config::TargetSecurityMode::GlobalDefault)
+    );
+}
+
+#[test]
+fn global_mode_lookup_does_not_expand_the_scope_or_probe_unrelated_calls() {
+    let mut config = policy_config("com.example.app", config::TargetSecurityMode::Tee);
+    config.filter.enabled = false;
+    let mut rejected = filter::FilterDecision {
+        allowed: false,
+        reason: filter::FilterReason::RejectedNonApplicationUid,
+        packages: Vec::new(),
+    };
+    resolve_global_policy_packages(&mut rejected, &config, &strongbox_request(), || {
+        panic!("rejected caller must not be resolved")
+    });
+    assert!(!rejected.allowed);
+
+    let mut allowed = filter::FilterDecision {
+        allowed: true,
+        reason: filter::FilterReason::Disabled,
+        packages: Vec::new(),
+    };
+    let request = ParsedServiceRequest::GetKeyEntry {
+        key: sample_key_descriptor(),
+    };
+    resolve_global_policy_packages(&mut allowed, &config, &request, || {
+        panic!("unrelated method must not be resolved")
+    });
+    assert!(allowed.packages.is_empty());
+}
+
+#[test]
 fn ommega_grant_blocker_preserves_inbound_binder_buffer() {
     let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
     tr.code = service_tx::r#grant;

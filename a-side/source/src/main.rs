@@ -21,6 +21,7 @@ use crate::{
 };
 
 pub mod att_mgr;
+pub mod attestation_counts;
 pub mod auth_signing;
 pub mod config;
 pub mod consts;

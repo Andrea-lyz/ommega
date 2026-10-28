@@ -153,6 +153,30 @@ test('status reports the configuration, the live values and the floor', t => {
   assert.match(box.state('spl-origin.conf'), /^SYSTEM_SPL=2025-12-01$/m);
 });
 
+test('WebUI read-only status reports floors without creating state or changing services', t => {
+  const box = sandbox(t);
+  const result = box.run('status', '--readonly');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^ORIGIN_SYSTEM_SPL=2025-12-01$/m);
+  assert.match(result.stdout, /^FLOOR_SYSTEM_SPL=2026-08-01$/m);
+  for (const name of ['spl-origin.conf','spl-baseline.conf','spl-applied.conf','spl.conf']) assert.equal(box.state(name),'');
+  assert.equal(box.calls(),'');
+  assert.equal(box.prop('ro.build.version.security_patch'),'2026-08-01');
+});
+
+test('WebUI read-only status retains saved origin bytes while showing newer firmware', t => {
+  const box = sandbox(t);
+  assert.equal(box.run('status').status,0);
+  const before = box.state('spl-origin.conf');
+  box.firmware({system:'2026-10-01'});
+  const result = box.run('status','--readonly');
+  assert.equal(result.status,0,result.stderr);
+  assert.match(result.stdout,/^ORIGIN_SYSTEM_SPL=2026-10-01$/m);
+  assert.match(result.stdout,/^FLOOR_SYSTEM_SPL=2026-10-01$/m);
+  assert.equal(box.state('spl-origin.conf'),before);
+  assert.equal(box.calls(),'');
+});
+
 test('saving an OS version rewrites the property and restarts the stack', t => {
   const box = sandbox(t);
   const result = box.run('save', '', '', '', '17');

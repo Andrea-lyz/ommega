@@ -122,6 +122,9 @@
 
     <!-- About -->
 
+
+    <string name="about_title">关于 Ommega</string>
+
     <string name="about_module_name_line1">Ommega</string>
 
     <string name="about_module_name_line2">远程认证中继</string>

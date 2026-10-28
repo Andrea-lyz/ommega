@@ -257,6 +257,8 @@ pub struct RemoteKeyMintProfile {
 pub struct RemoteAttestation {
     /// DER certificate chain, leaf first.
     pub cert_chain: Vec<Vec<u8>>,
+    /// A-to-B-to-A request time, only when the relay confirms a B task.
+    pub relay_latency_ms: Option<u64>,
     /// Security level the remote backend reports for this result.
     ///
     /// It must equal the requesting level: a physical KeyMint never downgrades
@@ -280,6 +282,10 @@ pub trait RemoteBackend: Send + Sync {
         cert_serial: Option<&[u8]>,
         params: &RemoteAttestParams,
     ) -> Result<Option<RemoteAttestation>, Error>;
+
+    /// Reports a fully validated remote chain to an optional local observer.
+    /// This never affects the attestation result.
+    fn attestation_verified(&self, _app_id_der: &[u8], _relay_latency_ms: Option<u64>) {}
 
     /// Forward a sign request for a remote key.  Returns the signature bytes,
     /// or `None` if the remote is unavailable.

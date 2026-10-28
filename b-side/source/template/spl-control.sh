@@ -214,7 +214,8 @@ refresh_origin() {
   [ "$settled" = "$ORIGIN_VENDOR_SPL" ] || { ORIGIN_VENDOR_SPL=$settled; changed=1; }
   settled=$(keep_newest "$ORIGIN_OS_VERSION" "$(prop_file_value ro.build.version.release)")
   [ "$settled" = "$ORIGIN_OS_VERSION" ] || { ORIGIN_OS_VERSION=$settled; changed=1; }
-  [ "$changed" -eq 0 ] || save_origin
+  # WebUI refresh only observes; saving/applying still persists the ratchet.
+  [ "$1" = "--readonly" ] || [ "$changed" -eq 0 ] || save_origin
   return 0
 }
 
@@ -470,10 +471,9 @@ save_config() {
 show_status() {
   load_config
   load_applied
-  # Record the device's own values here as well, so the WebUI can show the
-  # floor before the first save. Reading the recorded baseline directly keeps
-  # status from capturing a live baseline as a side effect.
-  refresh_origin
+  # Compute the floor from firmware plus saved origin. --readonly observes the
+  # same values without creating/updating any runtime files.
+  refresh_origin "$1"
   BASE_SYSTEM_SPL=$(read_key_file "$BASELINE_FILE" SYSTEM_SPL)
   BASE_OS_VERSION=$(read_key_file "$BASELINE_FILE" OS_VERSION)
   echo "SYSTEM_SPL=$SYSTEM_SPL"
@@ -500,6 +500,6 @@ show_status() {
 case "$1" in
   apply) apply_config ;;
   save) shift; save_config "$1" "$2" "$3" "$4" ;;
-  status) show_status ;;
-  *) echo "usage: $0 {apply|save <system> <boot> <vendor> <os_version>|status}" >&2; exit 2 ;;
+  status) show_status "$2" ;;
+  *) echo "usage: $0 {apply|save <system> <boot> <vendor> <os_version>|status [--readonly]}" >&2; exit 2 ;;
 esac

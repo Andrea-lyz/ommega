@@ -75,10 +75,12 @@ software TA switch is turned off.
    debug_logging: false
    ```
 
-3. Add the apps you want to intercept to `/data/misc/keystore/ommega/target.txt`, one
-   plain package name per line. The WebUI (`webroot/`) manages this and the
-   optional per-package `global_default` / `strongbox` / `tee` policy stored in
-   `/data/misc/keystore/ommega/target-security.toml`.
+3. Open the WebUI Apps page. It enumerates installed packages from the system
+   on startup and on each manual refresh, independent of the current
+   `target.txt` contents. Turn on an application's **Scope** switch to add its
+   package to `target.txt`; turn it off to remove only that entry. The WebUI
+   also manages the optional per-package `global_default` / `strongbox` / `tee`
+   policy stored in `/data/misc/keystore/ommega/target-security.toml`.
 
    The WebUI's **Global scope** switch takes effect without clearing the list.
    It is off by default. Turning it on sets `[filter].enabled = false` in
@@ -88,10 +90,12 @@ software TA switch is turned off.
    native core services (including system_server, Keystore, Gatekeeper and Vold),
    SDK sandboxes and isolated processes stay on System. A UID-1000 application
    is included only after its configured Binder SID and exact full process
-   name match; its saved scope and denylist are then bypassed. All included
-   callers use the global security-level policy.
-   Turning it off restores `[filter].enabled = true`, the saved lists and their
-   per-app policies. The WebUI disables list editing while global scope is on.
+   name match; its saved scope and denylist are then bypassed. Explicit
+   per-app StrongBox / TEE policies remain active for included callers;
+   otherwise the global security-level policy applies.
+   Turning global scope off restores `[filter].enabled = true` and the saved
+   lists. The WebUI disables individual scope editing while global scope is on,
+   while the per-app security and other policy settings remain available.
    Existing keys and descriptors are not migrated between System and Ommega.
 
    An explicit Ommega grant can delegate scope to a live isolated process. Its

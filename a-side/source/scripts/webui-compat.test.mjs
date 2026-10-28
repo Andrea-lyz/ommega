@@ -33,12 +33,15 @@ function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
     btoa,
     URL,
     setTimeout,
+    clearTimeout,
+    ksu: { getPackagesInfo: packages => JSON.stringify(JSON.parse(packages).map(pkg => ({packageName:pkg, appLabel:'App ' + pkg}))) },
     Mi: async () => undefined,
     _: async () => ({ stdout: "" }),
     se: { querySelectorAll: () => [] },
     Dl: new Set(),
     Qe: [],
     ommegaTargetModes: new Map(),
+    OMMEGA_TARGET_SECURITY: "/data/adb/ommega/ommegadata/target-security.toml",
     navigator: {language},
     localStorage: {getItem: () => preference},
     document: {
@@ -60,8 +63,365 @@ function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
   return context;
 }
 
+test("startup read timeout is bounded and a late original callback cannot change its result", async () => {
+  const ctx=loadGlue();let expire,finish;
+  ctx.setTimeout=fn=>{expire=fn;return 1;};ctx.clearTimeout=()=>{};
+  ctx._=()=>new Promise(resolve=>{finish=resolve;});
+  const pending=ctx.ommegaReadOnly('read fixture');
+  expire();const result=await pending;
+  assert.equal(result.errno,1);assert.equal(result.timedOut,true);
+  finish({errno:0,stdout:'late'});await Promise.resolve();
+  assert.equal(result.stdout,'');
+});
+
+test("health read failure never claims that no failures were recorded", async () => {
+  const ctx=loadGlue();const panel={textContent:''};
+  ctx.ommegaHealthPanel=()=>panel;
+  ctx._=async()=>({errno:1,stdout:'',stderr:'mock read timeout'});
+  await ctx.ommegaRefreshHealth();
+  assert.match(panel.textContent,/Could not read/);
+  assert.doesNotMatch(panel.textContent,/no failures recorded/);
+});
+
 test("the glue evaluates without the WebUI globals", () => {
   loadGlue();
+});
+
+test("certificate badges only use positive safe counts with explicit sharing metadata", () => {
+  const ctx = loadGlue();
+  assert.equal(ctx.ommegaCertificateCount(null), null);
+  assert.equal(ctx.ommegaCertificateCount({count:0,shared:false}), null);
+  assert.equal(ctx.ommegaCertificateCount({count:1}), null);
+  assert.equal(ctx.ommegaCertificateCount({count:Number.MAX_SAFE_INTEGER+1,shared:false}), null);
+  const count = ctx.ommegaCertificateCount({count:12,shared:true});
+  assert.equal(count.count,12);
+  assert.equal(count.shared,true);
+});
+
+test("certificate badges appear after the app name and identify shared UID counts", () => {
+  const ctx = loadGlue({language:'zh-CN'});
+  let badge = null, label = '';
+  const name = {textContent:'示例应用',querySelector:()=>badge,appendChild:value=>{badge=value;}};
+  const card = {dataset:{},querySelector:()=>name,getAttribute:()=> 'com.example.app',setAttribute:(_, value)=>{label=value;}};
+  ctx.document.createElement = () => ({textContent:'',title:'',remove(){badge=null;}});
+  ctx.fixtureCounts = {'com.example.app':{count:12,shared:true}};
+  vm.runInContext('ommegaCertificateCounts = fixtureCounts',ctx);
+  ctx.ommegaUpdateAppCount(card);
+  assert.match(badge.textContent,/证书 12 次.*共享 UID/);
+  assert.match(label,/共享 UID/);
+  ctx.fixtureCounts['com.example.app'] = {count:0,shared:false};
+  ctx.ommegaUpdateAppCount(card);
+  assert.equal(badge,null);
+});
+
+test("editing one app mode preserves other app policies and removes only its own override", () => {
+  const ctx = loadGlue();
+  const source = 'version = 1\r\n[packages]\r\n"com.example.wallet" = "tee" # saved\r\n"com.example.other" = "strongbox"\r\n';
+  const read = ctx.ommegaEditSecurityPolicy(source, "com.example.wallet", null);
+  assert.equal(read.modes.get("com.example.wallet"), "tee");
+  assert.equal(read.replacement, source);
+  const changed = ctx.ommegaEditSecurityPolicy(source, "com.example.wallet", "strongbox");
+  assert.equal(changed.modes.get("com.example.other"), "strongbox");
+  assert.match(changed.replacement, /"com.example.wallet" = "strongbox"/);
+  const reset = ctx.ommegaEditSecurityPolicy(changed.replacement, "com.example.wallet", "global_default");
+  assert.equal(reset.modes.has("com.example.wallet"), false);
+  assert.equal(reset.modes.get("com.example.other"), "strongbox");
+  assert.throws(() => ctx.ommegaEditSecurityPolicy('version = 1\n[packages]\n"a.b" = "future"\n', 'a.b', 'tee'), /Unsupported/);
+  assert.throws(() => ctx.ommegaEditSecurityPolicy(null, '../escape', 'tee'), /Invalid/);
+});
+
+test("scope and mode writes are fixed-path atomic compares and cannot touch each other", () => {
+  const ctx = loadGlue();
+  const before = 'com.example.wallet\n';
+  const command = ctx.ommegaAppFileWriteCommand('/data/adb/ommega/ommegadata/target.txt', before, 'com.example.other\n');
+  assert.match(command, /ommega-auth-policy/);
+  assert.match(command, /\bwrite-target$/);
+  const payload = JSON.parse(Buffer.from(command.match(/printf '%s' '([^']+)'/)[1], 'base64').toString('utf8'));
+  assert.deepEqual(payload, {expected:before, replacement:'com.example.other\n'});
+  assert.doesNotMatch(command, /write-target-security|injector\.toml/);
+  assert.throws(() => ctx.ommegaAppFileWriteCommand('/tmp/other', null, 'x'), /Invalid/);
+});
+
+test("per-app mode saves outside the scope list without dropping another override", async () => {
+  const ctx = loadGlue({language:'zh-CN'});
+  let contents = 'version = 1\n[packages]\n"com.example.other" = "strongbox"\n';
+  const status = {textContent:'',classList:{toggle() {}}};
+  ctx.document.getElementById = id => id === 'om-detail-mode-status' ? status : null;
+  ctx.document.querySelectorAll = () => [];
+  vm.runInContext('ommegaDetail = {pkg:"com.example.unselected",session:1}; ommegaGlobalScopeEnabled = true',ctx);
+  ctx._ = async command => {
+    if (command.includes('ommega_app_writer=')) {
+      const request = JSON.parse(Buffer.from(command.match(/printf '%s' '([^']+)'/)[1], 'base64').toString('utf8'));
+      assert.equal(request.expected, contents);
+      assert.match(command, /\bwrite-target(?:-security)?$/);
+      contents = request.replacement;
+      return {errno:0,stdout:'saved'};
+    }
+    return {errno:0,stdout:'F:' + Buffer.from(contents).toString('base64')};
+  };
+  await ctx.ommegaDetailSaveMode({checked:true,value:'tee'});
+  assert.match(contents, /"com.example.unselected" = "tee"/);
+  assert.match(contents, /"com.example.other" = "strongbox"/);
+  assert.match(status.textContent, /已保存/);
+});
+
+test("system-app visibility edits only system_app and never target.txt", async () => {
+  const ctx = loadGlue({language:'zh-CN'});
+  ctx.document.getElementById = () => null;
+  let target = 'com.example.other\n', system = null;
+  const writes = [];
+  ctx._ = async command => {
+    if (command.startsWith('pm list packages -s ')) return {errno:0,stdout:'package:com.example.system'};
+    if (command.includes('ommega_app_writer=')) {
+      const request = JSON.parse(Buffer.from(command.match(/printf '%s' '([^']+)'/)[1], 'base64').toString('utf8'));
+      const isTarget = command.endsWith(' write-target');
+      const current = isTarget ? target : system;
+      assert.equal(request.expected, current);
+      writes.push(isTarget ? 'target' : 'system');
+      if (isTarget) target = request.replacement; else system = request.replacement;
+      return {errno:0,stdout:'saved'};
+    }
+    const current = command.includes('/system_app') ? system : target;
+    return {errno:0,stdout:current === null ? 'M:' : 'F:' + Buffer.from(current).toString('base64')};
+  };
+  await assert.rejects(ctx.ommegaWriteSystemApp('com.example;rm', true), /Invalid/);
+  await ctx.ommegaWriteSystemApp('com.example.system', true);
+  assert.equal(target, 'com.example.other\n');
+  assert.equal(system, 'com.example.system\n');
+  assert.deepEqual(writes, ['system']);
+  await ctx.ommegaWriteSystemApp('com.example.system', false);
+  assert.equal(system, '');
+  assert.equal(target, 'com.example.other\n');
+  assert.deepEqual(writes, ['system','system']);
+});
+
+test("per-app scope editing preserves other entries and comments", () => {
+  const ctx = loadGlue();
+  const source = '# keep\r\ncom.example.first\r\ncom.example.second!\r\n';
+  const removed = ctx.ommegaEditAppScope(source, 'com.example.second', false);
+  assert.equal(removed.replacement, '# keep\r\ncom.example.first\r\n');
+  const added = ctx.ommegaEditAppScope(removed.replacement, 'com.example.third', true);
+  assert.equal(added.replacement, '# keep\r\ncom.example.first\r\ncom.example.third\r\n');
+  assert.equal(ctx.ommegaEditAppScope(added.replacement, 'com.example.third', true).changed, false);
+});
+
+test("per-app scope switch saves only its own entry and honors global scope", async () => {
+  const ctx = loadGlue({language:'zh-CN'});
+  let contents = 'com.example.other\ncom.example.removed\n';
+  const status = {textContent:'',classList:{toggle() {}}};
+  ctx.document.getElementById = id => id === 'om-detail-scope-status' ? status : null;
+  ctx.Jo = text => text.split(/\r?\n/).map(line=>line.trim().replace(/[!?]+$/,'')).filter(Boolean);
+  ctx.Di = () => {};
+  ctx.ommegaUpdateAppScope = () => {};
+  ctx._ = async command => {
+    if (command.includes('ommega_app_writer=')) {
+      const request = JSON.parse(Buffer.from(command.match(/printf '%s' '([^']+)'/)[1], 'base64').toString('utf8'));
+      assert.equal(request.expected, contents);
+      assert.match(command, /\bwrite-target(?:-security)?$/);
+      contents = request.replacement;
+      return {errno:0,stdout:'saved'};
+    }
+    if (command.startsWith('base64 < ')) return {errno:0,stdout:Buffer.from('[filter]\nenabled = true\n').toString('base64')};
+    return {errno:0,stdout:'F:' + Buffer.from(contents).toString('base64')};
+  };
+  ctx.targetFixture = contents;
+  ctx.cardFixture = {classList:{toggle() {}}};
+  ctx.boxFixture = {checked:false};
+  vm.runInContext('ommegaDetail = {pkg:"com.example.app",session:1,card:cardFixture,box:boxFixture}; ommegaTargetSnapshot = targetFixture; ommegaGlobalScopeKnown = true',ctx);
+  const input = {checked:true,disabled:false};
+  await ctx.ommegaDetailSaveScope(input);
+  assert.equal(contents, 'com.example.other\ncom.example.removed\ncom.example.app\n');
+  assert.equal(ctx.boxFixture.checked, true);
+  assert.match(status.textContent,/已保存/);
+});
+
+test("per-app scope switch cannot write when global scope is enabled", async () => {
+  const ctx = loadGlue({language:'zh-CN'});
+  const status = {textContent:'',classList:{toggle() {}}};
+  ctx.document.getElementById = id => id === 'om-detail-scope-status' ? status : null;
+  ctx.Jo = text => text.split(/\r?\n/).filter(Boolean);
+  ctx._ = async command => {
+    assert.doesNotMatch(command, /ommega_app_writer=/);
+    return command.startsWith('base64 < ')
+      ? {errno:0,stdout:Buffer.from('[filter]\nenabled = false\n').toString('base64')}
+      : {errno:0,stdout:'F:' + Buffer.from('com.example.app\n').toString('base64')};
+  };
+  vm.runInContext('ommegaDetail = {pkg:"com.example.app",session:1}; ommegaTargetSnapshot = "com.example.app\\n"; ommegaGlobalScopeKnown = true',ctx);
+  const input = {checked:false,disabled:false};
+  await ctx.ommegaDetailSaveScope(input);
+  assert.equal(input.checked,true);
+  assert.equal(input.disabled,true);
+  assert.match(status.textContent,/全局作用域已开启/);
+});
+
+test("detail loads explicit app modes without changing their stored values", async () => {
+  const ctx = loadGlue({language:'zh-CN'});
+  const modes = Object.fromEntries(['global_default','strongbox','tee'].map(value=>[value,{checked:false,disabled:true}]));
+  const auth = Object.fromEntries(['auto','compatibility','preserve'].map(value=>[value,{checked:false,disabled:true}]));
+  const status = () => ({textContent:'',classList:{toggle() {}}});
+  const elements = {'om-detail-mode-status':status(),'om-detail-auth-status':status(),'om-detail-cpu-status':status(),'om-detail-cpu':{},'om-detail-cpu-settings':{}};
+  ctx.document.getElementById = id => elements[id] || null;
+  ctx.document.querySelector = selector => {
+    const match=selector.match(/input\[name="([^"]+)"\]\[value="([^"]+)"\]/);
+    return match ? (match[1] === 'om-app-mode' ? modes[match[2]] : auth[match[2]]) : null;
+  };
+  ctx.document.querySelectorAll = selector => selector.includes('om-app-mode') ? Object.values(modes) : Object.values(auth);
+  ctx.ommegaReadAppFile = async () => 'version=1\n[packages]\n"com.example.app"="tee"\n';
+  ctx.ommegaAuthRead = async () => ({config:{version:1,default:'auto',apps:{'com.example.app':'preserve'}}});
+  ctx.ommegaCpuRead = async () => ({config:{enabled:true,packages:['com.example.app']}});
+  vm.runInContext('ommegaDetail = {pkg:"com.example.app",session:7}',ctx);
+  await ctx.ommegaDetailLoad(7);
+  assert.equal(modes.tee.checked,true);
+  assert.equal(auth.preserve.checked,true);
+  assert.equal(elements['om-detail-cpu'].checked,true);
+  assert.equal(modes.tee.disabled,false);
+});
+
+function detailRefreshFixture() {
+  const ctx = loadGlue();
+  const radios = values => {
+    const group = Object.fromEntries(values.map(value => [value, {value, disabled:false, _checked:false}]));
+    for (const input of Object.values(group)) Object.defineProperty(input, 'checked', {get() {return this._checked;}, set(value) {
+      if (value) Object.values(group).forEach(other => {other._checked=false;}); this._checked=value;
+    }});
+    return group;
+  };
+  const modes = radios(['global_default','strongbox','tee']), auth = radios(['auto','compatibility','preserve']);
+  modes.tee.checked = true; auth.auto.checked = true;
+  const status = () => ({textContent:'', error:false, classList:{toggle(name, value) {this.owner.error=value;}}});
+  const elements = Object.fromEntries(['mode','auth','cpu','scope'].map(group => [`om-detail-${group}-status`, status()]));
+  Object.values(elements).forEach(element => {element.classList.owner=element;});
+  elements['om-detail-cpu'] = {checked:true, disabled:false}; elements['om-detail-cpu-settings'] = {};
+  elements['om-detail-scope'] = {checked:true, disabled:false};
+  ctx.document.getElementById = id => elements[id] || null;
+  ctx.document.querySelector = selector => {
+    const match = selector.match(/input\[name="([^"]+)"\]\[value="([^"]+)"\]/);
+    return match ? (match[1] === 'om-app-mode' ? modes : auth)[match[2]] : null;
+  };
+  ctx.document.querySelectorAll = selector => selector.includes('om-app-mode') ? Object.values(modes)
+    : selector.includes('om-app-auth') ? Object.values(auth) : [];
+  const f = {ctx, modes, auth, elements, target:'com.example.app\n', security:'version=1\n[packages]\n"com.example.app"="tee"\n',
+    scope:'[filter]\nenabled=true\n', authConfig:{version:1, default:'auto', apps:{}},
+    cpuConfig:{enabled:true, packages:['com.example.app']}, writes:0, gate:null};
+  ctx.Jo = raw => raw.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+  ctx.Di = () => {};
+  ctx.ommegaReadAppFile = async path => path.endsWith('target-security.toml') ? f.security : f.target;
+  ctx.ommegaAuthRead = async () => ({contents:'auth-original', config:structuredClone(f.authConfig)});
+  ctx.ommegaCpuRead = async () => ({original:'cpu-original', config:structuredClone(f.cpuConfig)});
+  ctx.ommegaReadOnly = async () => ({errno:0, stdout:Buffer.from(f.scope).toString('base64')});
+  ctx.ommegaAuthCommit = async (_, config) => {f.writes++; f.authConfig=structuredClone(config); if(f.gate) await f.gate;};
+  ctx._ = async command => {
+    f.writes++;
+    const request = JSON.parse(Buffer.from(command.match(/printf '%s' '([^']+)'/)[1], 'base64').toString());
+    if (command.endsWith('write-target-security')) f.security = request.replacement;
+    else if (command.endsWith('write-target')) f.target = request.replacement;
+    else f.cpuConfig = {enabled:/^enabled=true$/m.test(request.replacement), packages:[...request.replacement.matchAll(/^package=(.+)$/gm)].map(match=>match[1])};
+    if (f.gate) await f.gate;
+    return {errno:0, stdout:'saved'};
+  };
+  ctx.detailBoxFixture = {checked:true}; ctx.detailCardFixture = {classList:{toggle() {}}}; ctx.detailTargetFixture = f.target;
+  ctx.Qe = ['com.example.app'];
+  vm.runInContext('ommegaDetail = {pkg:"com.example.app",session:7,box:detailBoxFixture,card:detailCardFixture}; ommegaTargetSnapshot = detailTargetFixture; ommegaAppsBaseline = ommegaAppSettingsSnapshot(Qe); ommegaGlobalScopeKnown = true', ctx);
+  return f;
+}
+
+for (const kind of ['mode','auth','cpu']) test(`detail ${kind} read failures return false and recover without false-success feedback`, async () => {
+  const f = detailRefreshFixture(), {ctx} = f;
+  const key = kind === 'mode' ? 'ommegaReadAppFile' : kind === 'auth' ? 'ommegaAuthRead' : 'ommegaCpuRead';
+  const original = ctx[key];
+  ctx[key] = async () => {throw new Error(kind + ' read denied');};
+  assert.equal(await ctx.ommegaDetailLoad(7), false);
+  assert.match(f.elements[`om-detail-${kind}-status`].textContent, /read denied/);
+  assert.equal(kind === 'cpu' ? f.elements['om-detail-cpu'].disabled : Object.values(f[kind === 'mode' ? 'modes' : 'auth']).every(input=>input.disabled), true);
+  ctx[key] = original;
+  assert.equal(await ctx.ommegaDetailLoad(7), true);
+  assert.equal(f.elements[`om-detail-${kind}-status`].error, false);
+});
+
+test('malformed detail policy is an incomplete refresh, not an enabled stale choice', async () => {
+  const f = detailRefreshFixture(); f.security = 'version=1\n[packages]\n"com.example.app"="unsupported"\n';
+  assert.equal(await f.ctx.ommegaDetailLoad(7), false);
+  assert.equal(f.modes.tee.disabled, true); assert.equal(f.elements['om-detail-mode-status'].error, true);
+});
+
+for (const kind of ['mode','scope','auth','cpu']) for (const completeBeforeRead of [false,true]) {
+  test(`detail refresh cannot overwrite ${kind} save ${completeBeforeRead ? 'completed' : 'still active'} during its await`, async () => {
+    const f = detailRefreshFixture(), {ctx} = f;
+    const original = ctx.ommegaCpuRead;
+    let releaseRead, first = true;
+    ctx.ommegaCpuRead = () => {
+      if (!first) return original();
+      first = false; const old = {original:'cpu-old',config:{enabled:true,packages:['com.example.app']}};
+      return new Promise(resolve => {releaseRead=()=>resolve(old);});
+    };
+    const read = ctx.ommegaDetailLoad(7);
+    let releaseSave; f.gate = new Promise(resolve => {releaseSave=resolve;});
+    let save, control;
+    if (kind === 'mode') {control=f.modes.strongbox; control.checked=true; save=ctx.ommegaDetailSaveMode(control);}
+    else if (kind === 'scope') {control=f.elements['om-detail-scope']; control.checked=false; save=ctx.ommegaDetailSaveScope(control);}
+    else if (kind === 'auth') {control=f.auth.compatibility; control.checked=true; save=ctx.ommegaDetailSaveAuth(control);}
+    else {control=f.elements['om-detail-cpu']; control.checked=false; save=ctx.ommegaDetailSaveCpu(control);}
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(vm.runInContext('ommegaDetail.pending',ctx), 1);
+    assert.equal(await ctx.ommegaDetailLoad(7), false, 'no new read starts over a pending mutation');
+    if (completeBeforeRead) {releaseSave(); await save;}
+    releaseRead(); assert.equal(await read, false);
+    if (!completeBeforeRead) {assert.equal(control.disabled, true, 'stale load must not re-enable a saving control'); releaseSave(); await save;}
+    assert.equal(vm.runInContext('ommegaDetail.pending',ctx), 0);
+    assert.equal(vm.runInContext('ommegaDetail.revision',ctx), 1);
+    assert.equal(control.checked, kind === 'mode' || kind === 'auth');
+    assert.equal(f.writes, 1, 'refresh must not write or retry the mutation');
+  });
+}
+
+test('a newer same-session detail read supersedes an older refresh', async () => {
+  const f = detailRefreshFixture(), {ctx} = f;
+  let release; const original = ctx.ommegaAuthRead;
+  ctx.ommegaAuthRead = () => new Promise(resolve => {release=resolve;});
+  const old = ctx.ommegaDetailLoad(7);
+  ctx.ommegaAuthRead = original; f.authConfig.apps['com.example.app']='preserve';
+  assert.equal(await ctx.ommegaDetailLoad(7), true);
+  release({config:{version:1,default:'auto',apps:{}}}); assert.equal(await old, false);
+  assert.equal(f.auth.preserve.checked, true);
+});
+
+test('explicit detail scope refresh reads saved/global state without rebasing list CAS', async () => {
+  const f = detailRefreshFixture(), {ctx} = f;
+  const baseline = vm.runInContext('ommegaAppsBaseline',ctx), snapshot = vm.runInContext('ommegaTargetSnapshot',ctx);
+  f.scope='[filter]\nenabled=false\n';
+  assert.equal(await ctx.ommegaDetailLoad(7,true), true);
+  assert.equal(vm.runInContext('ommegaGlobalScopeEnabled',ctx), true);
+  assert.equal(f.elements['om-detail-scope'].checked,true); assert.equal(f.elements['om-detail-scope'].disabled,true);
+  f.scope='[filter]\nenabled=true\n'; f.target='';
+  assert.equal(await ctx.ommegaDetailLoad(7,true), false);
+  assert.equal(f.elements['om-detail-scope'].checked,false); assert.equal(f.elements['om-detail-scope'].disabled,true);
+  assert.match(f.elements['om-detail-scope-status'].textContent,/list.*refresh/i);
+  assert.equal(vm.runInContext('ommegaAppsBaseline',ctx),baseline); assert.equal(vm.runInContext('ommegaTargetSnapshot',ctx),snapshot);
+  assert.deepEqual(ctx.Qe,['com.example.app']); assert.equal(f.writes,0);
+});
+
+test('detail scope read failure returns false without changing its list baseline', async () => {
+  const f=detailRefreshFixture(), {ctx}=f;
+  ctx.ommegaReadOnly=async()=>({errno:1,stderr:'global scope read denied'});
+  assert.equal(await ctx.ommegaDetailLoad(7,true),false);
+  assert.match(f.elements['om-detail-scope-status'].textContent,/read denied/); assert.equal(f.elements['om-detail-scope'].disabled,true);
+  assert.deepEqual(ctx.Qe,['com.example.app']); assert.equal(f.writes,0);
+});
+
+test("CPU app toggle does not activate previously saved unrelated apps", async () => {
+  const ctx = loadGlue({language:'zh-CN'});
+  const status = {textContent:'',classList:{toggle() {}}};
+  ctx.document.getElementById = id => id === 'om-detail-cpu-status' ? status : null;
+  const profile = {properties:Object.fromEntries(['ro.product.brand','ro.product.device','ro.product.name','ro.product.manufacturer','ro.product.model','ro.soc.model'].map(k=>[k,'x']))};
+  ctx.ommegaCpuRead = async () => ({original:'old',config:{enabled:false,packages:['com.example.other']},profile,engine:'exp6',standalone_active:false});
+  let wrote = false;
+  ctx._ = async () => {wrote=true; return {errno:0};};
+  vm.runInContext('ommegaDetail = {pkg:"com.example.app",session:1}',ctx);
+  const box = {checked:true,disabled:false};
+  await ctx.ommegaDetailSaveCpu(box);
+  assert.equal(wrote,false);
+  assert.equal(box.checked,false);
+  assert.match(status.textContent,/已有其他保存的应用/);
 });
 
 function capabilityFixture(ctx, config = {strongbox:false, device_id_attestation:false}) {
@@ -283,18 +643,55 @@ test("language changes warn only for real unsaved app selections and modes", asy
   assert.equal(ctx.ommegaAppsHaveChanges(), true, "retained scope selections count");
 });
 
-test("compatibility drafts remain dirty until the successfully saved settings reload", async () => {
+test("global compatibility saves independently of unsaved app selections", async () => {
   const ctx = loadGlue();
   ctx.Qe = ["com.example.wallet"];
   await ctx.Mi();
-  vm.runInContext('ommegaCompatEnabled = true', ctx);
-  assert.equal(ctx.ommegaAppsHaveChanges(), true);
-  ctx._ = async () => ({errno:1, stdout:"", stderr:"write failed"});
-  await ctx.ommegaWriteTargetCompat();
-  assert.equal(ctx.ommegaAppsHaveChanges(), true, "failed writes do not clear the baseline");
-  ctx._ = async () => ({errno:0, stdout:"[positive_key_id]\nenabled=true\n"});
-  await ctx.Mi();
-  assert.equal(ctx.ommegaAppsHaveChanges(), false);
+  ctx.Dl.add("com.example.unsaved");
+  const box = {checked:true, disabled:false}, status = {};
+  ctx.document.getElementById = id => id === "ommega-global-compat" ? box : id === "ommega-global-compat-status" ? status : null;
+  let current = null;
+  ctx._ = async command => {
+    if (command.includes("ommega_compat_current=")) { current = "[positive_key_id]\nenabled=true\n"; return {errno:0, stdout:"saved"}; }
+    return {errno:0, stdout:current === null ? "M:" : "F:" + Buffer.from(current).toString("base64")};
+  };
+  await ctx.ommegaGlobalCompatChange();
+  assert.equal(box.checked, true);
+  assert.equal(box.disabled, false);
+  assert.match(status.textContent, /Saved/);
+  assert.equal(ctx.ommegaAppsHaveChanges(), true, "saving compatibility must not discard scope drafts");
+});
+
+test("global compatibility reports write failure and restores the actual state", async () => {
+  const ctx = loadGlue();
+  const box = {checked:true, disabled:false}, status = {};
+  ctx.document.getElementById = id => id === "ommega-global-compat" ? box : id === "ommega-global-compat-status" ? status : null;
+  ctx._ = async command => command.includes("ommega_compat_current=")
+    ? {errno:1, stderr:"write failed"}
+    : {errno:0, stdout:"F:" + Buffer.from("[positive_key_id]\nenabled=false\n").toString("base64")};
+  await ctx.ommegaGlobalCompatChange();
+  assert.equal(box.checked, false);
+  assert.equal(box.disabled, false);
+  assert.match(status.textContent, /Save failed/);
+});
+
+test("compatibility updates preserve other settings and compare the original bytes", () => {
+  const ctx = loadGlue();
+  const original = 'version = 1\r\n[positive_key_id]\r\npackages = ["com.old.app"]\r\n[other]\r\nvalue = "keep"\r\n';
+  const updated = ctx.ommegaTargetCompatUpdate(original, false);
+  assert.match(updated, /enabled = false\r\n/);
+  assert.match(updated, /packages = \[\]\r\n/);
+  assert.match(updated, /\[other\]\r\nvalue = "keep"/);
+  assert.equal(ctx.ommegaParseTargetCompat(updated), false);
+  const command = ctx.ommegaCompatWriteCommand(original, false);
+  assert.ok(command.includes("F:" + Buffer.from(original).toString("base64")));
+  assert.match(command, /Config changed; retry/);
+  assert.throws(() => ctx.ommegaTargetCompatUpdate('[positive_key_id]\npackages = [\n"a.b"\n]\n', false), /Unsupported/);
+  const quoted = '["positive_key_id"]\r\n"enabled" = true # keep\r\n\'packages\' = ["com.old.app"] # keep\r\n';
+  const disabled = ctx.ommegaTargetCompatUpdate(quoted, false);
+  assert.equal(disabled, '["positive_key_id"]\r\n"enabled" = false # keep\r\n\'packages\' = [] # keep\r\n');
+  assert.equal(ctx.ommegaParseTargetCompat(disabled), false);
+  assert.equal(ctx.ommegaParseTargetCompat(quoted), true);
 });
 
 test("auth policy round-trips default and app exceptions and rejects ambiguous configs", () => {
@@ -393,7 +790,7 @@ test("global scope leaves auth exceptions enabled and failed writes never report
   };
   ctx.document.getElementById = id => elements[id] || null;
   vm.runInContext('ommegaAuthConfig = ommegaAuthParse(null); ommegaGlobalScopeKnown = true; ommegaGlobalScopeEnabled = true; ommegaScopeSync(); ommegaAuthSync()', ctx);
-  assert.equal(elements["apps-list"].inert, true);
+  assert.equal(elements["apps-list"].inert, false);
   assert.equal(authButton.disabled, false);
   ctx._ = async () => ({errno: 75, stderr: 'Config changed; reload before saving'});
   await ctx.ommegaAuthSaveDefault();
@@ -470,21 +867,27 @@ test("scope writes are atomic, detect stale input and never rewrite the target l
   assert.equal(Buffer.from(encoded, "base64").toString("utf8"), ctx.ommegaScopeConfig(original, true));
 });
 
-test("global scope disables list editing and restores it after switching off", () => {
+test("global scope keeps app details available but disables bulk scope selection", () => {
   const ctx = loadGlue({language: "zh-CN"});
   const elements = {
     "ommega-global-scope-enabled": {},
     "ommega-global-scope-status": {},
     "apps-list": {style: {}, setAttribute() {}},
     "save": {},
+    "select-all": {}, "deselect-all": {}, "deselect-unnecessary": {}, "add-system-app": {},
   };
   ctx.document.getElementById = id => elements[id] || null;
   vm.runInContext("ommegaGlobalScopeKnown = true; ommegaGlobalScopeEnabled = true; ommegaScopeSync()", ctx);
-  assert.equal(elements["apps-list"].inert, true);
-  assert.equal(elements.save.disabled, true);
+  assert.equal(elements["apps-list"].inert, false);
+  assert.equal(elements["select-all"].disabled, true);
+  assert.equal(elements["deselect-all"].disabled, true);
+  assert.equal(elements["deselect-unnecessary"].disabled, false);
+  assert.equal(elements["add-system-app"].disabled, false);
+  assert.equal(elements.save.disabled, false);
   assert.match(elements["ommega-global-scope-status"].textContent, /用户应用和普通系统应用.*排除核心系统服务/);
   vm.runInContext("ommegaGlobalScopeEnabled = false; ommegaScopeSync()", ctx);
   assert.equal(elements["apps-list"].inert, false);
+  assert.equal(elements["select-all"].disabled, false);
   assert.equal(elements.save.disabled, false);
 });
 
@@ -556,7 +959,7 @@ test("scope toggles preserve real LF/CRLF files through the line-based Android e
       elements["ommega-global-scope-enabled"].checked = true;
       await ctx.ommegaApplyGlobalScope();
       assert.equal(elements["ommega-global-scope-enabled"].checked, true);
-      assert.equal(elements["apps-list"].inert, true);
+      assert.equal(elements["apps-list"].inert, false);
       assert.doesNotMatch(elements["ommega-global-scope-status"].textContent, /Could not/);
       assert.equal(await ctx.ommegaScopeRead(), ctx.ommegaScopeConfig(original, true));
 
@@ -839,6 +1242,80 @@ test("the switch state is reported honestly", () => {
 
   const unreadable = context.ommegaSotertaReport(false, false, null);
   assert.match(unreadable, /Could not read the switch state/);
+});
+
+test("A app refresh uses installed packages, keeps uninstalled target entries and never writes", async () => {
+  const ctx=loadGlue();
+  let rendered, boxes=[], counts=0;
+  const makeBox=(pkg,checked)=>({checked,closest:()=>({getAttribute:()=>pkg})});
+  ctx.se.querySelectorAll=()=>boxes;
+  ctx.document.getElementById=()=>null;
+  ctx.document.querySelectorAll=()=>[];
+  ctx.window={scrollY:70,scrollTo:(x,y)=>assert.equal(y,70)};
+  ctx.requestAnimationFrame=fn=>fn();
+  ctx.Event=class {};
+  ctx.le={value:'wallet',dispatchEvent:()=>{}};
+  ctx.$s=apps=>{rendered=apps;boxes=apps.map(app=>makeBox(app.packageName,ctx.Qe.includes(app.packageName)));};
+  ctx.ommegaRefreshCertificateCounts=async()=>{counts++;};
+  const target='com.example.wallet\ncom.example.removed\n';
+  const commands=[];
+  ctx._=async command=>{
+    commands.push(command);
+    if(command.startsWith('pm list packages'))return {errno:0,stdout:'package:com.example.wallet\npackage:com.example.unscoped\n'};
+    if(command.includes('injector.toml'))return {errno:0,stdout:Buffer.from('[filter]\nenabled = true\n').toString('base64')};
+    if(command.includes('target-security.toml'))return {errno:0,stdout:'M:'};
+    if(command.includes('system_app'))return {errno:0,stdout:'M:'};
+    if(command.includes('target.txt'))return {errno:0,stdout:'F:'+Buffer.from(target).toString('base64')};
+    return {errno:0,stdout:'M:'};
+  };
+  assert.equal(await ctx.ommegaRefreshApps(),'');
+  assert.ok(rendered.some(app=>app.packageName==='com.example.wallet'));
+  assert.ok(rendered.some(app=>app.packageName==='com.example.unscoped'),'apps outside target.txt must still be listed');
+  assert.ok(!rendered.some(app=>app.packageName==='com.example.removed'),'uninstalled packages must not be listed');
+  assert.deepEqual([...ctx.Qe],['com.example.wallet','com.example.removed']);
+  assert.equal(ctx.le.value,'wallet');
+  assert.equal(vm.runInContext('ommegaTargetSnapshot',ctx),target);
+  assert.equal(vm.runInContext('ommegaAppsHaveChanges()',ctx),false);
+  assert.equal(counts,1);
+  assert.ok(commands.includes('pm list packages -3'));
+  assert.ok(commands.every(command=>! /write-target|ommega_app_writer| save|mv |touch |rm /.test(command)));
+});
+
+test("app names recover from a failed label batch instead of showing package ids", async () => {
+  const ctx=loadGlue();
+  const calls=[];
+  ctx.ksu={getPackagesInfo:raw=>{
+    const list=JSON.parse(raw);calls.push(list.length);
+    if(list.length>1)throw new Error('batch rejected');
+    return JSON.stringify(list.map(pkg=>({packageName:pkg,appLabel:pkg==='id.my.pjm.qbcd_okr_dvii'?'xka wl rl':'App '+pkg})));
+  }};
+  const result=await ctx.ommegaAppNames(['id.my.pjm.qbcd_okr_dvii','com.example.other'],{});
+  assert.equal(result.find(app=>app.packageName==='id.my.pjm.qbcd_okr_dvii').appName,'xka wl rl');
+  assert.equal(result.find(app=>app.packageName==='com.example.other').appName,'App com.example.other');
+  assert.ok(calls.includes(1),'failed batches are retried one package at a time');
+});
+
+test("settings refresh disables compatibility while reading and rejects a superseded snapshot", async () => {
+  const ctx=loadGlue();
+  const box={disabled:false,checked:false};
+  ctx.document.getElementById=id=>id==='ommega-global-compat'?box:null;
+  let release;
+  ctx.ommegaReadTargetCompat=()=>new Promise(resolve=>{release=resolve;});
+  const pending=ctx.ommegaRefreshActiveView('settings');
+  assert.equal(box.disabled,true);
+  vm.runInContext('++ommegaCompatRevision',ctx);
+  release({enabled:true});
+  await assert.rejects(pending,/Settings changed/);
+  assert.equal(box.checked,false);assert.equal(box.disabled,false);
+});
+
+test("A app refresh read failures leave the existing list and release the button", async () => {
+  const ctx=loadGlue();
+  const attrs={};const button={disabled:false,setAttribute:(key,value)=>{attrs[key]=value;}};
+  ctx.document.getElementById=id=>id==='refresh'?button:null;
+  ctx._=async()=>({errno:1,stdout:'',stderr:'mock read failed'});
+  await assert.rejects(ctx.ommegaRefreshApps(),/mock read failed/);
+  assert.equal(button.disabled,false);assert.equal(attrs['aria-busy'],'false');
 });
 
 test("Soter relay settings are separate from the Integrity config", async () => {
