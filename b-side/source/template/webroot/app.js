@@ -266,8 +266,8 @@ function updateSummary() {
   catch { setText('summary-server','—'); }
 }
 
-// The public status endpoint is the only server-side signal this WebUI can
-// trust: a running local relay does not prove that the server has seen it.
+// The public status endpoint is the server's own view. Devices without a
+// usable HTTPS client fall back to the relay's last poll below.
 let serverCheckedAt = 0, serverCheckedTarget = '';
 let serverResult = {ok:false, error:t('无法读取 Server 状态；本机进程状态不代表已连接。')};
 function serverOnlineState(raw, deviceId) {
@@ -366,8 +366,29 @@ async function refreshServerStatus(force = false, configReadable = true) {
     if (!['http:', 'https:'].includes(base.protocol) || !base.hostname || base.username || base.password || base.search || base.hash) {
       throw new Error('服务器地址无效，请重新读取或修改连接配置。');
     }
-    // Prefer the relay's own last poll: it proves the server accepted the
-    // connection without depending on a WebView-side HTTPS client.
+    const statusUrl = base.href.replace(/\/+$/, '') + '/api/status/';
+    const bytes = new TextEncoder().encode(statusUrl);
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    const encoded = btoa(binary);
+    // Prefer curl: its response is the server's own online list. Stock Android
+    // has no curl, so those devices use the relay's last poll below.
+    const curlCheck = await exec('command -v curl 2>/dev/null', {read:true});
+    const hasCurl = curlCheck.errno === 0 && curlCheck.stdout.trim() !== '';
+    if (hasCurl) {
+      const curlResult = await exec(`ommega_status_url=$(printf '%s' '${encoded}' | base64 -d)
+curl --silent --show-error --fail --insecure --connect-timeout 3 --max-time 6 -- "$ommega_status_url"`, {read:true});
+      if (curlResult.errno === 0) {
+        const state = curlResult.stdout.length <= 262144 ? serverOnlineState(curlResult.stdout, deviceId) : 'unknown';
+        if (state !== 'unknown') {
+          renderServerStatus(state);
+          serverResult = {ok:true};
+          return serverResult;
+        }
+      }
+    }
+    // No curl, or curl did not return a usable response: read the relay's own
+    // last poll. This works on stock Android without an HTTPS client.
     const relayRead = await exec(`log=/data/adb/ommega/logs/relay.log
 if [ -r "$log" ]; then
   tail -n 500 "$log" 2>/dev/null | grep -aE 'b/poll status=[0-9]+' | tail -n 1
@@ -378,24 +399,9 @@ fi`, {read:true});
       serverResult = {ok:true};
       return serverResult;
     }
-    const statusUrl = base.href.replace(/\/+$/, '') + '/api/status/';
-    const bytes = new TextEncoder().encode(statusUrl);
-    let binary = '';
-    for (const byte of bytes) binary += String.fromCharCode(byte);
-    const encoded = btoa(binary);
-    const result = await exec(`ommega_status_url=$(printf '%s' '${encoded}' | base64 -d)
-if command -v curl >/dev/null 2>&1; then
-  curl --silent --show-error --fail --insecure --connect-timeout 3 --max-time 6 -- "$ommega_status_url" | head -c 262145
-elif command -v busybox >/dev/null 2>&1; then
-  busybox wget -q --no-check-certificate -O - -T 6 "$ommega_status_url" | head -c 262145
-else
-  exit 1
-fi`, {read:true});
-    if (result.errno !== 0) throw new Error(result.stderr || '无法读取 Server 状态；本机进程状态不代表已连接。');
-    const state = result.stdout.length <= 262144 ? serverOnlineState(result.stdout, deviceId) : 'unknown';
-    if (state === 'unknown') throw new Error('服务器响应无效，请刷新重试。');
-    renderServerStatus(state);
-    serverResult = {ok:true};
+    throw new Error(hasCurl
+      ? '服务器响应无效，relay 日志也不可用。'
+      : '本机没有 curl，relay 日志也不可用。');
   } catch (error) {
     renderServerStatus('unknown');
     setText('server-note', t(error.message));
