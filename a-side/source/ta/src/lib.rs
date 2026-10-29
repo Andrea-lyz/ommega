@@ -1424,6 +1424,17 @@ impl KeyMintTa {
         self.dev.keys.root_kek(context)
     }
 
+    /// Resolve the version source without changing boot/RoT or key encryption state.
+    fn remote_version_tags(
+        &self,
+        security_level: SecurityLevel,
+    ) -> Result<Option<device::KeyMintVersionTags>, Error> {
+        match self.dev.remote.as_ref().filter(|remote| remote.enabled()) {
+            Some(remote) => remote.version_tags(security_level),
+            None => Ok(None),
+        }
+    }
+
     /// Add KeyMint-generated tags to the provided [`KeyCharacteristics`].
     fn add_keymint_tags(
         &self,
@@ -1431,9 +1442,25 @@ impl KeyMintTa {
         origin: KeyOrigin,
         security_level: SecurityLevel,
     ) -> Result<(), Error> {
+        let remote_versions = self.remote_version_tags(security_level)?;
         for kc in chars {
             if kc.security_level == security_level {
                 kc.authorizations.try_push(KeyParam::Origin(origin))?;
+                if let Some(versions) = remote_versions {
+                    kc.authorizations.try_extend_from_slice(&[
+                        KeyParam::OsVersion(versions.os_version),
+                        KeyParam::OsPatchlevel(versions.os_patchlevel),
+                    ])?;
+                    if let Some(value) = versions.vendor_patchlevel {
+                        kc.authorizations
+                            .try_push(KeyParam::VendorPatchlevel(value))?;
+                    }
+                    if let Some(value) = versions.boot_patchlevel {
+                        kc.authorizations
+                            .try_push(KeyParam::BootPatchlevel(value))?;
+                    }
+                    return Ok(());
+                }
                 if let Some(hal_info) = &self.hal_info {
                     kc.authorizations.try_extend_from_slice(&[
                         KeyParam::OsVersion(hal_info.os_version),

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{HardwareInfo, KeyMintHalVersion, KeyMintTa, RpcInfo, RpcInfoV3};
-use kmr_wire::keymint::{Algorithm, DateTime};
+use kmr_wire::keymint::{Algorithm, DateTime, PaddingMode};
 
 // In-process software fixture only: no Binder, HTTP, device files or real TEE.
 struct TestKeys;
@@ -22,6 +22,7 @@ impl crypto::MonotonicClock for TestClock {
 
 #[derive(Default)]
 struct TestRemote {
+    version_tags: Option<device::KeyMintVersionTags>,
     cert_chain: Option<Vec<Vec<u8>>>,
     expected_purpose: Option<KeyPurpose>,
     expected_issuer: Option<String>,
@@ -31,6 +32,14 @@ struct TestRemote {
     verified_calls: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl device::RemoteBackend for TestRemote {
+    fn version_tags(
+        &self,
+        level: SecurityLevel,
+    ) -> Result<Option<device::KeyMintVersionTags>, Error> {
+        assert_eq!(level, SecurityLevel::TrustedEnvironment);
+        Ok(self.version_tags)
+    }
+
     fn attestation_verified(&self, _: &[u8], _: Option<u64>) {
         if let Some(calls) = &self.verified_calls {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -305,6 +314,148 @@ fn remote_rot() -> crypto::RemoteRootOfTrust {
 }
 
 #[test]
+fn unchallenged_ec_and_rsa_use_profile_before_first_remote_generation() {
+    let versions = device::KeyMintVersionTags {
+        os_version: 170000,
+        os_patchlevel: 202609,
+        vendor_patchlevel: Some(20260901),
+        boot_patchlevel: Some(20251201),
+    };
+    let mut ta = test_ta();
+    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        version_tags: Some(versions),
+        // Any attempt to acquire remote key material in this test panics.
+        ..TestRemote::default()
+    }));
+    for rsa in [false, true] {
+        let mut params = key_params(KeyPurpose::Sign);
+        if rsa {
+            params.retain(|p| !matches!(p, KeyParam::Algorithm(_) | KeyParam::EcCurve(_)));
+            params.extend([
+                KeyParam::Algorithm(Algorithm::Rsa),
+                KeyParam::KeySize(kmr_wire::KeySizeInBits(2048)),
+                KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(65537)),
+                KeyParam::Padding(PaddingMode::RsaPss),
+            ]);
+        }
+        let key = ta.generate_key_default(&params, None).unwrap();
+        let (stored, _) = ta.keyblob_parse_decrypt(&key.key_blob, &[]).unwrap();
+        assert!(!matches!(stored.key_material, KeyMaterial::Remote(_)));
+        let auths = stored
+            .characteristics_at(SecurityLevel::TrustedEnvironment)
+            .unwrap();
+        for tag in [
+            KeyParam::OsVersion(170000),
+            KeyParam::OsPatchlevel(202609),
+            KeyParam::VendorPatchlevel(20260901),
+            KeyParam::BootPatchlevel(20251201),
+        ] {
+            assert!(auths.contains(&tag), "missing {tag:?}, rsa={rsa}");
+        }
+        assert_eq!(
+            ta.get_key_characteristics(&key.key_blob, vec![], vec![])
+                .unwrap(),
+            stored.characteristics
+        );
+        // An explicit upgrade must not switch the metadata back to A's dates.
+        assert!(ta.upgrade_key(&key.key_blob, vec![]).unwrap().is_empty());
+    }
+    // The profile changes only new key authorizations, never boot/RoT state.
+    assert_eq!(ta.boot_info.as_ref().unwrap().boot_patchlevel, 20260801);
+    assert_eq!(ta.hal_info.as_ref().unwrap().os_version, 160000);
+}
+
+#[test]
+fn absent_remote_partition_tags_are_not_filled_from_local_boot_info() {
+    let mut ta = test_ta();
+    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        version_tags: Some(device::KeyMintVersionTags {
+            os_version: 170000,
+            os_patchlevel: 202609,
+            vendor_patchlevel: None,
+            boot_patchlevel: None,
+        }),
+        ..TestRemote::default()
+    }));
+    let key = ta
+        .generate_key_default(&key_params(KeyPurpose::Sign), None)
+        .unwrap();
+    let (stored, _) = ta.keyblob_parse_decrypt(&key.key_blob, &[]).unwrap();
+    let auths = stored
+        .characteristics_at(SecurityLevel::TrustedEnvironment)
+        .unwrap();
+    assert!(!auths.iter().any(|tag| matches!(
+        tag,
+        KeyParam::BootPatchlevel(_) | KeyParam::VendorPatchlevel(_)
+    )));
+}
+
+#[test]
+fn legacy_remote_and_disabled_remote_keep_configured_version_tags() {
+    for disabled in [false, true] {
+        let mut ta = test_ta();
+        if disabled {
+            ta.dev.remote = None;
+        }
+        let key = ta
+            .generate_key_default(&key_params(KeyPurpose::Sign), None)
+            .unwrap();
+        let (stored, _) = ta.keyblob_parse_decrypt(&key.key_blob, &[]).unwrap();
+        assert!(stored
+            .characteristics_at(SecurityLevel::TrustedEnvironment)
+            .unwrap()
+            .contains(&KeyParam::BootPatchlevel(20260801)));
+    }
+}
+
+#[test]
+fn import_and_existing_blob_upgrade_share_profile_without_changing_key_material() {
+    let mut ta = test_ta();
+    let params = vec![
+        KeyParam::Algorithm(Algorithm::Aes),
+        KeyParam::KeySize(kmr_wire::KeySizeInBits(256)),
+        KeyParam::Purpose(KeyPurpose::Encrypt),
+        KeyParam::NoAuthRequired,
+    ];
+    let old = ta
+        .import_key(
+            &params,
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let (before, _) = ta.keyblob_parse_decrypt(&old.key_blob, &[]).unwrap();
+    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        version_tags: Some(device::KeyMintVersionTags {
+            os_version: 170000,
+            os_patchlevel: 202609,
+            vendor_patchlevel: None,
+            boot_patchlevel: None,
+        }),
+        ..TestRemote::default()
+    }));
+    let imported = ta
+        .import_key(
+            &params,
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let upgraded = ta.upgrade_key(&old.key_blob, vec![]).unwrap();
+    assert!(!upgraded.is_empty());
+    let (after, _) = ta.keyblob_parse_decrypt(&upgraded, &[]).unwrap();
+    let (new, _) = ta.keyblob_parse_decrypt(&imported.key_blob, &[]).unwrap();
+    assert_eq!(before.key_material, after.key_material);
+    assert_eq!(new.characteristics, after.characteristics);
+    assert!(ta.upgrade_key(&upgraded, vec![]).unwrap().is_empty());
+    assert_eq!(ta.boot_info.as_ref().unwrap().boot_patchlevel, 20260801);
+}
+
+#[test]
 fn unchallenged_auth_bound_generation_stays_local() {
     let mut ta = test_ta();
     let mut params = key_params(KeyPurpose::Sign);
@@ -505,6 +656,46 @@ fn remote_attestation_observer_runs_only_after_chain_validation() {
     }));
     assert!(fixture.generate().is_err());
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn remote_certificate_must_match_profile_and_is_returned_byte_exact() {
+    let mut fixture = DelegationFixture::new();
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        version_tags: Some(device::KeyMintVersionTags {
+            os_version: 160000,
+            os_patchlevel: 202608,
+            vendor_patchlevel: Some(20260801),
+            boot_patchlevel: Some(20260801),
+        }),
+        cert_chain: Some(fixture.chain.clone()),
+        expected_issuer: Some(fixture.issuer_alias.clone()),
+        ..TestRemote::default()
+    }));
+    fixture
+        .ta
+        .update_patchlevels(202609, 20260901, 20260901)
+        .unwrap();
+    let result = fixture.generate().unwrap();
+    assert_eq!(
+        result.certificate_chain[0].encoded_certificate,
+        fixture.chain[0]
+    );
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        version_tags: Some(device::KeyMintVersionTags {
+            os_version: 160000,
+            os_patchlevel: 202608,
+            vendor_patchlevel: Some(20260801),
+            boot_patchlevel: Some(20260901),
+        }),
+        cert_chain: Some(fixture.chain.clone()),
+        expected_issuer: Some(fixture.issuer_alias.clone()),
+        ..TestRemote::default()
+    }));
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
 }
 
 #[test]

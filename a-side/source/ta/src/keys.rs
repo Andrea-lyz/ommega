@@ -750,6 +750,18 @@ impl crate::KeyMintTa {
                     rot.keymaster_version
                 ));
             }
+            if let Some(versions) = self.remote_version_tags(effective_security_level)? {
+                if rot.os_version != Some(versions.os_version)
+                    || rot.os_patchlevel != Some(versions.os_patchlevel)
+                    || rot.vendor_patchlevel != versions.vendor_patchlevel
+                    || rot.boot_patchlevel != versions.boot_patchlevel
+                {
+                    return Err(km_err!(
+                        VerificationFailed,
+                        "remote certificate version tags differ from the current HAL profile"
+                    ));
+                }
+            }
             overlay_remote_version_tags(&mut chars, rot, effective_security_level);
             log::info!(
                 "event=remote_attest_identity interface={} hash={} profile={} hardware={} level={:?} strongbox={}",
@@ -1343,8 +1355,41 @@ impl crate::KeyMintTa {
             }
         }
 
+        // Use the same metadata source as generation/import. This only updates
+        // Ommega's encrypted software blob, never B's hardware SPL or keyblob.
+        let remote_versions = self.remote_version_tags(self.hw_info.security_level)?;
         for chars in &mut keyblob.characteristics {
             if chars.security_level != self.hw_info.security_level {
+                continue;
+            }
+            if let Some(versions) = remote_versions {
+                let expected = [
+                    Some(KeyParam::OsVersion(versions.os_version)),
+                    Some(KeyParam::OsPatchlevel(versions.os_patchlevel)),
+                    versions.vendor_patchlevel.map(KeyParam::VendorPatchlevel),
+                    versions.boot_patchlevel.map(KeyParam::BootPatchlevel),
+                ];
+                let is_version = |param: &KeyParam| {
+                    matches!(
+                        param,
+                        KeyParam::OsVersion(_)
+                            | KeyParam::OsPatchlevel(_)
+                            | KeyParam::VendorPatchlevel(_)
+                            | KeyParam::BootPatchlevel(_)
+                    )
+                };
+                if !chars
+                    .authorizations
+                    .iter()
+                    .filter(|p| is_version(p))
+                    .eq(expected.iter().flatten())
+                {
+                    chars.authorizations.retain(|p| !is_version(p));
+                    for param in expected.into_iter().flatten() {
+                        chars.authorizations.try_push(param)?;
+                    }
+                    modified = true;
+                }
                 continue;
             }
             for param in &mut chars.authorizations {

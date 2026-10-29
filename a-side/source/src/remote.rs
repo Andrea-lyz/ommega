@@ -132,6 +132,8 @@ pub(crate) struct RemoteIdentityProfile {
     pub has_strongbox: bool,
     /// Operation limit reported by the B-side implementation, when present.
     pub max_operations: Option<usize>,
+    /// Hardware version authorizations, independent of A's property policy.
+    pub version_tags: Option<kmr_ta::device::KeyMintVersionTags>,
 }
 
 fn new_request_id(kind: &str) -> String {
@@ -464,6 +466,12 @@ impl RemoteRelay {
             return Err(anyhow!("remote profile failed: {error}"));
         }
         let profile = parse_identity_profile(result)?;
+        match profile.version_tags {
+            Some(versions) => log::info!("event=remote_version_tags source=hal tags={versions:?}"),
+            None => log::warn!(
+                "remote profile has no HAL version tags; ordinary keys retain local metadata (update B to enable version consistency)"
+            ),
+        }
         // Piggyback on the existing profile exchange; app startup has no network or HAL work.
         let app_profile = result
             .get("app_identity")
@@ -854,6 +862,27 @@ fn reject_strongbox_demotion(
     ))
 }
 
+fn parse_version_tags(value: &Value) -> Result<kmr_ta::device::KeyMintVersionTags> {
+    let number = |name: &str| -> Result<Option<u32>> {
+        match value.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .map(Some)
+                .ok_or_else(|| anyhow!("remote version tags contain invalid {name}")),
+        }
+    };
+    Ok(kmr_ta::device::KeyMintVersionTags {
+        os_version: number("os_version")?
+            .ok_or_else(|| anyhow!("remote version tags missing os_version"))?,
+        os_patchlevel: number("os_patchlevel")?
+            .ok_or_else(|| anyhow!("remote version tags missing os_patchlevel"))?,
+        vendor_patchlevel: number("vendor_patchlevel")?,
+        boot_patchlevel: number("boot_patchlevel")?,
+    })
+}
+
 fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
     let field_i32 = |name: &str| -> Result<i32> {
         value
@@ -914,6 +943,11 @@ fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
     }
 
     Ok(RemoteIdentityProfile {
+        version_tags: value
+            .get("version_tags")
+            .filter(|value| !value.is_null())
+            .map(parse_version_tags)
+            .transpose()?,
         max_operations,
         interface_version,
         interface_hash,
@@ -958,6 +992,31 @@ pub fn remote_enabled() -> bool {
 mod tests {
     use super::*;
     use kmr_wire::keymint::SecurityLevel;
+
+    #[test]
+    fn version_tags_preserve_full_dates_absence_and_zero_and_reject_invalid_values() {
+        let value = json!({
+            "os_version": 170000, "os_patchlevel": 202609,
+            "vendor_patchlevel": 20260901, "boot_patchlevel": 20251201,
+        });
+        let tags = parse_version_tags(&value).unwrap();
+        assert_eq!(tags.boot_patchlevel, Some(20251201));
+        assert_eq!(tags.vendor_patchlevel, Some(20260901));
+        let absent = parse_version_tags(&json!({"os_version": 0, "os_patchlevel": 0})).unwrap();
+        assert_eq!(absent.os_version, 0);
+        assert_eq!(absent.boot_patchlevel, None);
+        for invalid in [
+            json!(-1),
+            json!(4_294_967_296_u64),
+            json!(1.5),
+            json!("20251201"),
+        ] {
+            let mut broken = value.clone();
+            broken["boot_patchlevel"] = invalid;
+            assert!(parse_version_tags(&broken).is_err());
+        }
+        assert!(parse_version_tags(&json!({"boot_patchlevel": 20251201})).is_err());
+    }
 
     #[test]
     fn signature_retry_and_backoff_cannot_reset_the_total_budget() {
@@ -1121,6 +1180,7 @@ mod tests {
             keymint_author: "synthetic".into(),
             has_strongbox: false,
             max_operations: None,
+            version_tags: None,
         };
         *REMOTE_IDENTITY_PROFILE.write().unwrap() = Some(profile);
         assert!(REMOTE_IDENTITY_PROFILE.read().unwrap().is_some());
