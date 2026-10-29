@@ -1,4 +1,5 @@
 import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js?v=material-ui-9';
+import {installAppSearch,prepareSearchEditor} from './app-search.js?v=app-search-3';
 
 if (typeof document !== 'undefined') {
   const style = document.createElement('link');
@@ -326,8 +327,8 @@ function install() {
       menuButton?.focus({preventScroll:true});
     });
   }
-  const appSearch = document.getElementById('search');
-  appSearch?.setAttribute('aria-label',text('搜索应用或包名','Search apps or packages'));
+  installAppSearch({text});
+  const searchRegion = document.getElementById('om-app-search-region');
   for (const [id,zh,en] of [['select-all','全选当前列表','Select visible apps'],['deselect-all','取消全选当前列表','Deselect visible apps'],['refresh','刷新应用列表','Refresh apps']]) {
     const button = document.getElementById(id);
     if (!button?.parentNode) continue;
@@ -338,17 +339,21 @@ function install() {
     caption.addEventListener('click', () => { if (!button.disabled) button.click(); });
   }
   const denylist = document.getElementById('select-denylist'); if (denylist) denylist.hidden = true;
-  function navigate(view, focus = false) {
+  function navigate(view) {
     if (!['overview','apps','settings'].includes(view)) view = 'overview';
     document.body.dataset.omView = view;
     for (const id of ['overview','settings']) document.getElementById('om-' + id).hidden = view !== id;
     document.getElementById('om-apps-heading').hidden = view !== 'apps';
     document.querySelectorAll('[data-om-view]').forEach(button => button.setAttribute('aria-current', button.dataset.omView === view ? 'page' : 'false'));
     document.querySelector('.om-nav').dataset.active = String(['overview','apps','settings'].indexOf(view));
-    if (focus) (view === 'apps' ? document.getElementById('search') : document.getElementById('om-main'))?.focus({preventScroll:true});
+    if (searchRegion) searchRegion.hidden = view !== 'apps';
+    // A parsed input never gets an Android text-editor connection; swap in a
+    // fresh node before the user taps it, and leave focus to that tap.
+    if (view === 'apps') prepareSearchEditor();
+    // Keep the user's navigation focus. A route change is not an edit action.
   }
   document.querySelectorAll('[data-om-view]').forEach(button => button.onclick = () => { location.hash = 'om-' + button.dataset.omView; });
-  window.addEventListener('hashchange', () => { navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview', true); });
+  window.addEventListener('hashchange', () => { navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview'); });
   navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview');
   for (const button of document.querySelectorAll('[data-om-action]')) button.onclick = () => {
     const target = document.getElementById(button.dataset.omAction);
