@@ -99,6 +99,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
         .with_db(db.clone())
         .with_invalid_rate_limit(cfg.invalid_rate_limit_requests)
         .with_relay_rate_limit(cfg.relay_rate_limit_requests)
+        .with_poll_rate_limit(cfg.poll_rate_limit_requests)
         .with_admin_credentials(&cfg.admin_user, &cfg.admin_password, &cfg.admin_extra),
     );
     let fulfill = Fulfill::new(cfg.server_keybox_enabled(), db.clone());

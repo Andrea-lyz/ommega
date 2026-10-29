@@ -29,17 +29,22 @@ pub struct AuthState {
     db: Option<Arc<Db>>,
     rate: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
     relay_rate: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    poll_rate: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
     invalid_rate: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
     login_rate: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
     sessions: Arc<Mutex<HashMap<String, Instant>>>,
     /// Last time `record_token_use` wrote a row, keyed by token + IP.
     token_use_seen: Arc<Mutex<HashMap<String, Instant>>>,
     pub rate_limit_requests: u64,
-    /// Limit for the relay data plane (A attest/sign/decrypt/agree/profile and
-    /// B poll/result). These carry real work for an already-authenticated
-    /// device, so they get their own, far larger budget than the public
-    /// card/query endpoints.
+    /// Limit for the relay work data plane (A
+    /// attest/sign/decrypt/agree/profile and B result). These carry real work
+    /// for an already-authenticated device, so they get their own, far larger
+    /// budget than the public card/query endpoints.
     pub relay_rate_limit_requests: u64,
+    /// Limit for the B poll heartbeat. Polls are idle liveness traffic, not
+    /// work, and the 2.1.2 short-poll cadence is ~45k/h; sharing the relay
+    /// bucket made an idle device throttle itself. 0 disables this budget.
+    pub poll_rate_limit_requests: u64,
     pub invalid_rate_limit_requests: u64,
     pub rate_limit_window: Duration,
     // IP allow/deny list (applies to A/B-side endpoints only).
@@ -64,6 +69,14 @@ const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
 /// `b/result` discards a finished task, surfaced on the A side as an
 /// attestation failure. This is a runaway-loop backstop, not a quota.
 const DEFAULT_RELAY_RATE_LIMIT_REQUESTS: u64 = 20_000;
+
+/// Default budget for B poll heartbeats per token per window.
+///
+/// 0 disables the poll budget: polling is the relay's idle heartbeat, and the
+/// 2.1.2 short-poll cadence is 80 ms (12.5/s, ~45k/h), far above the work
+/// budget. An operator can still set `RELAY_POLL_RATE_LIMIT_REQUESTS` to a
+/// finite value as a per-deployment backstop.
+const DEFAULT_POLL_RATE_LIMIT_REQUESTS: u64 = 0;
 
 /// Separator for the token + IP throttle key: a control character that
 /// cannot occur in either half.
@@ -101,12 +114,14 @@ impl AuthState {
             db: None,
             rate: Arc::new(Mutex::new(HashMap::new())),
             relay_rate: Arc::new(Mutex::new(HashMap::new())),
+            poll_rate: Arc::new(Mutex::new(HashMap::new())),
             invalid_rate: Arc::new(Mutex::new(HashMap::new())),
             login_rate: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             token_use_seen: Arc::new(Mutex::new(HashMap::new())),
             rate_limit_requests,
             relay_rate_limit_requests: DEFAULT_RELAY_RATE_LIMIT_REQUESTS,
+            poll_rate_limit_requests: DEFAULT_POLL_RATE_LIMIT_REQUESTS,
             // Invalid (failed-auth) requests get a much tighter limit.
             invalid_rate_limit_requests: 40,
             rate_limit_window: Duration::from_secs(rate_limit_window_secs),
@@ -385,9 +400,15 @@ impl AuthState {
         }
     }
 
-    /// Set the relay data-plane rate limit (0 disables it).
+    /// Set the relay work data-plane rate limit (0 disables it).
     pub fn with_relay_rate_limit(mut self, limit: u64) -> Self {
         self.relay_rate_limit_requests = limit;
+        self
+    }
+
+    /// Set the B poll heartbeat rate limit (0 disables it).
+    pub fn with_poll_rate_limit(mut self, limit: u64) -> Self {
+        self.poll_rate_limit_requests = limit;
         self
     }
 
@@ -397,7 +418,7 @@ impl AuthState {
         self.allow_with_limit(&self.rate, key, self.rate_limit_requests)
     }
 
-    /// Rate limit for the relay data plane, on its own budget and its own
+    /// Rate limit for the relay work data plane, on its own budget and its own
     /// bucket so attestation traffic and public card queries cannot starve
     /// each other. A limit of 0 disables it.
     pub fn allow_relay(&self, key: &str) -> bool {
@@ -407,11 +428,34 @@ impl AuthState {
         self.allow_with_limit(&self.relay_rate, key, self.relay_rate_limit_requests)
     }
 
+    /// Rate limit for the B poll heartbeat, on its own bucket. A limit of 0
+    /// disables it. Polls must not consume the work budget used by `b/result`
+    /// and the A-side task endpoints.
+    pub fn allow_poll(&self, key: &str) -> bool {
+        if self.poll_rate_limit_requests == 0 {
+            return true;
+        }
+        self.allow_with_limit(&self.poll_rate, key, self.poll_rate_limit_requests)
+    }
+
     /// Seconds until the oldest request in this bucket leaves the window, i.e.
     /// the earliest moment a throttled caller can succeed. Always at least 1 so
     /// a `Retry-After: 0` never invites an immediate retry.
     pub fn retry_after_secs(&self, key: &str, relay: bool) -> u64 {
         let bucket = if relay { &self.relay_rate } else { &self.rate };
+        self.retry_after_for(bucket, key)
+    }
+
+    /// Seconds until the poll heartbeat bucket frees a slot for this key.
+    pub fn retry_after_secs_poll(&self, key: &str) -> u64 {
+        self.retry_after_for(&self.poll_rate, key)
+    }
+
+    fn retry_after_for(
+        &self,
+        bucket: &Mutex<HashMap<String, Vec<Instant>>>,
+        key: &str,
+    ) -> u64 {
         let map = crate::util::mu(bucket);
         let Some(entries) = map.get(key) else {
             return 1;
@@ -606,6 +650,37 @@ mod tests {
         for _ in 0..1000 {
             assert!(auth.allow_relay("token"));
         }
+    }
+
+    #[test]
+    fn the_poll_budget_is_separate_and_disabled_by_default() {
+        let auth = AuthState::new("t".into(), 1, 60, true).with_relay_rate_limit(2);
+        for _ in 0..1000 {
+            assert!(auth.allow_poll("token"));
+        }
+        // Heartbeat polling must not spend the work budget.
+        assert!(auth.allow_relay("token"));
+        assert!(auth.allow_relay("token"));
+        assert!(!auth.allow_relay("token"), "relay budget is 2");
+    }
+
+    #[test]
+    fn a_finite_poll_limit_is_enforced_in_its_own_bucket() {
+        let auth = AuthState::new("t".into(), 1, 60, true)
+            .with_relay_rate_limit(2)
+            .with_poll_rate_limit(3);
+        assert!(auth.allow_poll("token"));
+        assert!(auth.allow_poll("token"));
+        assert!(auth.allow_poll("token"));
+        assert!(!auth.allow_poll("token"), "poll budget is 3");
+        assert!(auth.allow_relay("token"));
+        assert!(auth.allow_relay("token"));
+        assert!(!auth.allow_relay("token"), "relay budget is 2");
+        let wait = auth.retry_after_secs_poll("token");
+        assert!(
+            (1..=60).contains(&wait),
+            "unexpected poll retry-after {wait}"
+        );
     }
 
     #[test]

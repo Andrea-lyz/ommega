@@ -45,12 +45,19 @@ pub struct Config {
     pub geo_db_path: String,
     /// Rate limit: max valid requests per token per window.
     pub rate_limit_requests: u64,
-    /// Rate limit for the relay data plane (A attest/sign/decrypt/agree/profile
-    /// and B poll/result), per token per window. 0 disables it. Separate from
-    /// `rate_limit_requests` because a B device legitimately spends thousands
-    /// of requests an hour and a throttled `b/result` silently discards a
-    /// finished task.
+    /// Rate limit for the relay work data plane (A
+    /// attest/sign/decrypt/agree/profile and B result), per token per window.
+    /// 0 disables it. Separate from `rate_limit_requests` because a B device
+    /// legitimately spends thousands of requests an hour and a throttled
+    /// `b/result` silently discards a finished task.
     pub relay_rate_limit_requests: u64,
+    /// Rate limit for the B poll heartbeat, per token per window. 0 disables
+    /// it (the default). Polling is the relay's idle heartbeat, not work: the
+    /// 2.1.2 short-poll cadence is 80 ms (12.5/s, ~45k/h), far above the work
+    /// budget. Sharing the relay bucket made an idle B device throttle itself
+    /// and then disappear from the online list for the whole Retry-After
+    /// window. A finite value remains available as a deployment backstop.
+    pub poll_rate_limit_requests: u64,
     /// Rate limit: max invalid (failed-auth) requests per IP per window.
     pub invalid_rate_limit_requests: u64,
     pub rate_limit_window_secs: u64,
@@ -105,6 +112,7 @@ impl Default for Config {
             geo_db_path: "ip2region.xdb".to_string(),
             rate_limit_requests: 800,
             relay_rate_limit_requests: 20_000,
+            poll_rate_limit_requests: 0,
             invalid_rate_limit_requests: 40,
             rate_limit_window_secs: 3600,
             pay_gateway: String::new(),
@@ -128,6 +136,21 @@ fn env_str(name: &str) -> Option<String> {
 
 fn env_u64(name: &str, dflt: u64) -> u64 {
     env_str(name)
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(dflt)
+}
+
+/// Numeric setting with the documented precedence: process environment first,
+/// then the working-directory `.env` file. The rate-limit keys used to call
+/// `env_u64` directly, so a value in `.env` was silently ignored unless
+/// systemd also exported it via `EnvironmentFile=`.
+fn env_u64_or_dotenv(
+    dotenv: &std::collections::HashMap<String, String>,
+    name: &str,
+    dflt: u64,
+) -> u64 {
+    env_str(name)
+        .or_else(|| dotenv.get(name).cloned())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(dflt)
 }
@@ -247,10 +270,16 @@ impl Config {
         if let Some(v) = env_or_dotenv(&dotenv, "RELAY_GEO_DB_PATH") {
             cfg.geo_db_path = v;
         }
-        cfg.rate_limit_requests = env_u64("RELAY_RATE_LIMIT_REQUESTS", 800);
-        cfg.relay_rate_limit_requests = env_u64("RELAY_DATA_RATE_LIMIT_REQUESTS", 20_000);
-        cfg.invalid_rate_limit_requests = env_u64("RELAY_INVALID_RATE_LIMIT_REQUESTS", 40);
-        cfg.rate_limit_window_secs = env_u64("RELAY_RATE_LIMIT_WINDOW", 3600);
+        cfg.rate_limit_requests =
+            env_u64_or_dotenv(&dotenv, "RELAY_RATE_LIMIT_REQUESTS", 800);
+        cfg.relay_rate_limit_requests =
+            env_u64_or_dotenv(&dotenv, "RELAY_DATA_RATE_LIMIT_REQUESTS", 20_000);
+        cfg.poll_rate_limit_requests =
+            env_u64_or_dotenv(&dotenv, "RELAY_POLL_RATE_LIMIT_REQUESTS", 0);
+        cfg.invalid_rate_limit_requests =
+            env_u64_or_dotenv(&dotenv, "RELAY_INVALID_RATE_LIMIT_REQUESTS", 40);
+        cfg.rate_limit_window_secs =
+            env_u64_or_dotenv(&dotenv, "RELAY_RATE_LIMIT_WINDOW", 3600);
         if let Some(v) = env_or_dotenv(&dotenv, "PAY_GATEWAY") {
             cfg.pay_gateway = v;
         }
@@ -303,5 +332,18 @@ impl Config {
 
     pub fn server_keybox_enabled(&self) -> bool {
         self.attest_source.eq_ignore_ascii_case("server_keybox")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_dotenv_values_are_parsed() {
+        let mut dotenv = std::collections::HashMap::new();
+        dotenv.insert("OMMEGA_TEST_RATE_LIMIT".to_string(), "1234".to_string());
+        assert_eq!(env_u64_or_dotenv(&dotenv, "OMMEGA_TEST_RATE_LIMIT", 0), 1234);
+        assert_eq!(env_u64_or_dotenv(&dotenv, "OMMEGA_TEST_MISSING", 7), 7);
     }
 }

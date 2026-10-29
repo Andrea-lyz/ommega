@@ -119,10 +119,15 @@ fn json_err_retry_after(status: StatusCode, msg: &str, retry_after_secs: u64) ->
 /// Which rate-limit budget an endpoint draws from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RateClass {
-    /// Relay data plane: A attest/sign/decrypt/agree/profile, B poll/result.
-    /// Authenticated, device-driven, and the traffic the product exists to
-    /// carry. Throttling it breaks attestation rather than protecting anything.
+    /// Relay work data plane: A attest/sign/decrypt/agree/profile and B
+    /// result. Authenticated, device-driven, and the traffic the product
+    /// exists to carry. Throttling it breaks attestation rather than
+    /// protecting anything.
     Relay,
+    /// B poll heartbeat. Authenticated liveness traffic with its own bucket
+    /// and its own (default-disabled) budget, so idle polling can never spend
+    /// the work budget above.
+    Poll,
     /// Everything else reachable with a token (ping, status, registration).
     Standard,
 }
@@ -188,12 +193,15 @@ fn check_auth_class(
     let rl_key = if token.is_empty() { ip } else { token.clone() };
     let allowed = match class {
         RateClass::Relay => state.auth.allow_relay(&rl_key),
+        RateClass::Poll => state.auth.allow_poll(&rl_key),
         RateClass::Standard => state.auth.allow(&rl_key),
     };
     if !allowed {
-        let retry_after = state
-            .auth
-            .retry_after_secs(&rl_key, class == RateClass::Relay);
+        let retry_after = match class {
+            RateClass::Relay => state.auth.retry_after_secs(&rl_key, true),
+            RateClass::Poll => state.auth.retry_after_secs_poll(&rl_key),
+            RateClass::Standard => state.auth.retry_after_secs(&rl_key, false),
+        };
         return Err(json_err_retry_after(
             StatusCode::TOO_MANY_REQUESTS,
             "rate limit exceeded",
@@ -737,7 +745,7 @@ pub async fn b_poll(
     headers: HeaderMap,
     Query(q): Query<PollQuery>,
 ) -> Response {
-    if let Err(r) = check_auth_class(&state, &headers, Some("b"), RateClass::Relay) {
+    if let Err(r) = check_auth_class(&state, &headers, Some("b"), RateClass::Poll) {
         return r;
     }
     if q.device_id.is_empty() {

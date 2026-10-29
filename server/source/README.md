@@ -53,6 +53,17 @@ Both updated B relay and server binaries must be explicitly deployed before
 battery values arrive. This change does not restart, deploy to or probe devices;
 server restart also discards the in-memory snapshots until the next poll.
 
+## Rate limits
+
+`RELAY_DATA_RATE_LIMIT_REQUESTS` (default `20000`) is the work budget for the
+relay data plane: A task endpoints and `POST /api/b/result/`. `GET /api/b/poll/`
+has its own budget, `RELAY_POLL_RATE_LIMIT_REQUESTS` (default `0`, disabled), so
+idle heartbeats cannot exhaust the work budget. A 2.1.2 B relay short-polls
+every 80 ms (~45k/h); the default poll budget therefore does not throttle it.
+Both values are per token per `RELAY_RATE_LIMIT_WINDOW` seconds (default
+`3600`) and can be set in the process environment or the working-directory
+`.env` file.
+
 ## Safe local validation
 
 From this directory, `cargo test --lib` exercises the parser, queue and mock
