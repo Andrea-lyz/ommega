@@ -58,7 +58,15 @@ fn main() {
 
     let generated_path = PathBuf::from(format!("{}/aidl.rs", std::env::var("OUT_DIR").unwrap()));
     let content = fs::read_to_string(&generated_path).unwrap();
+    assert!(
+        content.contains("rsbinder::impl_deserialize_for_parcelable!"),
+        "generated parcelable deserializers were not found"
+    );
     let patched_content = content
+        .replace(
+            "rsbinder::impl_deserialize_for_parcelable!",
+            "crate::parcel::impl_android_deserialize_for_parcelable!",
+        )
         .replace(
             "\npub mod top {",
             "\n#[allow(clippy::all)]\n#[allow(unused_imports)]\npub mod top {",
