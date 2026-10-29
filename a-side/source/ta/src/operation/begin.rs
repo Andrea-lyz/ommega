@@ -322,7 +322,7 @@ impl crate::KeyMintTa {
                 crypto_op: match purpose {
                     KeyPurpose::Sign => CryptoOperation::RemoteSign {
                         alias: remote.alias.clone(),
-                        algorithm: remote_sign_algorithm(&params)?,
+                        algorithm: remote_sign_algorithm(get_algorithm(key_chars)?, &params)?,
                         data: Vec::new(),
                     },
                     KeyPurpose::Decrypt => CryptoOperation::RemoteDecrypt {
@@ -552,14 +552,13 @@ fn check_begin_params(
     Ok(())
 }
 
-/// Determine the remote signing algorithm (JCA name) from the begin params.
+/// Determine the remote signing algorithm (JCA name) from the key's algorithm and begin params.
 ///
 /// The digest and padding must be encoded into the algorithm string so the
 /// B-side real-TEE proxy mints the signature the app actually verifies: a PSS
 /// signature must not be produced as PKCS#1 v1.5 (which fails PSS verify), so
 /// RSA-PSS carries its digest plus the `/PSS` marker.
-fn remote_sign_algorithm(params: &[KeyParam]) -> Result<String, Error> {
-    let algo = get_algorithm(params)?;
+fn remote_sign_algorithm(algo: Algorithm, params: &[KeyParam]) -> Result<String, Error> {
     match algo {
         Algorithm::Rsa => {
             let padding = get_padding_mode(params)?;
@@ -1190,11 +1189,7 @@ mod tests {
         digest: Digest,
         mgf_digest: Option<Digest>,
     ) -> Vec<KeyParam> {
-        let mut params = vec![
-            KeyParam::Algorithm(Algorithm::Rsa),
-            KeyParam::Padding(padding),
-            KeyParam::Digest(digest),
-        ];
+        let mut params = vec![KeyParam::Padding(padding), KeyParam::Digest(digest)];
         if let Some(mgf_digest) = mgf_digest {
             params.push(KeyParam::RsaOaepMgfDigest(mgf_digest));
         }
@@ -1206,13 +1201,40 @@ mod tests {
     }
 
     #[test]
+    fn remote_signing_uses_key_algorithm_without_algorithm_operation_tag() {
+        let params = [KeyParam::Digest(Digest::Sha256)];
+        let chars = [
+            KeyParam::Algorithm(Algorithm::Ec),
+            KeyParam::EcCurve(EcCurve::P256),
+            KeyParam::Purpose(KeyPurpose::Sign),
+            KeyParam::Digest(Digest::Sha256),
+        ];
+        check_begin_params(&chars, KeyPurpose::Sign, &params).unwrap();
+        assert_eq!(
+            remote_sign_algorithm(get_algorithm(&chars).unwrap(), &params).unwrap(),
+            "SHA256withECDSA"
+        );
+        assert_eq!(
+            remote_sign_algorithm(Algorithm::Ec, &[KeyParam::Digest(Digest::None)]).unwrap(),
+            "NONEwithECDSA"
+        );
+        assert_eq!(
+            remote_sign_algorithm(
+                Algorithm::Rsa,
+                &rsa_remote_params(PaddingMode::RsaPkcs115Sign, Digest::Sha256, None),
+            )
+            .unwrap(),
+            "SHA256withRSA"
+        );
+    }
+
+    #[test]
     fn remote_algorithm_names_keep_existing_sha256_paths() {
         assert_eq!(
-            remote_sign_algorithm(&rsa_remote_params(
-                PaddingMode::RsaPss,
-                Digest::Sha256,
-                None,
-            ))
+            remote_sign_algorithm(
+                Algorithm::Rsa,
+                &rsa_remote_params(PaddingMode::RsaPss, Digest::Sha256, None,)
+            )
             .unwrap(),
             "SHA256withRSA/PSS"
         );
@@ -1248,16 +1270,18 @@ mod tests {
     #[test]
     fn remote_algorithm_names_preserve_no_padding_sha224_and_none() {
         assert_eq!(
-            remote_sign_algorithm(&rsa_remote_params(PaddingMode::None, Digest::None, None,))
-                .unwrap(),
+            remote_sign_algorithm(
+                Algorithm::Rsa,
+                &rsa_remote_params(PaddingMode::None, Digest::None, None,)
+            )
+            .unwrap(),
             "NONEwithRSA/NoPadding"
         );
         assert_eq!(
-            remote_sign_algorithm(&rsa_remote_params(
-                PaddingMode::RsaPkcs115Sign,
-                Digest::None,
-                None,
-            ))
+            remote_sign_algorithm(
+                Algorithm::Rsa,
+                &rsa_remote_params(PaddingMode::RsaPkcs115Sign, Digest::None, None,)
+            )
             .unwrap(),
             "NONEwithRSA"
         );
@@ -1276,8 +1300,11 @@ mod tests {
             "RSA/OAEP/SHA-224/MGF1-SHA224"
         );
         assert_eq!(
-            remote_sign_algorithm(&rsa_remote_params(PaddingMode::RsaPss, Digest::Md5, None,))
-                .unwrap(),
+            remote_sign_algorithm(
+                Algorithm::Rsa,
+                &rsa_remote_params(PaddingMode::RsaPss, Digest::Md5, None,)
+            )
+            .unwrap(),
             "MD5withRSA/PSS"
         );
         assert_eq!(
@@ -1290,19 +1317,11 @@ mod tests {
             "RSA/OAEP/MD5/MGF1-MD5"
         );
         assert_eq!(
-            remote_sign_algorithm(&[
-                KeyParam::Algorithm(Algorithm::Ec),
-                KeyParam::Digest(Digest::None),
-            ])
-            .unwrap(),
+            remote_sign_algorithm(Algorithm::Ec, &[KeyParam::Digest(Digest::None),]).unwrap(),
             "NONEwithECDSA"
         );
         assert_eq!(
-            remote_sign_algorithm(&[
-                KeyParam::Algorithm(Algorithm::Ec),
-                KeyParam::Digest(Digest::Sha224),
-            ])
-            .unwrap(),
+            remote_sign_algorithm(Algorithm::Ec, &[KeyParam::Digest(Digest::Sha224),]).unwrap(),
             "SHA224withECDSA"
         );
     }
@@ -1325,9 +1344,11 @@ mod tests {
         .unwrap_err();
         assert_hal_error(error, ErrorCode::UnsupportedPaddingMode);
 
-        let error =
-            remote_sign_algorithm(&rsa_remote_params(PaddingMode::None, Digest::Sha256, None))
-                .unwrap_err();
+        let error = remote_sign_algorithm(
+            Algorithm::Rsa,
+            &rsa_remote_params(PaddingMode::None, Digest::Sha256, None),
+        )
+        .unwrap_err();
         assert_hal_error(error, ErrorCode::IncompatibleDigest);
     }
 
