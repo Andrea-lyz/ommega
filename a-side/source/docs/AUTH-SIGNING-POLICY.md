@@ -68,6 +68,10 @@ refreshes notify the search controller without reading or writing editor text;
 filtering waits until IME composition finishes. Search matches app names and
 package ids, not policy or certificate badges. Only the explicit Clear action
 resets the search text.
+App names come from the manager's injected package bridge. Android WebView only
+answers a bridge method called through its injected object, so every label query
+keeps the live `ksu` receiver; the page falls back to the packaged
+`applist.json`, then to the package id, when the bridge is unavailable.
 Each app has an individual policy page with Auto, Payment compatibility and
 Preserve authentication choices. An app with no explicit override displays its inherited global default;
 choosing a mode writes only that app's exception and preserves the global default

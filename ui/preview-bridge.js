@@ -125,7 +125,13 @@ window.ksu = {
     setTimeout(()=>window[callback]?.(errno,stdout,errno?'Preview is read only':''),20);
   },
   listPackages: type => JSON.stringify(apps.filter(app=>type==='user'?!app.isSystem:type==='system'?app.isSystem:true).map(app=>app.packageName)),
-  getPackagesInfo: packages => JSON.stringify(apps.filter(app=>JSON.parse(packages).includes(app.packageName))),
+  // Android WebView only invokes an injected Java method through its bridge
+  // object; a method detached from `ksu` throws. Mirror that here so the
+  // browser preview and the smoke tests catch a detached call.
+  getPackagesInfo(packages) {
+    if (this !== window.ksu) throw new Error("Java bridge method can't be invoked on a non-injected object");
+    return JSON.stringify(apps.filter(app=>JSON.parse(packages).includes(app.packageName)));
+  },
   toast: () => {}, spawn: () => {},
 };
 document.addEventListener('DOMContentLoaded',() => {
