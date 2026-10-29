@@ -160,6 +160,58 @@ fn ensure_no_request_trailing_data(parcel: &Parcel, interface_name: &str) -> Res
     Ok(())
 }
 
+// Android's Parcelable presence marker is zero for null and nonzero for present.
+// Delegate the body to the generated reader so sized bounds and union validation
+// remain identical for both canonical and noncanonical presence markers.
+macro_rules! impl_android_deserialize_for_parcelable {
+    ($parcelable:ident) => {
+        impl rsbinder::Deserialize for $parcelable {
+            fn deserialize(parcel: &mut rsbinder::Parcel) -> rsbinder::Result<Self> {
+                rsbinder::DeserializeOption::deserialize_option(parcel)
+                    .transpose()
+                    .unwrap_or(Err(rsbinder::StatusCode::UnexpectedNull))
+            }
+
+            fn deserialize_from(&mut self, parcel: &mut rsbinder::Parcel) -> rsbinder::Result<()> {
+                let present: i32 = parcel.read()?;
+                if present == rsbinder::NULL_PARCELABLE_FLAG {
+                    Err(rsbinder::StatusCode::UnexpectedNull)
+                } else {
+                    rsbinder::Parcelable::read_from_parcel(self, parcel)
+                }
+            }
+        }
+
+        impl rsbinder::DeserializeArray for $parcelable {}
+
+        impl rsbinder::DeserializeOption for $parcelable {
+            fn deserialize_option(parcel: &mut rsbinder::Parcel) -> rsbinder::Result<Option<Self>> {
+                let mut result = None;
+                Self::deserialize_option_from(&mut result, parcel)?;
+                Ok(result)
+            }
+
+            fn deserialize_option_from(
+                this: &mut Option<Self>,
+                parcel: &mut rsbinder::Parcel,
+            ) -> rsbinder::Result<()> {
+                let present: i32 = parcel.read()?;
+                if present == rsbinder::NULL_PARCELABLE_FLAG {
+                    *this = None;
+                    Ok(())
+                } else {
+                    rsbinder::Parcelable::read_from_parcel(
+                        this.get_or_insert_with(Self::default),
+                        parcel,
+                    )
+                }
+            }
+        }
+    };
+}
+
+pub(crate) use impl_android_deserialize_for_parcelable;
+
 struct RequestEnvelope {
     data: *mut u8,
     data_size: usize,
