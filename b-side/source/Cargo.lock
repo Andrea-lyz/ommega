@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "ommegaclient-b"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "android_logger",
  "anyhow",
