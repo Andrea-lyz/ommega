@@ -868,6 +868,20 @@ fn parse_key_spec(payload: &Value) -> Result<KeySpec> {
         cert_subject_der: get("certificate_subject")
             .map(|v| b64_decode(v).with_context(|| "decode certificate_subject"))
             .transpose()?,
+        creation_datetime: get("creation_datetime_ms")
+            .map(|value| {
+                value
+                    .as_i64()
+                    .filter(|ms| *ms >= 0)
+                    .map(|ms| DateTime { ms_since_epoch: ms })
+                    .ok_or_else(|| {
+                        keymint_error(
+                            KmErrorCode::InvalidArgument,
+                            "creation_datetime_ms must be non-negative i64 milliseconds",
+                        )
+                    })
+            })
+            .transpose()?,
         cert_not_before: get_i64("certificate_not_before_ms")
             .map(|ms| DateTime { ms_since_epoch: ms }),
         cert_not_after: get_i64("certificate_not_after_ms")
@@ -1141,6 +1155,7 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
         "cert_chain": cert_chain_json(&session.cert_chain),
         "public_key": b64(&tee_ops::get_public_key(&alias)?),
         "remote_profile": {
+            "version_tags": tee_ops::version_tags()?,
             "interface_version": profile.interface_version,
             "interface_hash": profile.interface_hash,
             "profile_version": profile.profile_version,
@@ -1156,6 +1171,7 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
 fn handle_profile(_task_type: &str, _payload: &Value) -> Result<Value> {
     let profile = tee_ops::identity_profile()?;
     Ok(json!({
+        "version_tags": tee_ops::version_tags()?,
         "interface_version": profile.interface_version,
         "interface_hash": profile.interface_hash,
         "profile_version": profile.profile_version,
@@ -1813,6 +1829,58 @@ mod tests {
         // 5xx is retried by the caller's own branch.
         assert!(!result_status_is_permanent(500));
         assert!(!result_status_is_permanent(503));
+    }
+
+    #[test]
+    fn creation_datetime_is_preserved_from_top_level_or_nested_context() {
+        let requested = 1_793_284_488_065_i64;
+        for payload in [
+            json!({ "creation_datetime_ms": requested }),
+            json!({ "device_attest_context": { "creation_datetime_ms": requested } }),
+            json!({
+                "creation_datetime_ms": requested,
+                "device_attest_context": { "creation_datetime_ms": requested + 1 }
+            }),
+            json!({ "creation_datetime_ms": 0 }),
+        ] {
+            let expected = payload
+                .get("creation_datetime_ms")
+                .or_else(|| payload["device_attest_context"].get("creation_datetime_ms"))
+                .and_then(Value::as_i64)
+                .unwrap();
+            assert_eq!(
+                parse_key_spec(&payload)
+                    .unwrap()
+                    .creation_datetime
+                    .map(|time| time.ms_since_epoch),
+                Some(expected)
+            );
+        }
+        for payload in [json!({}), json!({ "device_attest_context": {} })] {
+            assert!(parse_key_spec(&payload)
+                .unwrap()
+                .creation_datetime
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn malformed_creation_datetime_is_rejected_before_hal() {
+        for value in [
+            json!(-1),
+            json!("1793284488065"),
+            json!(1.5),
+            json!(u64::MAX),
+            Value::Null,
+        ] {
+            for payload in [
+                json!({ "creation_datetime_ms": value.clone() }),
+                json!({ "device_attest_context": { "creation_datetime_ms": value.clone() } }),
+            ] {
+                let error = parse_key_spec(&payload).unwrap_err();
+                assert!(format!("{error:#}").contains("creation_datetime_ms"));
+            }
+        }
     }
 
     #[test]

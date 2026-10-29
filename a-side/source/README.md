@@ -247,6 +247,15 @@ mirror queue replays captured state changes after the service becomes ready.
 
 Remote keys use B's certificate chain unchanged and inherit its available OS,
 vendor and boot version tags in their returned characteristics and new keyblob.
+The default TEE profile also carries the real HAL's OS and partition version
+authorizations. With this snapshot present, ordinary local generation, import
+and software-keyblob upgrade use the same version source before any attestation
+request. Optional partition tags remain absent when the HAL omits them. A rejects
+a new remote certificate whose version tags differ from the profile. This does
+not change A's global properties, boot/RoT encryption inputs, B's SPL or hardware
+keyblobs. The snapshot is refreshed by the existing profile-cache invalidation;
+relays without this optional field retain configured local version metadata and
+emit a warning. The default TEE snapshot is never applied to StrongBox.
 A does not add a synthetic child leaf for authentication or unlock constraints.
 Existing keys retain their key material and credential-encryption state.
 

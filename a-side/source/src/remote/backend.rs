@@ -45,6 +45,24 @@ fn b_task_latency_ms(result: &Value, response: &Value, elapsed: Duration) -> Opt
 }
 
 impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
+    fn version_tags(
+        &self,
+        security_level: kmr_wire::keymint::SecurityLevel,
+    ) -> Result<Option<kmr_ta::device::KeyMintVersionTags>, kmr_common::Error> {
+        // The default profile describes TEE, never StrongBox.
+        if security_level != kmr_wire::keymint::SecurityLevel::TrustedEnvironment {
+            return Ok(None);
+        }
+        match remote_identity_profile() {
+            Ok(profile) => Ok(profile.version_tags),
+            Err(_) if self.fallback_local() => Ok(None),
+            Err(error) => Err(kmr_common::km_err!(
+                HardwareNotYetAvailable,
+                "remote HAL version tags unavailable: {error:#}"
+            )),
+        }
+    }
+
     fn attestation_verified(&self, app_id_der: &[u8], relay_latency_ms: Option<u64>) {
         super::attestation_metrics::mark_verified(app_id_der, relay_latency_ms);
     }

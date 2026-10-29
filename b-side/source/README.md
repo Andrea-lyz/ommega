@@ -22,6 +22,14 @@ The relay also serves a `profile` task. It reads the real default KeyMint HAL's
 stable-AIDL version/hash and `getHardwareInfo()` values, reports StrongBox
 availability, and freezes that identity for the relay process. Attestation
 results carry the same profile so A can reject mixed A/B identities.
+The profile includes `version_tags` from the default TEE's hardware-enforced
+key characteristics: OS version, OS patch level and optional vendor/boot patch
+levels. Once per relay process, a temporary AES-256/GCM key reads these values
+from `generateKey`; `deleteKey` releases it immediately, including when parsing
+fails. It has no challenge, attestation, alias or persisted session. The profile
+does not infer these values from properties and does not change SPL. After an
+approved HAL/SPL reconfiguration, refresh the relay process and A's profile
+cache so the snapshot describes the current HAL state.
 
 App AttestKey delegation uses `device_attest_context.attestation_key` containing
 the existing session alias and a base64 DER `issuer_subject_name`. B requires

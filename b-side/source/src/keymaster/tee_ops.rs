@@ -112,6 +112,9 @@ pub struct KeySpec {
     pub rsa_public_exponent: Option<u64>,
     /// Certificate subject (DER-encoded X500Name); optional.
     pub cert_subject_der: Option<Vec<u8>>,
+    /// Keystore creation time supplied by A, in Unix-epoch milliseconds.
+    /// Legacy requests without it use B's current time, not certificate validity.
+    pub creation_datetime: Option<DateTime>,
     /// Certificate validity bounds; default to now / now+10y.
     pub cert_not_before: Option<DateTime>,
     pub cert_not_after: Option<DateTime>,
@@ -272,6 +275,86 @@ pub fn identity_profile() -> Result<KeyMintIdentityProfile> {
     };
     let _ = PROFILE.set(profile.clone());
     Ok(PROFILE.get().cloned().unwrap_or(profile))
+}
+
+/// Current TEE version authorizations. The profile needs these before A can
+/// generate its first ordinary key. A short-lived AES key reads the HAL's
+/// actual state without requesting attestation, changing SPL, or saving a session.
+pub fn version_tags() -> Result<serde_json::Value> {
+    static TAGS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+    let mut cached = TAGS
+        .lock()
+        .map_err(|_| anyhow!("version tag cache poisoned"))?;
+    if let Some(tags) = cached.as_ref() {
+        return Ok(tags.clone());
+    }
+    let keymint = get_system_keymint(SYSTEM_KEYMINT_DEFAULT)
+        .context("connect default KeyMint for version authorizations")?;
+    let params = key_params_to_aidl(&version_sample_params(), probe_keymint_version(&keymint))?;
+    let generated = keymint
+        .generateKey(&params, None)
+        .map_err(|status| keymint_status_error(&status, "read HAL version authorizations"))?;
+    let tags = version_tags_from_characteristics(&generated.keyCharacteristics);
+    // Cleanup also runs when the returned characteristics are malformed. No
+    // alias, persistent blob, or attestation key is created for this snapshot.
+    keymint
+        .deleteKey(&generated.keyBlob)
+        .map_err(|status| keymint_status_error(&status, "delete version snapshot key"))?;
+    let tags = tags?;
+    log::info!("event=keymint_version_tags source=hal tags={tags}");
+    *cached = Some(tags.clone());
+    Ok(tags)
+}
+
+fn version_sample_params() -> Vec<KeyParam> {
+    vec![
+        KeyParam::Algorithm(KmAlgorithm::Aes),
+        KeyParam::KeySize(KeySizeInBits(256)),
+        KeyParam::Purpose(KmKeyPurpose::Encrypt),
+        KeyParam::Purpose(KmKeyPurpose::Decrypt),
+        KeyParam::BlockMode(kmr_wire::keymint::BlockMode::Gcm),
+        KeyParam::Padding(KmPadding::None),
+        KeyParam::MinMacLength(128),
+        KeyParam::NoAuthRequired,
+    ]
+}
+
+fn version_tags_from_characteristics(
+    characteristics: &[crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics],
+) -> Result<serde_json::Value> {
+    use crate::android::hardware::security::keymint::{
+        KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
+    };
+    let mut values = [None; 4];
+    for param in characteristics
+        .iter()
+        .filter(|chars| chars.securityLevel == SecurityLevel::TRUSTED_ENVIRONMENT)
+        .flat_map(|chars| &chars.authorizations)
+    {
+        let index = match param.tag {
+            Tag::OS_VERSION => 0,
+            Tag::OS_PATCHLEVEL => 1,
+            Tag::VENDOR_PATCHLEVEL => 2,
+            Tag::BOOT_PATCHLEVEL => 3,
+            _ => continue,
+        };
+        let value = match param.value {
+            KeyParameterValue::Integer(value) => u32::try_from(value)
+                .map_err(|_| anyhow!("negative HAL version authorization {:?}", param.tag))?,
+            _ => anyhow::bail!("invalid HAL version authorization {:?}", param.tag),
+        };
+        if values[index].replace(value).is_some() {
+            anyhow::bail!("duplicate HAL version authorization {:?}", param.tag);
+        }
+    }
+    let os_version = values[0].context("HAL version authorizations missing OS_VERSION")?;
+    let os_patchlevel = values[1].context("HAL version authorizations missing OS_PATCHLEVEL")?;
+    Ok(serde_json::json!({
+        "os_version": os_version,
+        "os_patchlevel": os_patchlevel,
+        "vendor_patchlevel": values[2],
+        "boot_patchlevel": values[3],
+    }))
 }
 
 /// Session persistence directory.  Key blobs minted by the real TEE are
@@ -755,6 +838,11 @@ fn build_attestation_params(
         KeyParam::KeySize(KeySizeInBits(key_size)),
         KeyParam::AttestationChallenge(challenge.to_vec()),
         KeyParam::AttestationApplicationId(app_id_der.to_vec()),
+        // AOSP Keystore2 adds tag 701 for KeyMint 1.0 and newer. Calling the
+        // HAL directly skips that layer: preserve A's creation time, or add
+        // the current time for legacy requests. The HAL signs it into the
+        // software-enforced list; certificate validity is independent.
+        KeyParam::CreationDatetime(spec.creation_datetime.unwrap_or_else(now_date_time)),
     ];
     params.extend(spec.device_properties.iter().cloned());
 
@@ -1315,6 +1403,141 @@ fn is_dead_object_status(status: &rsbinder::Status) -> bool {
         && status.transaction_error() == rsbinder::StatusCode::DeadObject
 }
 
+#[cfg(test)]
+mod version_tag_tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::{
+        KeyCharacteristics::KeyCharacteristics, KeyParameterValue::KeyParameterValue,
+        SecurityLevel::SecurityLevel, Tag::Tag,
+    };
+
+    fn characteristics() -> Vec<KeyCharacteristics> {
+        vec![KeyCharacteristics {
+            securityLevel: SecurityLevel::TRUSTED_ENVIRONMENT,
+            authorizations: [
+                (Tag::OS_VERSION, 170000),
+                (Tag::OS_PATCHLEVEL, 202609),
+                (Tag::VENDOR_PATCHLEVEL, 20260901),
+                (Tag::BOOT_PATCHLEVEL, 20251201),
+            ]
+            .into_iter()
+            .map(|(tag, value)| KmKeyParameter {
+                tag,
+                value: KeyParameterValue::Integer(value),
+            })
+            .collect(),
+        }]
+    }
+
+    #[test]
+    fn reads_hardware_dates_without_using_properties_or_software_tags() {
+        let mut chars = characteristics();
+        let mut software = characteristics().remove(0);
+        software.securityLevel = SecurityLevel::KEYSTORE;
+        software.authorizations[3].value = KeyParameterValue::Integer(20260901);
+        chars.push(software);
+        assert_eq!(
+            version_tags_from_characteristics(&chars).unwrap(),
+            serde_json::json!({
+                "os_version": 170000, "os_patchlevel": 202609,
+                "vendor_patchlevel": 20260901, "boot_patchlevel": 20251201,
+            })
+        );
+    }
+
+    #[test]
+    fn optional_partition_tags_are_absent_and_malformed_or_duplicate_values_fail() {
+        let mut chars = characteristics();
+        chars[0].authorizations.truncate(2);
+        assert!(version_tags_from_characteristics(&chars).unwrap()["boot_patchlevel"].is_null());
+        chars[0].authorizations[0].value = KeyParameterValue::Integer(-1);
+        assert!(version_tags_from_characteristics(&chars).is_err());
+        let mut chars = characteristics();
+        let duplicate = chars[0].authorizations[0].clone();
+        chars[0].authorizations.push(duplicate);
+        assert!(version_tags_from_characteristics(&chars).is_err());
+        assert!(version_tags_from_characteristics(&[]).is_err());
+    }
+
+    #[test]
+    fn snapshot_uses_only_standard_ephemeral_aes_params_for_every_keymint_version() {
+        let params = version_sample_params();
+        assert!(!params.iter().any(|param| matches!(
+            param,
+            KeyParam::AttestationChallenge(_)
+                | KeyParam::RollbackResistance
+                | KeyParam::OsVersion(_)
+                | KeyParam::BootPatchlevel(_)
+        )));
+        for version in [100, 200, 300, 400, 500] {
+            assert_eq!(
+                key_params_to_aidl(&params, version).unwrap().len(),
+                params.len()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod creation_datetime_tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::{
+        KeyParameterValue::KeyParameterValue, Tag::Tag,
+    };
+
+    // Parameter construction only: no Binder, key generation, or TEE calls.
+    fn creation_timestamps(spec: &KeySpec, version: i32) -> Vec<i64> {
+        build_attestation_params(b"app", b"challenge", spec, version)
+            .unwrap()
+            .into_iter()
+            .filter(|param| param.tag == Tag::CREATION_DATETIME)
+            .map(|param| match param.value {
+                KeyParameterValue::DateTime(ms) => ms,
+                other => panic!("creation time must use the AIDL DateTime variant: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn forwarded_creation_datetime_reaches_each_keymint_version_once() {
+        let requested = 1_793_284_488_065;
+        for version in [100, 200, 300, 400, 500] {
+            for algorithm in [KeyAlgorithm::EcP256, KeyAlgorithm::Rsa2048] {
+                let spec = KeySpec {
+                    algorithm,
+                    purposes: vec![KmKeyPurpose::Sign, KmKeyPurpose::Verify],
+                    digests: vec![KmDigest::Sha256],
+                    creation_datetime: Some(DateTime {
+                        ms_since_epoch: requested,
+                    }),
+                    cert_not_before: Some(DateTime { ms_since_epoch: 0 }),
+                    cert_not_after: Some(DateTime {
+                        ms_since_epoch: 253_402_300_799_000,
+                    }),
+                    ..Default::default()
+                };
+                assert_eq!(creation_timestamps(&spec, version), vec![requested]);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_request_uses_current_time_instead_of_certificate_not_before() {
+        let spec = KeySpec {
+            purposes: vec![KmKeyPurpose::Sign, KmKeyPurpose::Verify],
+            digests: vec![KmDigest::Sha256],
+            cert_not_before: Some(DateTime { ms_since_epoch: 0 }),
+            ..Default::default()
+        };
+        for version in [100, 200, 300, 400, 500] {
+            let before = now_date_time().ms_since_epoch;
+            let values = creation_timestamps(&spec, version);
+            let after = now_date_time().ms_since_epoch;
+            assert_eq!(values.len(), 1);
+            assert!((before..=after).contains(&values[0]));
+        }
+    }
+}
 #[cfg(test)]
 mod device_property_forwarding_tests {
     use super::*;

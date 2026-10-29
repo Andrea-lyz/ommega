@@ -238,6 +238,16 @@ pub struct RemoteAttestationKey {
     pub issuer_subject_name: Vec<u8>,
 }
 
+/// Version authorizations reported by one hardware security level.
+/// Missing optional partition tags stay absent rather than borrowing A's values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyMintVersionTags {
+    pub os_version: u32,
+    pub os_patchlevel: u32,
+    pub vendor_patchlevel: Option<u32>,
+    pub boot_patchlevel: Option<u32>,
+}
+
 /// Identity of the physical KeyMint HAL that minted a remote result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteKeyMintProfile {
@@ -272,6 +282,15 @@ pub struct RemoteAttestation {
 /// there.  Each method returns `Ok(None)` when the remote is unavailable or not
 /// configured, letting the TA fall back to the local software keybox.
 pub trait RemoteBackend: Send + Sync {
+    /// Current version authorizations from the existing profile exchange.
+    /// Legacy relays and security levels without a snapshot return `None`.
+    fn version_tags(
+        &self,
+        _security_level: keymint::SecurityLevel,
+    ) -> Result<Option<KeyMintVersionTags>, Error> {
+        Ok(None)
+    }
+
     /// Forward an attestation request.  Returns the B-side certificate chain
     /// (DER, leaf first) on success, or `None` if the remote is unavailable.
     fn attest(
