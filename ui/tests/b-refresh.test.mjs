@@ -30,10 +30,10 @@ const initialProperties = () => ({
 const properties = values => Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n') + '\n';
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({missingBridge = false, intercept = null} = {}) {
+function fixture({missingBridge = false, intercept = null, curl = true, relayLog = '2026-10-28 12:00:00 UTC [DEBUG] relay - b/poll status=204 body_len=0\n'} = {}) {
   let now = Date.parse('2026-10-28T12:00:00Z'), nextTimer = 1, focused = null;
   const timers = new Map(), intervals = new Map(), elements = [], byId = new Map(), observers = [];
-  const state = {raw:config(), runtime:{PIDS:'321', SPL:'2026-01-01', OS:'17', VERSION:'2.0-test'}, spl:initialProperties(), online:['b-one']};
+  const state = {raw:config(), runtime:{PIDS:'321', SPL:'2026-01-01', OS:'17', VERSION:'2.0-test'}, spl:initialProperties(), online:['b-one'], curl, relayLog};
   const calls = [], confirmations = [];
   const notify = () => observers.forEach(callback => queueMicrotask(callback));
   class Element extends EventTarget {
@@ -100,12 +100,17 @@ function fixture({missingBridge = false, intercept = null} = {}) {
     setInterval:(callback, delay) => { const id = nextTimer++; intervals.set(id, {callback, delay}); return id; },
     clearInterval:id => intervals.delete(id),
   });
-  const classify = command => command.includes('expected=') ? 'save' : command.includes('spl-control.sh" save ') ? 'spl-save'
-    : command.includes('spl-control.sh" status') ? 'spl' : command.startsWith('ommega_status_url=') ? 'server'
-      : command.startsWith('pids=') ? 'runtime' : command.includes('conf=') && command.includes('base64') ? 'config' : 'unexpected';
+  const classify = command => command.trim() === 'command -v curl 2>/dev/null' ? 'curl-check'
+    : command.startsWith('log=/data/adb/ommega/logs/relay.log') ? 'relay-log'
+      : command.includes('expected=') ? 'save' : command.includes('spl-control.sh" save ') ? 'spl-save'
+        : command.includes('spl-control.sh" status') ? 'spl' : command.startsWith('ommega_status_url=') ? 'server'
+          : command.startsWith('pids=') ? 'runtime' : command.includes('conf=') && command.includes('base64') ? 'config' : 'unexpected';
   function respond(call) {
     let errno = 0, stdout = '', stderr = '';
-    if (call.kind === 'config') stdout = state.raw === null ? 'missing\n' : digest(state.raw) + '\n' + Buffer.from(state.raw).toString('base64') + '\n';
+    if (call.kind === 'curl-check') {
+      if (state.curl) stdout = '/system/bin/curl\n'; else errno = 1;
+    } else if (call.kind === 'relay-log') stdout = state.relayLog || '';
+    else if (call.kind === 'config') stdout = state.raw === null ? 'missing\n' : digest(state.raw) + '\n' + Buffer.from(state.raw).toString('base64') + '\n';
     else if (call.kind === 'runtime') stdout = properties(state.runtime);
     else if (call.kind === 'spl') stdout = properties(state.spl);
     else if (call.kind === 'server') stdout = JSON.stringify({status:'ok', online_b_devices:state.online.map(device_id => ({device_id}))});
@@ -158,7 +163,7 @@ function fixture({missingBridge = false, intercept = null} = {}) {
 function assertReadOnly(calls) {
   assert.ok(calls.length > 0);
   for (const call of calls) {
-    assert.ok(['config','runtime','spl','server'].includes(call.kind), call.command);
+    assert.ok(['config','runtime','spl','server','curl-check','relay-log'].includes(call.kind), call.command);
     assert.doesNotMatch(call.command, /\b(?:resetprop|killall|mkdir|mktemp|touch)\b|service\.sh|spl-control\.sh" (?:save|apply)\b/);
     if (call.kind === 'spl') assert.match(call.command, / status --readonly$/);
   }
@@ -182,6 +187,15 @@ test('B global refresh bypasses the 20s status throttle and awaits config, runti
   assert.equal(f.get('runtime-pid').textContent, 'PID 654');
   assert.equal(f.get('server-state').dataset.tone, 'offline');
   assert.match(f.get('refresh-message').textContent, /refreshed/i);
+  assertReadOnly(f.calls); assertIdle(f);
+});
+
+test('B server card falls back to the relay log when curl is absent', async () => {
+  const f = await fixture({curl:false}).ready();
+  assert.equal(f.count('server'), 0);
+  assert.equal(f.count('relay-log'), 1);
+  assert.equal(f.get('server-state').dataset.tone, 'online');
+  assert.match(f.get('server-note').textContent, /204/);
   assertReadOnly(f.calls); assertIdle(f);
 });
 
@@ -315,6 +329,7 @@ test('B section rereads queue behind an in-flight read and preserve edits made a
 for (const kind of ['config','runtime','spl','server']) {
   test(`B ${kind} read failures are visible, clear busy states and recover on immediate forced retry`, async () => {
     const f = await fixture().ready();
+    if (kind === 'server') f.state.relayLog = '';
     f.get('relay-device').value = 'keep-draft'; f.get('system').value = '2033-01-01';
     f.intercept = (call, respond) => call.kind === kind ? call.reply(1, '', `${kind} permission denied`) : respond();
     await f.click('runtime-refresh');
@@ -331,6 +346,7 @@ for (const kind of ['config','runtime','spl','server']) {
   });
   test(`B absent ${kind} callbacks have a bounded read timeout and late results cannot overwrite a retry`, async () => {
     const f = await fixture().ready(), held = [];
+    if (kind === 'server') f.state.relayLog = '';
     f.intercept = (call, respond) => call.kind === kind ? held.push(call) : respond();
     let done = false; const refresh = f.click('runtime-refresh').then(() => { done = true; });
     await settle(); assert.equal(done, false); assert.equal(held.length, 1);
@@ -345,6 +361,7 @@ for (const kind of ['config','runtime','spl','server']) {
   });
   test(`B malformed ${kind} success callbacks are errors rather than successful refreshes`, async () => {
     const f = await fixture().ready();
+    if (kind === 'server') f.state.relayLog = '';
     f.intercept = (call, respond) => call.kind === kind ? call.reply(0, 'not a valid status response') : respond();
     await f.click('runtime-refresh');
     assert.match(f.get('refresh-message').className, /error/); assertIdle(f);
@@ -381,6 +398,6 @@ test('B hidden tabs skip background reads but manual refresh remains forced and 
   const f = await fixture().ready();
   f.document.hidden = true;
   const before = f.calls.length; await f.poll(); assert.equal(f.calls.length, before);
-  await f.click('runtime-refresh'); assert.equal(f.calls.length, before + 4);
+  await f.click('runtime-refresh'); assert.equal(f.calls.length, before + 5);
   assertReadOnly(f.calls); assertIdle(f);
 });

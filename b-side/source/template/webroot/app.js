@@ -375,6 +375,7 @@ async function refreshServerStatus(force = false, configReadable = true) {
     // has no curl, so those devices use the relay's last poll below.
     const curlCheck = await exec('command -v curl 2>/dev/null', {read:true});
     const hasCurl = curlCheck.errno === 0 && curlCheck.stdout.trim() !== '';
+    let curlError = '';
     if (hasCurl) {
       const curlResult = await exec(`ommega_status_url=$(printf '%s' '${encoded}' | base64 -d)
 curl --silent --show-error --fail --insecure --connect-timeout 3 --max-time 6 -- "$ommega_status_url"`, {read:true});
@@ -385,6 +386,9 @@ curl --silent --show-error --fail --insecure --connect-timeout 3 --max-time 6 --
           serverResult = {ok:true};
           return serverResult;
         }
+        curlError = '服务器响应无效，请刷新重试。';
+      } else {
+        curlError = curlResult.stderr || '无法读取 Server 状态；本机进程状态不代表已连接。';
       }
     }
     // No curl, or curl did not return a usable response: read the relay's own
@@ -393,15 +397,17 @@ curl --silent --show-error --fail --insecure --connect-timeout 3 --max-time 6 --
 if [ -r "$log" ]; then
   tail -n 500 "$log" 2>/dev/null | grep -aE 'b/poll status=[0-9]+' | tail -n 1
 fi`, {read:true});
-    const poll = relayRead.errno === 0 ? parseRelayPoll(relayRead.stdout) : null;
+    let poll = null, localError = '';
+    if (relayRead.errno === 0) poll = parseRelayPoll(relayRead.stdout);
+    else localError = relayRead.stderr || '';
     if (poll) {
       renderRelayPollStatus(poll);
       serverResult = {ok:true};
       return serverResult;
     }
-    throw new Error(hasCurl
+    throw new Error(localError || curlError || (hasCurl
       ? '服务器响应无效，relay 日志也不可用。'
-      : '本机没有 curl，relay 日志也不可用。');
+      : '本机没有 curl，relay 日志也不可用。'));
   } catch (error) {
     renderServerStatus('unknown');
     setText('server-note', t(error.message));
