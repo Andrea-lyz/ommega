@@ -23,6 +23,19 @@ const start = source.indexOf(GLUE_START);
 assert.notEqual(start, -1, "compat glue missing from the WebUI bundle");
 const glue = source.slice(start);
 
+// Android WebView injects `ksu` as a Java object whose methods only work when
+// called through that object; a detached copy throws. The mock behaves the same
+// so a regression like that fails here instead of on a device.
+function strictKsu(appLabel = pkg => 'App ' + pkg) {
+  const bridge = {
+    getPackagesInfo(packages) {
+      if (this !== bridge) throw new Error("Java bridge method can't be invoked on a non-injected object");
+      return JSON.stringify(JSON.parse(packages).map(pkg => ({packageName:pkg, appLabel:appLabel(pkg)})));
+    },
+  };
+  return bridge;
+}
+
 function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
   const element = { checked: false, onclick: undefined, addEventListener() {} };
   const context = {
@@ -34,7 +47,7 @@ function loadGlue({language = "en", preference = null, scopeConfig} = {}) {
     URL,
     setTimeout,
     clearTimeout,
-    ksu: { getPackagesInfo: packages => JSON.stringify(JSON.parse(packages).map(pkg => ({packageName:pkg, appLabel:'App ' + pkg}))) },
+    ksu: strictKsu(),
     Mi: async () => undefined,
     _: async () => ({ stdout: "" }),
     se: { querySelectorAll: () => [] },
@@ -1316,15 +1329,31 @@ test("app inventory never owns or binds the retired search editor", () => {
 test("app names recover from a failed label batch instead of showing package ids", async () => {
   const ctx=loadGlue();
   const calls=[];
-  ctx.ksu={getPackagesInfo:raw=>{
+  const bridge={};
+  bridge.getPackagesInfo=function(raw){
+    if(this!==bridge)throw new Error("Java bridge method can't be invoked on a non-injected object");
     const list=JSON.parse(raw);calls.push(list.length);
     if(list.length>1)throw new Error('batch rejected');
     return JSON.stringify(list.map(pkg=>({packageName:pkg,appLabel:pkg==='id.my.pjm.qbcd_okr_dvii'?'xka wl rl':'App '+pkg})));
-  }};
+  };
+  ctx.ksu=bridge;
   const result=await ctx.ommegaAppNames(['id.my.pjm.qbcd_okr_dvii','com.example.other'],{});
   assert.equal(result.find(app=>app.packageName==='id.my.pjm.qbcd_okr_dvii').appName,'xka wl rl');
   assert.equal(result.find(app=>app.packageName==='com.example.other').appName,'App com.example.other');
   assert.ok(calls.includes(1),'failed batches are retried one package at a time');
+});
+
+test("app names are read through the injected bridge, never through a detached copy", async () => {
+  const ctx=loadGlue();
+  ctx.ksu=strictKsu(pkg=>pkg==='com.example.wallet'?'钱包':'App '+pkg);
+  const result=await ctx.ommegaAppNames(['com.example.wallet','com.example.other'],{});
+  assert.deepEqual(result.map(app=>[app.packageName,app.appName]),[
+    ['com.example.wallet','钱包'],
+    ['com.example.other','App com.example.other'],
+  ]);
+  const adapter=readFileSync(join(here,"webui-app-detail.js"),"utf8");
+  assert.doesNotMatch(adapter,/=\s*globalThis\.ksu\??\.getPackagesInfo/);
+  assert.match(adapter,/bridge\.getPackagesInfo\(/);
 });
 
 test("settings refresh disables compatibility while reading and rejects a superseded snapshot", async () => {

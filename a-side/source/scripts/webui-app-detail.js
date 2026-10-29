@@ -639,6 +639,9 @@ async function ommegaAppFallbackLabels() {
   finally { clearTimeout(timer); }
 }
 
+// The manager injects `ksu` as a Java object. Reading a method off that object
+// and calling it later fails in Android WebView with "Java bridge method can't
+// be invoked on a non-injected object", so every query keeps the live receiver.
 // Labels are resolved in small batches and then package-by-package. A single
 // oversized/failed batch must not turn an entire page of real app names into
 // raw package ids (Android WebView can reject a large getPackagesInfo reply).
@@ -655,17 +658,17 @@ async function ommegaAppNames(pkgs, applist) {
     if (cached && String(cached).trim()) { names.set(pkg, String(cached).trim()); labeled.add(pkg); }
     else names.set(pkg, pkg);
   }
-  const api = globalThis.ksu?.getPackagesInfo;
-  if (typeof api === "function" && pkgs.length) {
+  const bridge = globalThis.ksu;
+  if (typeof bridge?.getPackagesInfo === "function" && pkgs.length) {
     for (let i = 0; i < pkgs.length; i += 24) {
       try {
-        const infos = JSON.parse(api(JSON.stringify(pkgs.slice(i, i + 24))));
+        const infos = JSON.parse(bridge.getPackagesInfo(JSON.stringify(pkgs.slice(i, i + 24))));
         for (const info of Array.isArray(infos) ? infos : []) take(info);
       } catch (_) { /* retried one by one below */ }
     }
     for (const pkg of pkgs.filter(name => !labeled.has(name))) {
       try {
-        const infos = JSON.parse(api(JSON.stringify([pkg])));
+        const infos = JSON.parse(bridge.getPackagesInfo(JSON.stringify([pkg])));
         for (const info of Array.isArray(infos) ? infos : [infos]) take(info);
       } catch (_) { /* package stays on its package-id fallback */ }
     }

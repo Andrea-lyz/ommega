@@ -205,7 +205,7 @@ try {
       window.__bootstrapHeld=[];window.__bootstrapReleased=false;
       Object.defineProperty(window,'ksu',{configurable:true,get:()=>bridge,set:value=>{
         bridge=value;const original=value.exec;window.__bootstrapExec=original;
-        const packages=value.getPackagesInfo;
+        const packages=value.getPackagesInfo.bind(value);
         value.getPackagesInfo=raw=>JSON.stringify(JSON.parse(packages(raw)).map(app=>app.packageName==='com.example.chat'?{...app,appLabel:'中文聊天'}:app));
         value.exec=(command,options,callback)=>command==='[ -d /data/adb/modules/.ommega ]' && !window.__bootstrapReleased
           ? window.__bootstrapHeld.push({command,options,callback}) : original(command,options,callback);
