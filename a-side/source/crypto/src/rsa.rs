@@ -298,9 +298,17 @@ impl OmmegaRsaUndigestSignOperation {
         let key_len = rsa_key.size();
         let (left_pad, max_size) = match mode {
             SignMode::NoPadding => (true, key_len),
-            SignMode::Pkcs1_1_5Padding(Digest::None) => {
-                (false, key_len - PKCS1_UNDIGESTED_SIGNATURE_PADDING_OVERHEAD)
-            }
+            SignMode::Pkcs1_1_5Padding(Digest::None) => (
+                false,
+                key_len
+                    .checked_sub(PKCS1_UNDIGESTED_SIGNATURE_PADDING_OVERHEAD)
+                    .ok_or_else(|| {
+                        km_err!(
+                            IncompatiblePaddingMode,
+                            "RSA key too small for PKCS#1 v1.5 signature padding"
+                        )
+                    })?,
+            ),
             _ => {
                 return Err(km_err!(
                     UnsupportedPaddingMode,
@@ -324,33 +332,60 @@ impl crypto::AccumulatingOperation for OmmegaRsaUndigestSignOperation {
     }
 
     fn update(&mut self, data: &[u8]) -> Result<(), Error> {
+        if self.pending_input.len().saturating_add(data.len()) > self.max_size {
+            return Err(km_err!(
+                InvalidInputLength,
+                "too much input for RSA signing"
+            ));
+        }
         self.pending_input.try_extend_from_slice(data)?;
         Ok(())
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
+        if self.pending_input.len() > self.max_size {
+            return Err(km_err!(
+                InvalidInputLength,
+                "too much input for RSA signing"
+            ));
+        }
         let priv_key = parse_key(&self.key)?;
+        if !self.left_pad {
+            // Match BoringSSL private_encrypt(PKCS1): type 1 padding of the raw
+            // message, without hashing or a DigestInfo prefix. The backend
+            // performs the private operation with RSA blinding.
+            let mut rng = OsRng;
+            return priv_key
+                .sign_with_rng(
+                    &mut rng,
+                    Pkcs1v15Sign::new_unprefixed(),
+                    &self.pending_input,
+                )
+                .map_err(|e| km_err!(UnknownError, "RSA-PKCS1 undigested sign failed: {e:?}"));
+        }
+
+        // NoPadding retains raw RSA semantics, including left-padding short
+        // inputs, but must reject representatives outside the modulus.
         let key_len = priv_key.size();
-        let input = if self.left_pad {
-            zero_pad_left(&self.pending_input, self.max_size)?
-        } else {
-            self.pending_input.clone()
-        };
-        let n = priv_key.n().clone();
-        let d = priv_key.d().clone();
+        let input = zero_pad_left(&self.pending_input, key_len)?;
+        let n = priv_key.n();
         let m = rsa::BigUint::from_bytes_be(&input);
-        let sig = m.modpow(&d, &n);
-        let mut buf = vec_try![0; key_len]?;
-        let sig_bytes = sig.to_bytes_be();
-        let offset = key_len.saturating_sub(sig_bytes.len());
-        buf[offset..].copy_from_slice(&sig_bytes);
-        Ok(buf)
+        if &m >= n {
+            return Err(km_err!(
+                InvalidArgument,
+                "RSA input is not less than the modulus"
+            ));
+        }
+        let sig = m.modpow(priv_key.d(), n);
+        zero_pad_left(&sig.to_bytes_be(), key_len)
     }
 }
 
 fn zero_pad_left(data: &[u8], len: usize) -> Result<Vec<u8>, Error> {
+    let padding_len = len
+        .checked_sub(data.len())
+        .ok_or_else(|| km_err!(InvalidInputLength, "RSA input exceeds padded length"))?;
     let mut dest = vec_try![0; len]?;
-    let padding_len = len - data.len();
     dest[padding_len..].copy_from_slice(data);
     Ok(dest)
 }

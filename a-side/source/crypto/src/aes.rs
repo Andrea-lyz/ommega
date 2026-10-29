@@ -21,6 +21,13 @@
 
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit as _, KeyIvInit as _, StreamCipher as _};
 use aes::{Aes128, Aes192, Aes256};
+use aes_gcm::{
+    aead::{
+        consts::{U12, U13, U14, U15, U16},
+        AeadInPlace,
+    },
+    AesGcm,
+};
 use ctr::Ctr128BE;
 use kmr_common::{crypto, crypto::OpaqueOr, explicit, km_err, vec_try, Error};
 use std::boxed::Box;
@@ -82,12 +89,15 @@ fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>, Error> {
         .last()
         .ok_or_else(|| km_err!(InvalidInputLength, "empty data"))?;
     let pad = pad as usize;
-    if pad == 0 || pad > data.len() || !data.len().is_multiple_of(BLOCK) {
-        return Err(km_err!(InvalidInputLength, "bad PKCS#7 padding"));
+    if !data.len().is_multiple_of(BLOCK) {
+        return Err(km_err!(InvalidInputLength, "input is not a full block"));
+    }
+    if !(1..=BLOCK).contains(&pad) {
+        return Err(km_err!(InvalidArgument, "bad PKCS#7 padding"));
     }
     let start = data.len() - pad;
     if data[start..].iter().any(|&b| b as usize != pad) {
-        return Err(km_err!(InvalidInputLength, "bad PKCS#7 padding bytes"));
+        return Err(km_err!(InvalidArgument, "bad PKCS#7 padding bytes"));
     }
     Ok(data[..start].to_vec())
 }
@@ -178,40 +188,42 @@ impl crypto::EmittingOperation for OmmegaAesOperation {
                     out.extend_from_slice(&self.run_blocks(&padded));
                 }
                 crypto::SymmetricOperation::Decrypt => {
+                    if self.data.is_empty() || !self.data.len().is_multiple_of(BLOCK) {
+                        return Err(km_err!(
+                            InvalidInputLength,
+                            "PKCS#7 ciphertext must contain full blocks"
+                        ));
+                    }
                     let dec = self.run_blocks(&self.data);
                     out.extend_from_slice(&pkcs7_unpad(&dec)?);
                 }
             },
             crypto::aes::CipherMode::Ctr { nonce } => {
-                let mut nonce12 = [0u8; 12];
-                nonce12.copy_from_slice(&nonce[..12]);
-                out = ctr_transform_keyed_bytes(&self.key, &nonce12, &self.data)?;
+                out = ctr_transform_keyed_bytes(&self.key, &nonce, &self.data)?;
             }
         }
         Ok(out)
     }
 }
 
-/// CTR-transform data with the given raw key bytes and 12-byte nonce. Uses AES-128,
-/// AES-192 or AES-256 based on key length.
-fn ctr_transform_keyed_bytes(key: &[u8], nonce: &[u8; 12], data: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut iv = [0u8; 16];
-    iv[..12].copy_from_slice(nonce);
+/// CTR-transform data with the complete 128-bit initial counter block.
+/// Uses AES-128, AES-192 or AES-256 based on key length.
+fn ctr_transform_keyed_bytes(key: &[u8], iv: &[u8; BLOCK], data: &[u8]) -> Result<Vec<u8>, Error> {
     let mut ks = vec_try![0; data.len()]?;
     let apply = |out: &mut [u8]| -> Result<(), Error> {
         match key.len() {
             16 => {
-                let mut c = Ctr128BE::<Aes128>::new_from_slices(key, &iv)
+                let mut c = Ctr128BE::<Aes128>::new_from_slices(key, iv)
                     .map_err(|_| km_err!(UnknownError, "invalid AES-128-CTR key"))?;
                 c.apply_keystream(out);
             }
             24 => {
-                let mut c = Ctr128BE::<Aes192>::new_from_slices(key, &iv)
+                let mut c = Ctr128BE::<Aes192>::new_from_slices(key, iv)
                     .map_err(|_| km_err!(UnknownError, "invalid AES-192-CTR key"))?;
                 c.apply_keystream(out);
             }
             32 => {
-                let mut c = Ctr128BE::<Aes256>::new_from_slices(key, &iv)
+                let mut c = Ctr128BE::<Aes256>::new_from_slices(key, iv)
                     .map_err(|_| km_err!(UnknownError, "invalid AES-256-CTR key"))?;
                 c.apply_keystream(out);
             }
@@ -312,14 +324,7 @@ impl crypto::EmittingOperation for OmmegaAesGcmEncryptOperation {
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
-        if self.tag_len != 16 {
-            return Err(km_err!(
-                InvalidArgument,
-                "only 16-byte GCM tags supported, requested {}",
-                self.tag_len
-            ));
-        }
-        gcm_encrypt(&self.key, &self.nonce, &self.aad, &self.data)
+        gcm_encrypt(&self.key, &self.nonce, &self.aad, &self.data, self.tag_len)
     }
 }
 
@@ -337,14 +342,7 @@ impl crypto::EmittingOperation for OmmegaAesGcmDecryptOperation {
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
-        if self.tag_len != 16 {
-            return Err(km_err!(
-                InvalidArgument,
-                "only 16-byte GCM tags supported, requested {}",
-                self.tag_len
-            ));
-        }
-        // The input is ciphertext || tag (16 bytes at the end).
+        // The input is ciphertext || tag of the length selected at begin().
         if self.data.len() < self.tag_len {
             return Err(km_err!(InvalidTag, "ciphertext too short for tag"));
         }
@@ -355,13 +353,37 @@ impl crypto::EmittingOperation for OmmegaAesGcmDecryptOperation {
     }
 }
 
+// Keep key-size dispatch shared between encryption and authenticated decryption.
+// The third AesGcm type parameter is the authentication tag size, not the nonce.
+macro_rules! gcm_for_key {
+    ($operation:ident, $tag_size:ty, $key:expr, $nonce:expr, $aad:expr, $data:expr $(, $tag:expr)?) => {
+        match $key.len() {
+            16 => $operation::<AesGcm<Aes128, U12, $tag_size>>($key, $nonce, $aad, $data $(, $tag)?),
+            24 => $operation::<AesGcm<Aes192, U12, $tag_size>>($key, $nonce, $aad, $data $(, $tag)?),
+            32 => $operation::<AesGcm<Aes256, U12, $tag_size>>($key, $nonce, $aad, $data $(, $tag)?),
+            _ => Err(km_err!(UnknownError, "invalid GCM key length")),
+        }
+    };
+}
+
 fn gcm_encrypt(
     key: &[u8],
     nonce: &[u8; 12],
     aad: &[u8],
     plaintext: &[u8],
+    tag_len: usize,
 ) -> Result<Vec<u8>, Error> {
-    gcm_encrypt_raw(key, nonce, aad, plaintext)
+    match tag_len {
+        12 => gcm_for_key!(gcm_encrypt_typed, U12, key, nonce, aad, plaintext),
+        13 => gcm_for_key!(gcm_encrypt_typed, U13, key, nonce, aad, plaintext),
+        14 => gcm_for_key!(gcm_encrypt_typed, U14, key, nonce, aad, plaintext),
+        15 => gcm_for_key!(gcm_encrypt_typed, U15, key, nonce, aad, plaintext),
+        16 => gcm_for_key!(gcm_encrypt_typed, U16, key, nonce, aad, plaintext),
+        _ => Err(km_err!(
+            InvalidMacLength,
+            "unsupported GCM tag length {tag_len}"
+        )),
+    }
 }
 
 fn gcm_decrypt(
@@ -371,34 +393,73 @@ fn gcm_decrypt(
     ciphertext: &[u8],
     tag: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    gcm_decrypt_raw(key, nonce, aad, ciphertext, tag)
+    match tag.len() {
+        12 => gcm_for_key!(gcm_decrypt_typed, U12, key, nonce, aad, ciphertext, tag),
+        13 => gcm_for_key!(gcm_decrypt_typed, U13, key, nonce, aad, ciphertext, tag),
+        14 => gcm_for_key!(gcm_decrypt_typed, U14, key, nonce, aad, ciphertext, tag),
+        15 => gcm_for_key!(gcm_decrypt_typed, U15, key, nonce, aad, ciphertext, tag),
+        16 => gcm_for_key!(gcm_decrypt_typed, U16, key, nonce, aad, ciphertext, tag),
+        len => Err(km_err!(
+            InvalidMacLength,
+            "unsupported GCM tag length {len}"
+        )),
+    }
 }
 
-/// Public AES-GCM encrypt helper (used by `km`). Emits `ciphertext || 16-byte tag`.
+fn gcm_encrypt_typed<C>(
+    key: &[u8],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, Error>
+where
+    C: AeadInPlace<NonceSize = U12> + aes_gcm::KeyInit,
+{
+    let cipher = C::new_from_slice(key).map_err(|_| km_err!(UnknownError, "invalid GCM key"))?;
+    let mut output = plaintext.to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(aes_gcm::Nonce::from_slice(nonce), aad, &mut output)
+        .map_err(|_| km_err!(VerificationFailed, "GCM encrypt failed"))?;
+    output.extend_from_slice(&tag);
+    Ok(output)
+}
+
+fn gcm_decrypt_typed<C>(
+    key: &[u8],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    ciphertext: &[u8],
+    tag: &[u8],
+) -> Result<Vec<u8>, Error>
+where
+    C: AeadInPlace<NonceSize = U12> + aes_gcm::KeyInit,
+{
+    let cipher = C::new_from_slice(key).map_err(|_| km_err!(UnknownError, "invalid GCM key"))?;
+    let mut output = ciphertext.to_vec();
+    // RustCrypto checks the selected tag in constant time before decrypting.
+    // Do not return any plaintext on authentication failure.
+    cipher
+        .decrypt_in_place_detached(
+            aes_gcm::Nonce::from_slice(nonce),
+            aad,
+            &mut output,
+            aes_gcm::Tag::<C::TagSize>::from_slice(tag),
+        )
+        .map_err(|_| km_err!(VerificationFailed, "GCM decrypt failed"))?;
+    Ok(output)
+}
+
+/// AES-GCM helper for keystore storage. Keeps the 16-byte tag wire format.
 pub(crate) fn gcm_encrypt_raw(
     key: &[u8],
     nonce: &[u8; 12],
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let alg = gcm_alg(key.len())?;
-    let key = ring::aead::UnboundKey::new(alg, key)
-        .map_err(|_| km_err!(UnknownError, "invalid GCM key"))?;
-    let sealing = ring::aead::LessSafeKey::new(key);
-    let nonce = ring::aead::Nonce::assume_unique_for_key(*nonce);
-    let aad = ring::aead::Aad::from(aad);
-    let mut in_out = plaintext.to_vec();
-    sealing
-        .seal_in_place_separate_tag(nonce, aad, &mut in_out)
-        .map(|tag| {
-            let mut out = in_out;
-            out.extend_from_slice(tag.as_ref());
-            out
-        })
-        .map_err(|_| km_err!(VerificationFailed, "GCM encrypt failed"))
+    gcm_encrypt(key, nonce, aad, plaintext, 16)
 }
 
-/// Public AES-GCM decrypt helper (used by `km`). `ciphertext` and `tag` are separate.
+/// AES-GCM storage helper. The separate tag must remain exactly 16 bytes.
 pub(crate) fn gcm_decrypt_raw(
     key: &[u8],
     nonce: &[u8; 12],
@@ -406,25 +467,14 @@ pub(crate) fn gcm_decrypt_raw(
     ciphertext: &[u8],
     tag: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let alg = gcm_alg(key.len())?;
-    let key = ring::aead::UnboundKey::new(alg, key)
-        .map_err(|_| km_err!(UnknownError, "invalid GCM key"))?;
-    let opening = ring::aead::LessSafeKey::new(key);
-    let nonce = ring::aead::Nonce::assume_unique_for_key(*nonce);
-    let aad = ring::aead::Aad::from(aad);
-    let mut in_out = ciphertext.to_vec();
-    in_out.extend_from_slice(tag);
-    opening
-        .open_in_place(nonce, aad, &mut in_out)
-        .map(|pt| pt.to_vec())
-        .map_err(|_| km_err!(VerificationFailed, "GCM decrypt failed"))
+    if tag.len() != 16 {
+        return Err(km_err!(
+            InvalidMacLength,
+            "storage GCM requires a 16-byte tag"
+        ));
+    }
+    gcm_decrypt(key, nonce, aad, ciphertext, tag)
 }
 
-fn gcm_alg(key_len: usize) -> Result<&'static ring::aead::Algorithm, Error> {
-    match key_len {
-        16 => Ok(&ring::aead::AES_128_GCM),
-        24 => Err(km_err!(UnknownError, "AES-192-GCM unsupported")),
-        32 => Ok(&ring::aead::AES_256_GCM),
-        _ => Err(km_err!(UnknownError, "invalid GCM key length")),
-    }
-}
+#[cfg(test)]
+mod tests;
