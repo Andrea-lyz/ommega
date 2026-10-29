@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
-> 不是上游官方发行版或官方在线服务。当前产品版本为 **2.1.3**，模块作者信息为
+> 不是上游官方发行版或官方在线服务。当前产品版本为 **2.1.4**，模块作者信息为
 > `jiyin004, Andrea-lyz`。
 
 > [!WARNING]
@@ -25,22 +25,36 @@ Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬
 本 fork 面向专用 **1A / 1B** 部署，维护远程身份一致性、原生 StrongBox、冷启动
 生命周期、WebUI 配置和 B 端服务级运维；不以一个 B 服务多个 A 为适配目标。
 
-## 2.1.3 下载与界面
+## 2.1.4 下载与界面
 
-[下载与完整中英更新说明](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.3) ·
+[下载与完整中英更新说明](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.4) ·
 [发布 CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
 
 | 发布资产 | 用途 |
 |---|---|
-| `ommega-a-release-arm64-v8a-2.1.3-<commit>.zip` | A 端 root 模块，含 WebUI |
-| `ommegaclient-b-release-arm64-v8a-2.1.3-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
+| `ommega-a-release-arm64-v8a-2.1.4-<commit>.zip` | A 端 root 模块，含 WebUI |
+| `ommegaclient-b-release-arm64-v8a-2.1.4-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
 | `relay_rs-linux-x86_64-musl` | 自建 Linux Server，独立更新 |
-| `Ommega-B-app-2.1.3-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同原生 B 模块 |
-| `StrongBoxCapabilityMask-2.1.3-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
+| `Ommega-B-app-2.1.4-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同原生 B 模块 |
+| `StrongBoxCapabilityMask-2.1.4-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
 | `SHA256SUMS` / `build-info.json` | 下载校验和、产品版本、源提交与签名说明 |
 
 GitHub 自动生成的 Source code 压缩包不是可安装模块。两个 APK 均为 debug 签名；
 覆盖安装前应核对签名。更新 A/B ZIP 不会替你更新 Server 或安装可选 APK。
+
+### 2.1.4 更新要点
+
+- B 端 WebUI 的 Server connection 卡片不再依赖 WebView 里的 curl/wget。设备有
+  `curl` 时优先读取 Server 的 `/api/status/`；没有 `curl` 或请求不可用时，读取
+  relay 日志最后一条 `b/poll status=`，显示 200/204、429、401/403、5xx 或 stale。
+- 修复原生 Android（没有 `/system/bin/curl`）上一直显示
+  “Invalid server response” / “Some status reads failed” 的误报；relay 实际 poll
+  204 时卡片会显示 “Server connected” 和最后 poll 时间。移除不兼容的 busybox
+  wget 状态读取路径。
+- 本次只改 B 端 WebUI；B relay 代码、A/Server、service.sh、TEE/KeyMint 未改，
+  版本号统一为 2.1.4。Server 2.1.3 的 poll 独立配额修复保持不变。
+- A/Server、B-app、StrongBoxCapabilityMask 相对 2.1.3 只有版本号变化。升级时只需
+  更新 B 模块即可获得状态卡修复；两个 APK 仍为 debug 签名。
 
 ### 2.1.3 更新要点
 
@@ -388,7 +402,7 @@ GitHub Actions 并行构建 A 模块、B 模块、Linux musl Server 和 Android 
 StrongBoxCapabilityMask 单元测试。Rust 固定到已验证的 `nightly-2026-09-01`，
 A/B/Server 提交 Cargo.lock，按组件缓存 Rust 构建并复用 Gradle 缓存。
 
-当前统一版本为 **2.1.3**。CI 默认使用源码版本，不自动递增或提交版本；
+当前统一版本为 **2.1.4**。CI 默认使用源码版本，不自动递增或提交版本；
 手动 `release_version` 仅覆盖本次构建。当前工作流只忽略纯 `*.md` 修改；TXT 修改仍会触发构建。
 全部构建成功后生成 `ommega-<版本>` artifact，包含 A/B 模块 ZIP、Server、
 B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
@@ -568,14 +582,14 @@ cd StrongBoxCapabilityMask
 
 ## 验证范围与限制
 
-2.1.3 已通过主机 WebUI 检查、CPU 配置与属性记录测试、Android 全工作区 Clippy 和测试编译，
-并由 [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml) 构建发布资产。
-这些是构建与界面检查。Server 的 poll 独立配额已在 de-fra 上用临时端口做集成测试
-（work 打满不影响 poll，poll 打满不影响 work），随后完成部署验证；A 端 crypto、版本标签、
-远程签名与注入器的实机结果见对应 PR，整体应用流程仍需安装新版后验收。
+2.1.4 已通过主机 WebUI 检查、Android 全工作区 Clippy 和测试编译，并由
+[Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml) 构建发布资产。
+这些是构建与界面检查。B 端刷新/状态测试 26/26 通过；客户测试设备上状态卡显示
+“Server connected / Relay last poll succeeded (HTTP 204)”，不再出现 Invalid server response。
+整体应用流程仍需安装新版后验收。
 
 <details>
-<summary>历史实现与测试记录，不代表 2.1.3 已完成整体实机验收</summary>
+<summary>历史实现与测试记录，不代表 2.1.4 已完成整体实机验收</summary>
 
 1.6.0 修复三处会直接打断应用的 A 端 KeyMint 实现问题：镜像重放期间不再把 ommega 路由调用打成 `SYSTEM_ERROR`（改为有界等待，`poisoned` 仍 fail-closed）；EC 密钥生成恢复 AOSP 语义（EC + ENCRYPT 只警告不拒绝，不再硬报 `INCOMPATIBLE_PURPOSE`）；RSA 与 ECDSA 按密钥请求的摘要选择签名方案（此前 RSA 的 PKCS#1/PSS 写死 SHA-256、ECDSA 用曲线默认摘要：前者让非 SHA-256 的 RSA 密钥签名直接失败，后者产生摘要不匹配的静默错误签名）。B 端 `spl-control.sh` 拒绝 SPL/OS 版本降级，A 端新增 `event=local_sign` 诊断日志（记录本地签名的 padding/digest）。实机验证：HDFC 的 RSA-SHA512 指纹登录、Google Pay 的 EC 密钥生成、以及锁屏令牌重放窗口内被打断的指纹流程均恢复正常；A 端 mirror 12/12、tag 12/12、crypto 7/7 单测与 B 端 13 个 spl-control 用例通过，CI 全绿。Server 相对 1.5.3 只有版本号变化；B 端模块额外包含降级防护脚本。
 
