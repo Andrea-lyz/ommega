@@ -277,6 +277,54 @@ function serverOnlineState(raw, deviceId) {
   if (!status.online_b_devices.every(device => device && typeof device.device_id === 'string')) return 'unknown';
   return status.online_b_devices.some(device => device.device_id === deviceId) ? 'online' : 'offline';
 }
+
+// The relay already talks to the server on every poll. Reading its last poll
+// result is cheaper and more reliable than asking the WebView to fetch HTTPS:
+// stock Android ships no curl, and the manager's busybox wget cannot always
+// complete this server's TLS handshake. The log line is a plain local read.
+function parseRelayPoll(raw) {
+  const line = String(raw || '').trim().split(/\r?\n/).filter(Boolean).pop();
+  if (!line) return null;
+  const match = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC .*b\/poll status=(\d+)/.exec(line);
+  if (!match) return null;
+  const at = Date.parse(match[1].replace(' ', 'T') + 'Z');
+  if (!Number.isFinite(at)) return null;
+  return { status: Number(match[2]), at };
+}
+function renderRelayPollStatus(poll) {
+  const heading = $('server-state');
+  const time = new Intl.DateTimeFormat(document.documentElement.lang, {timeStyle:'medium'}).format(new Date(poll.at));
+  const age = Date.now() - poll.at;
+  let title, note, tone;
+  if ((poll.status === 200 || poll.status === 204) && age <= 30000) {
+    title = text('服务器已连接', 'Server connected');
+    note = text(`Relay 最近一次 poll 成功（HTTP ${poll.status}），时间 ${time}。`, `Relay last poll succeeded (HTTP ${poll.status}) at ${time}.`);
+    tone = 'online';
+  } else if (poll.status === 200 || poll.status === 204) {
+    title = text('连接状态未知', 'Connection unknown');
+    note = text(`Relay 最近一次成功 poll 是 ${time}，已超过 30 秒。屏幕关闭或进程被冻结时可能出现。`, `The last successful relay poll was at ${time}, more than 30 seconds ago. This can happen while the screen is off or the process is frozen.`);
+    tone = 'unknown';
+  } else if (poll.status === 429) {
+    title = text('服务器限流（429）', 'Server throttled (429)');
+    note = text(`Relay 最近一次 poll 于 ${time} 被服务器限流；请检查 Server 的 relay 配额。`, `The relay was rate-limited at ${time}; check the server relay budget.`);
+    tone = 'offline';
+  } else if (poll.status === 401 || poll.status === 403) {
+    title = text(`Relay Token 被拒绝（${poll.status}）`, `Relay token rejected (${poll.status})`);
+    note = text(`Relay 最近一次 poll 于 ${time} 被拒绝；请核对 B 端与 Server 的 token。`, `The relay poll was rejected at ${time}; check the token on B and the server.`);
+    tone = 'offline';
+  } else if (poll.status >= 500) {
+    title = text(`Server 错误（${poll.status}）`, `Server error (${poll.status})`);
+    note = text(`Relay 最近一次 poll 于 ${time} 返回 HTTP ${poll.status}。`, `The last relay poll returned HTTP ${poll.status} at ${time}.`);
+    tone = 'offline';
+  } else {
+    title = text(`Server 返回 ${poll.status}`, `Server returned ${poll.status}`);
+    note = text(`Relay 最近一次 poll 于 ${time} 返回 HTTP ${poll.status}。`, `The last relay poll returned HTTP ${poll.status} at ${time}.`);
+    tone = 'unknown';
+  }
+  setText('server-state', title);
+  setText('server-note', note);
+  if (heading) heading.dataset.tone = tone;
+}
 function renderServerStatus(state, reason = '') {
   const title = state === 'online' ? '服务器已连接' : state === 'offline' ? 'B 端未连接' : reason === 'config' ? '尚未配置服务器连接' : '连接状态未知';
   const note = state === 'online'
@@ -317,6 +365,18 @@ async function refreshServerStatus(force = false, configReadable = true) {
     const base = new URL(url);
     if (!['http:', 'https:'].includes(base.protocol) || !base.hostname || base.username || base.password || base.search || base.hash) {
       throw new Error('服务器地址无效，请重新读取或修改连接配置。');
+    }
+    // Prefer the relay's own last poll: it proves the server accepted the
+    // connection without depending on a WebView-side HTTPS client.
+    const relayRead = await exec(`log=/data/adb/ommega/logs/relay.log
+if [ -r "$log" ]; then
+  tail -n 500 "$log" 2>/dev/null | grep -aE 'b/poll status=[0-9]+' | tail -n 1
+fi`, {read:true});
+    const poll = relayRead.errno === 0 ? parseRelayPoll(relayRead.stdout) : null;
+    if (poll) {
+      renderRelayPollStatus(poll);
+      serverResult = {ok:true};
+      return serverResult;
     }
     const statusUrl = base.href.replace(/\/+$/, '') + '/api/status/';
     const bytes = new TextEncoder().encode(statusUrl);
