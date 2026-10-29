@@ -1244,7 +1244,7 @@ test("the switch state is reported honestly", () => {
   assert.match(unreadable, /Could not read the switch state/);
 });
 
-test("A app refresh uses installed packages, keeps uninstalled target entries and never writes", async () => {
+function appRefreshFixture() {
   const ctx=loadGlue();
   let rendered, boxes=[], counts=0;
   const makeBox=(pkg,checked)=>({checked,closest:()=>({getAttribute:()=>pkg})});
@@ -1253,8 +1253,9 @@ test("A app refresh uses installed packages, keeps uninstalled target entries an
   ctx.document.querySelectorAll=()=>[];
   ctx.window={scrollY:70,scrollTo:(x,y)=>assert.equal(y,70)};
   ctx.requestAnimationFrame=fn=>fn();
-  ctx.Event=class {};
-  ctx.le={value:'wallet',dispatchEvent:()=>{}};
+  ctx.Event=class {constructor(type){this.type=type;}};
+  ctx.document.dispatchEvent=()=>{};
+  ctx.le={value:'wallet'};
   ctx.$s=apps=>{rendered=apps;boxes=apps.map(app=>makeBox(app.packageName,ctx.Qe.includes(app.packageName)));};
   ctx.ommegaRefreshCertificateCounts=async()=>{counts++;};
   const target='com.example.wallet\ncom.example.removed\n';
@@ -1268,7 +1269,13 @@ test("A app refresh uses installed packages, keeps uninstalled target entries an
     if(command.includes('target.txt'))return {errno:0,stdout:'F:'+Buffer.from(target).toString('base64')};
     return {errno:0,stdout:'M:'};
   };
+  return {ctx, target, commands, rendered:()=>rendered, counts:()=>counts};
+}
+
+test("A app refresh uses installed packages, keeps uninstalled target entries and never writes", async () => {
+  const f=appRefreshFixture(), {ctx,target,commands}=f;
   assert.equal(await ctx.ommegaRefreshApps(),'');
+  const rendered=f.rendered();
   assert.ok(rendered.some(app=>app.packageName==='com.example.wallet'));
   assert.ok(rendered.some(app=>app.packageName==='com.example.unscoped'),'apps outside target.txt must still be listed');
   assert.ok(!rendered.some(app=>app.packageName==='com.example.removed'),'uninstalled packages must not be listed');
@@ -1276,9 +1283,34 @@ test("A app refresh uses installed packages, keeps uninstalled target entries an
   assert.equal(ctx.le.value,'wallet');
   assert.equal(vm.runInContext('ommegaTargetSnapshot',ctx),target);
   assert.equal(vm.runInContext('ommegaAppsHaveChanges()',ctx),false);
-  assert.equal(counts,1);
+  assert.equal(f.counts(),1);
   assert.ok(commands.includes('pm list packages -3'));
   assert.ok(commands.every(command=>! /write-target|ommega_app_writer| save|mv |touch |rm /.test(command)));
+});
+
+test("app refresh never writes the live search value or overwrites typing between render frames", async () => {
+  const {ctx}=appRefreshFixture(), frames=[], writes=[], filters=[];
+  let value='wallet';
+  ctx.le={get value(){throw new Error('The retired editor must not be read');},set value(next){writes.push(next);}};
+  ctx.document.dispatchEvent=event=>{assert.equal(event.type,'ommega-apps-rendered');filters.push(value);};
+  ctx.requestAnimationFrame=fn=>frames.push(fn);
+  const pending=ctx.ommegaRefreshApps();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(frames.length,1,'the reader is paused after the list render');
+  value='中文'; // Native IME/input edits do not call the JavaScript value setter.
+  frames.shift()();
+  value='中文搜索';
+  frames.shift()();
+  await pending;
+  assert.equal(value,'中文搜索');
+  assert.deepEqual(writes,[],'even an equal-value assignment can disturb an IME session');
+  assert.deepEqual(filters,['中文搜索'],'filter with the latest query, never the pre-render snapshot');
+});
+
+test("app inventory never owns or binds the retired search editor", () => {
+  const adapter=readFileSync(join(here,"webui-app-detail.js"),"utf8");
+  assert.doesNotMatch(adapter,/\ble\b|ommegaBindAppSearch|ommegaFilterApps/);
+  assert.match(adapter,/ommega-apps-rendered/);
 });
 
 test("app names recover from a failed label batch instead of showing package ids", async () => {

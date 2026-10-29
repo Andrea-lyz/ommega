@@ -18,23 +18,29 @@
 .om-modern > .footer { max-width:900px; margin:20px auto; padding:0; }
 .om-modern:not([data-om-view=settings]) > .footer { display:none; }
 .om-modern md-dialog { --md-dialog-container-color:var(--om-surface); --md-dialog-headline-color:var(--om-ink); --md-dialog-supporting-text-color:var(--om-muted); }
-/* The legacy header marks the title and the search button with .search-bg so
-   it can fade them while the search field is open. They are not surfaces, so
-   they must not carry a background of their own. */
+/* Search is a body-level native editor, never a vendor header/text-field. */
+.om-modern > .header { display:none !important; }
 .om-modern .search-bg { background:transparent; color:var(--om-ink); }
-.om-modern .search-input { position:static; inset:auto; width:100%; height:56px; box-sizing:border-box; padding:0 48px 0 16px; background:var(--om-raised); border:1px solid var(--om-line); border-radius:16px; color:var(--om-ink); font:inherit; font-size:16px; }
-.om-modern .search-input:focus { outline:2px solid var(--om-accent); outline-offset:-2px; }
-.om-modern .search-field { position:relative; display:flex; align-items:center; min-width:0; }
-.om-modern .search-clear { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:40px; height:40px; display:grid; place-items:center; border:0; border-radius:50%; background:transparent; color:var(--om-muted); cursor:pointer; }
-.om-modern .search-clear svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; }
-.om-modern .search-input:placeholder-shown + .search-clear { visibility:hidden; }
-.om-modern .search-clear:focus-visible { outline:2px solid var(--om-accent); outline-offset:-2px; }
+#om-app-search-region { max-width:900px; margin:0 auto 16px; }
+#om-app-search-region[hidden] { display:none !important; }
+.om-app-search-control { position:relative; min-width:0; }
+.om-search-label { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+#om-app-search {
+  display:block; position:static; width:100%; height:56px; box-sizing:border-box;
+  padding:0 54px 0 16px; margin:0; border:1px solid var(--om-line); border-radius:22px;
+  background:var(--om-raised); color:var(--om-ink); caret-color:var(--om-ink);
+  font:inherit; font-size:16px; line-height:normal; appearance:none;
+  -webkit-user-select:text; user-select:text; touch-action:manipulation;
+  opacity:1; pointer-events:auto; transition:border-color .15s,box-shadow .15s;
+}
+#om-app-search:focus { outline:2px solid var(--om-accent); outline-offset:-2px; border-color:var(--om-accent); box-shadow:0 0 0 3px var(--primary-soft); }
+#om-app-search-clear { position:absolute; right:4px; top:6px; width:44px; height:44px; padding:10px; border:0; border-radius:50%; background:transparent; color:var(--om-muted); cursor:pointer; touch-action:manipulation; }
+#om-app-search-clear[hidden] { display:none; }
+#om-app-search-clear svg { width:24px; height:24px; }
+#om-app-search-clear:focus-visible { outline:2px solid var(--om-accent); outline-offset:-2px; }
+#om-app-search-status { margin:10px 4px 0; color:var(--om-muted); font-size:13px; }
+.om-modern #apps-list .card-box[hidden],.om-modern #apps-list .card[hidden] { display:none !important; }
 .om-modern #apps-list { padding-top:8px; }
-.om-modern[data-om-view=apps] .header { display:flex; gap:8px; align-items:center; height:auto; padding:0; background:transparent; }
-.om-modern[data-om-view=apps] .header > #title,.om-modern[data-om-view=apps] .header > #search-button { display:none; }
-.om-modern[data-om-view=apps] .header > .menu { order:2; flex:none; }
-.om-modern[data-om-view=apps] .header > .search-field { order:1; flex:1; min-width:0; opacity:1; pointer-events:auto; }
-.om-modern[data-om-view=apps] .header > .search-field .search-input { opacity:1; pointer-events:auto; }
 .om-modern .menu-item-button-container { display:flex; flex-direction:column; align-items:stretch; gap:2px; min-width:220px; }
 .om-modern .om-app-menu-item { display:flex; flex-direction:row; align-items:center; gap:9px; min-width:0; padding:3px 8px; }
 .om-modern .om-app-menu-item small { color:var(--om-ink); text-align:left; font-size:12px; line-height:1.3; cursor:pointer; }
@@ -81,6 +87,7 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 .om-modern.om-app-detail-ready #apps-list .app-name { display:flex; align-items:center; flex-wrap:wrap; gap:5px 7px; min-width:0; }
 .om-cert-count { display:inline-flex; flex:none; max-width:100%; padding:3px 7px; border-radius:99px; background:var(--om-accent-bg); color:var(--om-accent); font-size:10px; font-weight:700; line-height:1.3; white-space:nowrap; }
 .om-modern[data-om-app-detail] > .header,
+.om-modern[data-om-app-detail] > #om-app-search-region,
 .om-modern[data-om-app-detail] > #om-global-scope-slot,
 .om-modern[data-om-app-detail] > #om-app-operations,
 .om-modern[data-om-app-detail] > #apps-list,
@@ -167,22 +174,6 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 .om-modern #ommega-global-scope { margin: 8px 0 !important; padding: 10px 14px !important; border-radius: 20px !important; }
 .om-modern #ommega-global-scope label { min-height: 40px; }
 .om-modern #ommega-global-scope-status { margin-top: 2px !important; font-size: 12px !important; }
-
-/* Search field takes the design's larger corner radius. */
-.om-modern .search-input { border-radius: 22px; }
-
-/* The vendor outlined field draws a square 4px-radius focus outline inside
-   the rounded host. Hide it and use a rounded host ring instead. */
-.om-modern .search-input {
-  --md-outlined-field-outline-color: transparent !important;
-  --md-outlined-field-outline-width: 0px !important;
-  --md-outlined-field-focus-outline-color: transparent !important;
-  --md-outlined-field-focus-outline-width: 0px !important;
-}
-.om-modern .search-input:focus-within {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px var(--primary-soft);
-}
 
 /* Native fields and textareas sit flush against a scroll container. An outer
    focus ring is clipped at their left and right edges, so draw it inside. */

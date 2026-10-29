@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {resolveLanguage, parseProperties, freshness, escapeHtml, healthMessage} from '../shared/ui-kit.js';
 const aSource = readFileSync(new URL('../../a-side/source/template/webroot/modern.js',import.meta.url),'utf8')
-  .replace(/from '\.\/ui-kit\.js(?:\?[^']*)?'/,`from '${new URL('../shared/ui-kit.js',import.meta.url).href}'`);
+  .replace(/from '\.\/ui-kit\.js(?:\?[^']*)?'/,`from '${new URL('../shared/ui-kit.js',import.meta.url).href}'`)
+  .replace(/from '\.\/app-search\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/app-search.js',import.meta.url).href}'`);
 const {relayVerdict,requestIcon,deviceSnapshot,formatRelayLatency,parseBStatusConfig,bOnlineState,mergeAttestationHealth,bBatterySnapshot} = await import(`data:text/javascript;base64,${Buffer.from(aSource).toString('base64')}`);
 
 test('Chinese locales map to Chinese; unsupported system languages fall back to English', () => {

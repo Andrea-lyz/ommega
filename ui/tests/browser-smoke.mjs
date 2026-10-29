@@ -13,7 +13,7 @@ const browser = await chromium.launch({channel:process.env.BROWSER_CHANNEL || 'm
 const results = [];
 try {
   for (const [side,locale,theme] of [['a','zh-CN','dark'],['a','en-US','light'],['b','zh-CN','dark'],['b','en-US','light']]) {
-    const context = await browser.newContext({viewport:{width:393,height:852},locale,colorScheme:theme,reducedMotion:'reduce'});
+    const context = await browser.newContext({viewport:{width:393,height:852},locale,colorScheme:theme,reducedMotion:'reduce',...(side==='a'?{isMobile:true,hasTouch:true}:{})});
     await context.route('https://**/*',route=>route.abort()); // Prove the module UI can render offline.
     const page = await context.newPage();
     const errors = [];
@@ -132,12 +132,13 @@ try {
       await page.locator('#ommega-soterta-close').click();
       await page.locator('[data-om-view=apps]').click();
       await page.locator('#apps-list').waitFor({state:'visible'});
-      // The title and the search button are not surfaces: they carry no
-      // background of their own.
-      for (const selector of ['#title','#search-button']) {
-        const background = await page.locator(selector).evaluate(element=>getComputedStyle(element).backgroundColor);
-        assert.ok(/rgba\(0, 0, 0, 0\)|transparent/.test(background),`${selector} must not carry a background (${background})`);
-      }
+      const search=page.locator('#om-app-search');
+      assert.equal(await search.evaluate(input=>input===document.activeElement),false,'Apps navigation must not activate the editor');
+      assert.equal(await search.evaluate(input=>input.tagName==='INPUT' && input.closest('#om-app-search-region')?.parentElement===document.body && !input.closest('.header') && !input.autofocus),true);
+      assert.equal(await page.locator('#search').isVisible(),false,'vendor editor is compatibility-only');
+      assert.equal(await page.locator('#search').isDisabled(),true);
+      assert.equal(await page.locator('.header').evaluate(header=>header.inert && header.hidden),true);
+      assert.equal(await search.evaluate(input=>getComputedStyle(input).userSelect),'text');
       // The list is the installed-app inventory, not the saved scope. Apps
       // that were never added to target.txt must still be present.
       for (const pkg of ['com.example.wallet','com.example.checker','com.example.chat','com.lingqing.trustattestor','com.ommega.authrepro']) {
@@ -164,11 +165,24 @@ try {
       await page.screenshot({path:fileURLToPath(new URL(`a-app-menu-${locale}.png`,output)),fullPage:true,animations:'disabled'});
       await page.keyboard.press('Escape');
       await page.waitForFunction(()=>!document.getElementById('menu-options').open);
+      await page.locator('#menu-button').tap();
+      await page.waitForFunction(()=>document.getElementById('menu-options').open);
+      await page.evaluate(()=>{window.__searchMenuClosed=false;document.getElementById('menu-options').addEventListener('closed',()=>{window.__searchMenuClosed=true;},{once:true});});
+      await search.tap();
+      await page.waitForFunction(()=>window.__searchMenuClosed);
+      assert.equal(await search.evaluate(input=>input===document.activeElement),true,'single search tap survives menu close');
+      await search.fill('wallet');
+      const beforeClear=await page.evaluate(()=>window.__previewCommands.length);
+      await page.locator('#om-app-search-clear').tap();
+      assert.equal(await search.inputValue(),'');
+      assert.equal(await page.evaluate(()=>window.__previewCommands.length),beforeClear,'Clear is local filtering only');
       // Scope is written only by the individual switch. Chat starts outside
       // target.txt, is added by its switch, and can be removed again.
-      await page.locator('#search').fill('chat');
+      await page.locator('#om-app-search').fill('chat');
       await page.locator('.card[data-package="com.example.chat"]').click();
       await page.locator('#om-app-detail').waitFor({state:'visible'});
+      assert.equal(await page.locator('#om-app-search-region').isVisible(),false,'detail hides the independent search region');
+      assert.equal(await search.inputValue(),'chat');
       await page.waitForFunction(()=>!document.getElementById('om-detail-scope').disabled);
       assert.equal(await page.locator('#om-detail-scope').isChecked(),false);
       await page.locator('#om-detail-scope').check();
@@ -177,9 +191,12 @@ try {
       await page.locator('#om-detail-scope').uncheck();
       await page.locator('#om-detail-scope-status').filter({hasText:/已保存|Saved/}).waitFor();
       assert.equal(await page.evaluate(()=>targetList.includes('com.example.chat')),false);
-      await page.locator('#om-detail-back').click();
+      await page.locator('#om-detail-back').tap();
       await page.locator('#om-app-detail').waitFor({state:'hidden'});
-      await page.locator('#search').fill('wallet');
+      assert.equal(await page.locator('#om-app-search-region').isVisible(),true);
+      assert.equal(await search.inputValue(),'chat','detail Back preserves the query');
+      assert.equal(await search.evaluate(input=>input===document.activeElement),false,'detail Back does not request the IME');
+      await page.locator('#om-app-search').fill('wallet');
       await page.locator('.card[data-package="com.example.wallet"]').waitFor({state:'visible'});
       assert.equal(await page.locator('.card[data-package="com.example.checker"]').isVisible(),false);
       await page.locator('.card[data-package="com.example.wallet"]').click();

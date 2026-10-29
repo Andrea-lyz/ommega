@@ -3891,10 +3891,10 @@ async function ommegaRefreshApps() {
     ommegaAppsBaseline = ommegaAppSettingsSnapshot(Qe);
     if (scope) ommegaGlobalScopeEnabled = scope.global;
     ommegaGlobalScopeKnown = Boolean(scope); ommegaGlobalScopeMessage = scopeError; ommegaScopeSync();
-    const query = le.value, scrollY = window.scrollY;
+    const scrollY = window.scrollY;
     $s(apps);
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    le.value = query; le.dispatchEvent(new Event("input", {bubbles:true}));
+    document.dispatchEvent(new Event("ommega-apps-rendered"));
     window.scrollTo(0, scrollY);
     await ommegaRefreshCertificateCounts();
     if (scopeError) throw new Error(scopeError);

@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > Community fork of [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega),
-> not an official upstream release or hosted service. Product version: **2.1.0**.
+> not an official upstream release or hosted service. Product version: **2.1.1**.
 > Module authors: `jiyin004, Andrea-lyz`.
 
 > [!WARNING]
@@ -30,25 +30,36 @@ A also provides the software TA, local storage and application authentication ch
 This fork targets a dedicated **one-A / one-B** deployment; adapting one B for
 multiple A devices is outside its maintenance target.
 
-## 2.1.0 downloads and interface
+## 2.1.1 downloads and interface
 
-[Download and bilingual release notes](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.0) ·
+[Download and bilingual release notes](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.1) ·
 [Release CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
 
 | Release asset | Purpose |
 |---|---|
-| `ommega-a-release-arm64-v8a-2.1.0-<commit>.zip` | A root module, including WebUI |
-| `ommegaclient-b-release-arm64-v8a-2.1.0-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
+| `ommega-a-release-arm64-v8a-2.1.1-<commit>.zip` | A root module, including WebUI |
+| `ommegaclient-b-release-arm64-v8a-2.1.1-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
 | `relay_rs-linux-x86_64-musl` | Self-hosted Linux Server; updated separately |
-| `Ommega-B-app-2.1.0-debug-signed.apk` | Optional B client, separate from both A and the native B module |
-| `StrongBoxCapabilityMask-2.1.0-debug-signed.apk` | Optional A-side LSPosed module |
+| `Ommega-B-app-2.1.1-debug-signed.apk` | Optional B client, separate from both A and the native B module |
+| `StrongBoxCapabilityMask-2.1.1-debug-signed.apk` | Optional A-side LSPosed module |
 | `SHA256SUMS` / `build-info.json` | Download checksums, version, source commit and signing information |
 
 GitHub's generated Source code archives are not installable modules. Both APKs
 are debug-signed; compare certificates before upgrading. Updating A/B module ZIPs
 does not update the running Server or install optional APKs.
 
-### What is new in 2.1.0
+### What is new in 2.1.1
+
+- Fixes the A-side Apps search field that needed two taps before the keyboard appeared on a cold
+  start and could not accept Chinese candidates. Android WebView does not establish a text-input
+  connection for an input parsed with the document (the system reports `TYPE_NULL`), so committed
+  Chinese text was dropped while key-based English still worked. The field is now recreated when the
+  Apps view opens, without taking focus, so one tap raises the keyboard and Chinese input works.
+- The Apps search is an independent native input with its own controller: it no longer reuses the
+  old Material field's events, styles or clear behaviour, list refreshes never read or write editor
+  text, filtering waits for IME composition, and closing the app menu no longer pulls focus back to
+  its button.
+- Apart from search and this focus fix, every component differs from 2.1.0 by the version string only.
 
 - Both WebUIs now share a Material You design system: tonal colors, rounded surfaces, status
   cards, bottom navigation/side rail and common form controls across Overview, Apps, Settings and
@@ -350,7 +361,7 @@ Java/native replies and different transaction-number layouts.
 CI builds A, B, Linux musl Server and APKs in parallel, with A/B workspace, Server,
 B ELF, WebUI, version-sync and Mask unit checks. Rust is pinned to
 `nightly-2026-09-01`, with committed Cargo.lock and component Rust/Gradle caches.
-Version is **2.1.0**, with no automatic bump commits; manual `release_version`
+Version is **2.1.1**, with no automatic bump commits; manual `release_version`
 only overrides that build. Currently only Markdown-only changes are ignored; TXT
 changes trigger CI. Artifacts include both ZIPs, Server, B-app, Mask,
 `SHA256SUMS` and `build-info.json`. Both APKs use a cached Android debug signing
@@ -461,13 +472,13 @@ Complete distributions: [Build workflow](https://github.com/Andrea-lyz/ommega/ac
 
 ## Validation limits
 
-2.1.0 passed host WebUI checks, CPU config and property-record tests, Android workspace Clippy
+2.1.1 passed host WebUI checks, CPU config and property-record tests, Android workspace Clippy
 and test compilation, and the [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
-builds the release artifacts. These are build/presentation checks; device
+builds the release artifacts. These are build and presentation checks. The Apps search was verified on an Android 17 device: a cold start raises the keyboard on the first tap and accepts Chinese input. device
 gestures, network behavior and application flows still require device acceptance.
 
 <details>
-<summary>Historical implementation and test records; not 2.1.0 device acceptance</summary>
+<summary>Historical implementation and test records; not 2.1.1 overall device acceptance</summary>
 
 1.6.0 fixes three A-side KeyMint implementation problems that broke applications outright: an ommega-routed call is no longer answered with `SYSTEM_ERROR` while a mirror replay is in flight (the gate now waits, bounded, and stays fail-closed only for poisoned lanes); EC key generation restores AOSP semantics (EC plus ENCRYPT warns instead of failing with `INCOMPATIBLE_PURPOSE`); and RSA and ECDSA select their signature scheme from the digest the key was created for (the PKCS#1/PSS scheme was hardcoded to SHA-256 and ECDSA signed with the curve default digest, so a non-SHA-256 RSA key could not sign at all and a mismatched digest produced a silently wrong signature). The B side refuses SPL and OS version downgrades, and the A side logs `event=local_sign` with the padding and digest of every local signing operation. Verified on devices: HDFC RSA-SHA512 biometric login, Google Pay EC key generation and fingerprint flows interrupted by a lock-state replay all work again; A-side mirror 12/12, tag 12/12 and crypto 7/7 unit tests plus 13 B-side spl-control cases pass and CI is green. The Server differs from 1.5.3 by the version string only; the B module additionally ships the downgrade guard.
 

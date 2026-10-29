@@ -57,9 +57,19 @@ package records in the AAID are considered. If explicit overrides
 conflict, Preserve wins over Auto, which wins over Compatibility; packages
 without an override inherit without canceling an explicit override.
 
-The Apps page places **Global scope** below its search bar. Each app has an
-individual policy page with Auto, Payment compatibility and Preserve authentication
-choices. An app with no explicit override displays its inherited global default;
+The Apps page places **Global scope** below its search bar. Search uses a native
+text input outside the legacy header, with its own controller and text-selection
+styles. The retired vendor editor is disabled and hidden. Android WebView does
+not give a document-parsed input a text-editor connection, so the field is
+recreated once when the Apps view opens, before the user touches it, and focus
+is always left to that touch; preparing it during the tap loses the connection.
+Navigation does not focus an editor or request the soft keyboard. App-list
+refreshes notify the search controller without reading or writing editor text;
+filtering waits until IME composition finishes. Search matches app names and
+package ids, not policy or certificate badges. Only the explicit Clear action
+resets the search text.
+Each app has an individual policy page with Auto, Payment compatibility and
+Preserve authentication choices. An app with no explicit override displays its inherited global default;
 choosing a mode writes only that app's exception and preserves the global default
 and all other exceptions. The policy page remains accessible in global scope.
 Browser history, native WebView back events, Escape and the Back button return
