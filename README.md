@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
-> 不是上游官方发行版或官方在线服务。当前产品版本为 **2.1.2**，模块作者信息为
+> 不是上游官方发行版或官方在线服务。当前产品版本为 **2.1.3**，模块作者信息为
 > `jiyin004, Andrea-lyz`。
 
 > [!WARNING]
@@ -25,22 +25,44 @@ Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬
 本 fork 面向专用 **1A / 1B** 部署，维护远程身份一致性、原生 StrongBox、冷启动
 生命周期、WebUI 配置和 B 端服务级运维；不以一个 B 服务多个 A 为适配目标。
 
-## 2.1.2 下载与界面
+## 2.1.3 下载与界面
 
-[下载与完整中英更新说明](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.2) ·
+[下载与完整中英更新说明](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.3) ·
 [发布 CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
 
 | 发布资产 | 用途 |
 |---|---|
-| `ommega-a-release-arm64-v8a-2.1.2-<commit>.zip` | A 端 root 模块，含 WebUI |
-| `ommegaclient-b-release-arm64-v8a-2.1.2-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
+| `ommega-a-release-arm64-v8a-2.1.3-<commit>.zip` | A 端 root 模块，含 WebUI |
+| `ommegaclient-b-release-arm64-v8a-2.1.3-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
 | `relay_rs-linux-x86_64-musl` | 自建 Linux Server，独立更新 |
-| `Ommega-B-app-2.1.2-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同原生 B 模块 |
-| `StrongBoxCapabilityMask-2.1.2-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
+| `Ommega-B-app-2.1.3-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同原生 B 模块 |
+| `StrongBoxCapabilityMask-2.1.3-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
 | `SHA256SUMS` / `build-info.json` | 下载校验和、产品版本、源提交与签名说明 |
 
 GitHub 自动生成的 Source code 压缩包不是可安装模块。两个 APK 均为 debug 签名；
 覆盖安装前应核对签名。更新 A/B ZIP 不会替你更新 Server 或安装可选 APK。
+
+### 2.1.3 更新要点
+
+- Server：B 端 `GET /api/b/poll/` 心跳从 relay 工作配额中拆出，使用独立的
+  `RELAY_POLL_RATE_LIMIT_REQUESTS`（默认 0，不限制）。2.1.2 的 80ms 短轮询约
+  12.5 次/秒（约 4.5 万次/小时），会在大约 27 分钟内打满默认 2 万/小时的工作配额，
+  随后返回 429 并按 `Retry-After` 退避；期间 B 端从在线列表消失、任务延迟。现在心跳
+  不再消耗 A 任务和 `b/result` 的配额，工作配额仍由 `RELAY_DATA_RATE_LIMIT_REQUESTS`
+  约束，轮询与工作两个方向互不影响。
+- A/B：`version` 权限标签改为从 B 端真实 TEE 的 `profile` 快照读取（一次性
+  AES-256/GCM 密钥，读取后立即删除），本地生成/导入与远程证明使用同一来源；新增证书与
+  profile 不一致时拒绝，旧 relay 保持兼容并告警。同时保留 tag 701
+  `creationDateTime` 的修复。
+- A：远程签名算法改为从密钥特性读取，修复 `missing tag Algorithm` 导致的
+  `SERVICE_ERROR` / `Failed to begin operation`；注入器接受 Android 的非零
+  Parcelable presence 标记（0 仍为 null），避免同一密钥出现分裂的 keystore 视图。
+- A：软件 crypto 与 KeyMint 对齐：3DES ECB/CBC PKCS#7、NONEwithRSA、AES-CTR 的
+  16 字节初始计数器、AES-192-GCM，以及 12–16 字节 GCM tag；KmProbe 在 A 上达到 10/10。
+- 版本统一为 2.1.3。A/B/Server 包含上述修复；B-app 与 StrongBoxCapabilityMask
+  相对 2.1.2 只有版本号变化。两个 APK 仍为 debug 签名。
+- 升级：Server 需单独替换 `relay_rs`（poll 修复在 Server 侧）；A/B 模块按需更新；
+  更新模块 ZIP 不会替你更新 Server 或安装可选 APK。
 
 ### 2.1.2 更新要点
 
@@ -366,7 +388,7 @@ GitHub Actions 并行构建 A 模块、B 模块、Linux musl Server 和 Android 
 StrongBoxCapabilityMask 单元测试。Rust 固定到已验证的 `nightly-2026-09-01`，
 A/B/Server 提交 Cargo.lock，按组件缓存 Rust 构建并复用 Gradle 缓存。
 
-当前统一版本为 **2.1.2**。CI 默认使用源码版本，不自动递增或提交版本；
+当前统一版本为 **2.1.3**。CI 默认使用源码版本，不自动递增或提交版本；
 手动 `release_version` 仅覆盖本次构建。当前工作流只忽略纯 `*.md` 修改；TXT 修改仍会触发构建。
 全部构建成功后生成 `ommega-<版本>` artifact，包含 A/B 模块 ZIP、Server、
 B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
@@ -546,13 +568,14 @@ cd StrongBoxCapabilityMask
 
 ## 验证范围与限制
 
-2.1.2 已通过主机 WebUI 检查、CPU 配置与属性记录测试、Android 全工作区 Clippy 和测试编译，
+2.1.3 已通过主机 WebUI 检查、CPU 配置与属性记录测试、Android 全工作区 Clippy 和测试编译，
 并由 [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml) 构建发布资产。
-这些是构建与界面检查。应用页应用名已在 Android 17 实机验证：396 个应用全部显示真实名称，
-没有包名回退；手机手势、实际网络和应用流程仍需安装新版后验收。
+这些是构建与界面检查。Server 的 poll 独立配额已在 de-fra 上用临时端口做集成测试
+（work 打满不影响 poll，poll 打满不影响 work），随后完成部署验证；A 端 crypto、版本标签、
+远程签名与注入器的实机结果见对应 PR，整体应用流程仍需安装新版后验收。
 
 <details>
-<summary>历史实现与测试记录，不代表 2.1.2 已完成整体实机验收</summary>
+<summary>历史实现与测试记录，不代表 2.1.3 已完成整体实机验收</summary>
 
 1.6.0 修复三处会直接打断应用的 A 端 KeyMint 实现问题：镜像重放期间不再把 ommega 路由调用打成 `SYSTEM_ERROR`（改为有界等待，`poisoned` 仍 fail-closed）；EC 密钥生成恢复 AOSP 语义（EC + ENCRYPT 只警告不拒绝，不再硬报 `INCOMPATIBLE_PURPOSE`）；RSA 与 ECDSA 按密钥请求的摘要选择签名方案（此前 RSA 的 PKCS#1/PSS 写死 SHA-256、ECDSA 用曲线默认摘要：前者让非 SHA-256 的 RSA 密钥签名直接失败，后者产生摘要不匹配的静默错误签名）。B 端 `spl-control.sh` 拒绝 SPL/OS 版本降级，A 端新增 `event=local_sign` 诊断日志（记录本地签名的 padding/digest）。实机验证：HDFC 的 RSA-SHA512 指纹登录、Google Pay 的 EC 密钥生成、以及锁屏令牌重放窗口内被打断的指纹流程均恢复正常；A 端 mirror 12/12、tag 12/12、crypto 7/7 单测与 B 端 13 个 spl-control 用例通过，CI 全绿。Server 相对 1.5.3 只有版本号变化；B 端模块额外包含降级防护脚本。
 

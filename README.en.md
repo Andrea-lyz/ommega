@@ -7,7 +7,7 @@
 
 > [!IMPORTANT]
 > Community fork of [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega),
-> not an official upstream release or hosted service. Product version: **2.1.2**.
+> not an official upstream release or hosted service. Product version: **2.1.3**.
 > Module authors: `jiyin004, Andrea-lyz`.
 
 > [!WARNING]
@@ -30,23 +30,50 @@ A also provides the software TA, local storage and application authentication ch
 This fork targets a dedicated **one-A / one-B** deployment; adapting one B for
 multiple A devices is outside its maintenance target.
 
-## 2.1.2 downloads and interface
+## 2.1.3 downloads and interface
 
-[Download and bilingual release notes](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.2) ·
+[Download and bilingual release notes](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.3) ·
 [Release CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
 
 | Release asset | Purpose |
 |---|---|
-| `ommega-a-release-arm64-v8a-2.1.2-<commit>.zip` | A root module, including WebUI |
-| `ommegaclient-b-release-arm64-v8a-2.1.2-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
+| `ommega-a-release-arm64-v8a-2.1.3-<commit>.zip` | A root module, including WebUI |
+| `ommegaclient-b-release-arm64-v8a-2.1.3-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
 | `relay_rs-linux-x86_64-musl` | Self-hosted Linux Server; updated separately |
-| `Ommega-B-app-2.1.2-debug-signed.apk` | Optional B client, separate from both A and the native B module |
-| `StrongBoxCapabilityMask-2.1.2-debug-signed.apk` | Optional A-side LSPosed module |
+| `Ommega-B-app-2.1.3-debug-signed.apk` | Optional B client, separate from both A and the native B module |
+| `StrongBoxCapabilityMask-2.1.3-debug-signed.apk` | Optional A-side LSPosed module |
 | `SHA256SUMS` / `build-info.json` | Download checksums, version, source commit and signing information |
 
 GitHub's generated Source code archives are not installable modules. Both APKs
 are debug-signed; compare certificates before upgrading. Updating A/B module ZIPs
 does not update the running Server or install optional APKs.
+
+### What is new in 2.1.3
+
+- Server: the B heartbeat `GET /api/b/poll/` now has its own budget,
+  `RELAY_POLL_RATE_LIMIT_REQUESTS` (default 0, disabled). The 2.1.2 80 ms short poll
+  (~12.5/s, ~45k/h) exhausted the default 20k/h work budget in about 27 minutes, then
+  returned 429 with `Retry-After`; the device disappeared from the online list and tasks
+  were delayed. Heartbeats no longer spend the A-task / `b/result` budget, while
+  `RELAY_DATA_RATE_LIMIT_REQUESTS` still limits work in both directions.
+- A/B: `version` authorizations now come from the real B TEE `profile` snapshot (a
+  one-shot AES-256/GCM key, deleted immediately after the read), so local generation,
+  import and remote attestation share one source. A certificate whose tags differ from
+  the profile is rejected; older relays stay compatible with a warning. The tag 701
+  `creationDateTime` fix is retained.
+- A: remote signing derives the algorithm from key characteristics, fixing
+  `missing tag Algorithm` / `SERVICE_ERROR` / `Failed to begin operation`; the injector
+  accepts Android's nonzero Parcelable presence markers (0 is still null), avoiding a
+  split keystore view.
+- A: software crypto is aligned with KeyMint for 3DES ECB/CBC PKCS#7, NONEwithRSA, the
+  16-byte AES-CTR initial counter, AES-192-GCM and 12–16-byte GCM tags; KmProbe reaches
+  10/10 on A.
+- All components are 2.1.3. A/B/Server carry the fixes above; B-app and
+  StrongBoxCapabilityMask differ from 2.1.2 by the version string only. Both APKs remain
+  debug-signed.
+- Upgrade: replace the Server `relay_rs` separately (the poll fix is server-side); update
+  the A/B modules as needed. Updating a module ZIP does not update the running Server or
+  install an optional APK.
 
 ### What is new in 2.1.2
 
@@ -374,7 +401,7 @@ Java/native replies and different transaction-number layouts.
 CI builds A, B, Linux musl Server and APKs in parallel, with A/B workspace, Server,
 B ELF, WebUI, version-sync and Mask unit checks. Rust is pinned to
 `nightly-2026-09-01`, with committed Cargo.lock and component Rust/Gradle caches.
-Version is **2.1.2**, with no automatic bump commits; manual `release_version`
+Version is **2.1.3**, with no automatic bump commits; manual `release_version`
 only overrides that build. Currently only Markdown-only changes are ignored; TXT
 changes trigger CI. Artifacts include both ZIPs, Server, B-app, Mask,
 `SHA256SUMS` and `build-info.json`. Both APKs use a cached Android debug signing
@@ -485,14 +512,16 @@ Complete distributions: [Build workflow](https://github.com/Andrea-lyz/ommega/ac
 
 ## Validation limits
 
-2.1.2 passed host WebUI checks, CPU config and property-record tests, Android workspace Clippy
+2.1.3 passed host WebUI checks, CPU config and property-record tests, Android workspace Clippy
 and test compilation, and the [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
-builds the release artifacts. These are build and presentation checks. App names were verified on
-an Android 17 device: all 396 apps showed real names with no package-id fallback. Device
-gestures, network behavior and application flows still require device acceptance.
+builds the release artifacts. These are build and presentation checks. The Server poll budget was
+integration-tested on a temporary port on de-fra (exhausting work does not throttle polls, and
+exhausting polls does not throttle work) and then deployed; the A-side crypto, version-tag,
+remote-signing and injector device results are in the corresponding PRs. Overall application flows
+still require installing the new build for acceptance.
 
 <details>
-<summary>Historical implementation and test records; not 2.1.2 overall device acceptance</summary>
+<summary>Historical implementation and test records; not 2.1.3 overall device acceptance</summary>
 
 1.6.0 fixes three A-side KeyMint implementation problems that broke applications outright: an ommega-routed call is no longer answered with `SYSTEM_ERROR` while a mirror replay is in flight (the gate now waits, bounded, and stays fail-closed only for poisoned lanes); EC key generation restores AOSP semantics (EC plus ENCRYPT warns instead of failing with `INCOMPATIBLE_PURPOSE`); and RSA and ECDSA select their signature scheme from the digest the key was created for (the PKCS#1/PSS scheme was hardcoded to SHA-256 and ECDSA signed with the curve default digest, so a non-SHA-256 RSA key could not sign at all and a mismatched digest produced a silently wrong signature). The B side refuses SPL and OS version downgrades, and the A side logs `event=local_sign` with the padding and digest of every local signing operation. Verified on devices: HDFC RSA-SHA512 biometric login, Google Pay EC key generation and fingerprint flows interrupted by a lock-state replay all work again; A-side mirror 12/12, tag 12/12 and crypto 7/7 unit tests plus 13 B-side spl-control cases pass and CI is green. The Server differs from 1.5.3 by the version string only; the B module additionally ships the downgrade guard.
 
