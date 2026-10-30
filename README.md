@@ -1,512 +1,149 @@
-# Ommega — Andrea-lyz Fork
+# Ommega
 
+[![版本](https://img.shields.io/badge/版本-2.1.4-blue)](https://github.com/Andrea-lyz/ommega/releases)
+[![许可证](https://img.shields.io/badge/许可证-AGPL--3.0--or--later-green)](LICENSE)
 [![中文](https://img.shields.io/badge/语言-中文-blue)](README.md)
 [![English](https://img.shields.io/badge/Language-English-lightgrey)](README.en.md)
-[![中文使用说明](https://img.shields.io/badge/使用说明-中文-blue)](ommega远程转发密钥说明.txt)
+[![使用说明](https://img.shields.io/badge/使用说明-中文-blue)](ommega远程转发密钥说明.txt)
 [![English guide](https://img.shields.io/badge/Guide-English-lightgrey)](ommega-remote-key-guide.en.txt)
+
+> 把 A 端应用的 Android Keystore 请求，经自建 Server 调度到 B 端设备的真实 KeyMint/TEE
+> 上执行：证明链、签名、解密和密钥协商都由 B 端硬件完成，结果再原路返回应用。
 
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
-> 不是上游官方发行版或官方在线服务。当前产品版本为 **2.1.4**，模块作者信息为
-> `jiyin004, Andrea-lyz`。
+> 不是上游官方发行版，也不提供公共在线服务或公共 Token。当前版本 **2.1.4**，模块作者为
+> `jiyin004, Andrea-lyz`。维护目标是 **1 台 A + 1 台 B** 的专用部署，不以一个 B 服务
+> 多个 A 为适配目标。
 
 > [!WARNING]
 > **B 端请使用不存放个人数据的备用设备，并在设备之外保留可用备份。**
-> B 端模块会改写 System/Boot/Vendor 安全补丁级别（SPL）并重载原生 KeyMint。该改动涉及
-> 凭据加密和 keyblob 升级：一旦本机 keyblob 在较高 SPL 下完成升级，此后它可能要求始终
-> 保留该较高值。如果 root 在重启后丢失（断电、误操作、模块未随开机加载），SPL 覆写不会
-> 随之恢复，可能出现**密码正确却无法解锁、凭据加密数据不可用**，且无法保证无损恢复。
-> 因此不要把 B 端当作主力机或个人数据机，也不要把 root 的可用性当成必然前提；现有开机
-> 自动应用和脚本防护都不保证 root 丢失后仍能原生解锁。
+> B 端会改写 System/Boot/Vendor 安全补丁级别（SPL）并重载原生 KeyMint，涉及凭据加密与
+> keyblob 单向升级。若 root 在重启后丢失，SPL 覆写不会随之恢复，可能出现**密码正确却
+> 无法解锁、凭据加密数据不可用**，且不保证无损恢复。不要用主力机当 B，也不要把 root
+> 的可用性当成必然前提。详见[安全与风险](#安全与风险)。
 
-Ommega 是一套 A/B/Server 三端远程 KeyMint 系统：A 端拦截指定应用的 Android
-Keystore 请求；满足远程生成条件的请求经 Server 调度到 B 端硬件 KeyMint，
-返回证明、签名、解密和密钥协商结果。A 同时承担软件 TA、密钥存储和认证检查。
-本 fork 面向专用 **1A / 1B** 部署，维护远程身份一致性、原生 StrongBox、冷启动
-生命周期、WebUI 配置和 B 端服务级运维；不以一个 B 服务多个 A 为适配目标。
+## 这是什么
 
-## 2.1.4 下载与界面
+Ommega 是一套 A / Server / B 三端协作的远程 KeyMint 系统。
 
-[下载与完整中英更新说明](https://github.com/Andrea-lyz/ommega/releases/tag/ommega_fix-2.1.4) ·
+- **A 端**是 root 模块。它接管目标应用的 Keystore/KeyMint 调用，提供软件 TA、本地密钥
+  存储和认证检查；远程模式下把证明、签名、解密和协商请求转发给 Server。
+- **Server** 是自建的 Linux 服务。负责 Token 鉴权、任务队列、A/B 配对调度、设备在线
+  状态和管理后台。
+- **B 端**是 root 模块。native relay 轮询任务，直接调用本机真实 KeyMint HAL（TEE 或
+  StrongBox），返回硬件铸造的证书链与操作结果。
+
+本 fork 维护远程身份一致性、原生 StrongBox/RKP、冷启动与生物认证生命周期、WebUI 配置
+以及 B 端服务级运维。它不面向免 root 设备、非 Android 平台，也不承诺所有 ROM、机型或
+算法组合可用。
+
+| 项目 | 说明 |
+|---|---|
+| 当前版本 | **2.1.4**（A / B / Server / 两个 APK 统一版本号） |
+| 部署形态 | 1 台 A + 1 台 B + 1 个自建 Server |
+| A / B | Android 12 及以上，arm64-v8a，KernelSU / APatch / Magisk |
+| Server | Linux x86_64（musl 静态二进制） |
+| 许可证 | A/B 为 AGPL-3.0-or-later；Server 声明 MIT；部分源码 Apache-2.0 |
+
+## 工作原理
+
+```mermaid
+flowchart LR
+    App["目标应用"] -->|"Keystore / KeyMint Binder"| A["A 端模块<br/>injector · 软件 TA · relay client"]
+    A -->|"HTTPS 任务 + Token"| S["Server<br/>鉴权 · 队列 · 调度"]
+    S -->|"poll / result"| B["B 端模块<br/>native relay"]
+    B -->|"Stable AIDL"| HAL["真实 KeyMint HAL<br/>TEE / StrongBox"]
+    B -.->|"结果"| S
+    S -.->|"结果"| A
+    A -.->|"证书链 / 签名 / 解密"| App
+```
+
+一次远程请求的典型路径：
+
+1. 应用调用 Keystore，A 端注入器按作用域判断是否接管；未命中的应用继续走系统原始路径。
+2. A 端软件 TA 生成或选择密钥。满足远程条件的建钥请求携带应用 ID（tag 709）发给 Server。
+3. Server 鉴权后把任务放进队列，B 端 relay 轮询取走任务。
+4. B 端调用真实 HAL 完成 `profile` / `attest` / `sign` / `decrypt` / `agree` / `soter`，
+   把结果写回 Server。
+5. A 端校验远程 profile 与叶证书字段，保存密钥并返回应用。远程密钥的后续签名、解密和
+   协商同样由 B 执行，A 只做本地存储与认证检查。
+
+`remote-only` 表示符合远程生成条件时**不允许隐式回退**，并不表示所有操作都在 B 执行：
+
+- 远程生成需要 `remote: true`、存在 attestation challenge，且未指定签发密钥或指定了
+  远程 App AttestKey。指定本地签发密钥时仍在 A 完成。
+- B 保留请求中的认证授权列表（用户 SID、认证类型、超时、`UNLOCKED_DEVICE_REQUIRED`
+  509），但 B 无法验证 A 的用户认证令牌；需要认证的远程硬件操作仍可能被 B 拒绝。
+- 未指定签发密钥时，A 原样返回 B 的完整证书链，不为认证密钥额外签发子证书。
+- StrongBox 请求不会在任何一层被静默降级为 TEE：A 以 `HARDWARE_TYPE_UNAVAILABLE`
+  拒绝远程降级标记，Server 只转发 B 的能力错误。
+
+## 组件
+
+| 目录 | 角色 | 形态 |
+|---|---|---|
+| [`a-side`](a-side/source/README.md) | 拦截目标应用 Keystore；软件 TA；远程 TEE；可选 A 端原生 StrongBox | root 模块，含 WebUI，CI 提供 arm64-v8a |
+| [`b-side`](b-side/source/README.md) | 调用真实硬件 KeyMint，处理 `profile/attest/sign/decrypt/agree/soter` | root 模块，含 WebUI 与 SPL 控制 |
+| [`server`](server/source/README.md) | 鉴权、任务队列、A/B 调度、设备与后台管理 | Linux x86_64 musl 二进制 |
+| [`b-app`](b-app/source) | 可选的独立 B 端客户端与连接配置界面 | Android APK，只实现 `attest/sign/decrypt` |
+| [`StrongBoxCapabilityMask`](StrongBoxCapabilityMask/README.md) | 全局隐藏 StrongBox 与设备 ID 证明 capability | libxposed API 102 APK，仅加载到 `system_server` |
+| [`ui`](ui/README.md) | A/B WebUI 共享样式、设计预览与离线 smoke | 开发资源，随模块打包 |
+
+**B-app 不能替代 native B**：它没有实现 `profile` / `agree`，并使用自己的
+AndroidKeyStore 身份生成密钥，无法完成同一套验收。
+
+## 下载
+
+[Releases](https://github.com/Andrea-lyz/ommega/releases) ·
 [发布 CI](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
 
 | 发布资产 | 用途 |
 |---|---|
 | `ommega-a-release-arm64-v8a-2.1.4-<commit>.zip` | A 端 root 模块，含 WebUI |
 | `ommegaclient-b-release-arm64-v8a-2.1.4-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
-| `relay_rs-linux-x86_64-musl` | 自建 Linux Server，独立更新 |
-| `Ommega-B-app-2.1.4-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同原生 B 模块 |
+| `relay_rs-linux-x86_64-musl` | 自建 Linux Server，单独更新 |
+| `Ommega-B-app-2.1.4-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同 native B 模块 |
 | `StrongBoxCapabilityMask-2.1.4-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
-| `SHA256SUMS` / `build-info.json` | 下载校验和、产品版本、源提交与签名说明 |
+| `SHA256SUMS` / `build-info.json` | 校验和、产品版本、源提交与签名说明 |
 
-GitHub 自动生成的 Source code 压缩包不是可安装模块。两个 APK 均为 debug 签名；
-覆盖安装前应核对签名。更新 A/B ZIP 不会替你更新 Server 或安装可选 APK。
+GitHub 自动生成的 Source code 压缩包不是可安装模块。两个 APK 均为 debug 签名，覆盖安装
+前应核对证书；更新 A/B ZIP 不会替你更新 Server，也不会安装可选 APK。
 
 ### 2.1.4 更新要点
 
-- B 端 WebUI 的 Server connection 卡片不再依赖 WebView 里的 curl/wget。设备有
-  `curl` 时优先读取 Server 的 `/api/status/`；没有 `curl` 或请求不可用时，读取
-  relay 日志最后一条 `b/poll status=`，显示 200/204、429、401/403、5xx 或 stale。
-- 修复原生 Android（没有 `/system/bin/curl`）上一直显示
-  “Invalid server response” / “Some status reads failed” 的误报；relay 实际 poll
-  204 时卡片会显示 “Server connected” 和最后 poll 时间。移除不兼容的 busybox
-  wget 状态读取路径。
-- 本次只改 B 端 WebUI；B relay 代码、A/Server、service.sh、TEE/KeyMint 未改，
-  版本号统一为 2.1.4。Server 2.1.3 的 poll 独立配额修复保持不变。
-- A/Server、B-app、StrongBoxCapabilityMask 相对 2.1.3 只有版本号变化。升级时只需
-  更新 B 模块即可获得状态卡修复；两个 APK 仍为 debug 签名。
-
-### 2.1.3 更新要点
-
-- Server：B 端 `GET /api/b/poll/` 心跳从 relay 工作配额中拆出，使用独立的
-  `RELAY_POLL_RATE_LIMIT_REQUESTS`（默认 0，不限制）。2.1.2 的 80ms 短轮询约
-  12.5 次/秒（约 4.5 万次/小时），会在大约 27 分钟内打满默认 2 万/小时的工作配额，
-  随后返回 429 并按 `Retry-After` 退避；期间 B 端从在线列表消失、任务延迟。现在心跳
-  不再消耗 A 任务和 `b/result` 的配额，工作配额仍由 `RELAY_DATA_RATE_LIMIT_REQUESTS`
-  约束，轮询与工作两个方向互不影响。
-- A/B：`version` 权限标签改为从 B 端真实 TEE 的 `profile` 快照读取（一次性
-  AES-256/GCM 密钥，读取后立即删除），本地生成/导入与远程证明使用同一来源；新增证书与
-  profile 不一致时拒绝，旧 relay 保持兼容并告警。同时保留 tag 701
-  `creationDateTime` 的修复。
-- A：远程签名算法改为从密钥特性读取，修复 `missing tag Algorithm` 导致的
-  `SERVICE_ERROR` / `Failed to begin operation`；注入器接受 Android 的非零
-  Parcelable presence 标记（0 仍为 null），避免同一密钥出现分裂的 keystore 视图。
-- A：软件 crypto 与 KeyMint 对齐：3DES ECB/CBC PKCS#7、NONEwithRSA、AES-CTR 的
-  16 字节初始计数器、AES-192-GCM，以及 12–16 字节 GCM tag；KmProbe 在 A 上达到 10/10。
-- 版本统一为 2.1.3。A/B/Server 包含上述修复；B-app 与 StrongBoxCapabilityMask
-  相对 2.1.2 只有版本号变化。两个 APK 仍为 debug 签名。
-- 升级：Server 需单独替换 `relay_rs`（poll 修复在 Server 侧）；A/B 模块按需更新；
-  更新模块 ZIP 不会替你更新 Server 或安装可选 APK。
-
-### 2.1.2 更新要点
-
-- 修复 A 端应用页大多数应用只显示包名、拿不到应用名称的问题。管理器把应用信息桥作为
-  Android WebView 注入对象提供，只有经该对象调用才有效；旧代码先把方法摘下来再调用，
-  每次都被 WebView 以「Java bridge method can't be invoked on a non-injected object」
-  拒绝，于是除随包的 `applist.json` 外，所有应用名都退回包名。现在批量查询和逐包重试都
-  保留实时 `ksu` 接收者，应用页恢复显示真实名称。
-- 浏览器预览桥同样拒绝“摘下再调”，冒烟测试与新增回归用例在该模式下运行，避免同类回归
-  再次只在真机上暴露。
-- 本次只有 A 端 WebUI 变化；B 端、Server 与两个可选 APK 相对 2.1.1 只有版本号变化。
-
-### 2.1.1 更新要点
-
-- 修复 A 端应用页搜索框在冷启动时必须点两次才弹出键盘、且中文候选词无法输入的问题。
-  Android WebView 不会为随页面解析出的输入框建立文本输入连接（系统侧为 `TYPE_NULL`），
-  中文提交因此被丢弃，而按键类英文仍能进入，表现为“英文可输、中文不行”。现在进入应用页时
-  先重建输入框且不抢占焦点，首次点击即可弹出键盘并正常输入中文。
-- 应用搜索改为独立原生输入框与独立控制器，不再复用旧 Material 搜索控件的事件、样式和清空
-  逻辑。列表刷新不读写输入内容，中文组字期间不筛选；应用菜单关闭不再把焦点抢回菜单按钮。
-- 除搜索与上述焦点修复外，各组件相对 2.1.0 只有版本号变化。
-
-- A/B 双端 WebUI 统一为 Material You 设计系统：共享色调、圆角、状态卡、底部导航/侧栏和
-  表单组件，覆盖概览、应用、设置、连接页及多级弹窗；保留简体中文 / English 和浅色 / 深色，
-  在 320–1024 px 宽度下自适应。
-- A 应用页改为系统已安装应用列表，启动和手动刷新都会重新枚举，不再按 `target.txt` 过滤。
-  每个应用进入独立策略页，可分别设置作用域、接管模式（全局默认 / StrongBox / TEE）、
-  认证签名（自动 / 支付兼容 / 保持认证要求）和 CPU/设备属性。
-- 作用域写入收敛为单应用开关：只有打开或关闭某个应用的“启用作用域”才改写 `target.txt`；
-  列表不再提供批量写入、“显示全部”或已卸载应用清理。卸载后刷新只移除列表项，文件条目保留。
-  全局作用域开启时忽略 `target.txt`，单应用作用域暂停，其他应用策略仍可用。
-- A 新增每应用认证计数和最近一次 B 端延迟。只在证书链验证和密钥保存成功后计数，数据存入
-  现有 `keymaster.db`；共享 UID 显示共享标记，失败调用和内部重试不计数。
-- A 新增系统能力掩码弹窗，可独立关闭 StrongBox 与 device ID attestation capability，
-  保留 `app_attest_key`；CPU/设备属性继续使用 exp6 的 Zygisk 视图，属性由 B 端提供，
-  不提供手工改值。认证签名策略改为应用页内按应用保存，正数密钥 ID 兼容仍是独立全局开关。
-- B 端 WebUI 重做，并以只读方式读取 SPL/OS 状态；连接草稿、Token 掩码、语言和主题行为保留。
-  B 端新增只读电池遥测，经现有认证 poll 上报；Server 在状态接口中增加
-  `battery_percent`、`battery_charging`、`battery_updated_at_ms`。缺失、非法或过期数据显示
-  未知，不补 0，也不沿用上一个读数。
-- Server 对电池字段做独立校验并更新队列元数据，兼容旧 B 与旧 Server；B/Server 的协议、
-  负值/越界/非法状态测试和 `server/source/README.md` 一并补齐。A/B 顶部刷新现在等待完整
-  状态读取、显示忙碌状态，显式刷新在读取期间只排队一次，失败后可重试。
-- 新增共享 UI 资源、设计预览与离线浏览器 smoke，覆盖 A/B 双语和浅深色、320–1024 px、
-  应用列表/作用域、刷新、电池、能力弹窗；新增 WebUI bundle 补丁校验和发布包校验脚本。
-- 升级时分别更新 A/B 模块与 Server；A 安装后重启以加载 Zygisk 新库。旧 `target.txt`
-  条目会保留，可在应用页按应用重新开关。
-
-### 2.0.0 更新要点（上一版本）
-
-- 认证签名策略按应用自动判断是否使用本地认证密钥；全局作用域只覆盖普通应用
-  （每个用户 10000–19999 的应用 ID），工程模式需要匹配的 Binder SELinux 上下文和完整
-  进程名。策略和全局作用域集中在设置页，应用页与概览不再重复显示。
-- SOTER 的 ASK、AuthKey 与签名会话固定在同一后端。`local_only` 选择写入账本并在重载后
-  保留，签名会话使用 A 端分配的不透明句柄；网络错误和远端认证错误不会改成本地签名。
-- 有效 grant 把隔离进程纳入同一 Ommega 调用方作用域。委派绑定真实 UID、锚进程 PID、
-  启动时间和开机标识，密钥访问仍按授权向量检查 `GET_INFO` / `USE`；撤销授权、进程退出
-  或 UID 复用后失效。
-- 其余：App AttestKey 只返回叶证书委派、认证密钥本地签发、GMS 认证窗口、
-  system_server grant 探测、设置页多级弹窗与返回手势，以及 CI 缓存和工具链提速。
-
-A/B WebUI 只提供简体中文与 English，可跟随系统语言并切换浅色 / 深色主题。
-OpenUI 用于开发预览；设备端界面使用包内本地资源，无需在线生成 UI。
-
-| 端 | 页面 | 主要内容 |
-|---|---|---|
-| A | 概览 | 最近中继结果、KeyMint 进程、SOTER 软件 TA 与账本状态 |
-| A | 应用 | 系统已安装应用列表；单应用作用域、接管模式、认证签名与 CPU/设备属性 |
-| A | 设置 | 远程配置、SOTER、自动化、证明参数、系统能力掩码、语言、主题、帮助与关于 |
-| B | 概览 | relay 本机进程、连接证据、当前系统属性与 B 电量 |
-| B | 连接 | Server、设备 ID、Token 与日志配置 |
-| B | 设置 | SPL / OS 只读状态、语言与主题 |
-
-A/B 的刷新按钮重新读取状态文件，**不会发起硬件证明或清空失败记录**；读取期间显示忙碌，
-显式刷新只排队一次，失败后可重试。最近请求结果带有时间戳，不能当作实时连通性探测；
-B 的进程存在也不等于 Server 已连接。2.1.0 同时移除应用页保存按钮，作用域和策略开关直接
-保存并回读确认。
-
-顶部 TXT 使用说明保留较早的操作示例；配置路径、界面入口与 SPL 规则以本文和当前源码为准。
-
-## 测试环境与支持边界
-
-以下是 **2026-09-05** 的测试记录，不是兼容设备清单。固件版本由设备只读查询确认；
-应用版本和验收结果来自此前同日的测试窗口，后续更新不自动继承这些结果。
-
-| 项目 | A 端 | B 端 |
-|---|---|---|
-| 机型 | 一加 13，PJZ110 | 一加 11，PHB110 |
-| Android / API / ABI | Android 16 / API 36 / arm64-v8a | Android 16 / API 36 / arm64-v8a |
-| 固件构建号 | `PJZ110_16.0.10.501(CN01)` | `PHB110_16.0.2.400(CN01)` |
-| ColorOS 属性 `ro.build.version.oplusrom` | `V16.1.0` | `V16.0.0` |
-| 当次已验证硬件路径 | 原生 StrongBox + Android RKP 曾单独验证；远程验收时关闭该路径 | 默认 TEE KeyMint；native relay |
-| 当次 StrongBox 状态 | 有原生实现；启用 Mask 后功能查询为 false，不代表硬件消失 | 当次固件功能查询为 false，profile 为 `strongbox=false`；未验证 B StrongBox |
-| `app_attest_key` 功能查询 | true，Mask 保留此项 | true |
-
-Mask 历史验证环境为 LSPosed 2.2.0 / libxposed API 102。A/B 模块在 root 环境运行，
-上述结果不能推广为所有 root 管理器、ROM 或机型的兼容承诺。Server 为 Linux x86_64，
-使用 physical 模式；1.9.0 发布提供 musl 构件。
-
-历史远程验收配置：A `remote=true`、`local_hw=false`、`disable_native_strongbox=true`、
-`use_native_strongbox=false`，目标应用使用 GlobalDefault，并启用 Mask。
-这验证的是 **A → Server → B TEE**，不是“双端 StrongBox 均通过”。
-历史测试使用 Integrity Checker 2.2、Paytm 10.83.12、GMS 26.34.31、Play 商店 52.9.21-34。
-三绿曾通过；Paytm 曾进入手机号输入页，也曾间歇出现 `00000`。重启后改善不构成
-“已证实误报”或“永久修复”的结论，更不保证支付、绑卡或所有风控场景可用。
-
-A 安装器的最低门槛是 API 29，Mask 的 `minSdk` 也是 29；这只代表安装门槛，
-不代表 Android 10 起全部可用。实际运行还依赖 keystore2、KeyMint AIDL、注入器与固件
-接口匹配。CI 发布 arm64-v8a 模块；其他系统版本、架构及 B StrongBox 均需独立验证。
-
-## StrongBoxCapabilityMask：何时使用及风险
-
-这是可选的 LSPosed/libxposed APK，不是 A/B ZIP，也无需安装到 Server。
-通常只在 **A 端确实有 StrongBox，且希望应用按“未声明 StrongBox”选择路径**时使用。
-没有该功能声明的设备通常没有必要安装；不能将它作为 Paytm 告警的通用修复。
-
-模块仅加载到 `system_server`，在启动阶段 hook
-`com.android.server.SystemConfig.getAvailableFeatures()`，从返回的功能表中删除
-`android.hardware.strongbox_keystore` 和 `android.software.device_id_attestation`，
-保留 `android.hardware.keystore.app_attest_key`。
-它是全局操作，影响包括未勾选 Ommega 的应用在内的所有使用该功能表的调用者；没有按包名开关。
-
-设备 ID 证明一并按“未声明”处理是有意的：经 Ommega 路由的调用者，其证明链由远端真实
-KeyMint 铸造；已测 B 的 TA 拒绝 `ATTESTATION_ID_*` 标签。把远端设备的身份
-标识或本地替代值注入该链，都会破坏调用者自身的完整性判定。已测 B 的链路没有可用的 ID 证明，
-声明必须与事实一致，而不是让每次标识请求都以失败告终。该改动只影响功能表声明，不修改
-任何证书、密钥或路由；它本身不保证应用的完整性判定结果。
-
-适配前提是 ROM 沿用 AOSP 的上述方法和可修改的 Map，以及功能发布/缓存路径，且没有
-绕过此表的厂商实现或硬编码结果。Android 16 的进程功能缓存也是选择该启动 hook 的原因，
-见 [AOSP ActivityManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android16-release/services/core/java/com/android/server/am/ActivityManagerService.java)。
-“遵循 AOSP”是实现前提，不是 AOSP 认证或对所有 AOSP ROM 的支持保证；目前仅上述 A 固件有实机证据。
-
-使用步骤：
-
-1. 在 A 安装 `StrongBoxCapabilityMask-1.9.0-debug-signed.apk`。
-2. 在兼容 libxposed API 102 的 LSPosed 实现中启用，保持静态作用域仅 `system`（系统框架），不要勾选应用。
-3. 在允许正常重启的 A 上重启并解锁，让系统功能表及进程缓存重新建立；仅划掉应用不能启用/撤销此 hook。
-4. 检查 `pm has-feature android.hardware.strongbox_keystore` 与
-   `pm has-feature android.software.device_id_attestation` 均为 false、原有 `app_attest_key` 仍为 true，
-   并检查 Mask 日志的 `event=hook_registered` / `event=feature_removed`；必要时用正常测试 App 核对应用进程查询。
-5. 撤销时在 LSPosed 禁用模块，再重启 A。APK 使用调试签名，升级前核对签名；签名不同不能直接覆盖安装。
-
-**不要将上述重启步骤套用到禁止硬重启的 B。本测试 B 没有安装 Mask 的必要。**
-模块不修改系统 XML、不停止 StrongBox HAL、不删除或迁移已有密钥、不改变真实证明中的
-Bootloader 状态，也不阻止应用直接请求 StrongBox。显式请求仍由原系统或 Ommega 路由处理。
-原生硬件证明仍可能反映解锁状态；功能查询 false 不能证明设备已隐藏解锁或通过完整性校验。
-
-后果可能包括应用降级到 TEE/其他实现、拒绝运行、依赖 StrongBox 的功能或商店分发行为变化，
-以及声明与真实接口不一致被检测。已有密钥不会因此被转换；应用是否继续使用它们由应用决定。
-系统进程 hook 还有兼容性、崩溃或启动异常风险。**本项目及 Mask 按现状提供，不保证适用性、
-安全性或检测结果；使用者自行承担风险。对数据丢失、设备异常、账户限制、业务或财产损失概不负责
-（以适用法律允许的范围为限）。不接受这些风险请勿使用。**
-
-## 主要功能与行为
-
-### 1. A/B KeyMint 身份严格对齐
-
-- B 端新增 `profile` 任务，读取真实默认 KeyMint HAL 的 Stable AIDL 版本、接口哈希、
-  `getHardwareInfo()`、安全级别和 StrongBox 可用性。
-- A 端在软件 TA 启动前取得并冻结该 profile；后续证明结果必须携带同一身份，防止
-  AIDL 版本、硬件版本或安全级别混用。
-- 冷启动网络暂不可用时会等待并重试远程 profile，不再提前冻结错误的本地身份。
-- Server 对 B 端 profile 做结构校验；允许真实厂商 HAL 返回空
-  `keymint_author`，但拒绝字段缺失、类型错误和仅含空白字符的值。
-- A 校验远程 profile、叶证书的 challenge、应用 ID、版本和安全级别；校验错误直接失败。
-  当前尚未完成完整证书链的可信根、逐级签名及撤销校验。
-- `fallback_local` 只控制允许回退的远程不可用路径；它不会让身份校验错误变成成功。
-
-### 2. 原生 StrongBox 与 Android RKP
-
-- A 端加入 `use_native_strongbox`，可直接复用 A 设备自身的原生 StrongBox KeyMint
-  HAL，而 TEE 请求仍走远程 B 端。
-- 原生 StrongBox 证明密钥通过 Android RKP
-  `IRemotelyProvisionedComponent/strongbox` 获取，不把
-  `ATTESTATION_KEYS_NOT_PROVISIONED` 误判为设备没有 StrongBox。
-- 原生 HAL 实际返回的安全级别会被校验，避免把 TEE 错报成 StrongBox。
-
-`use_native_strongbox` 是 KeyMint 后端选择，修改后只需重启 Ommega 的 keymint
-子进程，不需要重启整台设备：
-
-```toml
-# /data/misc/keystore/ommega/config.toml
-[main]
-use_native_strongbox = true
-```
-
-```sh
-touch /data/adb/ommega/restart.keymint
-```
-
-### 3. 面向应用的三档安全级别策略
-
-`target.txt` 现在只保存普通包名；每个已勾选应用可在 A 端 WebUI 中选择：
-
-| 模式 | 行为 |
-|---|---|
-| 全局默认 | 遵循设备能力和“禁用原生 StrongBox”总开关 |
-| StrongBox | 显式选择 StrongBox 路径，并覆盖全局禁用开关 |
-| TEE | 将该应用的安全级别请求改写为 TEE，包括显式 StrongBox 请求 |
-
-显式策略保存在：
-
-```text
-/data/misc/keystore/ommega/target-security.toml
-```
-
-远程配置页另有默认关闭的“禁用原生 StrongBox”开关。开启后，它只影响
-`target.txt` 中处于“全局默认”的应用；显式 StrongBox/TEE 选择优先。
-
-旧 `strongbox_unavailable_packages` 仅保留一次性迁移兼容：当
-`target-security.toml` 尚不存在时可转成 TEE 策略，之后不再作为正式配置写回。
-`target.txt` 的 `!`、`?` 后缀也不再是正式配置格式。
-
-独立的 StrongBoxCapabilityMask 模块从系统功能表隐藏
-`android.hardware.strongbox_keystore` 和 `android.software.device_id_attestation`，
-保留 `android.hardware.keystore.app_attest_key`。
-它不停止 StrongBox HAL，也不替代上述请求路由。应用忽略功能表仍显式请求 StrongBox 时，
-全局默认加禁用开关会返回 `HARDWARE_TYPE_UNAVAILABLE`；显式 TEE 则改写请求。
-
-### 4. A 端配置即时生效
-
-- `target.txt`、`target-security.toml` 和“禁用原生 StrongBox”由注入器实时读取。
-- 远程地址、设备 ID、Token、TLS、日志和普通路由配置保存后即时生效。
-- 远程 profile 在 keymint 启动时冻结；改为另一台身份不同的 B 后，需重启 A 的 Ommega
-  keymint 重新取得画像。配置热加载不会绕过身份一致性校验。
-- Verified Boot Hash、Verified Boot Key、System/Vendor/Boot SPL 会同步到
-  `config.toml` 的 `[trust]` 配置。
-- SPL 更新直接作用于运行中的 TA；Hash/Key 改动只回收 Ommega keymint 子进程并等待
-  RPC 恢复，不要求设备重启。
-- WebUI 写配置时使用 UTF-8 Base64 传递内容，避免用户输入提前结束 shell heredoc。
-- 覆盖安装模块不会清空已经保存的 WebUI 信任参数。
-
-### 5. keystore2 冷启动与生物认证生命周期
-
-- Binder hook 会先于远程 RPC 就绪安装，避免漏掉开机早期的授权和维护事件。
-- RPC 在 `ommega-rpc-warmup` 后台线程中初始化，不阻塞 hook 安装。
-- `OnDeviceUnlocked`、auth token 和用户维护事件会进入内存 mirror 队列，RPC 恢复后
-  按顺序重放。
-- 修复了用户 0 super key 未初始化时，生物认证绑定密钥创建/读取失败的问题。
-
-本地旧密钥读取同时支持 P-521 裸标量和旧 SEC1 DER 编码；带曲线标识或公钥的
-DER 会校验其与 P-521 私钥的一致性。旧 PBKDF2 兼容 KDF 保留历史 64 字节
-extract 输出，仅用于旧数据读取；新数据仍使用标准 HKDF，P-521 写入格式不变。
-
-### 6. B 端 SPL WebUI 与服务级运维
-
-- B 端 WebUI 可分别设置 System、Boot、Vendor SPL 与 OS 版本，保存后立即应用。
-- OS 版本写入 `ro.build.version.release`，决定证明证书里的 OS_VERSION（tag 705）。
-  它与 SPL 一样来自系统属性而非硬件，`ro.build.version.sdk` 不随之改变。
-- 属性变化时只重载原生 KeyMint 服务和 `keystore2`，模块本身不请求硬重启。
-- 配置保存在 `/data/adb/ommega/spl.conf`；**留空保持当前生效值，不恢复原始值**。
-- 日期与 OS 版本只升不降。每项下限取设备原始值、当前上报值和已生效目标中的最高值；
-  低于该下限的保存会被拒绝。较高值下产生或升级的 keyblob 在较低值下可能无法使用，
-  不能把删除配置或回滚模块当作密钥回滚方案。
-- `/data/adb/ommega/spl-origin.conf` 从只读固件属性文件记录原始值；
-  `spl-baseline.conf` 是运行时基线快照，不一定是出厂值。
-  **`spl-applied.conf` 保存已生效目标，升级或回滚模块时必须保留**；属性回落后，
-  后续 `apply` 可重新应用该目标。这不保证 root 丢失或提前锁定时仍能解锁。
-- WebUI 分别显示原始值、下限与已生效目标（`ORIGIN_*` / `FLOOR_*` / `APPLIED_*`）。
-  固件升级会抬高原始值；文件暂时不可读不会主动降低已记录值。
-- 对齐时保持 A 的真实 OS/SPL，A 的 `[trust]` 使用 `auto`；不要把 A 降到 B 的旧日期。
-  历史测试中降低上报值曾导致 `INVALID_ARGUMENT`（-38），A 降日期也曾使 Wallet 绑卡失败。
-  Integrity 三绿不能替代支付应用和绑卡验收。
-- B 端故意不提供 `post-fs-data.sh`，只以 `service.sh` 作为生命周期入口；后续
-  KernelSU 加载或软重启时由 `service.sh` 重新应用 SPL，再启动 relay。
-- `service.sh` 会按精确模块路径清理旧 relay，避免旧进程继续占用 `relay.lock`。
-
-> 修改属性不等于硬件 TEE 一定接受了新 Boot SPL。最终值必须以新生成的硬件证明
-> 证书为准。
-> SPL 涉及凭据加密和 keyblob 升级。必须先确认用户已解锁、没有在途 TEE 调用及可行的恢复路径；
-> 不要将 SPL 调整与重启组合操作。禁止硬重启的 B 必须始终遵守该限制，软重启也不是无风险恢复手段。
-> 若 root 在重启后丢失，设备回到原生 SPL，而已经升级的 keyblob 不会随之回退：这类设备必须按
-> “数据可丢弃”来使用，请参考开头的 B 端数据风险提示。
-
-### 7. B 端 relay 与 Server 稳定性
-
-- B 端 WebUI 可编辑 `relay.conf` 的连接参数和四项日志设置；连接参数支持热加载，
-  日志设置在 relay 下次启动时生效。保存 Relay 配置不会重启进程或应用 SPL。
-- B 端持久化密钥在 `begin` 返回 `KEY_REQUIRES_UPGRADE` 时，会在原 HAL 上
-  调用 `upgradeKey`，原子保存并同步文件/目录后重试一次。alias、证书链、算法和
-  HAL 归属保持不变，不生成替代密钥；保存失败会保留内存中的新 blob 并阻止操作，
-  后续请求先重试保存。该内存保留不能替代失败写入时的断电保护。
-- 短轮询与 TEE 工作线程分离；轮询间隔下限为 80ms，单次 HTTP 请求预算为 3 秒。
-  relay 上报产品版本供 Server 展示，并支持物理上联网卡绑定与网卡切换后的重新选路。
-- 修复任务完成早于 waiter 注册、轮询超时、重复 request ID 和掉线任务回收等队列
-  竞态。
-- Server 校验结果结构、非空证明链字段、profile 字段及任务归属；
-  非空链检查不是证书签名或可信根验证，A 还会执行远程身份与叶证明字段检查。
-- 自动 keybox 与 serverbox 开关独立保存在 Server 的 `data/runtime-state.json`，重启后保留。
-
-远程失败响应保留原有 `error` 文本，并可附带整数 `keymint_error_code`。
-B 端只从真实 HAL 的 service-specific 失败中提取该字段；Server 保持 HTTP 500
-并转发它，A 端将已识别的负值还原为 KeyMint 错误。旧版失败响应、未知代码、HTTP
-鉴权/限流错误仍按通用失败处理，不通过解析错误文本推测硬件错误，也不触发新的
-本地回退。成功响应、证明生成和 StrongBox 能力声明不受该协议变更影响。
-
-A 端相关控制项互不等价：
-
-| 控制项 | 生效位置 | 用途 |
-|---|---|---|
-| `use_native_strongbox` | A 端 KeyMint 后端 | 使用 A 设备真实 StrongBox/RKP |
-| 禁用原生 StrongBox | A 端应用路由 | 让全局默认目标应用按无 StrongBox 设备处理 |
-| 每应用 StrongBox/TEE | A 端应用路由 | 覆盖全局默认行为 |
-
-StrongBox 请求不会被任何一层静默降级为 TEE：A 端拒绝远程降级标记并以
-`HARDWARE_TYPE_UNAVAILABLE` 失败，Server 只原样转发 B 端的能力错误。
-
-### 8. SOTER 与本地账本
-
-A 的软件 SOTER TA 与 KeyMint 是两条独立配置路径。在设置页启用软件 TA 后，可选择
-本地账本或远程中继；远程参数保存在 `/data/adb/ommega/soterta/remote.conf`，
-不会随 KeyMint 远程配置自动改变。本地账本保存在 `/data/adb/ommega/soterta/state.json`，
-软件密钥与真实 B 端 SOTER 硬件密钥不可等同。
-
-远程启用时，转发失败不会静默改用本地密钥。软件 TA 接管或重启后会重新绑定 SOTER
-宿主；B 串行执行 SOTER TA 调用。1.9.0 兼容 Java/原生返回结构及不同事务编号布局。
-
-### 9. 自动构建与版本管理
-
-GitHub Actions 并行构建 A 模块、B 模块、Linux musl Server 和 Android APK，
-保留 A/B workspace 检查、Server 测试、B ELF 检查，并运行 WebUI、版本同步和
-StrongBoxCapabilityMask 单元测试。Rust 固定到已验证的 `nightly-2026-09-01`，
-A/B/Server 提交 Cargo.lock，按组件缓存 Rust 构建并复用 Gradle 缓存。
-
-当前统一版本为 **2.1.4**。CI 默认使用源码版本，不自动递增或提交版本；
-手动 `release_version` 仅覆盖本次构建。当前工作流只忽略纯 `*.md` 修改；TXT 修改仍会触发构建。
-全部构建成功后生成 `ommega-<版本>` artifact，包含 A/B 模块 ZIP、Server、
-B-app 和 StrongBoxCapabilityMask APK，以及 SHA256SUMS 和源提交信息。
-两个 APK 使用 Android 默认 debug 签名；CI 缓存该调试签名身份供后续构建复用，
-它不是正式发布签名，私钥不随源码或构建产物分发。
-缓存失效可能导致后续签名身份变化，升级前仍需核对证书。
-
-## 系统组成
-
-| 端 | 角色 | 形态 |
-|---|---|---|
-| A 端（`a-side`） | 拦截目标应用 Keystore；远程 TEE；可选 A 端原生 StrongBox | root 模块，CI 提供 arm64-v8a；安装器检查 KernelSU/Magisk 环境 |
-| B 端（`b-side`） | 调用真实硬件 KeyMint，处理 profile/attest/sign/decrypt/agree | root 模块，CI 提供 arm64-v8a；管理器兼容性需单独确认 |
-| B 端 App（`b-app`） | 可选的独立 B 端客户端与连接配置界面 | Android APK |
-| StrongBoxCapabilityMask | 全局隐藏 StrongBox 与设备 ID 证明 capability；仅加载到 system_server | libxposed API 102 APK |
-| Server（`server`） | 鉴权、任务队列、A/B 调度、设备与后台管理 | Linux x86_64 musl 二进制 |
-
-`remote-only` 表示符合远程生成条件时不允许隐式回退；它不表示所有密钥或方法都在 B 执行。
-软件 TA 在有 attestation challenge、远程已启用，且未指定签发密钥或指定了远程
-App AttestKey 时进入远程生成；指定本地签发密钥时仍在 A 完成。远程密钥的签名、解密及协商由 B 执行，
-A 负责本地存储和应用认证检查。B 保留请求中的认证授权列表，包括用户 SID、认证类型、超时及
-`UNLOCKED_DEVICE_REQUIRED`（509）；仅在请求未指定认证策略时补充 `NO_AUTH_REQUIRED`。
-A 执行原始认证策略和超时；B 无法验证 A 的用户认证令牌，因此需要认证的远程硬件操作仍可能被 B 拒绝。
-未指定签发密钥时，A 原样返回 B 的完整证书链；证书反映 B 的实际授权，
-不为认证密钥额外签发子证书。
-`ATTEST_KEY` 原样传给 HAL，B 核对返回的硬件用途，A 核对证书中硬件授权的 `ATTEST_KEY`；
-显式 App AttestKey 委派使用 B 原生 `generateKey(..., AttestationKey)`，B 补齐父链，
-A 核对父公钥及子证书签名后，仅向调用方返回新子证书，由调用方拼接已持有的父链。
-远程 SIGN 接口不支持代签证书。
-原生委派权限由硬件 keyblob 授权决定，不对父证书额外施加通用 PKIX CA 门槛或改写证书扩展。
-该委派路径需要 A、B 均支持；旧 B 忽略委派参数时，A 会拒绝返回链，不回退到其他签发密钥。
-
-B-app 当前只分发 `attest/sign/decrypt`，未实现 native B 所需的 `profile/agree`，
-并通过 B-app 自己的 AndroidKeyStore 身份生成密钥；它目前不能替代 native B 完成同一套验收。
+- B 端 WebUI 的 Server connection 卡片不再依赖 WebView 里的 curl/wget：有 `curl` 时读取
+  Server 的 `/api/status/`，没有或不可用时读取 relay 日志最后一条 `b/poll status=`，
+  显示 200/204、429、401/403、5xx 或 stale。
+- 修复原生 Android（没有 `/system/bin/curl`）上误报 “Invalid server response” 的问题；
+  relay 实际 poll 204 时显示 “Server connected” 和最后 poll 时间。
+- 本次只改 B 端 WebUI；B relay 代码、A/Server、`service.sh`、TEE/KeyMint 未改。
+- 只需更新 B 模块即可获得该修复；其他组件相对 2.1.3 只有版本号变化。
+
+逐版本说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 快速部署
 
-本 fork 不在 README 中分发公共 Server Token。请自行部署 Server 并设置自定义凭据；
-启用 MySQL 后可从管理后台为 A/B 分配独立的角色 Token。
+准备：
 
-### B 端
+- 一台可用的 Linux x86_64 Server（或自行交叉编译 `relay_rs`）。
+- 两台 Android 12+、arm64-v8a 的 root 设备，建议都使用受支持的 KernelSU / APatch /
+  Magisk 环境。
+- 自建 Token 与（建议）可信 TLS 证书。仓库不提供公共 Server 或公共 Token。
+- **B 端必须是可丢弃数据的备用机**，并已完成设备外备份。
 
-> 动手前请先阅读开头的 **B 端数据风险提示**：建议使用无个人数据的备用机，并做好设备外备份。
+### 1. 部署 Server
 
-安装 B 模块后，可在模块 WebUI 的「连接」页填写以下项目，
-也可直接编辑 `/data/adb/ommega/relay.conf`：
-
-```ini
-OMMEGA_RELAY_SERVER=https://<server>:8443
-OMMEGA_RELAY_DEVICE_ID=<b-device-id>
-OMMEGA_RELAY_MACHINE_ID=
-OMMEGA_RELAY_TOKEN=<b-token-or-static-token>
-OMMEGA_RELAY_LOG_ENABLED=true
-OMMEGA_RELAY_LOG_LEVEL=debug
-OMMEGA_RELAY_LOGCAT_ENABLED=true
-OMMEGA_RELAY_LOGCAT_LEVEL=info
-```
-
-连接配置由 relay 热加载，日志配置在下次启动生效；需要主动触发重新读取时执行：
+把 musl 二进制放到工作目录，创建 `.env` 后启动：
 
 ```sh
-touch /data/adb/ommega/restart.all
+mkdir -p /opt/ommega && cd /opt/ommega
+cp /path/to/relay_rs-linux-x86_64-musl ./relay_rs
+chmod +x relay_rs
 ```
-
-该标记只请求重读配置，不重启 relay 或设备，也不重新初始化日志。
-
-### A 端
-
-安装 A 模块，在 WebUI「设置 → 远程配置」中填写；对应文件为
-`/data/misc/keystore/ommega/config`，WebUI 通过
-`/data/adb/ommega/ommegadata/config` 访问同一份配置：
-
-```yaml
-url: https://<server>:8443
-device_id: <b-device-id>
-token: <a-token-or-static-token>
-remote: true
-local_hw: false
-tls_insecure: true
-debug_logging: false
-disable_native_strongbox: false
-```
-
-上面是配置格式示例，不是测试配置的完整复刻。`tls_insecure: true` 会跳过 A 的证书验证；
-部署可信证书后应按实际环境配置。B 当前 HTTP 客户端接受无效证书，不能仅凭 HTTPS 地址
-就宣称已认证 Server 身份；公网部署需自行保护传输与凭据。
-
-`debug_logging: true` 时 A 端会把远端返回的证书链布局写入 keymint 日志（`event=remote_attest_chain`：证书数、尾链总字节数、每张证书的 len/签名 OID/SPKI OID），默认关闭。
-
-在 WebUI「应用」页勾选需要接管的应用，并按需选择“全局默认 / StrongBox / TEE”。
-目标范围合并 `target.txt` 与 `injector.toml` 的 `scoop`；两者均未命中的应用继续使用
-系统原始 Keystore 路径，不能仅凭 WebUI 未勾选就认定所有默认目标都已取消。
-
-「检测器兼容」是全局开关：启用后，所有经 Ommega 本机 Keystore 实现新建的应用密钥
-只分配正数 key id，而非只影响某个包。配置位于
-`/data/misc/keystore/ommega/target-compat.toml` 的 `[positive_key_id].enabled`，默认关闭；
-旧的非空 `packages` 列表按启用全局开关兼容读取。关闭时保留随机 64 位 id 的默认形态。
-该开关不迁移已有密钥，不改变算法或证明链，也不提供硬件安全保证。
-
-### Server
-
-在二进制工作目录创建 `.env`，最小示例：
 
 ```ini
+# /opt/ommega/.env
 RELAY_BIND=0.0.0.0
 RELAY_HTTP_PORT=10886
 RELAY_HTTPS_PORT=8443
@@ -521,113 +158,253 @@ RELAY_ATTEST_SOURCE=physical
 # RELAY_SECRET_KEY=<random-secret>
 ```
 
-- HTTP 默认端口：`10886`
-- HTTPS 默认端口：`8443`；证书不存在时自动回退为仅 HTTP
-- 健康检查：`/api/health/`
-- 公开设备状态：`/status/`
-- 管理后台：`/jiyin004/`
-- 登录页：`/login/`
+```sh
+./relay_rs
+```
 
-Linux 构件 `relay_rs-linux-x86_64-musl` 为静态链接二进制。更新时应先上传临时
-文件、核对 SHA-256、保留旧版备份，再停服原子替换并执行健康检查。
+生产环境请用 systemd 或同类工具托管，并确保工作目录就是 `.env` 与 `data/` 所在目录。
+默认端口与入口：
 
-## 配置文件与生效方式
+| 路径 | 用途 |
+|---|---|
+| `10886` | HTTP（默认） |
+| `8443` | HTTPS；证书缺失时自动回退为仅 HTTP |
+| `/api/health/` | 健康检查 |
+| `/status/` | 公开设备状态（含在线 B 与电量遥测） |
+| `/jiyin004/` | 管理后台 |
+| `/login/` | 登录页 |
 
-| 文件/开关 | 作用 | 生效方式 |
+启用 MySQL 后可在管理后台为 A/B 分配独立角色 Token。更新 `relay_rs` 时应先上传临时
+文件、核对 SHA-256、保留旧版备份，再停服务原子替换并做健康检查；不要覆盖正在运行的
+可执行文件。
+
+### 2. 安装 B 端
+
+安装 `ommegaclient-b-*.zip` 后，在模块 WebUI 的「连接」页填写，或直接编辑
+`/data/adb/ommega/relay.conf`：
+
+```ini
+OMMEGA_RELAY_SERVER=https://<server>:8443
+OMMEGA_RELAY_DEVICE_ID=<b-device-id>
+OMMEGA_RELAY_MACHINE_ID=
+OMMEGA_RELAY_TOKEN=<b-token-or-static-token>
+OMMEGA_RELAY_LOG_ENABLED=true
+OMMEGA_RELAY_LOG_LEVEL=debug
+OMMEGA_RELAY_LOGCAT_ENABLED=true
+OMMEGA_RELAY_LOGCAT_LEVEL=info
+```
+
+- `SERVER`、`DEVICE_ID`、`TOKEN` 为必填；`MACHINE_ID` 可选。
+- 连接参数由 relay 热加载；日志参数在 relay 下次启动时生效。
+- 需要主动触发重读时执行 `touch /data/adb/ommega/restart.all`。该标记只请求重读配置，
+  不重启 relay 或设备，也不会重新初始化日志。
+- SPL / OS 版本在 WebUI「设置 → 设备属性」中修改并应用，写入文件为
+  `/data/adb/ommega/spl.conf`。日期与 OS 版本只升不降；**升级或回滚模块时必须保留
+  `spl-applied.conf`**。
+- **禁止硬重启 B。** 需要重载时只使用已批准的 `service.sh` 服务级流程。
+
+SPL 的完整规则、下限计算与风险见 [B 端说明](b-side/source/README.md)。
+
+### 3. 安装 A 端
+
+安装 `ommega-a-*.zip`，在 WebUI「设置 → 远程配置」中填写。对应文件为
+`/data/misc/keystore/ommega/config`，WebUI 通过 `/data/adb/ommega/ommegadata/config`
+访问同一份配置：
+
+```yaml
+url: https://<server>:8443
+device_id: <b-device-id>
+token: <a-token-or-static-token>
+remote: true
+local_hw: false
+tls_insecure: true
+debug_logging: false
+disable_native_strongbox: false
+```
+
+- `device_id` 必须与 B 的 `OMMEGA_RELAY_DEVICE_ID` 一致；`token` 使用 Server 上为该角色
+  分配的 Token 或静态 Token。
+- `tls_insecure: true` 会跳过 A 的证书验证。部署可信证书后应按实际环境收紧；B 当前接受
+  自签证书，**仅凭 HTTPS 地址不能证明已认证 Server 身份**。
+- 在「应用」页按应用打开作用域，并按需选择接管模式（全局默认 / StrongBox / TEE）。
+  目标范围是 `target.txt` 与 `injector.toml` 中 `scoop` 的并集；两者都未命中的应用继续
+  使用系统原始 Keystore 路径。
+- 覆盖安装模块不会清空已保存的 WebUI 信任参数（Hash、Boot Key、SPL）。
+
+### 4. 联调检查
+
+1. B 端 WebUI「概览」应显示 relay 运行、`Server connected` 与最近 poll 时间。
+2. Server `/status/` 应出现该 B 的在线记录；管理后台可查看任务与设备状态。
+3. A 端「概览」显示最近一次中继结果；首次可先用测试应用建钥、签名，再切到生产应用。
+4. A/B 的刷新按钮只重读状态文件，**不会发起硬件证明**；最近结果有时间戳，不能当作
+   实时连通性探测。B 进程存在也不等于 Server 已连接。
+
+## 配置一览
+
+| 文件 / 开关 | 作用 | 生效方式 |
 |---|---|---|
 | A `target.txt` | 选择接管应用 | 注入器实时读取 |
-| A `target-security.toml` | 每应用安全级别 | 注入器实时读取 |
+| A `target-security.toml` | 每应用安全级别（全局默认 / StrongBox / TEE） | 注入器实时读取 |
 | A `target-compat.toml` | 全局正数 key id 兼容开关 | 热加载；只影响新建密钥 |
 | A `config`（`/data/misc/keystore/ommega/`） | 远程连接与全局 StrongBox 策略 | 保存后读取；启动时持久化已启用的远程配置 |
 | A `soterta/remote.conf`（`/data/adb/ommega/`） | 独立 SOTER 中继参数 | 与 KeyMint 配置分别维护 |
-| A `webui-props.sh` / `config.toml [trust]` | Hash、Key、SPL | 实时更新；必要时只重启 Ommega keymint |
-| A `config.toml [main].use_native_strongbox` | StrongBox 后端 | 重启 Ommega keymint，不重启设备 |
+| A `webui-props.sh` / `config.toml [trust]` | Verified Boot Hash、Key、SPL | 实时更新；必要时只重启 Ommega keymint |
+| A `config.toml [main].use_native_strongbox` | StrongBox 后端选择 | `touch /data/adb/ommega/restart.keymint` |
 | B `relay.conf` 连接参数 | Server、设备 ID、机器 ID、Token | WebUI 保存后由 relay 热加载 |
 | B `relay.conf` 日志参数 | 文件日志与 logcat 开关、级别 | relay 下次启动时生效 |
-| B `spl.conf` | System/Boot/Vendor SPL、OS 版本（`ro.build.version.release`） | 保存即应用；`service.sh` 再应用 |
+| B `spl.conf` | System/Boot/Vendor SPL、OS 版本 | 保存即应用；`service.sh` 再应用 |
 | B `spl-applied.conf` | 已生效目标与降级下限依据 | 脚本维护，升级/回滚时保留 |
+
+## WebUI
+
+A/B WebUI 只提供简体中文与 English，可跟随系统语言，并切换浅色 / 深色主题；设备端使用
+包内本地资源，无需在线生成 UI。`ui/` 中的 OpenUI 预览仅用于开发。
+
+| 端 | 页面 | 主要内容 |
+|---|---|---|
+| A | 概览 | 最近中继结果、KeyMint 进程、SOTER 软件 TA 与账本状态 |
+| A | 应用 | 系统已安装应用列表；单应用作用域、接管模式、认证签名、CPU/设备属性 |
+| A | 设置 | 远程配置、SOTER、自动化、证明参数、系统能力掩码、语言、主题、帮助与关于 |
+| B | 概览 | relay 进程、连接证据、当前系统属性与电量 |
+| B | 连接 | Server、设备 ID、Token 与日志配置 |
+| B | 设置 | 设备属性（SPL / OS）、语言与主题 |
+
+顶部两个 TXT 使用说明保留较早的操作示例；配置路径、界面入口与 SPL 规则以本 README、
+[CHANGELOG.md](CHANGELOG.md) 和当前源码为准。
+
+## 能力与边界
+
+- **KeyMint 身份对齐**：B 的 `profile` 任务读取真实默认 HAL 的 Stable AIDL 版本、接口
+  哈希、`getHardwareInfo()`、安全级别和 StrongBox 可用性；A 在软件 TA 启动前取得并冻结
+  该身份，后续证明必须携带同一 profile。冷启动网络不可用时等待重试，不提前冻结错误身份。
+  A 校验叶证书的 challenge、应用 ID、版本和安全级别；**完整证书链的可信根、逐级签名与
+  撤销校验尚未完成**。
+- **原生 StrongBox 与 RKP**：`use_native_strongbox = true` 时，A 复用本机
+  StrongBox HAL，证明密钥通过 `IRemotelyProvisionedComponent/strongbox` 获取；实际返回
+  的安全级别会被校验。修改该后端只需重启 Ommega keymint，不重启整台设备。
+- **每应用安全级别**：`全局默认`遵循设备能力与“禁用原生 StrongBox”总开关；
+  `StrongBox` 覆盖全局禁用；`TEE` 把该应用的请求改写为 TEE。策略保存在
+  `target-security.toml`，注入器实时读取。
+- **冷启动与生物认证**：Binder hook 先于远程 RPC 安装；`ommega-rpc-warmup` 后台初始化
+  RPC；`OnDeviceUnlocked`、auth token 和用户维护事件进入内存 mirror 队列，RPC 恢复后
+  顺序重放。
+- **B 端 SPL 与服务级运维**：SPL 与 OS 版本来自系统属性，不是硬件值；属性变化只重载
+  原生 KeyMint 和 `keystore2`。日期只升不降；较高值下升级过的 keyblob 在较低值下可能
+  无法使用。B 端只提供 `service.sh`，不提供 `post-fs-data.sh`。
+- **relay 与 Server 稳定性**：短轮询与 TEE 工作线程分离，轮询下限 80 ms，单次 HTTP
+  预算 3 秒；2.1.3 起 `b/poll` 使用独立的
+  `RELAY_POLL_RATE_LIMIT_REQUESTS`，不再消耗 A 任务与 `b/result` 的工作配额。
+- **电量遥测**：B 只读 `/sys/class/power_supply/battery`，最多每 5 秒采样一次，随现有
+  认证 poll 上报；Server 在 `/status/` 暴露 `battery_percent`、`battery_charging`、
+  `battery_updated_at_ms`。缺失、非法或过期数据保持未知，不补 0。
+- **SOTER**：软件 SOTER TA 与 KeyMint 是两条独立配置路径，远程参数保存在
+  `soterta/remote.conf`，不随 KeyMint 远程配置自动改变。远程失败不会静默改用本地密钥。
+- **时限与灭屏**：A 端远端签名两次尝试和退避共用 10 秒 HTTP 预算，建钥证明使用独立的
+  较长预算。B 端 `OMMEGA_RELAY_WAKELOCK=true` 在灭屏时维持 CPU 可用，每 30 秒续期
+  90 秒租约，会增加耗电，且需要内核支持 `CONFIG_PM_WAKELOCKS`。
 
 ## 构建
 
-以下每段从仓库根目录独立执行，需先配置相应依赖：
+以下命令从仓库根目录进入对应目录后执行；CI 使用固定的 `nightly-2026-09-01` 工具链。
 
 ```sh
 # A 端模块
 cd a-side/source
 python build.py
 ```
+
 ```sh
 # B 端模块
 cd b-side/source
 python build.py
 ```
+
 ```sh
 # Server
 cd server/source
 cargo build --locked --release
 ```
+
 ```sh
 # B 端 App
 cd b-app/source
 ./gradlew assembleRelease
 ```
+
 ```sh
-# StrongBoxCapabilityMask（从仓库根目录进入）
+# StrongBoxCapabilityMask
 cd StrongBoxCapabilityMask
 ./gradlew :app:testDebugUnitTest :app:assembleRelease
 ```
 
-完整发行构建建议使用仓库的
-[Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)。
+完整发行构建建议使用 [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)。
+CI 只忽略纯 `*.md` 修改，TXT 修改仍会触发构建；默认使用源码版本，不自动递增或提交版本，
+手动 `release_version` 仅覆盖本次构建。
 
-## 验证范围与限制
+## 兼容性与验证范围
 
-2.1.4 已通过主机 WebUI 检查、Android 全工作区 Clippy 和测试编译，并由
-[Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml) 构建发布资产。
-这些是构建与界面检查。B 端刷新/状态测试 26/26 通过；客户测试设备上状态卡显示
-“Server connected / Relay last poll succeeded (HTTP 204)”，不再出现 Invalid server response。
-整体应用流程仍需安装新版后验收。
+以下是 **2026-09-05** 的测试记录，不是兼容设备清单，也不自动继承到后续版本。
 
-<details>
-<summary>历史实现与测试记录，不代表 2.1.4 已完成整体实机验收</summary>
+| 项目 | A 端 | B 端 |
+|---|---|---|
+| 机型 | 一加 13，PJZ110 | 一加 11，PHB110 |
+| Android / API / ABI | Android 16 / API 36 / arm64-v8a | Android 16 / API 36 / arm64-v8a |
+| 固件构建号 | `PJZ110_16.0.10.501(CN01)` | `PHB110_16.0.2.400(CN01)` |
+| 验证的硬件路径 | 原生 StrongBox + RKP 曾单独验证；远程验收时关闭 | 默认 TEE KeyMint，native relay |
+| StrongBox 状态 | 有原生实现；Mask 后功能查询为 false | 当次固件查询为 false，未验证 B StrongBox |
+| `app_attest_key` | true，Mask 保留 | true |
 
-1.6.0 修复三处会直接打断应用的 A 端 KeyMint 实现问题：镜像重放期间不再把 ommega 路由调用打成 `SYSTEM_ERROR`（改为有界等待，`poisoned` 仍 fail-closed）；EC 密钥生成恢复 AOSP 语义（EC + ENCRYPT 只警告不拒绝，不再硬报 `INCOMPATIBLE_PURPOSE`）；RSA 与 ECDSA 按密钥请求的摘要选择签名方案（此前 RSA 的 PKCS#1/PSS 写死 SHA-256、ECDSA 用曲线默认摘要：前者让非 SHA-256 的 RSA 密钥签名直接失败，后者产生摘要不匹配的静默错误签名）。B 端 `spl-control.sh` 拒绝 SPL/OS 版本降级，A 端新增 `event=local_sign` 诊断日志（记录本地签名的 padding/digest）。实机验证：HDFC 的 RSA-SHA512 指纹登录、Google Pay 的 EC 密钥生成、以及锁屏令牌重放窗口内被打断的指纹流程均恢复正常；A 端 mirror 12/12、tag 12/12、crypto 7/7 单测与 B 端 13 个 spl-control 用例通过，CI 全绿。Server 相对 1.5.3 只有版本号变化；B 端模块额外包含降级防护脚本。
+- 历史远程验收使用 A `remote=true`、`local_hw=false`、`disable_native_strongbox=true`、
+  `use_native_strongbox=false`、GlobalDefault，并启用 Mask。它验证的是
+  **A → Server → B TEE**，不是“双端 StrongBox 均通过”。
+- Mask 在 LSPosed 2.2.0 / libxposed API 102 上验证；A/B 模块在 root 环境运行，结果不能
+  推广为所有 root 管理器、ROM 或机型可用。
+- A 安装器与 Mask 的 `minSdk` 为 29，只是安装门槛，不代表 Android 10 起全部可用；实际
+  运行依赖 keystore2、KeyMint AIDL、注入器与固件接口匹配。
+- CI 发布 arm64-v8a 模块；其他架构、Android 版本与 B StrongBox 均需独立验证。
+- 2.1.4 通过主机 WebUI 检查、Android 全工作区 Clippy 与测试编译，B 端刷新/状态测试
+  26/26 通过，客户测试设备状态卡显示 HTTP 204；整体应用流程仍需安装新版后验收。
 
-1.4.6 把“异常 E”类检测器兼容改成按包名的显式开关：A 端 KeyMint 默认维持原厂形态（随机 64 位 key id，约一半为负），只有 `target-compat.toml` 里列出的包名在本机 Keystore 实现中新建密钥时才分配正 id；策略按 mtime 热重载，文件缺失、为空或格式非法即整条关闭且不产生额外开销。WebUI 在应用长按的“模式”对话框提供「检测器兼容」复选框，保存时原子写入该文件。兼容只影响改动后新建的密钥，已有负 id 密钥保持原样。B 端模块、Server 与两个 APK 相对 1.4.5 只有版本号变化。
-1.4.5 修两项 A 端问题：KeyMint 现在为每个进入软件 TA 的 HAL 入口补记“安全世界往返”耗时（begin/update/finish/abort/getKeyCharacteristics 9-21 ms、密钥生成 6-16 ms、控制类 1-4 ms），拦截路径下的时序不再明显快于硬件 TA（实机复验该判据不再命中，实测 T_triv 16.4-19.3 ms，硬件参考区间 11.93-25.00 ms）；远端 `debug_logging` 选项此前只被解析与保存、没有消费点，现开启后记录 `event=remote_attest_chain`（证书数、尾链字节数、每张证书的 len/签名 OID/SPKI OID）。B 端模块、Server 与两个 APK 相对 1.4.2 只有版本号变化。
-1.4.2 在 1.4.1 基础上把 A 端并发操作契约对齐 AOSP：同一 operation 的重叠调用在注入器边界返回 `OPERATION_BUSY`，不再依赖后端排队结果；A 端已实机复验通过（2026-09-13），B 端未改动。
-1.4.1 源码对应的前六批工作已覆盖远程 profile、证明/签名/解密、
-P-256/P-384/P-521/X25519 协商，以及 A 重启前后的认证密钥生命周期。
-NoPadding、SHA-224、NONE、OAEP MGF 修复有定向验证，不代表所有算法参数组合都支持。
-第六批 A Android workspace 测试为 516 项通过，另有正常应用远程链路验证。
-历史 B SPL 和 A 原生 StrongBox/RKP 测试与最终远程 TEE 配置是不同测试窗口。
-CI 全绿、Server 部署成功与最终安装包的应用验收是不同层次；不得互相替代。
+历史测试中的 Integrity 三绿、Paytm 进入手机号页或间歇 `00000` 等结果属于当时窗口，
+不构成对支付、绑卡或任何风控场景的保证。
 
-</details>
+## 安全与风险
 
-Wrapped import 未纳入支持验收，完整证书信任链验证及其他未完成工作仍有边界。
-不保证所有设备、固件、应用、算法或网络环境可用。
+- **B 端数据**：SPL 改动涉及凭据加密。keyblob 在较高 SPL 下升级后，可能要求始终保留该
+  较高值；root 丢失后设备回到原生 SPL，已升级的 keyblob 不会回退。请把 B 当作数据可
+  丢弃的设备，并保留设备外备份。现有开机自动应用和脚本防护都不保证 root 丢失后仍能
+  原生解锁。
+- **SPL 只升不降**：每项下限取设备原始值、当前上报值和已生效目标中的最高值。降低上报
+  值曾导致 `INVALID_ARGUMENT`（-38），A 降日期也曾使 Wallet 绑卡失败。不要把删除配置
+  或回滚模块当作密钥回滚方案。
+- **StrongBoxCapabilityMask**：它是全局 `system_server` hook，影响所有读取系统功能表的
+  应用；可能引起兼容性、崩溃或启动异常，也不能证明设备已隐藏解锁或通过完整性校验。
+  只在 A 确有 StrongBox 且希望应用按“未声明”处理时使用，并阅读
+  [Mask 说明](StrongBoxCapabilityMask/README.md)。
+- **传输与凭据**：`tls_insecure: true` 跳过 A 的证书验证，B 接受无效证书；公网部署需
+  自行保护传输、Token 与 Server。不要把 HTTPS 地址当作已认证身份的证明。
+- **发布签名**：两个 APK 使用 Android 默认 debug 签名，CI 会缓存该调试身份；它不是正式
+  发布签名，缓存失效可能导致签名身份变化，升级前务必核对证书。
+- **无担保**：本项目按现状提供，不保证适用性、安全性或任何检测结果。使用者自行承担
+  数据丢失、设备异常、账户限制、业务或财产损失等风险（以适用法律允许的范围为限）。
 
-## 远端请求时限与灭屏可用性
+## 文档
 
-B 端 `OMMEGA_RELAY_WAKELOCK=true` 在灭屏时维持 CPU 可用，会增加耗电；需要内核
-提供 `CONFIG_PM_WAKELOCKS` 接口。relay 每 30 秒续期一次 90 秒锁租约，进程停止或异常退出
-后租约自行到期；设置为 false 后 30 秒内释放本模块锁。接口缺失或拒绝时记录警告，
-不能保证灭屏转发可用性。升级只补齐缺少的配置键，保留已有值、凭据和设备身份。
+| 文档 | 内容 |
+|---|---|
+| [A 端说明](a-side/source/README.md) | 注入与路由、远程配置、keybox、认证签名、构建与校验 |
+| [B 端说明](b-side/source/README.md) | relay 协议、SPL 规则、电量遥测、灭屏可用性 |
+| [Server 说明](server/source/README.md) | 电量字段、速率限制与本地测试 |
+| [UI 说明](ui/README.md) | 共享设计系统、预览、浏览器 smoke 与部署回滚 |
+| [Mask 说明](StrongBoxCapabilityMask/README.md) | hook 点、验证步骤、兼容前提与回滚 |
+| [CHANGELOG.md](CHANGELOG.md) | 2.1.x / 2.0.x 逐版本更新要点 |
 
-A 端远端签名的两次尝试和退避共用 10 秒 HTTP 预算；建钥证明仍采用独立的较长预算。
-injector 在同一 RPC 会话内使用最多 4 个连接，普通远端签名在网络等待期间释放 TA 锁。
-带后续认证、可信确认、可信在场或单次使用删除约束的操作继续走原串行执行路径。
-服务器签名等待至多 10 秒，超时仅撤销尚未分配的任务，不中断已进入 HAL 的调用。
+## 致谢与许可证
 
-## 上游、署名与许可证
+- 上游仓库：[jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega)，原作者 jiyin004
+- 本 fork：[Andrea-lyz/ommega](https://github.com/Andrea-lyz/ommega)，维护者 Andrea-lyz
 
-- 上游仓库：[jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega)
-- 本 fork：[Andrea-lyz/ommega](https://github.com/Andrea-lyz/ommega)
-- 原作者：jiyin004
-- Fork 维护：Andrea-lyz
-
-继续感谢本项目所参考的开源实现：
+参考的开源实现：
 
 | 项目 | 作者 | GitHub |
 |---|---|---|
@@ -637,5 +414,5 @@ injector 在同一 RPC 会话内使用最多 4 个连接，普通远端签名在
 | KeyAttestation | vvb2060 | [vvb2060/KeyAttestation](https://github.com/vvb2060/KeyAttestation) |
 | TEESimulator-RS | Enginex0 | [Enginex0/TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS) |
 
-项目继续遵循仓库中现有的 AGPL-3.0-or-later、Apache-2.0 等对应源码许可证；本 README
+项目遵循仓库中现有的 AGPL-3.0-or-later、MIT、Apache-2.0 等对应源码许可证；本 README
 不改变任何第三方代码的原许可证或版权归属。
