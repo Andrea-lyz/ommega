@@ -7,6 +7,9 @@
 版本号在 A / B / Server / B-app / StrongBoxCapabilityMask 之间统一。除特别说明外，一次
 发布中只更新正常发布的模块 ZIP 不会替你更新 Server，也不会安装可选 APK。
 
+README 不再内嵌逐版本更新要点：发版时只更新版本号，并在这里追加条目。发布步骤见
+[RELEASING.md](RELEASING.md)。
+
 ## 2.1.4 — 2026-10-29
 
 B 端 WebUI 状态卡修复。
@@ -21,6 +24,8 @@ B 端 WebUI 状态卡修复。
   Server 2.1.3 的 poll 独立配额修复保持不变。
 - A/Server、B-app、StrongBoxCapabilityMask 相对 2.1.3 只有版本号变化。升级时只需更新
   B 模块即可获得状态卡修复；两个 APK 仍为 debug 签名。
+- 验证：B 端刷新/状态测试 26/26 通过，UI checks 与 master CI 全绿；客户测试设备状态卡
+  显示 “Server connected / Relay last poll succeeded (HTTP 204)”。
 
 ## 2.1.3 — 2026-10-29
 

@@ -119,30 +119,16 @@ suite.
 
 | Release asset | Purpose |
 |---|---|
-| `ommega-a-release-arm64-v8a-2.1.4-<commit>.zip` | A root module, including WebUI |
-| `ommegaclient-b-release-arm64-v8a-2.1.4-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
+| `ommega-a-release-arm64-v8a-<version>-<commit>.zip` | A root module, including WebUI |
+| `ommegaclient-b-release-arm64-v8a-<version>-<commit>.zip` | Native B relay module, including WebUI and SPL controls |
 | `relay_rs-linux-x86_64-musl` | Self-hosted Linux Server, updated separately |
-| `Ommega-B-app-2.1.4-debug-signed.apk` | Optional B client; neither the A app nor a native-B replacement |
-| `StrongBoxCapabilityMask-2.1.4-debug-signed.apk` | Optional A-side LSPosed module |
+| `Ommega-B-app-<version>-debug-signed.apk` | Optional B client; neither the A app nor a native-B replacement |
+| `StrongBoxCapabilityMask-<version>-debug-signed.apk` | Optional A-side LSPosed module |
 | `SHA256SUMS` / `build-info.json` | Checksums, product version, source commit and signing notes |
 
 GitHub's generated Source code archives are not installable modules. Both APKs are
 debug-signed; compare certificates before upgrading. Updating an A/B ZIP does not
 update the running Server or install the optional APKs.
-
-### What is new in 2.1.4
-
-- The B WebUI server card no longer depends on WebView-side curl/wget: with
-  `curl` it reads `/api/status/` from Server; without it, it reads the last
-  `b/poll status=` line from the relay log and shows 200/204, 429, 401/403, 5xx
-  or stale.
-- Fixes the false "Invalid server response" on stock Android without
-  `/system/bin/curl`; a real poll of 204 now shows "Server connected" and the
-  last poll time.
-- Only the B WebUI changed; B relay code, A/Server, `service.sh` and
-  TEE/KeyMint are untouched.
-- Updating the B module is enough for this fix; other components differ from
-  2.1.3 by the version string only.
 
 Per-version notes live in [CHANGELOG.en.md](CHANGELOG.en.md).
 
@@ -423,9 +409,11 @@ later releases do not inherit it automatically.
   compatibility.
 - CI publishes arm64-v8a modules. Other architectures, Android versions and B
   StrongBox require separate validation.
-- 2.1.4 passed host WebUI checks, Android workspace Clippy and test compilation;
-  all 26 B refresh/status tests pass, and the customer test device shows HTTP
-  204. Overall app flows still require installing the new build for acceptance.
+- Release assets are built by the
+  [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml);
+  CI runs host WebUI checks, Android workspace Clippy and test compilation.
+  Per-version validation records are in [CHANGELOG.en.md](CHANGELOG.en.md); overall
+  application flows still require installing the new build for acceptance.
 
 Integrity three-green results, Paytm reaching the phone-number page and
 intermittent `00000` belong to those historical test windows and do not guarantee
@@ -469,6 +457,7 @@ payments, card binding or any risk-control outcome.
 | [UI README](ui/README.md) | Shared design system, previews, browser smoke tests, deployment and rollback |
 | [Mask README](StrongBoxCapabilityMask/README.md) | Hook point, verification, compatibility and rollback |
 | [CHANGELOG.en.md](CHANGELOG.en.md) | Per-version notes for 2.1.x / 2.0.x |
+| [RELEASING.md](RELEASING.md) | Release steps and version maintenance (maintainers) |
 
 ## Credits and license
 

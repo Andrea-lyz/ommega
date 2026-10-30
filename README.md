@@ -100,27 +100,17 @@ AndroidKeyStore 身份生成密钥，无法完成同一套验收。
 
 | 发布资产 | 用途 |
 |---|---|
-| `ommega-a-release-arm64-v8a-2.1.4-<commit>.zip` | A 端 root 模块，含 WebUI |
-| `ommegaclient-b-release-arm64-v8a-2.1.4-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
+| `ommega-a-release-arm64-v8a-<version>-<commit>.zip` | A 端 root 模块，含 WebUI |
+| `ommegaclient-b-release-arm64-v8a-<version>-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
 | `relay_rs-linux-x86_64-musl` | 自建 Linux Server，单独更新 |
-| `Ommega-B-app-2.1.4-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同 native B 模块 |
-| `StrongBoxCapabilityMask-2.1.4-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
+| `Ommega-B-app-<version>-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同 native B 模块 |
+| `StrongBoxCapabilityMask-<version>-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
 | `SHA256SUMS` / `build-info.json` | 校验和、产品版本、源提交与签名说明 |
 
 GitHub 自动生成的 Source code 压缩包不是可安装模块。两个 APK 均为 debug 签名，覆盖安装
 前应核对证书；更新 A/B ZIP 不会替你更新 Server，也不会安装可选 APK。
 
-### 2.1.4 更新要点
-
-- B 端 WebUI 的 Server connection 卡片不再依赖 WebView 里的 curl/wget：有 `curl` 时读取
-  Server 的 `/api/status/`，没有或不可用时读取 relay 日志最后一条 `b/poll status=`，
-  显示 200/204、429、401/403、5xx 或 stale。
-- 修复原生 Android（没有 `/system/bin/curl`）上误报 “Invalid server response” 的问题；
-  relay 实际 poll 204 时显示 “Server connected” 和最后 poll 时间。
-- 本次只改 B 端 WebUI；B relay 代码、A/Server、`service.sh`、TEE/KeyMint 未改。
-- 只需更新 B 模块即可获得该修复；其他组件相对 2.1.3 只有版本号变化。
-
-逐版本说明见 [CHANGELOG.md](CHANGELOG.md)。
+逐版本更新说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 快速部署
 
@@ -362,8 +352,9 @@ CI 只忽略纯 `*.md` 修改，TXT 修改仍会触发构建；默认使用源�
 - A 安装器与 Mask 的 `minSdk` 为 29，只是安装门槛，不代表 Android 10 起全部可用；实际
   运行依赖 keystore2、KeyMint AIDL、注入器与固件接口匹配。
 - CI 发布 arm64-v8a 模块；其他架构、Android 版本与 B StrongBox 均需独立验证。
-- 2.1.4 通过主机 WebUI 检查、Android 全工作区 Clippy 与测试编译，B 端刷新/状态测试
-  26/26 通过，客户测试设备状态卡显示 HTTP 204；整体应用流程仍需安装新版后验收。
+- 发布资产由 [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
+  构建；CI 会运行主机 WebUI 检查、Android 全工作区 Clippy 与测试编译。具体版本的验证
+  记录见 [CHANGELOG.md](CHANGELOG.md)；整体应用流程仍需安装新版后验收。
 
 历史测试中的 Integrity 三绿、Paytm 进入手机号页或间歇 `00000` 等结果属于当时窗口，
 不构成对支付、绑卡或任何风控场景的保证。
@@ -398,6 +389,7 @@ CI 只忽略纯 `*.md` 修改，TXT 修改仍会触发构建；默认使用源�
 | [UI 说明](ui/README.md) | 共享设计系统、预览、浏览器 smoke 与部署回滚 |
 | [Mask 说明](StrongBoxCapabilityMask/README.md) | hook 点、验证步骤、兼容前提与回滚 |
 | [CHANGELOG.md](CHANGELOG.md) | 2.1.x / 2.0.x 逐版本更新要点 |
+| [RELEASING.md](RELEASING.md) | 发版步骤与版本号维护（维护者） |
 
 ## 致谢与许可证
 

@@ -9,6 +9,9 @@ A / B / Server / B-app / StrongBoxCapabilityMask share one version number. Unles
 stated otherwise, updating the module ZIPs from a release does not update the
 running Server and does not install the optional APKs.
 
+The README no longer embeds per-version notes: a release only bumps the version
+and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
+
 ## 2.1.4 — 2026-10-29
 
 B WebUI server-status card fix.
@@ -26,6 +29,9 @@ B WebUI server-status card fix.
 - A/Server, B-app and StrongBoxCapabilityMask differ from 2.1.3 by the version
   string only. Updating the B module is enough for the status-card fix; both APKs
   remain debug-signed.
+- Validation: all 26 B refresh/status tests pass, UI checks and master CI are
+  green, and the customer test device shows "Server connected / Relay last poll
+  succeeded (HTTP 204)".
 
 ## 2.1.3 — 2026-10-29
 

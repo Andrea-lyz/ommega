@@ -10,7 +10,7 @@ class VersionTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.files = (*versioning.CARGOS, *versioning.LOCKS, *versioning.APPS)
+        self.files = (*versioning.CARGOS, *versioning.LOCKS, *versioning.APPS, *versioning.READMES)
         for relative in self.files:
             dest = self.root / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -25,6 +25,27 @@ class VersionTests(unittest.TestCase):
         snapshot = self.snapshot()
         versioning.set_version(self.root, "9.8.7")
         self.assertEqual(self.snapshot(), snapshot)
+
+    def test_readme_versions_follow_product_version(self):
+        versioning.set_version(self.root, "9.8.7")
+        readme = (self.root / "README.md").read_text(encoding="utf-8")
+        english = (self.root / "README.en.md").read_text(encoding="utf-8")
+        self.assertIn("版本-9.8.7-blue", readme)
+        self.assertIn("当前版本 **9.8.7**", readme)
+        self.assertIn("| 当前版本 | **9.8.7**", readme)
+        self.assertIn("version-9.8.7-blue", english)
+        self.assertIn("Current version: **9.8.7**", english)
+        self.assertIn("| Current version | **9.8.7**", english)
+
+    def test_check_detects_readme_version_drift(self):
+        versioning.set_version(self.root, "9.8.7")
+        readme = self.root / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8").replace("当前版本 **9.8.7**", "当前版本 **9.8.6**"),
+            encoding="utf-8",
+        )
+        with self.assertRaises(ValueError):
+            versioning.check_versions(self.root)
 
     def test_malformed_input_leaves_files_unchanged(self):
         snapshot = self.snapshot()

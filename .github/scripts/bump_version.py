@@ -23,6 +23,20 @@ APPS = {
     "b-app/source/app/build.gradle.kts": "-ommega",
     "StrongBoxCapabilityMask/app/build.gradle.kts": "",
 }
+# The READMEs carry only the current product version; release history belongs in
+# CHANGELOG.md / CHANGELOG.en.md. Patterns are ordered and must match exactly once.
+READMES = {
+    "README.md": (
+        (r"(版本-)\d+\.\d+\.\d+(-blue)", "README.md version badge"),
+        (r"(当前版本 \*\*)\d+\.\d+\.\d+(\*\*)", "README.md current version"),
+        (r"(\| 当前版本 \| \*\*)\d+\.\d+\.\d+(\*\*)", "README.md version table"),
+    ),
+    "README.en.md": (
+        (r"(version-)\d+\.\d+\.\d+(-blue)", "README.en.md version badge"),
+        (r"(Current version: \*\*)\d+\.\d+\.\d+(\*\*)", "README.en.md current version"),
+        (r"(\| Current version \| \*\*)\d+\.\d+\.\d+(\*\*)", "README.en.md version table"),
+    ),
+}
 
 def read_version(root: Path = ROOT) -> str:
     return tomllib.loads((root / CARGOS[0]).read_text(encoding="utf-8"))["package"]["version"]
@@ -32,6 +46,14 @@ def replace_one(text: str, pattern: str, replacement, label: str) -> str:
     if count != 1:
         raise ValueError(f"missing version field: {label}")
     return updated
+
+def replace_readme_versions(text: str, patterns, version: str) -> str:
+    for pattern, label in patterns:
+        updated, count = re.subn(pattern, lambda match: match[1] + version + match[2], text, count=1)
+        if count != 1:
+            raise ValueError(f"missing version field: {label}")
+        text = updated
+    return text
 
 def set_version(root: Path, version: str) -> None:
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
@@ -56,6 +78,9 @@ def set_version(root: Path, version: str) -> None:
             text = replace_one(text, r'versionName = "[^"]+"', f'versionName = "{desired}"', relative)
             text = replace_one(text, r'versionCode = (\d+)', lambda m: f"versionCode = {int(m[1]) + 1}", relative)
         updates[relative] = text
+    for relative, patterns in READMES.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        updates[relative] = replace_readme_versions(text, patterns, version)
     # Validate every file before writing any of them.
     for relative, updated in updates.items():
         target = root / relative
@@ -81,6 +106,10 @@ def check_versions(root: Path = ROOT) -> str:
         name = re.search(r'versionName = "([^"]+)"', text)
         code = re.search(r'versionCode = (\d+)', text)
         if not name or name[1] != version + suffix or not code or int(code[1]) < 1:
+            raise ValueError(f"version mismatch: {relative}")
+    for relative, patterns in READMES.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        if replace_readme_versions(text, patterns, version) != text:
             raise ValueError(f"version mismatch: {relative}")
     return version
 
