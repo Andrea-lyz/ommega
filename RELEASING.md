@@ -71,7 +71,9 @@ git push origin master
 ## 6. 构建与发布资产
 
 发布资产由 [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
-在 `master` 上构建。发布 GitHub Release 时使用 tag `ommega_fix-X.Y.Z`，附上：
+在 `master` 上构建。缓存、NDK 与工具链细节见 [.github/BUILD.md](.github/BUILD.md)。
+
+发布 GitHub Release 时使用 tag `ommega_fix-X.Y.Z`，附上：
 
 - 两个模块 ZIP、`relay_rs-linux-x86_64-musl`、两个 APK；
 - `SHA256SUMS` 与 `build-info.json`；
