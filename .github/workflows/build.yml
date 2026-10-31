@@ -416,7 +416,7 @@ jobs:
           shutil.copy2(a_zip, root / 'ommega-a-latest.zip')
           shutil.copy2(b_zip, root / 'ommega-b-latest.zip')
           base = f"https://github.com/{os.environ['REPO']}/releases/latest/download"
-          changelog = f"https://github.com/{os.environ['REPO']}/releases/tag/{os.environ['TAG']}"
+          changelog = f"https://raw.githubusercontent.com/{os.environ['REPO']}/master/docs/KSU-CHANGELOG.txt"
           for module, zip_name in (('a', 'ommega-a-latest.zip'), ('b', 'ommega-b-latest.zip')):
               payload = {
                   'version': os.environ['RELEASE_VERSION'],
