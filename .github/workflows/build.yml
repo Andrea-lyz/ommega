@@ -222,6 +222,55 @@ jobs:
           compression-level: 0
           path: server/source/dist/relay_rs-linux-x86_64-musl
 
+  server-aarch64:
+    name: Server Linux aarch64
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set build version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 .github/scripts/bump_version.py --version "$RELEASE_VERSION"
+      - name: Install aarch64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          targets: aarch64-unknown-linux-gnu
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server/source
+          key: server-linux-aarch64-static
+          cache-workspace-crates: true
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Build static aarch64 Server
+        working-directory: server/source
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          RUSTFLAGS: "-C target-feature=+crt-static -C relocation-model=static"
+        run: |
+          cargo build --locked --release --target aarch64-unknown-linux-gnu --bin relay_rs
+          aarch64-linux-gnu-readelf -h target/aarch64-unknown-linux-gnu/release/relay_rs | grep -q AArch64
+          if aarch64-linux-gnu-readelf -l target/aarch64-unknown-linux-gnu/release/relay_rs | grep -q INTERP; then
+            echo "aarch64 server must be static" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-gnu/release/relay_rs dist/relay_rs-linux-aarch64-static
+          chmod +x dist/relay_rs-linux-aarch64-static
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ommega-${{ needs.prepare.outputs.version }}-server-aarch64
+          if-no-files-found: error
+          compression-level: 0
+          path: server/source/dist/relay_rs-linux-aarch64-static
+
   apks:
     name: Android APKs
     needs: prepare
@@ -296,7 +345,7 @@ jobs:
 
   bundle:
     name: Collect release artifacts
-    needs: [prepare, ui, android, server, apks]
+    needs: [prepare, ui, android, server, server-aarch64, apks]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -315,8 +364,8 @@ jobs:
           from pathlib import Path
           root = Path('dist')
           files = sorted(p for p in root.iterdir() if p.is_file())
-          if len(files) != 5 or sum(p.suffix == '.zip' for p in files) != 2 or sum(p.suffix == '.apk' for p in files) != 2:
-              raise SystemExit('Expected two module ZIPs, two APKs and one server binary')
+          if len(files) != 6 or sum(p.suffix == '.zip' for p in files) != 2 or sum(p.suffix == '.apk' for p in files) != 2 or sum(p.name.startswith('relay_rs-linux-') for p in files) != 2:
+              raise SystemExit('Expected two module ZIPs, two APKs and two server binaries')
           (root / 'build-info.json').write_text(json.dumps({'version': os.environ['RELEASE_VERSION'], 'commit': os.environ['SOURCE_COMMIT'], 'apk_signing': 'Android debug'}, indent=2) + '\n')
           files.append(root / 'build-info.json')
           (root / 'SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))

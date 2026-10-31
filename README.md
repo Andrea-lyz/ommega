@@ -43,7 +43,7 @@ Ommega 是一套 A / Server / B 三端协作的远程 KeyMint 系统。
 | 当前版本 | **2.1.4**（A / B / Server / 两个 APK 统一版本号） |
 | 部署形态 | 1 台 A + 1 台 B + 1 个自建 Server |
 | A / B | Android 12 及以上，arm64-v8a，KernelSU / APatch / Magisk |
-| Server | Linux x86_64（musl 静态二进制） |
+| Server | Linux x86_64（musl）/ aarch64（静态） |
 | 许可证 | A/B 为 AGPL-3.0-or-later；Server 声明 MIT；部分源码 Apache-2.0 |
 
 ## 工作原理
@@ -85,7 +85,7 @@ flowchart LR
 |---|---|---|
 | [`a-side`](a-side/source/README.md) | 拦截目标应用 Keystore；软件 TA；远程 TEE；可选 A 端原生 StrongBox | root 模块，含 WebUI，CI 提供 arm64-v8a |
 | [`b-side`](b-side/source/README.md) | 调用真实硬件 KeyMint，处理 `profile/attest/sign/decrypt/agree/soter` | root 模块，含 WebUI 与 SPL 控制 |
-| [`server`](server/source/README.md) | 鉴权、任务队列、A/B 调度、设备与后台管理 | Linux x86_64 musl 二进制 |
+| [`server`](server/source/README.md) | 鉴权、任务队列、A/B 调度、设备与后台管理 | Linux x86_64 musl / aarch64 static 二进制 |
 | [`b-app`](b-app/source) | 可选的独立 B 端客户端与连接配置界面 | Android APK，只实现 `attest/sign/decrypt` |
 | [`StrongBoxCapabilityMask`](StrongBoxCapabilityMask/README.md) | 全局隐藏 StrongBox 与设备 ID 证明 capability | libxposed API 102 APK，仅加载到 `system_server` |
 | [`ui`](ui/README.md) | A/B WebUI 共享样式、设计预览与离线 smoke | 开发资源，随模块打包 |
@@ -102,7 +102,8 @@ AndroidKeyStore 身份生成密钥，无法完成同一套验收。
 |---|---|
 | `ommega-a-release-arm64-v8a-<version>-<commit>.zip` | A 端 root 模块，含 WebUI |
 | `ommegaclient-b-release-arm64-v8a-<version>-<commit>.zip` | B 端原生 relay 模块，含 WebUI 与 SPL 控制 |
-| `relay_rs-linux-x86_64-musl` | 自建 Linux Server，单独更新 |
+| `relay_rs-linux-x86_64-musl` | 自建 Linux x86_64 Server，单独更新 |
+| `relay_rs-linux-aarch64-static` | ARM64 Linux / OpenWrt 路由器 Server，静态链接 |
 | `Ommega-B-app-<version>-debug-signed.apk` | 可选 B 客户端，不是 A 端 App，也不等同 native B 模块 |
 | `StrongBoxCapabilityMask-<version>-debug-signed.apk` | 可选 A 端 LSPosed 模块 |
 | `SHA256SUMS` / `build-info.json` | 校验和、产品版本、源提交与签名说明 |
@@ -116,7 +117,7 @@ GitHub 自动生成的 Source code 压缩包不是可安装模块。两个 APK �
 
 准备：
 
-- 一台可用的 Linux x86_64 Server（或自行交叉编译 `relay_rs`）。
+- 一台可用的 Linux x86_64 / aarch64 Server（CI 提供两种架构的静态 `relay_rs`）。
 - 两台 Android 12+、arm64-v8a 的 root 设备，建议都使用受支持的 KernelSU / APatch /
   Magisk 环境。
 - 自建 Token 与（建议）可信 TLS 证书。仓库不提供公共 Server 或公共 Token。
