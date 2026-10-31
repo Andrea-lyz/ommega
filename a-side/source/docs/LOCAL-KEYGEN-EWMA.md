@@ -8,40 +8,34 @@ One package per line; empty and # lines ignored. Missing file = off.
 
 ## Target policy
 
-Remote attested generateKey samples (challenge, no attestation key) feed a
-global 3/4-old + 1/4-new EWMA. For an opted-in application, the injector pads
-local GenerateKey only when needed so that:
+Remote attested generateKey samples feed an EWMA with fast upward attack and
+3/4-old + 1/4-new downward smoothing. For an opted-in application the injector
+pads GenerateKey only when needed so that:
 
-    local total = max(0, remote EWMA - 110ms)
+    local total = max(0, remote EWMA - 85ms)
 
-The goal is to keep the remote-minus-local delta near 110ms (under the 120ms
-Duck/T04 threshold), not to make local generation as slow as remote. If the
-remote EWMA is below 110ms, no local padding is applied.
+The goal is to keep the remote-minus-local delta near 85ms, comfortably below
+the 120ms Duck/T04 threshold, without making local generation as slow as remote.
+If the remote EWMA is below 85ms, no local padding is applied.
 
-All local GenerateKey paths are handled by the injector, including no-challenge
-keygen and challenge+ATTEST_KEY local generation. The TA no longer applies a
-local sleep. Samples above 250ms are discarded as queue-inflated.
+The injector resolves the caller package for every GenerateKey and applies the
+delta gate to both local and remote-shaped requests; remote generation is
+normally already above the target. The TA no longer applies a local sleep.
+Samples above 500ms are discarded as queue-inflated.
 
 ## Device evidence
 
-Policy enabled on the home-router path:
+A/B routed through the VPS ingress, policy enabled:
 
-| Metric | value |
-| --- | ---: |
-| T01 local baseline | 28ms |
-| T03 plain / child | 28/37ms |
-| T04 attested / control | 142/37ms |
-| T04 diff | 105ms PASS |
+| Metric | run 1 | run 2 |
+| --- | ---: | ---: |
+| T01 local baseline | 174ms | 149ms |
+| T03 plain / child | 233/240ms | 130/131ms |
+| T04 attested / control | 398/316ms | 376/255ms |
+| T04 diff | 82ms PASS | 120ms PASS |
 
-Policy file removed (default off):
+Duck Detector after the fix: 0 Danger, 2 Warning (ADB Runtime and System
+Properties only). Duck's timing signal is no longer emitted.
 
-| Metric | value |
-| --- | ---: |
-| T01 | 18ms |
-| T03 plain / child | 31/42ms |
-| T04 attested / control | 131/31ms |
-| T04 diff | 100ms PASS |
-
-The 110ms target is intentionally below the 120ms detector threshold; EWMA
-smoothing still means a sudden remote latency jump takes several samples to
-converge.
+Network jitter can still make the measured pair land at the 120ms boundary;
+85ms is the configured target, not a hard per-pair guarantee.
