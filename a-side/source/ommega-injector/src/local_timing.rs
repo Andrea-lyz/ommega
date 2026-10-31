@@ -15,8 +15,8 @@ use std::{
 const PATH: &str = "/data/misc/keystore/ommega/data/local-keygen.txt";
 const MAX_BYTES: u64 = 64 * 1024;
 const EWMA_MAX_NS: u64 = 2_000_000_000;
-const SAMPLE_MAX_NS: u64 = 250_000_000;
-const EQUALIZE_MIN_NS: u64 = 50_000_000;
+const SAMPLE_MAX_NS: u64 = 500_000_000;
+const TARGET_DELTA_NS: u64 = 85_000_000;
 type Stamp = (u64, u64, u64, i64, i64);
 type Cached = Option<(Stamp, Vec<String>)>;
 
@@ -98,8 +98,13 @@ fn record_sample(elapsed: Duration) {
     let Ok(mut ewma) = EWMA_NS.lock() else {
         return;
     };
-    *ewma = /* α = 1/4 */
-        if *ewma == 0 { sample } else { ewma.saturating_mul(3) / 4 + sample / 4 };
+    // Fast upward attack avoids a multi-round lag when a cellular path jumps
+    // above the previous EWMA; downward movement stays smoothed.
+    *ewma = if *ewma == 0 || sample > *ewma {
+        sample
+    } else {
+        ewma.saturating_mul(3) / 4 + sample / 4
+    };
 }
 
 fn equalize(packages: &[String], started: Instant) {
@@ -109,9 +114,9 @@ fn equalize(packages: &[String], started: Instant) {
     let Ok(ewma) = EWMA_NS.lock() else {
         return;
     };
-    let target = *ewma;
+    let target = ewma.saturating_sub(TARGET_DELTA_NS);
     drop(ewma);
-    if target < EQUALIZE_MIN_NS {
+    if target == 0 {
         return;
     }
     let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
@@ -142,11 +147,10 @@ pub(crate) fn after_generate(
         started.elapsed().as_micros(),
         packages
     );
-    if challenge {
-        if !has_attestation_key {
-            record_sample(started.elapsed());
-        }
-    } else {
-        equalize(packages, started);
+    if challenge && !has_attestation_key {
+        record_sample(started.elapsed());
     }
+    // Equalize every enabled GenerateKey. Remote generation is normally already
+    // above the target; the local ATTEST_KEY arm is what needs the pad.
+    equalize(packages, started);
 }

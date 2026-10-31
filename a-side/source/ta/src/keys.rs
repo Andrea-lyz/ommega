@@ -463,7 +463,6 @@ impl crate::KeyMintTa {
         authorize_on_a: bool,
     ) -> Result<KeyCreationResult, Error> {
         let _generate_timer = GenerateTimer::new();
-        let timing_started = Instant::now();
         // Remote mode: if a remote backend is enabled and attestation is
         // requested, mint the key on the B-side real TEE instead of locally.
         // A caller-selected remote attestation key is passed to B's native
@@ -516,7 +515,6 @@ impl crate::KeyMintTa {
             if let Some(result) =
                 self.generate_key_remote(params, remote_issuer.as_ref(), a_authorized_signing)?
             {
-                crate::local_timing::record_remote_attest_duration(timing_started.elapsed());
                 return Ok(result);
             }
             if kmr_common::auth_signing::eligible(params)
@@ -530,15 +528,13 @@ impl crate::KeyMintTa {
             }
         }
         let (key_material, chars) = self.generate_key_material(params)?;
-        let result = self.finish_keyblob_creation(
+        self.finish_keyblob_creation(
             params,
             attestation_key,
             chars,
             key_material,
             keyblob::SlotPurpose::KeyGeneration,
-        )?;
-        crate::local_timing::equalize_if_enabled(params, timing_started);
-        Ok(result)
+        )
     }
 
     /// Remote-mode key generation: the B-side TEE mints the attestation chain.

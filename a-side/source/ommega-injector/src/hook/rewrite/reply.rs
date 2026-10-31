@@ -580,7 +580,7 @@ pub(super) fn build_ommega_security_level_reply(
                 .iter()
                 .any(|param| param.tag == KeyTag::ATTESTATION_CHALLENGE);
             let has_attestation_key = attestation_key.is_some();
-            let timing_packages = if !has_challenge && pending.packages.is_empty() {
+            let timing_packages = if pending.packages.is_empty() {
                 match crate::ipc::resolve_packages_for_uid(pending.caller.uid as u32) {
                     PackageResolution::Known(packages) => packages,
                     _ => Vec::new(),
