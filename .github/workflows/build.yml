@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [master]
+    tags: ['v*']
     paths-ignore: ['**/*.md']
   pull_request:
     paths-ignore: ['**/*.md']
@@ -376,3 +377,64 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           path: dist/*
+
+  release:
+    name: Publish KSU release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, bundle]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ommega-${{ needs.prepare.outputs.version }}
+          path: dist
+      - name: Prepare KSU update metadata and stable aliases
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil, zipfile
+          from pathlib import Path
+
+          root = Path('dist')
+          a_zip = next(root.glob('ommega-a-release-*.zip'))
+          b_zip = next(root.glob('ommegaclient-b-release-*.zip'))
+
+          def version_code(path):
+              with zipfile.ZipFile(path) as archive:
+                  for line in archive.read('module.prop').decode('utf-8').splitlines():
+                      if line.startswith('versionCode='):
+                          return int(line.split('=', 1)[1])
+              raise SystemExit(f'missing versionCode in {path}')
+
+          shutil.copy2(a_zip, root / 'ommega-a-latest.zip')
+          shutil.copy2(b_zip, root / 'ommega-b-latest.zip')
+          base = f"https://github.com/{os.environ['REPO']}/releases/latest/download"
+          changelog = f"https://github.com/{os.environ['REPO']}/releases/tag/{os.environ['TAG']}"
+          for module, zip_name in (('a', 'ommega-a-latest.zip'), ('b', 'ommega-b-latest.zip')):
+              payload = {
+                  'version': os.environ['RELEASE_VERSION'],
+                  'versionCode': version_code(root / zip_name),
+                  'zipUrl': f'{base}/{zip_name}',
+                  'changelog': changelog,
+              }
+              (root / f'ommega-{module}-update.json').write_text(
+                  json.dumps(payload, indent=2) + '\n', encoding='utf-8'
+              )
+          PY
+      - name: Create or refresh GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "Ommega ${RELEASE_VERSION}" --generate-notes --latest
+          fi

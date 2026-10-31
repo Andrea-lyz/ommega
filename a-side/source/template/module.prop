@@ -2,5 +2,6 @@ id=ommega
 name=Ommega
 version=${versionName}
 versionCode=${versionCode}
+updateJson=https://github.com/Andrea-lyz/ommega/releases/latest/download/ommega-a-update.json
 author=jiyin004, Andrea-lyz
 description=Ommega A-side relay: remote TEE attestation via real hardware TEE

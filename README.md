@@ -1,6 +1,6 @@
 # Ommega
 
-[![版本](https://img.shields.io/badge/版本-2.1.4-blue)](https://github.com/Andrea-lyz/ommega/releases)
+[![版本](https://img.shields.io/badge/版本-2.2.0-blue)](https://github.com/Andrea-lyz/ommega/releases)
 [![许可证](https://img.shields.io/badge/许可证-AGPL--3.0--or--later-green)](LICENSE)
 [![中文](https://img.shields.io/badge/语言-中文-blue)](README.md)
 [![English](https://img.shields.io/badge/Language-English-lightgrey)](README.en.md)
@@ -12,7 +12,7 @@
 
 > [!IMPORTANT]
 > 本仓库是 [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega) 的社区维护分支，
-> 不是上游官方发行版，也不提供公共在线服务或公共 Token。当前版本 **2.1.4**，模块作者为
+> 不是上游官方发行版，也不提供公共在线服务或公共 Token。当前版本 **2.2.0**，模块作者为
 > `jiyin004, Andrea-lyz`。维护目标是 **1 台 A + 1 台 B** 的专用部署，不以一个 B 服务
 > 多个 A 为适配目标。
 
@@ -40,7 +40,7 @@ Ommega 是一套 A / Server / B 三端协作的远程 KeyMint 系统。
 
 | 项目 | 说明 |
 |---|---|
-| 当前版本 | **2.1.4**（A / B / Server / 两个 APK 统一版本号） |
+| 当前版本 | **2.2.0**（A / B / Server / 两个 APK 统一版本号） |
 | 部署形态 | 1 台 A + 1 台 B + 1 个自建 Server |
 | A / B | Android 12 及以上，arm64-v8a，KernelSU / APatch / Magisk |
 | Server | Linux x86_64（musl）/ aarch64（静态） |

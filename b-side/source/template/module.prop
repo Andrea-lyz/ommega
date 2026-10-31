@@ -2,5 +2,6 @@ id=ommegaclient_b
 name=Ommegaclient B
 version=${versionName}
 versionCode=${versionCode}
+updateJson=https://github.com/Andrea-lyz/ommega/releases/latest/download/ommega-b-update.json
 author=jiyin004, Andrea-lyz
 description=B-side relay agent: real-TEE attestation forwarding for the ommega keystore
