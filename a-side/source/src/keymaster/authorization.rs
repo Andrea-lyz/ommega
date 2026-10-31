@@ -70,6 +70,8 @@ pub enum Error {
     Binder(ExceptionCode, i32),
 }
 
+mod token_gate;
+
 const AUTH_TOKEN_MAC_LEN: usize = 32;
 
 /// Translate an error into a service specific exception, logging along the way.
@@ -319,25 +321,26 @@ impl AuthorizationManager {
             }
         }
 
-        // Android keystore2 accepts HAT contents at the addAuthToken ingestion boundary. Mirrored
-        // calls only arrive after System returned success, so preserve that result and attempt to
-        // localize the token without applying ommega-only shape or MAC checks. Direct service calls
-        // retain the stricter ommega boundary checks.
-        validate_auth_token_shape_for_source(ctx, auth_token)?;
-        if should_skip_system_auth_token_verification(ctx) {
-            log::debug!(
-                "system auth token MAC verification skipped for mirrored/config fallback authType={:#x} challengeTag={:04x}",
-                auth_token.authenticatorType.0,
-                challenge_tag(auth_token.challenge),
-            );
-        } else {
-            verify_system_auth_token(auth_token)
-                .context(ks_err!("system KeyMint did not verify the auth token MAC"))?;
-        }
-
-        if let Some(localized) =
-            localize_auth_token_for_source(ctx, auth_token, localize_auth_token_for_ommega)?
-        {
+        // System's addAuthToken success only means the token was cached. Its
+        // MAC is normally checked later by a TEE operation; it is not proof
+        // that Ommega may re-MAC arbitrary mirrored contents as a local HAT.
+        if let Some(localized) = localize_auth_token_for_source(
+            ctx,
+            auth_token,
+            |token| {
+                if should_skip_system_auth_token_verification() {
+                    log::warn!(
+                        "INSECURE configured HAT MAC bypass authType={:#x}",
+                        token.authenticatorType.0
+                    );
+                    Ok(())
+                } else {
+                    verify_system_auth_token(token)
+                        .context(ks_err!("system KeyMint did not verify the auth token MAC"))
+                }
+            },
+            localize_auth_token_for_ommega,
+        )? {
             ENFORCEMENTS.add_auth_token(localized);
         }
         Ok(())
@@ -405,27 +408,20 @@ fn check_ommega_keystore_permission(
         .map_err(into_logged_binder)
 }
 
-fn validate_auth_token_shape_for_source(
-    ctx: Option<&CallerInfo>,
-    auth_token: &HardwareAuthToken,
-) -> Result<()> {
-    if ctx.is_some() {
-        Ok(())
-    } else {
-        validate_auth_token_shape(auth_token)
-    }
-}
-
 fn localize_auth_token_for_source(
     ctx: Option<&CallerInfo>,
     auth_token: &HardwareAuthToken,
+    verify: impl FnOnce(&HardwareAuthToken) -> Result<()>,
     localize: impl FnOnce(&HardwareAuthToken) -> Result<HardwareAuthToken>,
 ) -> Result<Option<HardwareAuthToken>> {
-    match localize(auth_token).context(ks_err!("localizing trusted auth token for ommega")) {
+    let result =
+        token_gate::verified_localization(auth_token, validate_auth_token_shape, verify, localize)
+            .context(ks_err!("verifying and localizing auth token for ommega"));
+    match result {
         Ok(localized) => Ok(Some(localized)),
         Err(error) if ctx.is_some() => {
             log::warn!(
-                "dropping auth token mirrored after System success because ommega localization failed authType={:#x} challengeTag={:04x}: {error:#}",
+                "dropping auth token mirrored after System success because ommega verification/localization failed authType={:#x} challengeTag={:04x}: {error:#}",
                 auth_token.authenticatorType.0,
                 challenge_tag(auth_token.challenge),
             );
@@ -457,11 +453,7 @@ fn validate_auth_token_shape(auth_token: &HardwareAuthToken) -> Result<()> {
     Ok(())
 }
 
-fn should_skip_system_auth_token_verification(ctx: Option<&CallerInfo>) -> bool {
-    if ctx.is_some() {
-        return true;
-    }
-
+fn should_skip_system_auth_token_verification() -> bool {
     match config().read() {
         Ok(config) => config.main.force_skip_system_biometric_hat_verification,
         Err(_) => {
@@ -1104,8 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_auth_token_shapes_match_aosp_ingestion() {
-        let caller = mirrored_caller();
+    fn mirrored_shapes_are_not_trusted_as_verified_authentication() {
         let mut variants = Vec::new();
 
         let mut token = valid_auth_token();
@@ -1149,19 +1140,20 @@ mod tests {
 
         for (label, token) in variants {
             assert!(
-                validate_auth_token_shape_for_source(Some(&caller), &token).is_ok(),
-                "mirror rejected {label}"
+                validate_auth_token_shape(&token).is_err()
+                    || token.authenticatorType == combined_authenticator_type(),
+                "unexpected mirrored shape accepted: {label}"
             );
         }
     }
 
     #[test]
     fn direct_auth_token_shape_validation_remains_strict() {
-        assert!(validate_auth_token_shape_for_source(None, &valid_auth_token()).is_ok());
+        assert!(validate_auth_token_shape(&valid_auth_token()).is_ok());
 
         let mut combined = valid_auth_token();
         combined.authenticatorType = combined_authenticator_type();
-        assert!(validate_auth_token_shape_for_source(None, &combined).is_ok());
+        assert!(validate_auth_token_shape(&combined).is_ok());
 
         let mut variants = Vec::new();
 
@@ -1188,7 +1180,7 @@ mod tests {
 
         for (label, token) in variants {
             assert!(
-                validate_auth_token_shape_for_source(None, &token).is_err(),
+                validate_auth_token_shape(&token).is_err(),
                 "direct validation accepted {label}"
             );
         }
@@ -1200,31 +1192,38 @@ mod tests {
         let mut token = valid_auth_token();
         token.authenticatorType = HardwareAuthenticatorType(4);
 
-        assert!(
-            localize_auth_token_for_source(Some(&caller), &token, |token| {
+        assert!(localize_auth_token_for_source(
+            Some(&caller),
+            &token,
+            |_| Ok(()),
+            |token| {
                 token.to_km()?;
                 Ok(token.clone())
-            })
-            .expect("unknown mirror auth type should preserve System success")
-            .is_none()
-        );
+            }
+        )
+        .expect("unknown mirror auth type should preserve System success")
+        .is_none());
 
         let token = valid_auth_token();
-        assert!(localize_auth_token_for_source(Some(&caller), &token, |_| {
-            Err(anyhow::anyhow!("auth-token HMAC key is not initialized"))
-        })
+        assert!(localize_auth_token_for_source(
+            Some(&caller),
+            &token,
+            |_| Ok(()),
+            |_| { Err(anyhow::anyhow!("auth-token HMAC key is not initialized")) }
+        )
         .expect("unavailable mirror HMAC key should preserve System success")
         .is_none());
     }
 
     #[test]
     fn direct_localization_failures_are_propagated() {
-        assert!(
-            localize_auth_token_for_source(None, &valid_auth_token(), |_| {
-                Err(anyhow::anyhow!("auth-token HMAC key is not initialized"))
-            })
-            .is_err()
-        );
+        assert!(localize_auth_token_for_source(
+            None,
+            &valid_auth_token(),
+            |_| Ok(()),
+            |_| { Err(anyhow::anyhow!("auth-token HMAC key is not initialized")) }
+        )
+        .is_err());
     }
 
     #[test]
@@ -1232,7 +1231,86 @@ mod tests {
         let mut token = valid_auth_token();
         token.authenticatorType = combined_authenticator_type();
 
-        assert!(validate_auth_token_shape_for_source(None, &token).is_ok());
+        assert!(validate_auth_token_shape(&token).is_ok());
         assert!(token.to_km().is_err());
+    }
+
+    #[test]
+    fn forged_mac_never_reaches_localization_for_any_source() {
+        use std::cell::Cell;
+        let caller = mirrored_caller();
+        for ctx in [None, Some(&caller)] {
+            let localizations = Cell::new(0);
+            let verifications = Cell::new(0);
+            let result = localize_auth_token_for_source(
+                ctx,
+                &valid_auth_token(),
+                |_| {
+                    verifications.set(verifications.get() + 1);
+                    Err(anyhow::anyhow!("invalid original MAC"))
+                },
+                |_| {
+                    localizations.set(localizations.get() + 1);
+                    Ok(valid_auth_token())
+                },
+            );
+            assert_eq!(verifications.get(), 1);
+            assert_eq!(localizations.get(), 0, "never re-MAC an unverified token");
+            if ctx.is_some() {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_mirrored_token_is_dropped_before_verifier_or_localizer() {
+        let caller = mirrored_caller();
+        let mut token = valid_auth_token();
+        token.mac.pop();
+        let result = localize_auth_token_for_source(
+            Some(&caller),
+            &token,
+            |_| panic!("malformed token must not call a HAL"),
+            |_| panic!("malformed token must not be localized"),
+        );
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn verification_precedes_remac_and_retains_all_authentication_fields() {
+        use std::cell::Cell;
+        let caller = mirrored_caller();
+        for ctx in [None, Some(&caller)] {
+            let order = Cell::new(0);
+            let token = valid_auth_token();
+            let localized = localize_auth_token_for_source(
+                ctx,
+                &token,
+                |original| {
+                    assert_eq!(order.get(), 0);
+                    order.set(1);
+                    assert_eq!(original.mac, token.mac);
+                    Ok(())
+                },
+                |original| {
+                    assert_eq!(order.get(), 1);
+                    order.set(2);
+                    let mut localized = original.clone();
+                    localized.mac = vec![0x5a; 32];
+                    Ok(localized)
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(order.get(), 2);
+            assert_eq!(localized.challenge, token.challenge);
+            assert_eq!(localized.userId, token.userId);
+            assert_eq!(localized.authenticatorId, token.authenticatorId);
+            assert_eq!(localized.authenticatorType, token.authenticatorType);
+            assert_eq!(localized.timestamp, token.timestamp);
+            assert_eq!(localized.mac, vec![0x5a; 32]);
+        }
     }
 }

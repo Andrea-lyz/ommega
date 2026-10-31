@@ -35,7 +35,7 @@ namespace maskcpu {
 namespace {
 
 constexpr char kTag[] = "MaskCPU";
-constexpr uint32_t kProtocol = 0x4d435036;  // MCP6: pre IPC, post shared-memory coordination
+constexpr uint32_t kProtocol = 0x4d435037;  // MCP6: pre IPC, post shared-memory coordination
 
 struct ScopeRequest { uint32_t protocol; int32_t pid; uint32_t uid; char package[256]; };
 struct ScopeReply { uint32_t protocol; int32_t error; RuntimeProfile profile; };
@@ -46,7 +46,7 @@ void captureHostIdentity() {
         snprintf(key, sizeof(key), "ro.product.%s", kIdentity[i].property);
         __system_property_get(key, kHostValues[i]);
     }
-    for (size_t i = 0; i < 3; ++i) __system_property_get(kCpuAliases[i].property, kHostValues[5 + i]);
+    for (size_t i = 0; i < kDirectCount; ++i) __system_property_get(kDirectProperties[i].property, kHostValues[5 + i]);
 }
 
 struct NamespaceId { uint64_t device; uint64_t inode; };
@@ -76,6 +76,7 @@ struct Plan {
     bool modelFound;
     uint32_t identityFound;
     unsigned skippedAliases;
+    bool directFound[kDirectCount];
 };
 
 struct PropertyContext { Plan* plan; const prop_info* property; };
@@ -294,13 +295,17 @@ void planProperty(void* cookie, const char* name, const char* value, uint32_t se
     const auto* context = static_cast<PropertyContext*>(cookie);
     Plan* plan = context->plan;
     if (strcmp(name, "ro.soc.model") == 0) plan->modelFound = true;
+    for (size_t i = 0; i < kDirectCount; ++i) {
+        if (strcmp(name, kDirectProperties[i].property) == 0) plan->directFound[i] = true;
+    }
     for (size_t i = 0; i < kIdentityCount; ++i) {
         char key[80];
         snprintf(key, sizeof(key), "ro.product.%s", kIdentity[i].property);
         if (strcmp(name, key) == 0) plan->identityFound |= 1u << i;
     }
     if (plan->error || strncmp(name, "ro.", 3) != 0) return;
-    const char* replacement = identityPropertyOverride(name);
+    const auto* direct = directProperty(name);
+    const char* replacement = direct ? direct->value : identityPropertyOverride(name);
     bool uncovered = false;
     if (const char* error = experimentHostError(name, value, &uncovered)) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "experiment refused: %s %s=%s", error, name, value);
@@ -312,17 +317,8 @@ void planProperty(void* cookie, const char* name, const char* value, uint32_t se
         __android_log_print(ANDROID_LOG_INFO, kTag, "uncovered partition alias retained: %s=%s", name, value);
         return;
     }
-    if (replacement) {
-        if (replacement[0] == '\0') {
-            return;  // Empty stays empty; missing properties are never created.
-        }
-        if (emptyOrUnknown(value)) return;
-    } else {
-        for (const auto& alias : kCpuAliases) {
-            if (strcmp(name, alias.property) != 0) continue;
-            replacement = alias.value;
-            break;
-        }
+    if (!direct && replacement && replacement[0] == '\0') {
+        return; // Dedicated attestation properties remain empty; no insertion.
     }
     if (!replacement || strcmp(value, replacement) == 0) return;
     // exp6 already patches the complete short prop_info union and length serial.
@@ -532,6 +528,14 @@ void companionWork(int socket) {
         if (plan.error || !plan.modelFound || plan.identityFound != ((1u << kIdentityCount) - 1)) {
             reply.error = plan.error ? plan.error : ENODEV; break;
         }
+        for (size_t i = 0; i < kDirectCount; ++i) {
+            if (!plan.directFound[i] && kDirectProperties[i].value[0]) {
+                __android_log_print(ANDROID_LOG_ERROR, kTag, "B view requires absent property: %s", kDirectProperties[i].property);
+                reply.error = ENODEV;
+                break;
+            }
+        }
+        if (reply.error) break;
         for (size_t i = 0; i < plan.count; ++i) {
             if (createSnapshot(plan.areas[i], &snapshots[i], temporary[i], sizeof(temporary[i])) != 0) {
                 reply.error = errno; break;
@@ -734,6 +738,10 @@ bool verifyNativeKey(const char* key, const char* expected) {
 struct AliasCheck { unsigned mismatches; unsigned uncovered; };
 void checkAlias(void* cookie, const char* name, const char* value, uint32_t) {
     auto* check = static_cast<AliasCheck*>(cookie);
+    if (const auto* direct = directProperty(name)) {
+        if (strcmp(value, direct->value) != 0) ++check->mismatches;
+        return;
+    }
     const char* expected = identityPropertyOverride(name);
     if (expected) {
         if (strcmp(value, expected) == 0) return;
@@ -749,7 +757,7 @@ void checkAlias(void* cookie, const char* name, const char* value, uint32_t) {
         }
         return;
     }
-    for (const auto& alias : kCpuAliases) {
+    for (const auto& alias : kDirectProperties) {
         if (strcmp(name, alias.property) == 0 && strcmp(value, alias.value) != 0) ++check->mismatches;
     }
 }
@@ -894,11 +902,14 @@ bool verifyPropertyView() {
         nativeOk &= verifyNativeKey(key, "");
         snprintf(key, sizeof(key), "ro.product.vendor.%s", kIdentity[i].property);
         __system_property_get(key, vendor[i]);
-        nativeOk &= emptyOrUnknown(vendor[i]) || strcmp(vendor[i], kIdentity[i].value) == 0;
+        const auto* expectedVendor = directProperty(key);
+        nativeOk &= expectedVendor ? strcmp(vendor[i], expectedVendor->value) == 0 :
+            (emptyOrUnknown(vendor[i]) || strcmp(vendor[i], kIdentity[i].value) == 0);
     }
     char nativeSoc[PROP_VALUE_MAX]{};
     __system_property_get("ro.soc.model", nativeSoc);
     nativeOk &= verifyNativeKey("ro.soc.model", kSocModel);
+    for (const auto& field : kDirectProperties) nativeOk &= verifyNativeKey(field.property, field.value);
     AliasCheck aliases{};
     if (__system_property_foreach(enumerateForAliases, &aliases) != 0) ++aliases.mismatches;
     __android_log_print(ANDROID_LOG_INFO, kTag, "native tuple=%s/%s/%s/%s/%s SOC_MODEL=%s APIs_verified=%s",
@@ -929,10 +940,10 @@ bool verifyPropertyView() {
         }
         childOk &= listingValue(listing, "ro.soc.model", childSoc, sizeof(childSoc), false) &&
             strcmp(childSoc, kSocModel) == 0;
-        for (const auto& alias : kCpuAliases) {
+        for (const auto& alias : kDirectProperties) {
             char value[PROP_VALUE_MAX]{};
-            childOk &= listingValue(listing, alias.property, value, sizeof(value), true) &&
-                (value[0] == '\0' || strcmp(value, alias.value) == 0);
+            childOk &= listingValue(listing, alias.property, value, sizeof(value), alias.value[0] == '\0') &&
+                strcmp(value, alias.value) == 0;
         }
     }
     free(listing);

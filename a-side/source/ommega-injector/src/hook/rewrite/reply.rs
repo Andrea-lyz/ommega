@@ -1,4 +1,7 @@
 use super::*;
+use crate::android::hardware::security::keymint::Tag::Tag as KeyTag;
+use crate::filter::PackageResolution;
+use std::time::Instant;
 
 mod dispatch;
 mod operation;
@@ -572,6 +575,19 @@ pub(super) fn build_ommega_security_level_reply(
             flags,
             entropy,
         } => {
+            let timing_started = Instant::now();
+            let has_challenge = params
+                .iter()
+                .any(|param| param.tag == KeyTag::ATTESTATION_CHALLENGE);
+            let has_attestation_key = attestation_key.is_some();
+            let timing_packages = if !has_challenge && pending.packages.is_empty() {
+                match crate::ipc::resolve_packages_for_uid(pending.caller.uid as u32) {
+                    PackageResolution::Known(packages) => packages,
+                    _ => Vec::new(),
+                }
+            } else {
+                pending.packages.clone()
+            };
             match ommega_level.r#generateKey(
                 Some(caller),
                 key,
@@ -580,7 +596,15 @@ pub(super) fn build_ommega_security_level_reply(
                 *flags,
                 entropy,
             ) {
-                Ok(metadata) => Ok(Some(parcel::build_plain_reply(&metadata)?)),
+                Ok(metadata) => {
+                    crate::local_timing::after_generate(
+                        &timing_packages,
+                        has_challenge,
+                        has_attestation_key,
+                        timing_started,
+                    );
+                    Ok(Some(parcel::build_plain_reply(&metadata)?))
+                }
                 Err(error) => {
                     ommega_status_reply_for_method("generateKey", &pending.caller, &error)
                 }

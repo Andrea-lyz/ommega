@@ -356,6 +356,8 @@ impl RemoteRelay {
     /// not be confused with an unavailable relay, because doing so silently
     /// changes the attestation backend.
     fn post_json(path: &str, body: &Value) -> Result<Option<Value>> {
+        let started = Instant::now();
+        let attempts = std::cell::Cell::new(0u32);
         let url = format!("{}{}", Self::base_url()?, path);
         let body_str = serde_json::to_string(body)?;
         let headers = vec![
@@ -371,6 +373,7 @@ impl RemoteRelay {
         };
         let deadline = Instant::now() + budget;
         let send = || {
+            attempts.set(attempts.get() + 1);
             http_request(
                 "POST",
                 &url,
@@ -451,7 +454,22 @@ impl RemoteRelay {
         // "remote unavailable" — surface it loudly instead of silently falling
         // back to the local software keybox (which would emit a self-signed
         // chain and hide the real failure).
-        decode_relay_response(path, status, &resp).map(Some)
+        let decoded = decode_relay_response(path, status, &resp);
+        log::debug!(
+            "event=relay_roundtrip path={path} request={} task={} attempts={} \
+             elapsed_us={} status={status} decoded_ok={}",
+            body.get("request_id").and_then(Value::as_str).unwrap_or(""),
+            decoded
+                .as_ref()
+                .ok()
+                .and_then(|v| v.get("task_id"))
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            attempts.get(),
+            started.elapsed().as_micros(),
+            decoded.is_ok()
+        );
+        decoded.map(Some)
     }
 
     fn fetch_identity_profile() -> Result<RemoteIdentityProfile> {

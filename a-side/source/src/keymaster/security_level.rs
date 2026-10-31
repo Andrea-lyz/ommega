@@ -15,7 +15,7 @@
 //! This crate implements the IKeystoreSecurityLevel interface.
 
 use crate::android::hardware::security::keymint::{
-    Algorithm::Algorithm, AttestationKey::AttestationKey, Certificate::Certificate,
+    Algorithm::Algorithm, AttestationKey::AttestationKey,
     HardwareAuthenticatorType::HardwareAuthenticatorType, IKeyMintDevice::IKeyMintDevice,
     KeyCreationResult::KeyCreationResult, KeyFormat::KeyFormat,
     KeyMintHardwareInfo::KeyMintHardwareInfo, KeyOrigin::KeyOrigin, KeyParameter::KeyParameter,
@@ -944,9 +944,14 @@ impl KeystoreSecurityLevel {
                     log_security_safe_params(&params)
                 ))
                 .map(|(mut result, _)| {
-                    result.certificateChain.push(Certificate {
-                        encodedCertificate: rkp_key.certificate_chain,
-                    });
+                    let _wp = self.watch_millis(
+                        "KeystoreSecurityLevel::generate_key (RkpdProvisioned): postprocess certificates",
+                        1000,
+                    );
+                    result.certificateChain = super::cert_postprocessor::process_certificate_chain(
+                        result.certificateChain,
+                        rkp_key.certificate_chain,
+                    );
                     result
                 })
             }

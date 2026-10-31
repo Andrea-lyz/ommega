@@ -15,6 +15,8 @@
 //! Generation of certificates and attestation extensions.
 
 use crate::keys::SigningInfo;
+
+mod policy;
 use core::time::Duration;
 use der::asn1::{OctetStringRef, SetOfVec};
 use der::{asn1::Null, oid::AssociatedOid, Enumerated, Sequence};
@@ -35,7 +37,7 @@ use kmr_wire::{
     KeySizeInBits, RsaExponent,
 };
 use spki::ObjectIdentifier;
-use std::{borrow::Cow, vec::Vec};
+use std::{borrow::Cow, sync::Mutex, vec::Vec};
 use x509_cert::der as x509_der;
 use x509_cert::der::asn1::{
     Any as X509Any, BitString as X509BitString, GeneralizedTime as X509GeneralizedTime,
@@ -54,6 +56,10 @@ use x509_cert::{
     name::Name,
     time::Time,
 };
+
+/// Last fully verified remote parent chain (intermediate..root) DER.
+/// Only the root/intermediate chain is cached; the leaf is verified every time.
+static REMOTE_PARENT_CHAIN_CACHE: Mutex<Option<Vec<Vec<u8>>>> = Mutex::new(None);
 
 /// OID value for the Android Attestation extension.
 pub const ATTESTATION_EXTENSION_OID: ObjectIdentifier =
@@ -393,8 +399,6 @@ pub(crate) fn validate_remote_delegation(
     chain: &[Vec<u8>],
     issuer: &crate::device::RemoteAttestationKey,
 ) -> Result<(), Error> {
-    use ring::signature;
-
     let invalid = || km_err!(VerificationFailed, "remote certificate issuer mismatch");
     if chain.len() < 2 {
         return Err(invalid());
@@ -415,6 +419,21 @@ pub(crate) fn validate_remote_delegation(
         return Err(invalid());
     }
     validate_native_attestation_issuer(&chain[1])?;
+    verify_remote_certificate_signature(&leaf, &parent)
+}
+
+fn verify_remote_certificate_signature(
+    leaf: &x509_cert::Certificate,
+    parent: &x509_cert::Certificate,
+) -> Result<(), Error> {
+    use ring::signature;
+    let invalid = || km_err!(VerificationFailed, "remote certificate issuer mismatch");
+    if leaf.tbs_certificate().issuer() != parent.tbs_certificate().subject()
+        || leaf.signature_algorithm() != leaf.tbs_certificate().signature()
+    {
+        return Err(invalid());
+    }
+    let spki = parent.tbs_certificate().subject_public_key_info();
     let key_oid = spki.algorithm.oid.to_string();
     let signature_oid = leaf.signature_algorithm().oid.to_string();
     let curve_oid = spki
@@ -470,11 +489,58 @@ pub(crate) fn validate_remote_delegation(
         })
 }
 
+/// Check every returned signature before a remote key is saved. This establishes
+/// chain integrity, not a trusted root or revocation policy.
+pub(crate) fn validate_remote_chain(chain: &[Vec<u8>]) -> Result<(), Error> {
+    if !(2..=16).contains(&chain.len()) {
+        return Err(km_err!(
+            VerificationFailed,
+            "incomplete or oversized remote certificate chain"
+        ));
+    }
+    let certificates = chain
+        .iter()
+        .map(|der| {
+            x509_cert::Certificate::from_der(der)
+                .map_err(|_| km_err!(VerificationFailed, "invalid remote certificate chain"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // The leaf is always verified against its immediate issuer. Only the
+    // already-fully-verified parent chain may be skipped, and only when every
+    // parent DER is byte-identical to the cached chain.
+    let parent_chain = &chain[1..];
+    let parent_cached = REMOTE_PARENT_CHAIN_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .as_ref()
+                .map(|cached| cached.as_slice() == parent_chain)
+        })
+        .unwrap_or(false);
+    verify_remote_certificate_signature(&certificates[0], &certificates[1])?;
+    if !parent_cached {
+        for pair in certificates[1..].windows(2) {
+            verify_remote_certificate_signature(&pair[0], &pair[1])?;
+        }
+        let root = certificates
+            .last()
+            .ok_or_else(|| km_err!(VerificationFailed, "missing remote root"))?;
+        verify_remote_certificate_signature(root, root)?;
+        if let Ok(mut cache) = REMOTE_PARENT_CHAIN_CACHE.lock() {
+            *cache = Some(parent_chain.to_vec());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_remote_attestation(
     cert_der: &[u8],
     expected_challenge: &[u8],
     expected_app_id: &[u8],
     expected_security_level: keymint::SecurityLevel,
+    requested: &crate::device::RemoteAttestParams,
 ) -> Result<(), Error> {
     let cert = <x509_cert::Certificate as Decode>::from_der(cert_der)
         .map_err(|e| km_err!(UnknownError, "parse remote attestation certificate: {e:?}"))?;
@@ -505,7 +571,18 @@ pub(crate) fn validate_remote_attestation(
         .app_id
         .as_deref()
         .or(attestation.hw_enforced.app_id.as_deref());
-    if app_id != Some(expected_app_id) {
+    if app_id != Some(expected_app_id)
+        || attestation
+            .sw_enforced
+            .app_id
+            .as_deref()
+            .is_some_and(|id| id != expected_app_id)
+        || attestation
+            .hw_enforced
+            .app_id
+            .as_deref()
+            .is_some_and(|id| id != expected_app_id)
+    {
         return Err(km_err!(
             VerificationFailed,
             "remote attestation application id mismatch"
@@ -525,7 +602,101 @@ pub(crate) fn validate_remote_attestation(
             "remote attestation security level mismatch"
         ));
     }
+    let public_key_oid = cert
+        .tbs_certificate()
+        .subject_public_key_info()
+        .algorithm
+        .oid
+        .to_string();
+    let public_key_matches = match requested.key_algorithm {
+        Some(1) => public_key_oid == "1.2.840.113549.1.1.1",
+        Some(3) => matches!(
+            public_key_oid.as_str(),
+            "1.2.840.10045.2.1" | "1.3.101.112" | "1.3.101.110"
+        ),
+        _ => false,
+    };
+    if !public_key_matches {
+        return Err(km_err!(
+            VerificationFailed,
+            "remote public key algorithm differs from request"
+        ));
+    }
+    validate_remote_policy(&attestation, requested)?;
     Ok(())
+}
+
+fn requested_policy(request: &crate::device::RemoteAttestParams) -> policy::Policy {
+    let mut result = policy::Policy::default();
+    for (tag, value) in [
+        (2, request.key_algorithm),
+        (3, request.key_size),
+        (10, request.ec_curve),
+    ] {
+        if let Some(value) = value {
+            result.numeric.insert(tag, i128::from(value));
+        }
+    }
+    if let Some(value) = request.rsa_public_exponent {
+        result.numeric.insert(200, i128::from(value));
+    }
+    for (tag, value) in &request.user_auth {
+        if matches!(tag, 503 | 504 | 505 | 507 | 508 | 509) {
+            result.numeric.insert(*tag, i128::from(*value));
+        }
+    }
+    result.ids.extend(request.device_properties.iter().cloned());
+    result
+}
+
+fn signed_policy(list: &AuthorizationList<'_>) -> policy::Policy {
+    let mut result = policy::Policy::default();
+    for param in list.auths.iter() {
+        let (tag, value) = match param {
+            KeyParam::Algorithm(v) => (2, i128::from(*v as i32)),
+            KeyParam::KeySize(v) => (3, i128::from(v.0)),
+            KeyParam::EcCurve(v) => (10, i128::from(*v as i32)),
+            KeyParam::RsaPublicExponent(v) => (200, i128::from(v.0)),
+            KeyParam::NoAuthRequired => (503, 1),
+            KeyParam::UserAuthType(v) => (504, i128::from(*v)),
+            KeyParam::AuthTimeout(v) => (505, i128::from(*v)),
+            KeyParam::TrustedUserPresenceRequired => (507, 1),
+            KeyParam::TrustedConfirmationRequired => (508, 1),
+            KeyParam::UnlockedDeviceRequired => (509, 1),
+            _ => continue,
+        };
+        result.numeric.insert(tag, value);
+    }
+    for (tag, value) in [
+        (710, &list.ids.brand),
+        (711, &list.ids.device),
+        (712, &list.ids.product),
+        (716, &list.ids.manufacturer),
+        (717, &list.ids.model),
+    ] {
+        if let Some(value) = value {
+            result.ids.insert(tag, value.to_vec());
+        }
+    }
+    result
+}
+
+fn validate_remote_policy(
+    attestation: &AttestationExtension<'_>,
+    requested: &crate::device::RemoteAttestParams,
+) -> Result<(), Error> {
+    policy::validate(
+        &requested_policy(requested),
+        &signed_policy(&attestation.hw_enforced),
+        &signed_policy(&attestation.sw_enforced),
+    )
+    .map_err(|mismatch| {
+        km_err!(
+            VerificationFailed,
+            "remote signed policy differs from request at tag {}",
+            mismatch.0
+        )
+    })
 }
 
 fn x509_oid(oid: ObjectIdentifier) -> Result<X509ObjectIdentifier, Error> {

@@ -21,17 +21,24 @@ relay_server.
   mismatched local profile. Profile or certificate mismatches fail closed;
   enabling local fallback does not bypass identity checks.
 - **Authentication-signing policy** is configured at runtime in the WebUI.
-  The default **Auto** mode preserves B's requested authentication policy for
-  known detector probes, and uses A authorization with B signing for other
-  eligible EC/RSA authentication-signing keys. **Payment compatibility** always
-  uses that compatibility path; **Preserve authentication** keeps the requested
+  The default **Auto** mode preserves the requested B authentication policy for
+  every alias. A authorization with B signing requires an explicit **Payment
+  compatibility** selection for eligible EC/RSA authentication-signing keys.
+  **Preserve authentication** also keeps the requested
   B policy, which may return `KeyUserNotAuthenticated` (-26) when A authenticates.
   Every remote path returns B's certificate unchanged. Per-app exceptions work
   in both list scope and global scope, without package-name heuristics.
 
 See [Authentication-signing policy](docs/AUTH-SIGNING-POLICY.md) for eligibility,
-probe recognition, configuration and the authentication trust boundary. Only
+creation policy, configuration and the authentication trust boundary. Only
 newly created keys are affected; existing keys are never converted.
+
+Native Android RKP key creation supports the optional system certificate
+postprocessor, preserving the original chain if lookup or processing fails.
+See [RKP certificate postprocessor](docs/RKP-POSTPROCESSOR.md). Remote B chains do
+not pass through this native RKP postprocessor. Mirrored HAT ingestion verifies
+the original MAC before re-MACing locally by default; the explicit insecure
+verification override is described in the authentication-signing policy.
 
 The native Soter HAL has an independent relay. Enable the software Soter TA in
 the WebUI to take over `vendor.qti.hardware.soter.ISoter/default`; then configure
@@ -248,9 +255,13 @@ mirror queue replays captured state changes after the service becomes ready.
 Remote keys use B's certificate chain unchanged and inherit its available OS,
 vendor and boot version tags in their returned characteristics and new keyblob.
 The default TEE profile also carries the real HAL's OS and partition version
-authorizations. With this snapshot present, ordinary local generation, import
-and software-keyblob upgrade use the same version source before any attestation
-request. Optional partition tags remain absent when the HAL omits them. A rejects
+authorizations. With this snapshot present, ordinary local generation, import,
+software-keyblob loading and explicit upgrade use the same current version source.
+New optional partition tags remain absent when the HAL omits them; explicit upgrade
+does not erase an existing bound tag merely because current metadata omits it.
+Older software keyblobs require upgrade; future versions are rejected and are never
+silently lowered. See [Software keyblob version checks](docs/KEYBLOB-VERSIONS.md)
+for the OS-zero exception and deployment/migration constraints. A rejects
 a new remote certificate whose version tags differ from the profile. This does
 not change A's global properties, boot/RoT encryption inputs, B's SPL or hardware
 keyblobs. The snapshot is refreshed by the existing profile-cache invalidation;
@@ -260,10 +271,11 @@ A does not add a synthetic child leaf for authentication or unlock constraints.
 Existing keys retain their key material and credential-encryption state.
 
 The relay's physical authorization policy is distinct from A-side application
-policy: B preserves the requested purposes and uses `NO_AUTH_REQUIRED` because
-it cannot validate A's user token. B forwards `UNLOCKED_DEVICE_REQUIRED` (509)
-independently. A enforces the application's original
-authentication policy and timeout without alias-specific extensions.
+policy. Auto/Preserve retain requested B user-auth tags. Explicit Payment
+compatibility replaces user-auth requirements with `NO_AUTH_REQUIRED` because B
+cannot validate A's user token. Requested purposes and `UNLOCKED_DEVICE_REQUIRED`
+(509) remain intact. In compatibility mode A enforces the original authentication
+policy and timeout without alias-specific extensions.
 This proxy does not provide hardware enforcement of A's user authentication;
 the certificate reports B's actual policy. An `ATTEST_KEY` certificate must
 report an exclusive hardware ATTEST_KEY purpose. A caller-selected remote App AttestKey is resolved

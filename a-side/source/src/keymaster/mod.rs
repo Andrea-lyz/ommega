@@ -4,6 +4,7 @@ pub mod attestation_key_utils;
 pub mod audit_log;
 pub mod authorization;
 pub mod boot_key;
+mod cert_postprocessor;
 pub mod crypto;
 pub mod database;
 pub mod db;

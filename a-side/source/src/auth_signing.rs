@@ -101,9 +101,6 @@ pub fn authorize_on_a(
     }
     let mode = config.mode_for_packages(packages);
     let decision = auth_signing::authorize_on_a(mode, alias, params);
-    log::info!(
-        "Auth-signing creation policy: mode={mode:?} authorize_on_a={decision} known_probe={}",
-        auth_signing::known_probe(alias, params)
-    );
+    log::info!("Auth-signing creation policy: mode={mode:?} authorize_on_a={decision}");
     Ok(decision)
 }

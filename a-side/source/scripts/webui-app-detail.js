@@ -3,6 +3,7 @@
 // Scope, security mode, auth signing and CPU scope remain separate policies.
 const OMMEGA_APP_TARGET = "/data/adb/ommega/ommegadata/target.txt";
 const OMMEGA_SYSTEM_APPS = "/data/adb/ommega/ommegadata/system_app";
+const OMMEGA_LOCAL_KEYGEN = "/data/adb/ommega/ommegadata/data/local-keygen.txt";
 let ommegaTargetSnapshot = undefined;
 let ommegaTargetSnapshotGeneration = 0;
 let ommegaDetail = null;
@@ -12,7 +13,7 @@ let ommegaCertificateCounts = null;
 let ommegaCountsBusy = false;
 
 async function ommegaReadAppFile(path) {
-  if (![OMMEGA_APP_TARGET, OMMEGA_TARGET_SECURITY, OMMEGA_SYSTEM_APPS].includes(path)) throw new Error("Unsupported app policy");
+  if (![OMMEGA_APP_TARGET, OMMEGA_TARGET_SECURITY, OMMEGA_SYSTEM_APPS, OMMEGA_LOCAL_KEYGEN].includes(path)) throw new Error("Unsupported app policy");
   const result = await ommegaReadOnly('if [ ! -e "' + path + '" ]; then printf "M:"; elif [ -f "' + path + '" ]; then printf "F:"; base64 < "' + path + '"; else exit 1; fi');
   if (Number(result.errno) !== 0) throw new Error(result.stderr || "Read failed");
   const encoded = String(result.stdout).replace(/\s/g, "");
@@ -23,9 +24,9 @@ async function ommegaReadAppFile(path) {
 }
 
 function ommegaAppFileWriteCommand(path, expected, replacement) {
-  if (![OMMEGA_APP_TARGET, OMMEGA_TARGET_SECURITY, OMMEGA_SYSTEM_APPS].includes(path) ||
+  if (![OMMEGA_APP_TARGET, OMMEGA_TARGET_SECURITY, OMMEGA_SYSTEM_APPS, OMMEGA_LOCAL_KEYGEN].includes(path) ||
       (expected !== null && typeof expected !== "string") || typeof replacement !== "string") throw new Error("Invalid policy write");
-  const operation = path === OMMEGA_APP_TARGET ? "write-target" : path === OMMEGA_TARGET_SECURITY ? "write-target-security" : "write-system-apps";
+  const operation = path === OMMEGA_APP_TARGET ? "write-target" : path === OMMEGA_TARGET_SECURITY ? "write-target-security" : path === OMMEGA_LOCAL_KEYGEN ? "write-local-keygen" : "write-system-apps";
   const payload = ommegaSoterRemoteBase64(JSON.stringify({expected, replacement}));
   return ["set -e",
     'ommega_app_writer="/data/adb/modules/ommega/libs/arm64-v8a/ommega-auth-policy"',
@@ -84,6 +85,30 @@ function ommegaEditAppScope(original, pkg, enabled) {
   const matches = line => {
     const value = line.trim();
     return value && !value.startsWith("#") && !value.startsWith("[") && value.replace(/[!?]+$/, "").trim() === pkg;
+  };
+  const present = lines.some(matches);
+  if (present === enabled) return {replacement:original, changed:false};
+  if (!enabled) return {replacement:lines.filter(line => !matches(line)).join(ending), changed:true};
+  if (lines.at(-1) === "") lines.pop();
+  lines.push(pkg, "");
+  return {replacement:lines.join(ending), changed:true};
+}
+
+function ommegaLocalTimingEnabled(contents, pkg) {
+  if (typeof contents !== "string") return false;
+  return String(contents).split(/\r?\n/).some(line => {
+    const value = line.trim();
+    return value && !value.startsWith("#") && value === pkg;
+  });
+}
+
+function ommegaEditLocalKeygen(original, pkg, enabled) {
+  if (!ommegaAuthPackage(pkg) || typeof enabled !== "boolean") throw new Error("Invalid local timing policy");
+  const input = original || "", ending = input.includes("\r\n") ? "\r\n" : "\n";
+  const lines = input.split(/\r?\n/);
+  const matches = line => {
+    const value = line.trim();
+    return value && !value.startsWith("#") && value === pkg;
   };
   const present = lines.some(matches);
   if (present === enabled) return {replacement:original, changed:false};
@@ -196,7 +221,7 @@ async function ommegaDetailLoad(session, refreshScope = false) {
   if (!state || state.session !== session || state.pending || ommegaAppScopeSaving || ommegaGlobalScopePending) return false;
   const revision = state.revision || 0, generation = ommegaTargetSnapshotGeneration;
   const load = state.load = (state.load || 0) + 1;
-  const reads = [ommegaReadAppFile(OMMEGA_TARGET_SECURITY), ommegaAuthRead(), ommegaCpuRead()];
+  const reads = [ommegaReadAppFile(OMMEGA_TARGET_SECURITY), ommegaAuthRead(), ommegaCpuRead(), ommegaReadAppFile(OMMEGA_LOCAL_KEYGEN)];
   if (refreshScope) reads.push(ommegaReadAppFile(OMMEGA_APP_TARGET), ommegaReadOnly('base64 < "' + OMMEGA_SCOPE_CONFIG + '"'));
   const results = await Promise.allSettled(reads);
   // A same-session save can start and finish before these reads return. Its
@@ -209,7 +234,7 @@ async function ommegaDetailLoad(session, refreshScope = false) {
     ommegaDetailMessage(id, String(error?.message || error), true);
     if (controls) ommegaDetailControls(controls, true);
   };
-  const [security, auth, cpu, target, injector] = results;
+  const [security, auth, cpu, localTiming, target, injector] = results;
   try {
     if (security.status !== "fulfilled") throw security.reason;
     const policy = ommegaEditSecurityPolicy(security.value, state.pkg, null);
@@ -230,6 +255,21 @@ async function ommegaDetailLoad(session, refreshScope = false) {
       ? ommegaDetailText("当前继承全局默认策略；选择后单独保存。", "Currently inheriting the global default; a choice saves an app override.")
       : ommegaDetailText("仅对之后新建的密钥生效。", "Applies to newly created keys."));
   } catch (error) { failed("om-detail-auth-status", error, 'input[name="om-app-auth"]'); }
+  try {
+    const box = document.getElementById("om-detail-local-timing");
+    if (box) {
+      if (localTiming?.status !== "fulfilled") throw localTiming?.reason || new Error("Local timing policy unavailable");
+      box.checked = ommegaLocalTimingEnabled(localTiming.value, state.pkg);
+      box.disabled = false;
+      ommegaDetailMessage("om-detail-local-timing-status", box.checked
+        ? ommegaDetailText("已启用：本应用所有本地 keygen 会等待远程 EWMA；仅用于时序检测器。", "Enabled: all local keygen for this app waits for the remote EWMA; for timing detectors only.")
+        : ommegaDetailText("默认关闭；仅有时序要求的检测器建议启用。", "Off by default; enable only for timing-sensitive detectors."));
+    }
+  } catch (error) {
+    failed("om-detail-local-timing-status", error);
+    const box = document.getElementById("om-detail-local-timing");
+    if (box) box.disabled = true;
+  }
   try {
     if (cpu.status !== "fulfilled") throw cpu.reason;
     const box = document.getElementById("om-detail-cpu");
@@ -390,6 +430,40 @@ async function ommegaDetailSaveAuth(input) {
   }
 }
 
+async function ommegaDetailSaveLocalTiming(box) {
+  const state = ommegaDetail;
+  if (!state) return;
+  state.revision = (state.revision || 0) + 1;
+  state.pending = (state.pending || 0) + 1;
+  const session = state.session, requested = box.checked;
+  let readable = true;
+  box.disabled = true;
+  ommegaDetailMessage("om-detail-local-timing-status", ommegaDetailText("正在保存…", "Saving…"));
+  try {
+    const original = await ommegaReadAppFile(OMMEGA_LOCAL_KEYGEN);
+    const edited = ommegaEditLocalKeygen(original, state.pkg, requested);
+    if (edited.changed) {
+      const result = await _(ommegaAppFileWriteCommand(OMMEGA_LOCAL_KEYGEN, original, edited.replacement));
+      if (Number(result.errno) !== 0) throw new Error(result.stderr || "Save failed");
+      if (await ommegaReadAppFile(OMMEGA_LOCAL_KEYGEN) !== edited.replacement) throw new Error("Readback did not match");
+    }
+    if (ommegaDetailCurrent(session)) ommegaDetailMessage("om-detail-local-timing-status", requested
+      ? ommegaDetailText("已启用：本应用所有本地 keygen 会等待远程 EWMA；仅用于时序检测器。", "Enabled: all local keygen for this app waits for the remote EWMA; for timing detectors only.")
+      : ommegaDetailText("已关闭。", "Disabled."));
+  } catch (error) {
+    if (ommegaDetailCurrent(session)) {
+      ommegaDetailMessage("om-detail-local-timing-status", ommegaDetailText("保存失败", "Save failed") + ": " + error.message, true);
+      try {
+        const actual = await ommegaReadAppFile(OMMEGA_LOCAL_KEYGEN);
+        if (ommegaDetailCurrent(session)) box.checked = ommegaLocalTimingEnabled(actual, state.pkg);
+      } catch (_) { readable = false; }
+    }
+  } finally {
+    state.pending--;
+    if (ommegaDetailCurrent(session)) ommegaDetailControls("#om-detail-local-timing", !readable);
+  }
+}
+
 async function ommegaDetailSaveCpu(box) {
   const state = ommegaDetail;
   if (!state) return;
@@ -527,6 +601,9 @@ function ommegaOpenAppDetail(card) {
       ommegaDetailRadio("om-app-auth", "compatibility", ommegaDetailText("支付兼容", "Payment compatibility"), ommegaDetailText("在本机验证认证，由远端签名。", "Authenticate locally and sign remotely.")) +
       ommegaDetailRadio("om-app-auth", "preserve", ommegaDetailText("保持认证要求", "Preserve authentication"), ommegaDetailText("远端保留认证要求。", "Keep the remote authentication requirement."))) +
       '<p class="om-detail-status" id="om-detail-auth-status" role="status"></p>') +
+    ommegaDetailCard('cpu', ommegaDetailText("本地 keygen 时序整形（EWMA）", "Local keygen timing (EWMA)"), ommegaDetailText("仅用于有时序要求的检测器；日常不推荐开启。", "For timing-sensitive detectors only; not recommended for daily use."),
+      ommegaDetailRow(ommegaDetailText("启用 EWMA 补时", "Enable EWMA equalization"), ommegaDetailText("把本应用所有本地 keygen 拖慢到远程 EWMA 目标；默认关闭。", "Hold all local keygen for this app to the remote EWMA target; off by default."), '<input id="om-detail-local-timing" type="checkbox" role="switch">') +
+      '<p class="om-detail-status" id="om-detail-local-timing-status" role="status"></p>') +
     ommegaDetailCard('cpu', 'CPU ' + ommegaDetailText("与设备属性", "and device properties"), '',
       ommegaDetailRow(ommegaDetailText("启用", "Enable"), ommegaDetailText("为此应用启用 CPU 与设备属性策略。", "Enable the property view for this app."), '<input id="om-detail-cpu" type="checkbox" role="switch" disabled>') +
       '<p class="om-detail-status" id="om-detail-cpu-status" role="status"></p><div class="form-actions"><button type="button" id="om-detail-cpu-settings" class="secondary-button" hidden>' + ommegaDetailText("CPU 总设置", "CPU feature settings") + '</button></div>') + '</div>';
@@ -540,6 +617,8 @@ function ommegaOpenAppDetail(card) {
   document.getElementById("om-detail-scope").onchange = event => ommegaDetailSaveScope(event.target);
   detail.querySelectorAll('input[name="om-app-mode"]').forEach(input => input.onchange = () => ommegaDetailSaveMode(input));
   detail.querySelectorAll('input[name="om-app-auth"]').forEach(input => input.onchange = () => ommegaDetailSaveAuth(input));
+  const localTiming = document.getElementById("om-detail-local-timing");
+  if (localTiming) localTiming.onchange = event => ommegaDetailSaveLocalTiming(event.target);
   document.getElementById("om-detail-cpu").onchange = event => ommegaDetailSaveCpu(event.target);
   document.getElementById("om-detail-cpu-settings").onclick = () => {
     for (const id of ["ommega-cpu-policy-dialog", "ommega-cpu-app-dialog"]) {

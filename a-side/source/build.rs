@@ -4,7 +4,8 @@ fn main() {
     println!("cargo:rustc-link-lib=static=c++_static");
 
     println!("cargo:rerun-if-changed=aidl");
-    println!("cargo:rerun-if-changed=src/proto");
+    // Watch inputs, not the generated src/proto output (which self-invalidates builds).
+    println!("cargo:rerun-if-changed=proto");
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = "src/proto";
@@ -35,6 +36,7 @@ fn main() {
         .include_dir(PathBuf::from("aidl/android/security/authorization"))
         .include_dir(PathBuf::from("aidl/android/security/maintenance"))
         .include_dir(PathBuf::from("aidl/android/security/rkp"))
+        .include_dir(PathBuf::from("aidl/android/security/postprocessor"))
         .include_dir(PathBuf::from("aidl/android/content/pm"))
         .include_dir(PathBuf::from("aidl/android/os"))
         .output(PathBuf::from("aidl.rs"));
@@ -48,6 +50,7 @@ fn main() {
         "aidl/android/security/metrics",
         "aidl/android/security/keystore",
         "aidl/android/security/rkp",
+        "aidl/android/security/postprocessor",
         "aidl/android/apex",
         "aidl/android/content/pm",
         "aidl/android/os",

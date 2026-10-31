@@ -31,6 +31,14 @@ does not infer these values from properties and does not change SPL. After an
 approved HAL/SPL reconfiguration, refresh the relay process and A's profile
 cache so the snapshot describes the current HAL state.
 
+The same response includes an `app_identity` version-2 snapshot of 95
+allowlisted product, build, SDK, ABI, SoC and partition properties for A's scoped
+B identity view. This component reads properties only and adds no HAL calls to
+profile sampling. A and B must use the matching snapshot schema; an unsupported
+snapshot disables the scoped property view, not KeyMint routing. Empty optional
+fields remain empty. The snapshot does not describe kernel or actual API/ABI
+execution capabilities on A. See [Scoped B identity view](../../a-side/source/cpu-mask/README.md).
+
 App AttestKey delegation uses `device_attest_context.attestation_key` containing
 the existing session alias and a base64 DER `issuer_subject_name`. B requires
 that session to belong to the selected HAL and its certificate to have the
@@ -163,14 +171,23 @@ The module ships one daemon, `relay`. It is started directly by
 `service.sh` (which kills stale instances first, then spawns a fresh one). The
 `relay` process itself monitors `/data/adb/ommega/relay.conf` and reloads on
 change; the wrapper never kills it, so the two never conflict. One thread
-short-polls the server with an 80ms floor and a three-second request budget;
-three worker threads run TEE `generateKey` / sign /
-decrypt so a new task can be claimed while another is still in the hardware
-TEE.
+long-polls with `timeout=20` and a 25-second HTTP request deadline. Enqueued
+work wakes a held poll immediately; 20 seconds is the maximum idle hold, not
+a per-task delay. A fast empty 204 has an 80ms minimum cadence for compatibility
+with servers/proxies that do not hold the request. A successful task response
+is followed by an immediate new poll. Three worker threads run TEE
+`generateKey` / sign / decrypt with a zero-capacity dispatch channel; the
+concurrency limit and backpressure remain fixed. A held poll and a result
+upload use the shared client's independent connections, not a global request lock.
 
 Logs go to logcat (tag `ommegaclient-b`) and `/data/adb/ommega/logs/relay.log`.
-Each poll, config reload, task receipt, task outcome (with duration), and
-`b/result` submission is logged.
+Each poll, config reload, task receipt and result submission is logged.
+`event=relay_task` records monotonic `dispatch_us`, `execute_us`, `upload_us`
+and `upload_ok` after the upload attempt. Execution includes parsing, local
+policy/profile work and HAL time; it is not a pure TEE timer.
+`event=relay_upload` includes task ID, attempts and cumulative upload time
+(including retries). A held idle poll's HTTP duration is not network RTT.
+No task payload, key or new persistent metric file is added by these events.
 
 B-side protocol implemented: `GET /api/b/poll/` + `POST /api/b/result/`.
 
@@ -180,7 +197,7 @@ The existing authenticated poll carries optional `battery_percent=0..100` and
 `battery_charging=true|false` query fields. The relay reads only the standard
 `/sys/class/power_supply/battery/{present,capacity,status}` sysfs attributes in
 Rust. It samples at most once every five seconds (an in-memory cache, not a new
-thread or persistent file), avoiding sysfs reads on every 80ms short poll.
+thread or persistent file), including when a busy queue causes rapid polls.
 Unreadable, absent, unsupported and malformed attributes are omitted; a failed
 refresh clears the previous reading. Both 0% and 100% are valid. `Charging`
 means true; `Discharging`, `Not charging` and `Full` mean false (active charging,

@@ -50,7 +50,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use x509_cert::der::Decode as _;
 
 use anyhow::{anyhow, Context, Result};
@@ -68,15 +68,15 @@ use ommegaclient_b::keymaster::relay_tee::keymint_error;
 use ommegaclient_b::keymaster::tee_ops::{self, AttestationKeyRef, KeyAlgorithm, KeySpec};
 use ommegaclient_b::wakelock;
 
-/// Long-poll timeout. 0 = short poll: the server answers immediately and the
-/// interval below controls the worst-case task pickup latency.
-const POLL_TIMEOUT_SEC: u32 = 0;
-const TEE_WORKERS: usize = 3;
+/// Hold an idle poll open so task arrival wakes B immediately. Stay below the
+/// server's 30s active-machine lease and common proxy idle timeouts.
+const POLL_TIMEOUT_SEC: u32 = 20;
+const TEE_WORKERS: usize = 1;
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
-/// Wall-clock cap for one short poll. The reqwest client's 30s total timeout is
-/// too long for an 80ms cadence; this bounds a dead proxy without a watchdog.
-const POLL_WALL_LIMIT: Duration = Duration::from_secs(3);
+/// Leave transport headroom after the server's hold, without an unbounded
+/// read. A request deadline never interrupts an in-flight TEE call.
+const POLL_WALL_LIMIT: Duration = Duration::from_secs(POLL_TIMEOUT_SEC as u64 + 5);
 const CONF_PATH: &str = "/data/adb/ommega/relay.conf";
 const STATE_DIR: &str = "/data/adb/ommega";
 const INSTANCE_LOCK_PATH: &str = "/data/adb/ommega/relay.lock";
@@ -104,10 +104,13 @@ const THROTTLE_BACKOFF_MS: u64 = 30_000;
 /// Never re-poll faster than this after an immediate 204: a server or proxy
 /// that returns without holding the long poll must not turn the loop into a
 /// tight loop against the server.
-/// Short polling: 80ms (12 requests/s) is the latency/load knee. Without a
-/// floor an immediate 204 from an older server becomes a tight loop.
+/// This is a compatibility floor only; a held poll needs no extra sleep.
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const MODULE_PROP: &str = "/data/adb/modules/ommegaclient_b/module.prop";
+
+#[cfg(test)]
+#[path = "relay/latency_tests.rs"]
+mod latency_tests;
 
 fn acquire_instance_lock() -> Result<File> {
     std::fs::create_dir_all(STATE_DIR).context("create relay state directory")?;
@@ -728,18 +731,18 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
         ("Content-Type".to_string(), "application/json".to_string()),
         ("X-Relay-Token".to_string(), cfg.token.clone()),
     ];
+    let body = serde_json::to_vec(&body)?;
+    let started = Instant::now();
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 1..=MAX_ATTEMPTS {
         // The server's own `Retry-After`, when it sent one, wins over our
         // exponential guess.
-        let retry_hint = match http_request(
-            "POST",
-            &url,
-            &headers,
-            Some(body.to_string().as_bytes()),
-        ) {
+        let retry_hint = match http_request("POST", &url, &headers, Some(&body)) {
             Ok(HttpResponse { status: 200, .. }) => {
-                log::info!("b/result task={task_id} accepted (HTTP 200)");
+                log::info!(
+                    "event=relay_upload task={task_id} attempts={attempt} elapsed_us={} status=200",
+                    started.elapsed().as_micros()
+                );
                 return Ok(());
             }
             Ok(HttpResponse {
@@ -1035,6 +1038,9 @@ fn log_cert_chain(tag: &str, chain: &[Vec<u8>]) {
         log::info!("cert_chain[{tag}]: EMPTY");
         return;
     }
+    if !log::log_enabled!(log::Level::Debug) {
+        return;
+    }
     let mut lines = Vec::new();
     for (i, der) in chain.iter().enumerate() {
         let parsed = x509_cert::Certificate::from_der(der).ok().map(|c| {
@@ -1076,6 +1082,7 @@ fn alias_of(payload: &Value, default: &str) -> String {
 }
 
 fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
+    let phase_start = Instant::now();
     let (app_id_der, challenge) = extract_attestation_context(payload)?;
     check_app_id_der(&app_id_der).with_context(|| {
         "attestation_application_id is not a valid AttestationApplicationId DER"
@@ -1096,7 +1103,9 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
         .and_then(|c| c.get("attestation_security_level"))
         .and_then(Value::as_i64)
         .unwrap_or(1);
+    let parse_us = phase_start.elapsed().as_micros();
 
+    let tee_start = Instant::now();
     let session = if security_level == 2 {
         match tee_ops::generate_attest_key_on(
             SYSTEM_KEYMINT_STRONGBOX,
@@ -1140,6 +1149,8 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
     } else {
         tee_ops::generate_attest_key(&alias, &challenge, &app_id_der, &spec)?
     };
+    let tee_us = tee_start.elapsed().as_micros();
+    let profile_start = Instant::now();
     let profile = tee_ops::identity_profile()?;
     if session.km_version != profile.hardware_version {
         anyhow::bail!(
@@ -1149,8 +1160,10 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
         );
     }
 
+    let profile_us = profile_start.elapsed().as_micros();
+    let encode_start = Instant::now();
     log_cert_chain("attest", &session.cert_chain);
-    Ok(json!({
+    let result = json!({
         "alias": alias,
         "cert_chain": cert_chain_json(&session.cert_chain),
         "public_key": b64(&tee_ops::get_public_key(&alias)?),
@@ -1165,7 +1178,13 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
             "keymint_author": profile.keymint_author,
             "has_strongbox": profile.has_strongbox,
         },
-    }))
+    });
+    let encode_us = encode_start.elapsed().as_micros();
+    log::info!(
+        "event=attest_phase parse_us={parse_us} tee_us={tee_us} profile_us={profile_us} encode_us={encode_us} total_us={}",
+        phase_start.elapsed().as_micros()
+    );
+    Ok(result)
 }
 
 fn handle_profile(_task_type: &str, _payload: &Value) -> Result<Value> {
@@ -1262,7 +1281,14 @@ fn handle_agree(_task_type: &str, payload: &Value) -> Result<Value> {
     }))
 }
 
-fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Value) -> Result<()> {
+fn handle_task(
+    cfg: &RelayConfig,
+    task_id: &str,
+    task_type: &str,
+    payload: &Value,
+    received_at: Instant,
+) -> Result<()> {
+    let dispatch_us = received_at.elapsed().as_micros();
     let handler: fn(&RelayConfig, &str, &Value) -> Result<Value> = match task_type {
         "profile" => |_cfg, task_type, payload| handle_profile(task_type, payload),
         "attest" => |_cfg, task_type, payload| handle_generate_attest(task_type, payload),
@@ -1300,11 +1326,16 @@ fn handle_task(cfg: &RelayConfig, task_id: &str, task_type: &str, payload: &Valu
     } else {
         "ok"
     };
+    let execute_us = start.elapsed().as_micros();
+    let upload_started = Instant::now();
+    let posted = post_result(cfg, task_id, &result);
     log::info!(
-        "task {task_id} type={task_type} {outcome} in {:?}",
-        start.elapsed()
+        "event=relay_task task={task_id} type={task_type} outcome={outcome} \
+         dispatch_us={dispatch_us} execute_us={execute_us} upload_us={} upload_ok={}",
+        upload_started.elapsed().as_micros(),
+        posted.is_ok()
     );
-    post_result(cfg, task_id, &result)
+    posted
 }
 
 /// Background thread: hot-reload the config when `relay.conf` changes or the
@@ -1359,6 +1390,7 @@ struct TeeWork {
     task_id: String,
     task_type: String,
     payload: Value,
+    received_at: Instant,
 }
 
 fn spawn_tee_workers() -> mpsc::SyncSender<TeeWork> {
@@ -1378,9 +1410,13 @@ fn spawn_tee_workers() -> mpsc::SyncSender<TeeWork> {
                 };
                 match work {
                     Ok(work) => {
-                        if let Err(e) =
-                            handle_task(&work.cfg, &work.task_id, &work.task_type, &work.payload)
-                        {
+                        if let Err(e) = handle_task(
+                            &work.cfg,
+                            &work.task_id,
+                            &work.task_type,
+                            &work.payload,
+                            work.received_at,
+                        ) {
                             log::error!("handle_task failed: {e:#}");
                         }
                     }
@@ -1390,6 +1426,10 @@ fn spawn_tee_workers() -> mpsc::SyncSender<TeeWork> {
             .unwrap_or_else(|e| panic!("spawn TEE worker {i}: {e}"));
     }
     tx
+}
+
+fn empty_poll_delay(elapsed: Duration) -> Duration {
+    MIN_POLL_INTERVAL.saturating_sub(elapsed)
 }
 
 fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>) {
@@ -1421,6 +1461,7 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
         let poll_started = std::time::Instant::now();
         match poll_tasks(&cfg, &mut battery) {
             Ok(Some((task_id, task_type, payload))) => {
+                let received_at = Instant::now();
                 transient_ms = POLL_BACKOFF_MIN_MS;
                 rejected_ms = AUTH_BACKOFF_MIN_MS;
                 log::info!("poll received task {task_id} type={task_type}");
@@ -1430,6 +1471,7 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
                         task_id,
                         task_type,
                         payload,
+                        received_at,
                     })
                     .is_err()
                 {
@@ -1443,9 +1485,9 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
                 // A 204 that came back quickly means the long poll did not
                 // actually hold (older server, proxy closing early); re-polling
                 // at once would hammer the server.
-                let waited = poll_started.elapsed();
-                if waited < MIN_POLL_INTERVAL {
-                    thread::sleep(MIN_POLL_INTERVAL - waited);
+                let delay = empty_poll_delay(poll_started.elapsed());
+                if !delay.is_zero() {
+                    thread::sleep(delay);
                 }
             }
             Err(PollError { error, failure }) => {

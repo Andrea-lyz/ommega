@@ -24,6 +24,18 @@ fn policy_destination(command: &str, replacement: &str) -> Result<(&'static str,
         }
         "write-target" => Ok(("/data/misc/keystore/ommega/target.txt", 0o644)),
         "write-system-apps" => Ok(("/data/misc/keystore/ommega/system_app", 0o644)),
+        "write-local-keygen" => {
+            let mut seen = std::collections::BTreeSet::new();
+            for line in replacement.lines().map(str::trim) {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if !kmr_common::cpu_mask::valid_package(line) || !seen.insert(line.to_string()) {
+                    return Err(anyhow!("invalid local-keygen policy"));
+                }
+            }
+            Ok(("/data/misc/keystore/ommega/data/local-keygen.txt", 0o600))
+        }
         "write-target-security" => {
             let table: toml::Table =
                 toml::from_str(replacement).context("parse target security policy")?;
@@ -52,7 +64,7 @@ fn write_request() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let [command] = args.as_slice() else {
         return Err(anyhow!(
-            "usage: ommega-auth-policy write|write-target|write-target-security|write-system-apps < request.json"
+            "usage: ommega-auth-policy write|write-target|write-target-security|write-system-apps|write-local-keygen < request.json"
         ));
     };
     let mut contents = Vec::new();
@@ -117,9 +129,13 @@ mod tests {
         .is_err());
         assert_eq!(
             policy_destination("write-system-apps", "").unwrap().0,
+            policy_destination("write-local-keygen", "com.example.app\n")
+                .unwrap()
+                .0,
             "/data/misc/keystore/ommega/system_app"
         );
         assert!(policy_destination("/tmp/unrelated", "").is_err());
         assert!(policy_destination("write", "[invalid").is_err());
+        assert!(policy_destination("write-local-keygen", "bad package\n").is_err());
     }
 }
