@@ -98,6 +98,11 @@ wait_for_relay() {
 
 # Kill every relay-related process by name only. 'daemon-relay' is matched too
 # so leftover wrappers from older module versions get cleaned up.
+wifi_low_latency_once() {
+  [ -x /system/bin/iw ] || return 0
+  /system/bin/iw dev wlan0 set power_save off >/dev/null 2>&1 || true
+}
+
 kill_all() {
   pkill -9 -f 'daemon-relay' 2>/dev/null
   pkill -9 -x relay 2>/dev/null
@@ -136,6 +141,7 @@ load_relay_env
 
 "$TARGET" </dev/null >/dev/null 2>&1 &
 if wait_for_relay; then
+  wifi_low_latency_once
   echo "[service] ommegaclient-b relay started"
 else
   echo "[service] ommegaclient-b relay failed to start; see logcat tag ommegaclient-b"

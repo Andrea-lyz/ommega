@@ -10,6 +10,10 @@
 README 不再内嵌逐版本更新要点：发版时只更新版本号，并在这里追加条目。发布步骤见
 [RELEASING.md](RELEASING.md)。
 
+## 2.2.1 — 2026-10-31
+
+- B 端 service 启动时关闭 wlan0 Wi-Fi power-save；设置在本机重连后保持，降低 relay 抖动。
+- A/B KSU 更新元数据与 2.2.1 版本保持一致。
 ## 2.2.0 — 2026-10-31
 
 - A/B 模块加入 KSU/Magisk `updateJson`，发布后可从 KSU 管理器检查并升级。

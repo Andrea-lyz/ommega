@@ -1,10 +1,12 @@
+Ommega 2.2.1
+
+- B 端 service 启动时关闭 wlan0 Wi-Fi power-save，降低 relay 抖动。
+- 该设置在 B 端 Wi-Fi 重连后保持；模块更新后重新执行 service 自动恢复。
+- A/B KSU updateJson 和稳定别名 zip 继续指向 latest release。
+
 Ommega 2.2.0
 
-- KSU Manager 在线更新：A/B module.prop 增加 updateJson。
-- 发布包提供 ommega-a-latest.zip / ommega-b-latest.zip 和 update JSON。
+- A/B 模块支持 KSU 在线更新。
 - A 端本地 keygen EWMA 差值目标调整为 85ms。
-- 所有 GenerateKey 解析 caller 包名；500ms 样本上限，向上快速跟随。
 - Relay 增加证书链/请求字段校验、RKP 后处理、keyblob 版本处理。
 - Server 增加 attestation 优先调度、延迟测试和 aarch64 静态构建。
-- 2.1.4 及更早版本需手动安装一次 2.2.0，之后可从 KSU 管理器更新。
-- 已知限制：85ms 不是逐请求硬保证；user-auth-bound 远程操作仍受 B 端无法验证 A 端认证令牌限制。
