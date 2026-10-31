@@ -262,7 +262,7 @@ async function ommegaDetailLoad(session, refreshScope = false) {
       box.checked = ommegaLocalTimingEnabled(localTiming.value, state.pkg);
       box.disabled = false;
       ommegaDetailMessage("om-detail-local-timing-status", box.checked
-        ? ommegaDetailText("已启用：本应用所有本地 keygen 会等待远程 EWMA；仅用于时序检测器。", "Enabled: all local keygen for this app waits for the remote EWMA; for timing detectors only.")
+        ? ommegaDetailText("已启用：本地 keygen 只补到远程差值约 110ms；仅用于时序检测器。", "Enabled: local keygen is padded only to keep the remote-local delta near 110ms; for timing detectors only.")
         : ommegaDetailText("默认关闭；仅有时序要求的检测器建议启用。", "Off by default; enable only for timing-sensitive detectors."));
     }
   } catch (error) {
@@ -448,7 +448,7 @@ async function ommegaDetailSaveLocalTiming(box) {
       if (await ommegaReadAppFile(OMMEGA_LOCAL_KEYGEN) !== edited.replacement) throw new Error("Readback did not match");
     }
     if (ommegaDetailCurrent(session)) ommegaDetailMessage("om-detail-local-timing-status", requested
-      ? ommegaDetailText("已启用：本应用所有本地 keygen 会等待远程 EWMA；仅用于时序检测器。", "Enabled: all local keygen for this app waits for the remote EWMA; for timing detectors only.")
+      ? ommegaDetailText("已启用：本地 keygen 只补到远程差值约 110ms；仅用于时序检测器。", "Enabled: local keygen is padded only to keep the remote-local delta near 110ms; for timing detectors only.")
       : ommegaDetailText("已关闭。", "Disabled."));
   } catch (error) {
     if (ommegaDetailCurrent(session)) {
@@ -602,7 +602,7 @@ function ommegaOpenAppDetail(card) {
       ommegaDetailRadio("om-app-auth", "preserve", ommegaDetailText("保持认证要求", "Preserve authentication"), ommegaDetailText("远端保留认证要求。", "Keep the remote authentication requirement."))) +
       '<p class="om-detail-status" id="om-detail-auth-status" role="status"></p>') +
     ommegaDetailCard('cpu', ommegaDetailText("本地 keygen 时序整形（EWMA）", "Local keygen timing (EWMA)"), ommegaDetailText("仅用于有时序要求的检测器；日常不推荐开启。", "For timing-sensitive detectors only; not recommended for daily use."),
-      ommegaDetailRow(ommegaDetailText("启用 EWMA 补时", "Enable EWMA equalization"), ommegaDetailText("把本应用所有本地 keygen 拖慢到远程 EWMA 目标；默认关闭。", "Hold all local keygen for this app to the remote EWMA target; off by default."), '<input id="om-detail-local-timing" type="checkbox" role="switch">') +
+      ommegaDetailRow(ommegaDetailText("启用 EWMA 补时", "Enable EWMA equalization"), ommegaDetailText("将本应用远程-本地差值维持在约 110ms 内，尽量减少本地补时；默认关闭。", "Keep the remote-local delta near 110ms with minimal local padding; off by default."), '<input id="om-detail-local-timing" type="checkbox" role="switch">') +
       '<p class="om-detail-status" id="om-detail-local-timing-status" role="status"></p>') +
     ommegaDetailCard('cpu', 'CPU ' + ommegaDetailText("与设备属性", "and device properties"), '',
       ommegaDetailRow(ommegaDetailText("启用", "Enable"), ommegaDetailText("为此应用启用 CPU 与设备属性策略。", "Enable the property view for this app."), '<input id="om-detail-cpu" type="checkbox" role="switch" disabled>') +

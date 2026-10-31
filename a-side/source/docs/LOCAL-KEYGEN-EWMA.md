@@ -6,13 +6,42 @@ It is off by default and is intended for timing-sensitive detectors, not daily u
 Policy file: /data/misc/keystore/ommega/data/local-keygen.txt
 One package per line; empty and # lines ignored. Missing file = off.
 
-TA handles challenge-bearing local generation via the caller AAID.
-Injector handles no-challenge local generation via caller UID package resolution.
-Remote attested generation is never delayed. Successful remote samples feed a
-global 3/4-old + 1/4-new EWMA; targets below 50ms are ignored and samples above
-250ms are discarded as queue-inflated.
+## Target policy
 
-Device evidence with aprobes.agap enabled on the home-router path:
-T01 126/118ms, T02 112/111ms, T03 plain/child 119/218 and 115/233ms,
-T04 115/117 and 122/116ms, diff -1/5ms. After removing the policy file,
-T01 returned 24ms, T03 28/38ms, T04 114/36ms (diff 77).
+Remote attested generateKey samples (challenge, no attestation key) feed a
+global 3/4-old + 1/4-new EWMA. For an opted-in application, the injector pads
+local GenerateKey only when needed so that:
+
+    local total = max(0, remote EWMA - 110ms)
+
+The goal is to keep the remote-minus-local delta near 110ms (under the 120ms
+Duck/T04 threshold), not to make local generation as slow as remote. If the
+remote EWMA is below 110ms, no local padding is applied.
+
+All local GenerateKey paths are handled by the injector, including no-challenge
+keygen and challenge+ATTEST_KEY local generation. The TA no longer applies a
+local sleep. Samples above 250ms are discarded as queue-inflated.
+
+## Device evidence
+
+Policy enabled on the home-router path:
+
+| Metric | value |
+| --- | ---: |
+| T01 local baseline | 28ms |
+| T03 plain / child | 28/37ms |
+| T04 attested / control | 142/37ms |
+| T04 diff | 105ms PASS |
+
+Policy file removed (default off):
+
+| Metric | value |
+| --- | ---: |
+| T01 | 18ms |
+| T03 plain / child | 31/42ms |
+| T04 attested / control | 131/31ms |
+| T04 diff | 100ms PASS |
+
+The 110ms target is intentionally below the 120ms detector threshold; EWMA
+smoothing still means a sudden remote latency jump takes several samples to
+converge.

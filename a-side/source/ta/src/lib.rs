@@ -47,7 +47,6 @@ mod cert;
 mod clock;
 pub mod device;
 pub mod keys;
-mod local_timing;
 mod operation;
 pub mod rkp;
 mod secret;
