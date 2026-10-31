@@ -1,6 +1,6 @@
 //! Creation-time policy for A-authorized remote signing. No routing or app-name heuristics.
 
-use kmr_wire::keymint::{Algorithm, Digest, EcCurve, KeyParam, KeyPurpose};
+use kmr_wire::keymint::{Algorithm, KeyParam, KeyPurpose};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -80,55 +80,17 @@ pub fn eligible(params: &[KeyParam]) -> bool {
         && !params.iter().any(|p| matches!(p, KeyParam::NoAuthRequired | KeyParam::TrustedUserPresenceRequired | KeyParam::TrustedConfirmationRequired | KeyParam::AllowWhileOnBody))
 }
 
-/// Match the known probe contract, not a whole package or a generic auth key.
-/// The auth probe uses a random 32-byte challenge, so challenge length alone
-/// must never select preservation for an ordinary payment key.
-pub fn known_probe(alias: Option<&str>, params: &[KeyParam]) -> bool {
-    let Some(uuid) = alias.and_then(|a| a.strip_prefix("TrustAttestor_silent_auth_")) else {
-        return false;
-    };
-    let bytes = uuid.as_bytes();
-    let uuid_v4 = bytes.len() == 36
-        && bytes.iter().enumerate().all(|(i, c)| {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                *c == b'-'
-            } else {
-                c.is_ascii_hexdigit()
-            }
-        })
-        && bytes[14] == b'4'
-        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B');
-    uuid_v4
-        && eligible(params)
-        && params.contains(&KeyParam::Algorithm(Algorithm::Ec))
-        && params.contains(&KeyParam::EcCurve(EcCurve::P256))
-        && params.contains(&KeyParam::Purpose(KeyPurpose::Verify))
-        && params.contains(&KeyParam::Digest(Digest::Sha256))
-        && params.contains(&KeyParam::UserAuthType(3))
-        && params
-            .iter()
-            .any(|p| matches!(p, KeyParam::AttestationChallenge(v) if v.len() == 32))
-        && !params
-            .iter()
-            .any(|p| matches!(p, KeyParam::AuthTimeout(v) if *v != 0))
-        && !params
-            .iter()
-            .any(|p| matches!(p, KeyParam::Digest(d) if *d != Digest::Sha256))
-        && !params.contains(&KeyParam::UnlockedDeviceRequired)
-}
-
-pub fn authorize_on_a(mode: Mode, alias: Option<&str>, params: &[KeyParam]) -> bool {
-    eligible(params)
-        && match mode {
-            Mode::Auto => !known_probe(alias, params),
-            Mode::Compatibility => true,
-            Mode::Preserve => false,
-        }
+/// Aliases are application-owned names, not evidence for an authentication policy.
+/// Auto preserves the requested hardware authorization. Relaxing it requires an
+/// explicit compatibility setting for the caller.
+pub fn authorize_on_a(mode: Mode, _alias: Option<&str>, params: &[KeyParam]) -> bool {
+    eligible(params) && matches!(mode, Mode::Compatibility)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kmr_wire::keymint::{Digest, EcCurve};
     const ALIAS: &str = "TrustAttestor_silent_auth_14c21f61-4c15-4e09-92d7-3a33d665458c";
 
     fn probe() -> Vec<KeyParam> {
@@ -145,26 +107,24 @@ mod tests {
     }
 
     #[test]
-    fn only_the_known_probe_is_preserved_in_auto() {
-        let params = probe();
-        assert!(known_probe(Some(ALIAS), &params));
-        assert!(!authorize_on_a(Mode::Auto, Some(ALIAS), &params));
-        for alias in [
-            None,
-            Some("payment"),
-            Some("TrustAttestor_silent_auth_bad"),
-            Some("TrustAttestor_silent_other_14c21f61-4c15-4e09-92d7-3a33d665458c"),
-        ] {
-            assert!(authorize_on_a(Mode::Auto, alias, &params));
-        }
-        assert!(authorize_on_a(Mode::Compatibility, Some(ALIAS), &params));
-        assert!(!authorize_on_a(Mode::Preserve, Some("payment"), &params));
-        let mut timed = params.clone();
+    fn auto_and_preserve_are_alias_independent() {
+        let mut timed = probe();
         timed.push(KeyParam::AuthTimeout(30));
-        assert!(!known_probe(Some(ALIAS), &timed));
-        let mut unlocked = params;
+        let mut unlocked = probe();
         unlocked.push(KeyParam::UnlockedDeviceRequired);
-        assert!(!known_probe(Some(ALIAS), &unlocked));
+        for params in [probe(), timed, unlocked] {
+            for alias in [
+                None,
+                Some("payment"),
+                Some(ALIAS),
+                Some("TrustAttestor_silent_auth_bad"),
+                Some("arbitrary-auth-key"),
+            ] {
+                assert!(!authorize_on_a(Mode::Auto, alias, &params));
+                assert!(!authorize_on_a(Mode::Preserve, alias, &params));
+                assert!(authorize_on_a(Mode::Compatibility, alias, &params));
+            }
+        }
     }
 
     #[test]

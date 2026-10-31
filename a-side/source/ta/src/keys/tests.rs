@@ -450,7 +450,38 @@ fn import_and_existing_blob_upgrade_share_profile_without_changing_key_material(
     let (after, _) = ta.keyblob_parse_decrypt(&upgraded, &[]).unwrap();
     let (new, _) = ta.keyblob_parse_decrypt(&imported.key_blob, &[]).unwrap();
     assert_eq!(before.key_material, after.key_material);
-    assert_eq!(new.characteristics, after.characteristics);
+    let upgraded_auths = after
+        .characteristics_at(SecurityLevel::TrustedEnvironment)
+        .unwrap();
+    let new_auths = new
+        .characteristics_at(SecurityLevel::TrustedEnvironment)
+        .unwrap();
+    assert!(upgraded_auths.contains(&KeyParam::OsVersion(170000)));
+    assert!(upgraded_auths.contains(&KeyParam::OsPatchlevel(202609)));
+    // Unknown current partition values must not erase a previously bound SPL.
+    for bound in [
+        KeyParam::VendorPatchlevel(20260801),
+        KeyParam::BootPatchlevel(20260801),
+    ] {
+        assert!(upgraded_auths.contains(&bound));
+        assert!(!new_auths.contains(&bound));
+    }
+    let without_partitions = |auths: &[KeyParam]| {
+        auths
+            .iter()
+            .filter(|p| {
+                !matches!(
+                    p,
+                    KeyParam::VendorPatchlevel(_) | KeyParam::BootPatchlevel(_)
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        without_partitions(upgraded_auths),
+        without_partitions(new_auths)
+    );
     assert!(ta.upgrade_key(&upgraded, vec![]).unwrap().is_empty());
     assert_eq!(ta.boot_info.as_ref().unwrap().boot_patchlevel, 20260801);
 }
@@ -508,6 +539,10 @@ impl DelegationFixture {
     }
 
     fn with_rsa_issuer(rsa: bool) -> Self {
+        Self::with_child_policy(rsa, |_| {})
+    }
+
+    fn with_child_policy(rsa: bool, adjust: impl FnOnce(&mut Vec<KeyParam>)) -> Self {
         let mut ta = test_ta();
         let root_params = key_params(KeyPurpose::AttestKey);
         let root = ta.generate_key_default(&root_params, None).unwrap();
@@ -557,6 +592,7 @@ impl DelegationFixture {
             KeyParam::AttestationChallenge(b"child-challenge".to_vec()),
             KeyParam::AttestationApplicationId(b"test-app".to_vec()),
         ]);
+        adjust(&mut params);
         let physical_child = ta
             .generate_key_default(
                 &params,
@@ -692,6 +728,16 @@ fn remote_certificate_must_match_profile_and_is_returned_byte_exact() {
         expected_issuer: Some(fixture.issuer_alias.clone()),
         ..TestRemote::default()
     }));
+    assert!(matches!(
+        fixture.generate().unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::KeyRequiresUpgrade, _)
+    ));
+    let upgraded = fixture
+        .ta
+        .upgrade_key(&fixture.issuer.key_blob, vec![])
+        .unwrap();
+    assert!(!upgraded.is_empty());
+    fixture.issuer.key_blob = upgraded;
     assert!(matches!(
         fixture.generate().unwrap_err().kind(),
         ErrorKind::Hal(ErrorCode::VerificationFailed, _)
@@ -872,4 +918,392 @@ fn relay_leaf_serial_is_the_aosp_default_unless_the_caller_set_it() {
         effective_remote_serial(Some(&[0x2a, 0x01])),
         Some(&[0x2a, 0x01][..])
     );
+}
+
+#[test]
+fn remote_batch_chain_integrity_is_checked_before_storage() {
+    let fixture = DelegationFixture::new();
+    cert::validate_remote_chain(&fixture.batch_chain).unwrap();
+    for index in 0..fixture.batch_chain.len() {
+        let mut broken = fixture.batch_chain.clone();
+        *broken[index].last_mut().unwrap() ^= 1;
+        assert!(cert::validate_remote_chain(&broken).is_err());
+    }
+    assert!(cert::validate_remote_chain(&fixture.batch_chain[..1]).is_err());
+    let mut reordered = fixture.chain.clone();
+    reordered.swap(0, 1);
+    assert!(cert::validate_remote_chain(&reordered).is_err());
+    let mut ta = test_ta();
+    let mut broken = fixture.batch_chain.clone();
+    *broken[0].last_mut().unwrap() ^= 1;
+    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(broken),
+        ..TestRemote::default()
+    }));
+    let err = ta.generate_key_default(&fixture.params, None).unwrap_err();
+    assert!(matches!(
+        err.kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+}
+#[test]
+fn unsupported_remote_algorithm_never_defaults_to_ec_or_calls_backend() {
+    for variant in [
+        kmr_wire::keymint::MlDsaVariant::MlDsa65,
+        kmr_wire::keymint::MlDsaVariant::MlDsa87,
+    ] {
+        let mut ta = test_ta();
+        let params = [
+            KeyParam::Algorithm(Algorithm::MlDsa),
+            KeyParam::MlDsaVariant(variant),
+            KeyParam::Purpose(KeyPurpose::Sign),
+            KeyParam::NoAuthRequired,
+            KeyParam::AttestationChallenge(b"challenge".to_vec()),
+            KeyParam::AttestationApplicationId(b"app-id".to_vec()),
+        ];
+        let error = ta.generate_key_default(&params, None).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::Hal(ErrorCode::UnsupportedAlgorithm, _)
+        ));
+    }
+}
+
+fn imported_aes_params() -> Vec<KeyParam> {
+    vec![
+        KeyParam::Algorithm(Algorithm::Aes),
+        KeyParam::KeySize(kmr_wire::KeySizeInBits(256)),
+        KeyParam::Purpose(KeyPurpose::Encrypt),
+        KeyParam::NoAuthRequired,
+    ]
+}
+fn set_test_remote_versions(ta: &mut KeyMintTa, versions: device::KeyMintVersionTags) {
+    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        version_tags: Some(versions),
+        ..TestRemote::default()
+    }));
+}
+fn fixed_test_versions() -> device::KeyMintVersionTags {
+    device::KeyMintVersionTags {
+        os_version: 160000,
+        os_patchlevel: 202608,
+        vendor_patchlevel: Some(20260801),
+        boot_patchlevel: Some(20260801),
+    }
+}
+#[test]
+fn software_keyblob_older_profile_requires_upgrade_and_preserves_key_material() {
+    let mut ta = test_ta();
+    let params = imported_aes_params();
+    let old = ta
+        .import_key(
+            &params,
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let before = ta.keyblob_parse_decrypt(&old.key_blob, &[]).unwrap().0;
+    let original_bytes = old.key_blob.clone();
+    set_test_remote_versions(
+        &mut ta,
+        device::KeyMintVersionTags {
+            os_version: 170000,
+            os_patchlevel: 202609,
+            vendor_patchlevel: Some(20260901),
+            boot_patchlevel: Some(20260901),
+        },
+    );
+    assert!(matches!(
+        ta.keyblob_parse_decrypt(&old.key_blob, &[])
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Hal(ErrorCode::KeyRequiresUpgrade, _)
+    ));
+    let upgraded = ta.upgrade_key(&old.key_blob, vec![]).unwrap();
+    assert!(!upgraded.is_empty());
+    let after = ta.keyblob_parse_decrypt(&upgraded, &[]).unwrap().0;
+    assert_eq!(before.key_material, after.key_material);
+    assert_eq!(original_bytes, old.key_blob);
+    assert!(ta.upgrade_key(&upgraded, vec![]).unwrap().is_empty());
+}
+
+#[test]
+fn software_future_blob_and_explicit_downgrade_fail_without_modifying_input() {
+    for which in 0..4 {
+        let mut ta = test_ta();
+        let params = imported_aes_params();
+        let old = ta
+            .import_key(
+                &params,
+                KeyFormat::Raw,
+                &[7; 32],
+                None,
+                KeyImport::NonWrapped,
+            )
+            .unwrap();
+        let original = old.key_blob.clone();
+        let mut current = fixed_test_versions();
+        match which {
+            0 => current.os_version -= 10000,
+            1 => current.os_patchlevel -= 1,
+            2 => current.vendor_patchlevel = Some(20260701),
+            3 => current.boot_patchlevel = Some(20260701),
+            _ => unreachable!(),
+        }
+        set_test_remote_versions(&mut ta, current);
+        assert!(
+            matches!(
+                ta.keyblob_parse_decrypt(&old.key_blob, &[])
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::Hal(ErrorCode::InvalidKeyBlob, _)
+            ),
+            "field={which}"
+        );
+        assert!(
+            matches!(
+                ta.upgrade_key(&old.key_blob, vec![]).unwrap_err().kind(),
+                ErrorKind::Hal(ErrorCode::InvalidArgument, _)
+            ),
+            "field={which}"
+        );
+        assert_eq!(old.key_blob, original);
+        set_test_remote_versions(&mut ta, fixed_test_versions());
+        assert!(ta.keyblob_parse_decrypt(&original, &[]).is_ok());
+    }
+}
+
+#[test]
+fn software_profile_removal_cannot_delete_bound_partition_authorizations() {
+    let mut ta = test_ta();
+    let old = ta
+        .import_key(
+            &imported_aes_params(),
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    set_test_remote_versions(
+        &mut ta,
+        device::KeyMintVersionTags {
+            os_version: 160000,
+            os_patchlevel: 202608,
+            vendor_patchlevel: None,
+            boot_patchlevel: None,
+        },
+    );
+    assert!(ta.upgrade_key(&old.key_blob, vec![]).unwrap().is_empty());
+    let stored = ta.keyblob_parse_decrypt(&old.key_blob, &[]).unwrap().0;
+    let auths = stored
+        .characteristics_at(SecurityLevel::TrustedEnvironment)
+        .unwrap();
+    assert!(auths.contains(&KeyParam::VendorPatchlevel(20260801)));
+    assert!(auths.contains(&KeyParam::BootPatchlevel(20260801)));
+}
+
+#[test]
+fn software_os_zero_exception_does_not_disable_spl_checks() {
+    let mut ta = test_ta();
+    let old = ta
+        .import_key(
+            &imported_aes_params(),
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let mut versions = fixed_test_versions();
+    versions.os_version = 0;
+    set_test_remote_versions(&mut ta, versions);
+    assert!(matches!(
+        ta.keyblob_parse_decrypt(&old.key_blob, &[])
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Hal(ErrorCode::KeyRequiresUpgrade, _)
+    ));
+    let zero = ta.upgrade_key(&old.key_blob, vec![]).unwrap();
+    let stored = ta.keyblob_parse_decrypt(&zero, &[]).unwrap().0;
+    assert!(stored
+        .characteristics_at(SecurityLevel::TrustedEnvironment)
+        .unwrap()
+        .contains(&KeyParam::OsVersion(0)));
+    versions.os_patchlevel -= 1;
+    set_test_remote_versions(&mut ta, versions);
+    assert!(matches!(
+        ta.upgrade_key(&zero, vec![]).unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::InvalidArgument, _)
+    ));
+}
+
+#[test]
+fn software_late_upgrade_failure_never_rewrites_the_original_blob() {
+    let mut ta = test_ta();
+    let old = ta
+        .import_key(
+            &imported_aes_params(),
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let original = old.key_blob.clone();
+    let before = ta.keyblob_parse_decrypt(&original, &[]).unwrap().0;
+    let mut current = fixed_test_versions();
+    current.os_version = 170000; // Earlier in the loop this is a legal upgrade.
+    current.boot_patchlevel = Some(20260701); // Later this must reject the batch.
+    set_test_remote_versions(&mut ta, current);
+    assert!(matches!(
+        ta.upgrade_key(&old.key_blob, vec![]).unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::InvalidArgument, _)
+    ));
+    assert_eq!(old.key_blob, original);
+    set_test_remote_versions(&mut ta, fixed_test_versions());
+    let after = ta.keyblob_parse_decrypt(&original, &[]).unwrap().0;
+    assert_eq!(before.key_material, after.key_material);
+    assert_eq!(before.characteristics, after.characteristics);
+}
+
+#[test]
+fn software_local_metadata_enforces_the_same_future_version_rule() {
+    let mut ta = test_ta();
+    ta.dev.remote = None;
+    let old = ta
+        .import_key(
+            &imported_aes_params(),
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let original = old.key_blob.clone();
+    ta.hal_info.as_mut().unwrap().vendor_patchlevel -= 1;
+    assert!(matches!(
+        ta.keyblob_parse_decrypt(&old.key_blob, &[])
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Hal(ErrorCode::InvalidKeyBlob, _)
+    ));
+    assert!(matches!(
+        ta.upgrade_key(&old.key_blob, vec![]).unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::InvalidArgument, _)
+    ));
+    assert_eq!(old.key_blob, original);
+}
+
+#[test]
+fn signed_wrong_key_family_is_rejected_before_the_success_observer() {
+    let mut fixture = DelegationFixture::new();
+    let observed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fixture
+        .params
+        .retain(|p| !matches!(p, KeyParam::Algorithm(_) | KeyParam::EcCurve(_)));
+    fixture.params.extend([
+        KeyParam::Algorithm(Algorithm::Rsa),
+        KeyParam::KeySize(kmr_wire::KeySizeInBits(2048)),
+        KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(65537)),
+        KeyParam::Padding(kmr_wire::keymint::PaddingMode::RsaPkcs115Sign),
+    ]);
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(fixture.batch_chain.clone()),
+        verified_calls: Some(observed.clone()),
+        ..TestRemote::default()
+    }));
+    let error = fixture
+        .ta
+        .generate_key_default(&fixture.params, None)
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+    assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn signed_wrong_curve_cannot_satisfy_a_different_request() {
+    let mut fixture = DelegationFixture::new();
+    fixture
+        .params
+        .retain(|p| !matches!(p, KeyParam::EcCurve(_)));
+    fixture.params.push(KeyParam::EcCurve(EcCurve::P384));
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(fixture.batch_chain.clone()),
+        ..TestRemote::default()
+    }));
+    let error = fixture
+        .ta
+        .generate_key_default(&fixture.params, None)
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+}
+
+#[test]
+fn signed_missing_requested_device_property_is_not_synthesized() {
+    let mut fixture = DelegationFixture::new();
+    fixture
+        .params
+        .push(KeyParam::AttestationIdModel(b"B-model".to_vec()));
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(fixture.batch_chain.clone()),
+        ..TestRemote::default()
+    }));
+    let error = fixture
+        .ta
+        .generate_key_default(&fixture.params, None)
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+}
+
+#[test]
+fn invalid_rsa_size_is_rejected_before_any_remote_request() {
+    let mut ta = test_ta();
+    let params = vec![
+        KeyParam::Algorithm(Algorithm::Rsa),
+        KeyParam::KeySize(kmr_wire::KeySizeInBits(128)),
+        KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(65537)),
+        KeyParam::Purpose(KeyPurpose::Sign),
+        KeyParam::Digest(Digest::Sha256),
+        KeyParam::NoAuthRequired,
+        KeyParam::AttestationChallenge(b"request".to_vec()),
+        KeyParam::AttestationApplicationId(b"app".to_vec()),
+    ];
+    // The default mock panics if any request reaches it, so a fabricated remote
+    // error cannot stand in for the local validation boundary.
+    let error = ta.generate_key_default(&params, None).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::UnsupportedKeySize, _)
+    ));
+}
+
+#[test]
+fn empty_remote_chain_is_a_protocol_error_not_an_unavailability_fallback() {
+    let mut ta = test_ta();
+    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(vec![]),
+        ..TestRemote::default()
+    }));
+    let mut params = key_params(KeyPurpose::Sign);
+    params.extend([
+        KeyParam::AttestationChallenge(b"request".to_vec()),
+        KeyParam::AttestationApplicationId(b"app".to_vec()),
+    ]);
+    let error = ta.generate_key_default(&params, None).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
 }

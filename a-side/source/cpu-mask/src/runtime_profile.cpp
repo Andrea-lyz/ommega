@@ -3,19 +3,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <limits.h>
+#include <initializer_list>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace maskcpu {
 namespace {
-constexpr const char* kKeys[] = {
-    "ro.product.brand", "ro.product.device", "ro.product.name",
-    "ro.product.manufacturer", "ro.product.model",
-    "ro.product.brand_for_attestation", "ro.product.device_for_attestation",
-    "ro.product.name_for_attestation", "ro.product.manufacturer_for_attestation",
-    "ro.product.model_for_attestation", "ro.soc.model",
-    "ro.product.oplus.cpuinfo", "ro.build.device_family"
-};
+
 
 bool validPackage(const char* package) {
     if (!package || !strchr(package, '.') || strlen(package) > 255) return false;
@@ -76,23 +72,53 @@ bool parseConfiguredScope(char* contents, const char* package) {
 bool parseRuntimeProfile(char* contents, RuntimeProfile* profile) {
     if (!contents || !profile) return false;
     RuntimeProfile result{};
-    unsigned seen = 0;
+    bool seen[kProfileCount]{};
+    size_t count = 0;
     bool version = false;
     char* save = nullptr;
     for (char* line = strtok_r(contents, "\n", &save); line; line = strtok_r(nullptr, "\n", &save)) {
         char* value = strchr(line, '=');
         if (!value) return false;
         *value++ = 0;
-        if (!strcmp(line, "version") && !version && !strcmp(value, "1")) { version = true; continue; }
+        if (!strcmp(line, "version") && !version && !strcmp(value, "2")) { version = true; continue; }
         size_t index = 0;
-        while (index < 13 && strcmp(line, kKeys[index])) ++index;
-        if (index == 13 || (seen & (1u << index)) || strlen(value) >= 92 || strchr(value, '\r')) return false;
-        if ((index < 5 || index == 10) && !value[0]) return false;
+        while (index < kProfileCount && strcmp(line, kProfileKeys[index])) ++index;
+        if (index == kProfileCount || seen[index] || strlen(value) >= 92 || strchr(value, '\r')) return false;
+        if (profileFieldRequired(index) && !value[0]) return false;
         if (index >= 5 && index < 10 && value[0]) return false;
         strcpy(result.values[index], value);
-        seen |= 1u << index;
+        seen[index] = true;
+        ++count;
     }
-    if (!version || seen != ((1u << 13) - 1)) return false;
+    if (!version || count != kProfileCount) return false;
+    for (size_t index : {size_t{32}, size_t{36}, size_t{37}, size_t{38}}) {
+        const char* number = result.values[index];
+        if (!number[0]) { if (index == 32) return false; else continue; }
+        for (const char* p = number; *p; ++p) if (*p < '0' || *p > '9') return false;
+        errno = 0; char* end = nullptr;
+        const unsigned long value = strtoul(number, &end, 10);
+        if (errno || !end || *end || value > INT_MAX || (index == 32 && value == 0)) return false;
+    }
+    const char* seconds = result.values[21];
+    if (!seconds[0]) return false;
+    for (const char* p = seconds; *p; ++p) if (*p < '0' || *p > '9') return false;
+    errno = 0; char* end = nullptr;
+    const unsigned long long timestamp = strtoull(seconds, &end, 10);
+    if (errno || !end || *end || timestamp > static_cast<unsigned long long>(LLONG_MAX / 1000)) return false;
+    int sdkFull = 0;
+    if (!parseSdkFull(result.values[52], static_cast<unsigned>(strtoul(result.values[32], nullptr, 10)), &sdkFull)) return false;
+    for (size_t index : {size_t{39}, size_t{40}, size_t{41}}) {
+        const char* abi = result.values[index];
+        if (!abi[0]) continue;
+        bool separator = true;
+        for (const char* p = abi; *p; ++p) {
+            if (*p == ',') { if (separator) return false; separator = true; continue; }
+            if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                  (*p >= '0' && *p <= '9') || *p == '-' || *p == '_')) return false;
+            separator = false;
+        }
+        if (separator) return false;
+    }
     *profile = result;
     return true;
 }
@@ -107,7 +133,7 @@ int loadConfiguredProfile(const char* package, RuntimeProfile* profile) {
     int error = readFile("/data/misc/keystore/ommega/data/cpu-mask.conf", config, sizeof(config));
     if (error) return error;
     if (!parseConfiguredScope(config, package)) return ENOENT;
-    char contents[8193];
+    char contents[kMaxProfileBytes + 1];
     error = readFile("/data/misc/keystore/ommega/data/cpu-mask-profile.conf", contents, sizeof(contents));
     if (error) return error;
     return parseRuntimeProfile(contents, profile) ? 0 : EINVAL;

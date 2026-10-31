@@ -47,9 +47,11 @@ mod cert;
 mod clock;
 pub mod device;
 pub mod keys;
+mod local_timing;
 mod operation;
 pub mod rkp;
 mod secret;
+mod versions;
 
 use keys::KeyImport;
 pub use operation::RemoteSignTask;
@@ -518,60 +520,47 @@ impl KeyMintTa {
             ));
         }
 
-        // Patch-level / version anti-downgrade checks are intentionally
-        // disabled: Ommega lets the user override the security patch date via
-        // the web UI, and a keyblob recorded with an older (or newer) value
-        // must not block startup. The stored values still flow into
-        // attestation certificates; we only stop rejecting them on load.
-        fn check(_v: &u32, _curr: u32, _name: &str) -> Result<(), Error> {
-            Ok(())
-        }
-
+        // Use the same current implementation profile as generation/import/upgrade.
+        // Never compare B-bound authorizations to unrelated A-local SPL values.
+        let current = self.current_version_tags(self.hw_info.security_level)?;
         let key_chars = keyblob.characteristics_at(self.hw_info.security_level)?;
         for param in key_chars {
-            match param {
-                KeyParam::OsVersion(v) => {
-                    if let Some(hal_info) = &self.hal_info {
-                        if hal_info.os_version == 0 {
-                            // Special case: upgrades to OS version zero are always allowed.
-                            if *v != 0 {
-                                warn!("requesting upgrade to OS version 0");
-                                return Err(km_err!(
-                                    KeyRequiresUpgrade,
-                                    "keyblob with OS version {} needs upgrade to current version 0",
-                                    v,
-                                ));
-                            }
-                        } else {
-                            check(v, hal_info.os_version, "OS version")?;
-                        }
-                    } else {
-                        error!("OS version not available, can't check for upgrade from {v}");
-                    }
+            let (stored, name) = match param {
+                KeyParam::OsVersion(value) => (*value, "OS version"),
+                KeyParam::OsPatchlevel(value) => (*value, "OS patchlevel"),
+                KeyParam::VendorPatchlevel(value) => (*value, "vendor patchlevel"),
+                KeyParam::BootPatchlevel(value) => (*value, "boot patchlevel"),
+                _ => continue,
+            };
+            let value = current.iter().flatten().find(|p| p.tag() == param.tag());
+            let current_value = match value {
+                Some(
+                    KeyParam::OsVersion(value)
+                    | KeyParam::OsPatchlevel(value)
+                    | KeyParam::VendorPatchlevel(value)
+                    | KeyParam::BootPatchlevel(value),
+                ) => *value,
+                _ => {
+                    // Missing optional HAL data is not permission to erase a bound tag.
+                    warn!("{name} unavailable; retaining keyblob value {stored}");
+                    continue;
                 }
-                KeyParam::OsPatchlevel(v) => {
-                    if let Some(hal_info) = &self.hal_info {
-                        check(v, hal_info.os_patchlevel, "OS patchlevel")?;
-                    } else {
-                        error!("OS patchlevel not available, can't check for upgrade from {v}");
-                    }
-                }
-                KeyParam::VendorPatchlevel(v) => {
-                    if let Some(hal_info) = &self.hal_info {
-                        check(v, hal_info.vendor_patchlevel, "vendor patchlevel")?;
-                    } else {
-                        error!("vendor patchlevel not available, can't check for upgrade from {v}");
-                    }
-                }
-                KeyParam::BootPatchlevel(v) => {
-                    if let Some(boot_info) = &self.boot_info {
-                        check(v, boot_info.boot_patchlevel, "boot patchlevel")?;
-                    } else {
-                        error!("boot patchlevel not available, can't check for upgrade from {v}");
-                    }
-                }
-                _ => {}
-            }
+            };
+            versions::check(
+                stored,
+                current_value,
+                matches!(param, KeyParam::OsVersion(_)),
+            )
+            .map_err(|error| match error {
+                versions::VersionError::RequiresUpgrade => km_err!(
+                    KeyRequiresUpgrade,
+                    "keyblob with old {name} {stored} needs upgrade to current {current_value}"
+                ),
+                versions::VersionError::Future => km_err!(
+                    InvalidKeyBlob,
+                    "keyblob with future {name} {stored} (current {current_value})"
+                ),
+            })?;
         }
         Ok((keyblob, slot))
     }
@@ -1435,6 +1424,36 @@ impl KeyMintTa {
         }
     }
 
+    /// Current metadata source for every software keyblob version operation.
+    /// The active implementation/configuration selects the profile, never key provenance.
+    fn current_version_tags(
+        &self,
+        security_level: SecurityLevel,
+    ) -> Result<[Option<KeyParam>; 4], Error> {
+        if let Some(remote) = self.remote_version_tags(security_level)? {
+            return Ok([
+                Some(KeyParam::OsVersion(remote.os_version)),
+                Some(KeyParam::OsPatchlevel(remote.os_patchlevel)),
+                remote.vendor_patchlevel.map(KeyParam::VendorPatchlevel),
+                remote.boot_patchlevel.map(KeyParam::BootPatchlevel),
+            ]);
+        }
+        Ok([
+            self.hal_info
+                .as_ref()
+                .map(|h| KeyParam::OsVersion(h.os_version)),
+            self.hal_info
+                .as_ref()
+                .map(|h| KeyParam::OsPatchlevel(h.os_patchlevel)),
+            self.hal_info
+                .as_ref()
+                .map(|h| KeyParam::VendorPatchlevel(h.vendor_patchlevel)),
+            self.boot_info
+                .as_ref()
+                .map(|b| KeyParam::BootPatchlevel(b.boot_patchlevel)),
+        ])
+    }
+
     /// Add KeyMint-generated tags to the provided [`KeyCharacteristics`].
     fn add_keymint_tags(
         &self,
@@ -1442,35 +1461,12 @@ impl KeyMintTa {
         origin: KeyOrigin,
         security_level: SecurityLevel,
     ) -> Result<(), Error> {
-        let remote_versions = self.remote_version_tags(security_level)?;
+        let versions = self.current_version_tags(security_level)?;
         for kc in chars {
             if kc.security_level == security_level {
                 kc.authorizations.try_push(KeyParam::Origin(origin))?;
-                if let Some(versions) = remote_versions {
-                    kc.authorizations.try_extend_from_slice(&[
-                        KeyParam::OsVersion(versions.os_version),
-                        KeyParam::OsPatchlevel(versions.os_patchlevel),
-                    ])?;
-                    if let Some(value) = versions.vendor_patchlevel {
-                        kc.authorizations
-                            .try_push(KeyParam::VendorPatchlevel(value))?;
-                    }
-                    if let Some(value) = versions.boot_patchlevel {
-                        kc.authorizations
-                            .try_push(KeyParam::BootPatchlevel(value))?;
-                    }
-                    return Ok(());
-                }
-                if let Some(hal_info) = &self.hal_info {
-                    kc.authorizations.try_extend_from_slice(&[
-                        KeyParam::OsVersion(hal_info.os_version),
-                        KeyParam::OsPatchlevel(hal_info.os_patchlevel),
-                        KeyParam::VendorPatchlevel(hal_info.vendor_patchlevel),
-                    ])?;
-                }
-                if let Some(boot_info) = &self.boot_info {
-                    kc.authorizations
-                        .try_push(KeyParam::BootPatchlevel(boot_info.boot_patchlevel))?;
+                for version in versions.into_iter().flatten() {
+                    kc.authorizations.try_push(version)?;
                 }
                 return Ok(());
             }

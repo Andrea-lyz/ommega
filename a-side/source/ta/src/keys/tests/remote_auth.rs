@@ -250,14 +250,10 @@ fn remote_unavailability_never_changes_the_experiment_to_a_local_key() {
 fn preserve_and_compatibility_decisions_remain_per_key() {
     let mut fixture = Fixture::new(None);
     let compatible_blob = fixture.key.key_blob.clone();
-    let chain: Vec<_> = fixture
-        .key
-        .certificate_chain
-        .iter()
-        .map(|c| c.encoded_certificate.clone())
-        .collect();
+    let preserved_source = signed_auth_fixture(None);
+    let preserved_chain = preserved_source.chain;
     fixture.ta.dev.remote = Some(Arc::new(TestRemote {
-        cert_chain: Some(chain.clone()),
+        cert_chain: Some(preserved_chain.clone()),
         expected_user_auth: Some(vec![(502, 42), (504, 2)]),
         ..TestRemote::default()
     }));
@@ -283,7 +279,7 @@ fn preserve_and_compatibility_decisions_remain_per_key() {
         "different B policies cannot reuse a remote alias"
     );
     assert_eq!(
-        preserved.certificate_chain[0].encoded_certificate, chain[0],
+        preserved.certificate_chain[0].encoded_certificate, preserved_chain[0],
         "never rewrite the B certificate"
     );
     fixture.ta.dev.remote = Some(Arc::new(TestRemote {
@@ -298,4 +294,83 @@ fn preserve_and_compatibility_decisions_remain_per_key() {
             .is_err(),
         "preserve must not fall back to a local keybox"
     );
+}
+
+fn signed_auth_fixture(timeout: Option<u32>) -> DelegationFixture {
+    DelegationFixture::with_child_policy(false, |params| {
+        params.retain(|p| !matches!(p, KeyParam::NoAuthRequired));
+        params.extend([
+            KeyParam::UserSecureId(42),
+            KeyParam::UserAuthType(HardwareAuthenticatorType::Fingerprint as u32),
+        ]);
+        if let Some(timeout) = timeout {
+            params.push(KeyParam::AuthTimeout(timeout));
+        }
+    })
+}
+
+#[test]
+fn correctly_signed_no_auth_certificate_cannot_satisfy_preserve_request() {
+    let mut fixture = Fixture::new(None);
+    let chain = fixture
+        .key
+        .certificate_chain
+        .iter()
+        .map(|c| c.encoded_certificate.clone())
+        .collect();
+    let observed = Arc::new(AtomicUsize::new(0));
+    fixture.ta.dev.remote = Some(Arc::new(TestRemote {
+        cert_chain: Some(chain),
+        expected_user_auth: Some(vec![(502, 42), (504, 2)]),
+        verified_calls: Some(observed.clone()),
+        ..TestRemote::default()
+    }));
+    let error = fixture
+        .ta
+        .generate_key(&fixture.params, None, false)
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
+    assert_eq!(observed.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn preserved_auth_timeout_matches_the_signed_b_policy_exactly() {
+    for timeout in [None, Some(0), Some(30)] {
+        let mut source = signed_auth_fixture(timeout);
+        let expected_chain = source.chain.clone();
+        source.ta.dev.remote = Some(Arc::new(TestRemote {
+            cert_chain: Some(expected_chain.clone()),
+            ..TestRemote::default()
+        }));
+        let generated = source.ta.generate_key(&source.params, None, false).unwrap();
+        assert_eq!(
+            generated.certificate_chain[0].encoded_certificate,
+            expected_chain[0]
+        );
+    }
+}
+
+#[test]
+fn validly_signed_wrong_timeout_window_is_rejected_before_key_storage() {
+    let mut source = signed_auth_fixture(Some(10));
+    let chain = source.chain.clone();
+    source
+        .params
+        .retain(|p| !matches!(p, KeyParam::AuthTimeout(_)));
+    source.params.push(KeyParam::AuthTimeout(30));
+    source.ta.dev.remote = Some(Arc::new(TestRemote {
+        cert_chain: Some(chain),
+        ..TestRemote::default()
+    }));
+    let error = source
+        .ta
+        .generate_key(&source.params, None, false)
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
+    ));
 }

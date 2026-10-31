@@ -11,6 +11,7 @@ pub mod identify;
 pub mod inject;
 pub mod ipc;
 pub mod legacy;
+pub mod local_timing;
 pub mod logging;
 pub mod parcel;
 pub mod sys;

@@ -5,7 +5,7 @@ authentication-signing keys. It has three modes:
 
 | Mode | New eligible key |
 | --- | --- |
-| Auto (default) | Preserve the requested B authentication policy for a recognized probe; otherwise use payment compatibility. |
+| Auto (default) | Preserve the requested B authentication policy for every alias. Payment compatibility must be selected explicitly. |
 | Payment compatibility | A authenticates the operation; a physical no-auth key on B signs it. |
 | Preserve authentication | Send the original authentication requirements to B. A's HAT cannot authenticate to B, so real authenticated operations can still fail with -26. |
 
@@ -26,21 +26,34 @@ existing behavior. Requests without a challenge retain local generation.
 Remote unavailability for eligible challenged keys is an error in every mode;
 it never silently switches the key to a local keybox.
 
-## Automatic recognition
+## Token verification boundary
 
-Recognition applies to one key creation, not the whole application or UID.
-The known TrustAttestor auth probe must match all of these conditions:
+Before a system HAT is re-MACed with Ommega's local key, its shape and original
+MAC are verified through A's native KeyMint verifier. This applies to direct and
+mirrored ingestion. System addAuthToken success means caching, not a TEE MAC
+verdict. A mirrored verification/localization failure is logged and dropped from
+Ommega while preserving the successful System result; a direct failure is returned.
+Invalid tokens never reach ENFORCEMENTS through this default path.
 
-- Alias `TrustAttestor_silent_auth_<UUID-v4>`.
-- EC P-256, SIGN/VERIFY, SHA-256, user-auth type 3, a 32-byte challenge.
-- Per-operation authentication (timeout absent or zero), no unlocked-device
-  requirement, and the general eligibility requirements above.
+The existing main.force_skip_system_biometric_hat_verification setting is an
+explicit insecure override, defaults to false and emits a warning when used. It
+is not automatically enabled for mirrored calls. Turning it on removes the original
+MAC guarantee and must not be counted as passing the strict authentication gate.
+The verifier may generate/cache a native A-side HMAC verification key; it never
+contacts B. Deployment requires A-side authentication/lockscreen regression tests.
+No credential, CE super-key, request-flag or key-storage policy is changed.
 
-Unknown patterns use payment compatibility. Recognition does not use package
-names, a generic random challenge or a generic auth type as detector evidence.
-Probe changes require a rule update or an explicit per-app mode. The resolved
-creation decision is carried in the internal request and reused through retries;
-there is no mutable global or thread-local request mode.
+## Creation policy
+
+Auto and Preserve send the caller's original authentication requirements to B,
+including authentication type, timeout and the unlocked-device requirement.
+Application aliases, UUIDs, challenge shapes and detector names never change
+this decision. A hardware-bound B key cannot be authenticated with A's HAT;
+applications that require A-authorized remote signing must explicitly select
+Payment compatibility and accept its different certificate policy.
+
+The decision is resolved once per creation and reused through retries. There is
+no mutable global or thread-local request mode. Existing keys are not changed.
 
 ## Scope and exceptions
 

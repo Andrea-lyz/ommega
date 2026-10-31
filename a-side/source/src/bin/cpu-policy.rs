@@ -3,7 +3,7 @@
 pub mod attestation_counts;
 use anyhow::{anyhow, Context, Result};
 use kmr_common::{
-    cpu_mask::{Config, Profile, CONFIG_PATH, PROFILE_PATH},
+    cpu_mask::{Config, Profile, CONFIG_PATH, MAX_PROFILE_BYTES, PROFILE_PATH},
     runtime::fs::atomic_compare_replace_preserving_metadata,
 };
 use serde::Deserialize;
@@ -40,7 +40,7 @@ fn execute() -> Result<()> {
                 .unwrap_or_default();
             let profile = std::fs::read_to_string(PROFILE_PATH)
                 .ok()
-                .filter(|contents| contents.len() <= 8192)
+                .filter(|contents| contents.len() <= MAX_PROFILE_BYTES)
                 .and_then(|contents| Profile::parse(&contents).ok());
             let standalone = Path::new("/data/adb/modules/zygisk_maskcpu");
             let standalone_active = standalone.is_dir()

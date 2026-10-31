@@ -10,7 +10,7 @@
 namespace maskcpu {
 
 inline constexpr size_t kMaxAreas = 16;
-inline constexpr size_t kMaxPatches = 64;
+inline constexpr size_t kMaxPatches = 128;
 inline constexpr size_t kMaxAreaBytes = 4 * 1024 * 1024;
 inline constexpr size_t kPropertyValueBytes = 92;
 inline constexpr size_t kPropertyNameOffset = 96;

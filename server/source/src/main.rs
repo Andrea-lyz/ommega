@@ -115,8 +115,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
 
     // Start the auto keybox refresh loop (background thread) when enabled.
     // The persisted admin switch wins over the startup configuration.
-    let keybox_refresh =
-        relay_rs::autokeybox::desired_from_state(cfg.keybox_refresh_enabled);
+    let keybox_refresh = relay_rs::autokeybox::desired_from_state(cfg.keybox_refresh_enabled);
     if keybox_refresh {
         if let Some(db_ref) = db.clone() {
             relay_rs::autokeybox::set_enabled(true);
@@ -268,7 +267,8 @@ async fn main() -> anyhow::Result<()> {
         http_listener,
         app.clone()
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    );
+    )
+    .tcp_nodelay(true);
 
     // HTTPS server (if TLS enabled and cert files exist)
     if cfg.use_tls {
@@ -285,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?,
             )
+            .map(|acceptor| acceptor.acceptor(axum_server::accept::NoDelayAcceptor::new()))
             .serve(
                 app.clone()
                     .into_make_service_with_connect_info::<std::net::SocketAddr>(),

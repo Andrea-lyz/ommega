@@ -6,9 +6,13 @@
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Mutex, Notify};
+
+#[cfg(test)]
+#[path = "queue/latency_tests.rs"]
+mod latency_tests;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -31,6 +35,8 @@ pub struct Task {
     pub created_at_ms: u64,
     pub completed_at_ms: u64,
     pub status: TaskStatus,
+    created_at: Instant,
+    assigned_at: Option<Instant>,
 }
 
 impl Task {
@@ -180,12 +186,13 @@ struct Inner {
     active_machine: HashMap<String, (String, u64)>,
     /// per-device recent activity for load estimation: (timestamp_ms, weight).
     device_events: HashMap<String, VecDeque<(u64, u64)>>,
+    /// Shared only by concurrent polls for the same device. Weak handles do not
+    /// retain a cancelled HTTP poll or its waiter.
+    poll_notifiers: HashMap<String, Weak<Notify>>,
 }
 
 pub struct TaskStore {
     inner: Mutex<Inner>,
-    /// Woken whenever a new pending task appears (long-poll support).
-    notify: Notify,
     assignment_timeout: Duration,
     /// How long a pending task may wait before being marked as failed (timeout).
     pending_ttl: Duration,
@@ -204,7 +211,6 @@ impl TaskStore {
     ) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner::default()),
-            notify: Notify::new(),
             assignment_timeout: Duration::from_secs(assignment_timeout_secs),
             pending_ttl: Duration::from_secs(pending_ttl_secs),
             completed_max,
@@ -259,6 +265,8 @@ impl TaskStore {
                 created_at_ms: now,
                 completed_at_ms: 0,
                 status: TaskStatus::Pending,
+                created_at: Instant::now(),
+                assigned_at: None,
             },
         );
         if let Some(key) = request_key {
@@ -277,9 +285,24 @@ impl TaskStore {
                 .or_default()
                 .push_back(task_id.clone());
         }
-        drop(inner);
-        self.notify.notify_waiters();
+        Self::notify_pending_locked(&inner, target_device_id);
         task_id
+    }
+
+    /// Targeted work wakes only that device; wildcard work may wake any poll.
+    /// Call under the queue lock so notification and enqueue are one transition.
+    fn notify_pending_locked(inner: &Inner, target_device_id: &str) {
+        if target_device_id.is_empty() {
+            for notify in inner.poll_notifiers.values().filter_map(Weak::upgrade) {
+                notify.notify_waiters();
+            }
+        } else if let Some(notify) = inner
+            .poll_notifiers
+            .get(target_device_id)
+            .and_then(Weak::upgrade)
+        {
+            notify.notify_waiters();
+        }
     }
 
     fn remove_task_locked(inner: &mut Inner, task_id: &str) -> Option<Task> {
@@ -394,7 +417,22 @@ impl TaskStore {
         let pending_ttl = self.pending_ttl;
         let completed_ttl = self.completed_ttl;
         let completed_max = self.completed_max;
-        self.wait_until(timeout, |inner| {
+        let notify = {
+            let mut inner = self.inner.lock().await;
+            let slot = inner
+                .poll_notifiers
+                .entry(device_id.to_string())
+                .or_default();
+            match slot.upgrade() {
+                Some(notify) => notify,
+                None => {
+                    let notify = Arc::new(Notify::new());
+                    *slot = Arc::downgrade(&notify);
+                    notify
+                }
+            }
+        };
+        self.wait_until(&notify, timeout, |inner| {
             let known_version = inner
                 .devices
                 .get(device_id)
@@ -433,16 +471,17 @@ impl TaskStore {
         .await
     }
 
-    /// Enable-then-check-then-await on `notify`. Timeout still runs `check`
-    /// once more so a completion that races the deadline is not dropped.
+    /// Enable-then-check-then-await on the device notifier. Timeout runs `check`
+    /// once more so an enqueue that races the deadline is not dropped.
     async fn wait_until<T>(
         &self,
+        notify: &Notify,
         timeout: Duration,
         mut check: impl FnMut(&mut Inner) -> Option<T>,
     ) -> Option<T> {
         let deadline = Instant::now() + timeout;
         loop {
-            let notified = self.notify.notified();
+            let notified = notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
@@ -469,6 +508,45 @@ impl TaskStore {
     /// Try to dequeue a task matching this device from the FIFO.
     /// O(1): checks per-device queue first, then the wildcard queue.
     fn dequeue_locked(inner: &mut Inner, device_id: &str, caps: DeviceCaps) -> Option<Task> {
+        // 0) Attest outranks older sign/decrypt work for the same device. Scan a
+        // snapshot of the IDs so the queue and task table are not borrowed at the
+        // same time; FIFO is preserved within the attest class.
+        let attest_candidate = {
+            let ids: Vec<String> = inner
+                .pending_by_device
+                .get(device_id)
+                .map(|q| q.iter().cloned().collect())
+                .unwrap_or_default();
+            ids.into_iter().find(|id| {
+                inner
+                    .tasks
+                    .get(id)
+                    .is_some_and(|task| task.task_type == "attest" && caps.can_serve(task))
+            })
+        };
+        if let Some(task_id) = attest_candidate {
+            if let Some(q) = inner.pending_by_device.get_mut(device_id) {
+                if let Some(pos) = q.iter().position(|id| id == &task_id) {
+                    q.remove(pos);
+                }
+                if q.is_empty() {
+                    inner.pending_by_device.remove(device_id);
+                }
+            }
+            if let Some(task) = inner.tasks.get_mut(&task_id) {
+                task.assigned_device_id = Some(device_id.to_string());
+                task.assigned_at_ms = Self::now_ms();
+                task.assigned_at = Some(Instant::now());
+                tracing::debug!(
+                    event = "relay_claim",
+                    task_id = %task.task_id,
+                    queue_us = task.created_at.elapsed().as_micros() as u64
+                );
+                task.status = TaskStatus::Assigned;
+                return Some(task.clone());
+            }
+        }
+
         // 1) Try device-specific queue first.
         if let Some(q) = inner.pending_by_device.get_mut(device_id) {
             for _ in 0..q.len() {
@@ -482,6 +560,9 @@ impl TaskStore {
                     }
                     t.assigned_device_id = Some(device_id.to_string());
                     t.assigned_at_ms = Self::now_ms();
+                    t.assigned_at = Some(Instant::now());
+                    tracing::debug!(event = "relay_claim", task_id = %t.task_id,
+                        queue_us = t.created_at.elapsed().as_micros() as u64);
                     t.status = TaskStatus::Assigned;
                     return Some(t.clone());
                 }
@@ -506,6 +587,9 @@ impl TaskStore {
                 }
                 t.assigned_device_id = Some(device_id.to_string());
                 t.assigned_at_ms = Self::now_ms();
+                t.assigned_at = Some(Instant::now());
+                tracing::debug!(event = "relay_claim", task_id = %t.task_id,
+                    queue_us = t.created_at.elapsed().as_micros() as u64);
                 t.status = TaskStatus::Assigned;
                 return Some(t.clone());
             }
@@ -615,6 +699,7 @@ impl TaskStore {
             .collect();
         for id in stale {
             let mut ended = false;
+            let mut requeued_target = None;
             if let Some(t) = inner.tasks.get_mut(&id) {
                 // A lost poller does not prove its secure-world call ended.
                 // Never replay an agreement or SOTER operation that may still
@@ -630,6 +715,8 @@ impl TaskStore {
                 } else {
                     t.status = TaskStatus::Pending;
                     t.assigned_device_id = None;
+                    t.assigned_at = None;
+                    requeued_target = Some(t.target_device_id.clone());
                     // Put back into the appropriate bucket.
                     if t.target_device_id.is_empty() {
                         inner.pending_any.push_back(id.clone());
@@ -644,6 +731,9 @@ impl TaskStore {
             }
             if ended {
                 Self::publish_result_locked(inner, &id);
+            }
+            if let Some(target) = requeued_target {
+                Self::notify_pending_locked(inner, &target);
             }
         }
     }
@@ -688,6 +778,12 @@ impl TaskStore {
             TaskStatus::Completed
         };
         task.completed_at_ms = now;
+        tracing::debug!(
+            event = "relay_complete",
+            task_id,
+            assigned_us = task.assigned_at.map(|at| at.elapsed().as_micros() as u64),
+            total_us = task.created_at.elapsed().as_micros() as u64
+        );
         // Track in the appropriate ordered queue for later TTL / capacity pruning.
         if is_err {
             inner.failed_queue.push_back((now, task_id.to_string()));
@@ -705,16 +801,16 @@ impl TaskStore {
             self.completed_max,
             self.completed_ttl,
         );
-        drop(inner);
-        self.notify.notify_waiters();
+        // Only this task's A-side watch receivers need the completion. B polls
+        // wait for new work, not unrelated result uploads.
         Ok(())
     }
 
     /// Wait until the task is completed or failed. Returns None on timeout.
     ///
     /// Every open task owns a `watch` sender, so a completion wakes only the
-    /// waiters of that task - the shared `notify` belongs to the B-side long
-    /// poll and no longer wakes every A-side waiter on any change. A result
+    /// waiters of that task. B-side long polls use device-specific notifiers
+    /// and are not woken by result uploads. A result
     /// published just before the task is pruned stays readable in the
     /// receivers.
     pub async fn wait_for_result(&self, task_id: &str, timeout: Duration) -> Option<Value> {
@@ -1082,7 +1178,12 @@ mod tests {
     async fn lost_soter_assignment_is_never_replayed() {
         let store = store();
         let id = store
-            .create_task("soter", json!({"op": "generate_auth_key_pair"}), "dev", None)
+            .create_task(
+                "soter",
+                json!({"op": "generate_auth_key_pair"}),
+                "dev",
+                None,
+            )
             .await;
         let caps = DeviceCaps::parse(Some("soter"));
         store
@@ -1107,7 +1208,12 @@ mod tests {
     async fn timed_out_pending_soter_is_withdrawn_before_a_late_poll() {
         let store = store();
         let id = store
-            .create_task("soter", json!({"op": "generate_auth_key_pair"}), "dev", None)
+            .create_task(
+                "soter",
+                json!({"op": "generate_auth_key_pair"}),
+                "dev",
+                None,
+            )
             .await;
         assert!(store.cancel_pending_task(&id).await);
         assert!(store
@@ -1123,6 +1229,31 @@ mod tests {
 
     fn store() -> Arc<TaskStore> {
         TaskStore::new(60, 60, 100, 60)
+    }
+
+    #[tokio::test]
+    async fn attest_is_dequeued_before_an_earlier_sign() {
+        let store = store();
+        let sign = store
+            .create_task("sign", json!({}), "dev", None)
+            .await;
+        let attest = store
+            .create_task("attest", json!({}), "dev", None)
+            .await;
+
+        let first = store
+            .pop_for_b("dev", "m1", Duration::ZERO)
+            .await
+            .expect("first task");
+        assert_eq!(first.task_id, attest);
+        assert_eq!(first.task_type, "attest");
+
+        let second = store
+            .pop_for_b("dev", "m1", Duration::ZERO)
+            .await
+            .expect("second task");
+        assert_eq!(second.task_id, sign);
+        assert_eq!(second.task_type, "sign");
     }
 
     fn assert_woke_fast(started: Instant) {

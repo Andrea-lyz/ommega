@@ -15,7 +15,7 @@
 //! TA functionality related to key generation/import/upgrade.
 
 use crate::{cert, device, AttestationChainInfo};
-use core::{borrow::Borrow, cmp::Ordering, convert::TryFrom};
+use core::{borrow::Borrow, convert::TryFrom};
 use der::{Decode, Encode, Sequence};
 use kmr_common::{
     crypto::{self, aes, rsa, KeyMaterial, OpaqueOr},
@@ -30,14 +30,31 @@ use kmr_wire::{
     },
     *,
 };
-use log::{error, warn};
-use std::{
-    collections::btree_map::Entry,
-    string::String,
-    sync::Mutex,
-    time::{Duration, Instant},
-    vec::Vec,
-};
+use std::time::Instant;
+
+/// Logs the full KeyMint `generate_key` duration, including pre/post work that
+/// is outside the remote relay phase. The Drop guard covers every return path.
+struct GenerateTimer {
+    started: Instant,
+}
+
+impl GenerateTimer {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for GenerateTimer {
+    fn drop(&mut self) {
+        log::info!(
+            "event=generate_total total_us={}",
+            self.started.elapsed().as_micros()
+        );
+    }
+}
+use std::{collections::btree_map::Entry, string::String, vec::Vec};
 use x509_cert::ext::pkix::KeyUsages;
 
 /// Maximum size of an attestation challenge value.
@@ -45,47 +62,6 @@ const MAX_ATTESTATION_CHALLENGE_LEN: usize = 128;
 
 #[cfg(test)]
 mod tests;
-
-/// EWMA of remote (B-side TEE) attested generateKey wall time, in nanoseconds.
-/// Duck Detector's Keystore2PostProcessingProbe pairs a challenge-only
-/// generateKey (RKP / batch-key arm, which we send remote) against a
-/// challenge+ATTEST_KEY generateKey (UserGenerated arm, which we keep local).
-/// It flags TIMING_DETECTED when the remote arm is >= 120ms slower and
-/// >= 3x the paired-diff MAD. Track the slow arm so the local arm can wait.
-static REMOTE_ATTEST_EWMA_NS: Mutex<u64> = Mutex::new(0);
-
-const REMOTE_ATTEST_EWMA_MAX_NS: u64 = 2_000_000_000;
-const REMOTE_ATTEST_EQUALIZE_MIN_NS: u64 = 50_000_000;
-
-fn record_remote_attest_duration(elapsed: Duration) {
-    let sample = elapsed
-        .as_nanos()
-        .min(u128::from(REMOTE_ATTEST_EWMA_MAX_NS)) as u64;
-    let Ok(mut ewma) = REMOTE_ATTEST_EWMA_NS.lock() else {
-        return;
-    };
-    *ewma = if *ewma == 0 {
-        sample
-    } else {
-        // alpha = 1/4: follow RTT/TEE jitter without snapping to one outlier.
-        ewma.saturating_mul(3) / 4 + sample / 4
-    };
-}
-
-fn equalize_to_remote_attest_duration(started: Instant) {
-    let Ok(ewma) = REMOTE_ATTEST_EWMA_NS.lock() else {
-        return;
-    };
-    let target = *ewma;
-    drop(ewma);
-    if target < REMOTE_ATTEST_EQUALIZE_MIN_NS {
-        return;
-    }
-    let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-    if elapsed < target {
-        std::thread::sleep(Duration::from_nanos(target - elapsed));
-    }
-}
 
 /// Make remote key characteristics use the version tags from B's certificate.
 fn overlay_remote_version_tags(
@@ -486,6 +462,8 @@ impl crate::KeyMintTa {
         attestation_key: Option<AttestationKey>,
         authorize_on_a: bool,
     ) -> Result<KeyCreationResult, Error> {
+        let _generate_timer = GenerateTimer::new();
+        let timing_started = Instant::now();
         // Remote mode: if a remote backend is enabled and attestation is
         // requested, mint the key on the B-side real TEE instead of locally.
         // A caller-selected remote attestation key is passed to B's native
@@ -532,16 +510,13 @@ impl crate::KeyMintTa {
         let remote_attest = has_challenge
             && remote_enabled
             && (attestation_key.is_none() || remote_issuer.is_some());
-        let pad_local_attest_key =
-            has_challenge && attestation_key.is_some() && remote_enabled && !remote_attest;
-        let started = Instant::now();
         if remote_attest {
             // `Ok(None)` from the remote backend means it was unavailable; fall
             // back to the local software keybox when `fallback_local` allows.
             if let Some(result) =
                 self.generate_key_remote(params, remote_issuer.as_ref(), a_authorized_signing)?
             {
-                record_remote_attest_duration(started.elapsed());
+                crate::local_timing::record_remote_attest_duration(timing_started.elapsed());
                 return Ok(result);
             }
             if kmr_common::auth_signing::eligible(params)
@@ -562,11 +537,7 @@ impl crate::KeyMintTa {
             key_material,
             keyblob::SlotPurpose::KeyGeneration,
         )?;
-        // Local challenge+ATTEST_KEY mint is the probe's fast arm. Hold it to
-        // the remote EWMA so the paired delta stays under 120ms / 3xMAD.
-        if pad_local_attest_key {
-            equalize_to_remote_attest_duration(started);
-        }
+        crate::local_timing::equalize_if_enabled(params, timing_started);
         Ok(result)
     }
 
@@ -581,6 +552,17 @@ impl crate::KeyMintTa {
         attestation_key: Option<&device::RemoteAttestationKey>,
         a_authorized_signing: bool,
     ) -> Result<Option<KeyCreationResult>, Error> {
+        // The relay protocol currently carries only EC/RSA. Never let an
+        // unsupported family fall through to B's legacy default EC key.
+        match tag::get_algorithm(params)? {
+            keymint::Algorithm::Ec | keymint::Algorithm::Rsa => {}
+            algorithm => {
+                return Err(km_err!(
+                    UnsupportedAlgorithm,
+                    "remote key algorithm {algorithm:?} is not supported"
+                ))
+            }
+        }
         let challenge = get_opt_tag_value!(params, AttestationChallenge)?
             .ok_or_else(|| km_err!(AttestationChallengeMissing, "remote attest needs challenge"))?;
         // Enforce the same challenge-length bound as the local path so the
@@ -661,16 +643,27 @@ impl crate::KeyMintTa {
         // STRONGBOX request is not misreported as TEE by the relay's default.
         remote_params.security_level = Some(self.hw_info.security_level as i32);
 
+        // Validate generation parameters before any relay work; invalid input
+        // must not become a physical B-side algorithm experiment.
+        let (mut chars, _) = tag::extract_key_gen_characteristics(
+            self.secure_storage_available(),
+            params,
+            self.hw_info.security_level,
+        )?;
         let remote = self
             .dev
             .remote
             .as_ref()
             .ok_or_else(|| km_err!(UnknownError, "remote backend not configured"))?;
+        let phase_start = Instant::now();
+        let http_start = Instant::now();
         let Some(remote_attestation) =
             remote.attest(challenge, app_id, &alias, effective_serial, &remote_params)?
         else {
             return Ok(None);
         };
+        let http_us = http_start.elapsed().as_micros();
+        let validate_start = Instant::now();
         let relay_latency_ms = remote_attestation.relay_latency_ms;
         let remote_profile = remote_attestation.profile;
         if remote_profile.profile_version != self.aidl_version as i32 {
@@ -700,8 +693,13 @@ impl crate::KeyMintTa {
             ));
         }
         if chain.is_empty() {
-            return Ok(None);
+            return Err(km_err!(
+                VerificationFailed,
+                "remote returned an empty certificate chain"
+            ));
         }
+
+        crate::cert::validate_remote_chain(&chain)?;
 
         // Derive the remote key's public key (SPKI) from the leaf certificate.
         let leaf_der = &chain[0];
@@ -712,6 +710,7 @@ impl crate::KeyMintTa {
             challenge,
             app_id,
             effective_security_level,
+            &remote_params,
         )?;
         if let Some(issuer) = attestation_key {
             crate::cert::validate_remote_delegation(&chain, issuer)?;
@@ -728,15 +727,9 @@ impl crate::KeyMintTa {
             .to_der()
             .map_err(|e| km_err!(UnknownError, "encode remote SPKI: {e:?}"))?;
 
-        // Build characteristics (algorithm/key size from params), mirroring the
-        // local path but with a Remote key material.
-        let (mut chars, keygen_info) = tag::extract_key_gen_characteristics(
-            self.secure_storage_available(),
-            params,
-            effective_security_level,
-        )?;
+        // The prevalidated characteristics are retained; B must not silently
+        // change the requested policy after returning a valid signature.
         self.add_keymint_tags(&mut chars, KeyOrigin::Generated, effective_security_level)?;
-        let _ = keygen_info;
         let root_of_trust = crate::cert::parse_remote_root_of_trust(leaf_der)?;
         if let Some(rot) = root_of_trust.as_ref() {
             if rot.attestation_version != remote_profile.profile_version
@@ -778,6 +771,7 @@ impl crate::KeyMintTa {
                 "remote attestation is missing an Android attestation record"
             ));
         }
+        let validate_us = validate_start.elapsed().as_micros();
         let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
             alias,
             public_key,
@@ -801,6 +795,7 @@ impl crate::KeyMintTa {
         }
 
         // Build the keyblob (encrypted, containing the Remote reference).
+        let store_start = Instant::now();
         let keyblob = keyblob::PlaintextKeyBlob {
             characteristics: chars
                 .iter()
@@ -828,6 +823,11 @@ impl crate::KeyMintTa {
             keyblob::SlotPurpose::KeyGeneration,
         )?;
         let serialized_keyblob = encrypted_keyblob.into_vec()?;
+        let store_us = store_start.elapsed().as_micros();
+        log::info!(
+            "event=remote_phase http_us={http_us} validate_us={validate_us} store_us={store_us} total_us={}",
+            phase_start.elapsed().as_micros()
+        );
 
         if let Some(remote) = self.dev.remote.as_ref() {
             remote.attestation_verified(app_id, relay_latency_ms);
@@ -1332,105 +1332,48 @@ impl crate::KeyMintTa {
                 },
             };
 
-        fn upgrade(v: &mut u32, curr: u32, _name: &str) -> Result<bool, Error> {
-            match (*v).cmp(&curr) {
-                Ordering::Less => {
-                    *v = curr;
-                    Ok(true)
-                }
-                Ordering::Equal => Ok(false),
-                Ordering::Greater => {
-                    // We allow patchlevel downgrades.
-                    // error!("refusing to downgrade {name} from {v} to {curr}");
-                    // Err(km_err!(
-                    //     InvalidArgument,
-                    //     "keyblob with future {} {} (current {})",
-                    //     name,
-                    //     v,
-                    //     curr
-                    // ))
-                    *v = curr;
-                    Ok(true)
-                }
-            }
-        }
-
-        // Use the same metadata source as generation/import. This only updates
-        // Ommega's encrypted software blob, never B's hardware SPL or keyblob.
-        let remote_versions = self.remote_version_tags(self.hw_info.security_level)?;
+        let current = self.current_version_tags(self.hw_info.security_level)?;
         for chars in &mut keyblob.characteristics {
             if chars.security_level != self.hw_info.security_level {
                 continue;
             }
-            if let Some(versions) = remote_versions {
-                let expected = [
-                    Some(KeyParam::OsVersion(versions.os_version)),
-                    Some(KeyParam::OsPatchlevel(versions.os_patchlevel)),
-                    versions.vendor_patchlevel.map(KeyParam::VendorPatchlevel),
-                    versions.boot_patchlevel.map(KeyParam::BootPatchlevel),
-                ];
-                let is_version = |param: &KeyParam| {
-                    matches!(
-                        param,
-                        KeyParam::OsVersion(_)
-                            | KeyParam::OsPatchlevel(_)
-                            | KeyParam::VendorPatchlevel(_)
-                            | KeyParam::BootPatchlevel(_)
-                    )
+            for param in &mut chars.authorizations {
+                let replacement = current.iter().flatten().find(|p| p.tag() == param.tag());
+                let current_value = match replacement {
+                    Some(
+                        KeyParam::OsVersion(v)
+                        | KeyParam::OsPatchlevel(v)
+                        | KeyParam::VendorPatchlevel(v)
+                        | KeyParam::BootPatchlevel(v),
+                    ) => *v,
+                    _ => continue,
                 };
+                let (stored, is_os, name) = match param {
+                    KeyParam::OsVersion(v) => (v, true, "OS version"),
+                    KeyParam::OsPatchlevel(v) => (v, false, "OS patchlevel"),
+                    KeyParam::VendorPatchlevel(v) => (v, false, "vendor patchlevel"),
+                    KeyParam::BootPatchlevel(v) => (v, false, "boot patchlevel"),
+                    _ => continue,
+                };
+                let before = *stored;
+                modified |=
+                    crate::versions::upgrade(stored, current_value, is_os).map_err(|_| {
+                        km_err!(
+                            InvalidArgument,
+                            "refusing to downgrade keyblob {name} from {before} to {current_value}"
+                        )
+                    })?;
+            }
+            // Add published version tags on explicit upgrade; never erase a
+            // bound optional value because the new profile does not publish it.
+            for replacement in current.iter().flatten() {
                 if !chars
                     .authorizations
                     .iter()
-                    .filter(|p| is_version(p))
-                    .eq(expected.iter().flatten())
+                    .any(|p| p.tag() == replacement.tag())
                 {
-                    chars.authorizations.retain(|p| !is_version(p));
-                    for param in expected.into_iter().flatten() {
-                        chars.authorizations.try_push(param)?;
-                    }
+                    chars.authorizations.try_push(replacement.clone())?;
                     modified = true;
-                }
-                continue;
-            }
-            for param in &mut chars.authorizations {
-                match param {
-                    KeyParam::OsVersion(v) => {
-                        if let Some(hal_info) = &self.hal_info {
-                            if hal_info.os_version == 0 {
-                                // Special case: upgrades to OS version zero are always allowed.
-                                warn!("forcing upgrade to OS version 0");
-                                modified |= *v != 0;
-                                *v = 0;
-                            } else {
-                                modified |= upgrade(v, hal_info.os_version, "OS version")?;
-                            }
-                        } else {
-                            error!("OS version not available, can't upgrade from {v}");
-                        }
-                    }
-                    KeyParam::OsPatchlevel(v) => {
-                        if let Some(hal_info) = &self.hal_info {
-                            modified |= upgrade(v, hal_info.os_patchlevel, "OS patchlevel")?;
-                        } else {
-                            error!("OS patchlevel not available, can't upgrade from {v}");
-                        }
-                    }
-                    KeyParam::VendorPatchlevel(v) => {
-                        if let Some(hal_info) = &self.hal_info {
-                            modified |=
-                                upgrade(v, hal_info.vendor_patchlevel, "vendor patchlevel")?;
-                        } else {
-                            error!("vendor patchlevel not available, can't upgrade from {v}");
-                        }
-                    }
-                    KeyParam::BootPatchlevel(v) => {
-                        if let Some(boot_info) = &self.boot_info {
-                            modified |= upgrade(v, boot_info.boot_patchlevel, "boot patchlevel")?;
-                        } else {
-                            error!("boot patchlevel not available, can't upgrade from {v}");
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
