@@ -10,7 +10,13 @@
 README 不再内嵌逐版本更新要点：发版时只更新版本号，并在这里追加条目。发布步骤见
 [RELEASING.md](RELEASING.md)。
 
-## 2.1.4 — 2026-10-29
+## 2.2.0 — 2026-10-31
+
+- A/B 模块加入 KSU/Magisk `updateJson`，发布后可从 KSU 管理器检查并升级。
+- 新增 `v*` tag release workflow：自动构建 A/B 模块、生成 `ommega-a-update.json` / `ommega-b-update.json` 和稳定别名 zip，发布 GitHub Release。
+- A 端 local-keygen EWMA 差值目标调整为 85ms；Duck Detector 时序信号清除。
+- 保留 A/B/Server 2.2.0 统一版本号和既有功能。
+`r`n## 2.1.4 — 2026-10-29
 
 B 端 WebUI 状态卡修复。
 

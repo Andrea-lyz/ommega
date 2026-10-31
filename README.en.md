@@ -1,6 +1,6 @@
 # Ommega
 
-[![Version](https://img.shields.io/badge/version-2.1.4-blue)](https://github.com/Andrea-lyz/ommega/releases)
+[![Version](https://img.shields.io/badge/version-2.2.0-blue)](https://github.com/Andrea-lyz/ommega/releases)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](LICENSE)
 [![中文](https://img.shields.io/badge/语言-中文-lightgrey)](README.md)
 [![English](https://img.shields.io/badge/Language-English-blue)](README.en.md)
@@ -16,7 +16,7 @@
 > This repository is a community-maintained fork of
 > [jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega). It is not an
 > official upstream release, and it ships no public Server or public token.
-> Current version: **2.1.4**. Module authors: `jiyin004, Andrea-lyz`. The
+> Current version: **2.2.0**. Module authors: `jiyin004, Andrea-lyz`. The
 > maintenance target is a dedicated **one-A / one-B** deployment, not one B
 > serving several A devices.
 
@@ -50,7 +50,7 @@ does not promise compatibility with every ROM, device or algorithm combination.
 
 | Item | Value |
 |---|---|
-| Current version | **2.1.4** (A / B / Server / both APKs share one version) |
+| Current version | **2.2.0** (A / B / Server / both APKs share one version) |
 | Deployment | 1 A + 1 B + 1 self-hosted Server |
 | A / B | Android 12 or later, arm64-v8a, KernelSU / APatch / Magisk |
 | Server | Linux x86_64 (static musl binary) |
