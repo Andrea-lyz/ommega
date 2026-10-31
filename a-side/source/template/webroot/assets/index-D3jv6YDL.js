@@ -3414,14 +3414,20 @@ async function ommegaDetailLoad(session, refreshScope = false) {
       : ommegaDetailText("仅对之后新建的密钥生效。", "Applies to newly created keys."));
   } catch (error) { failed("om-detail-auth-status", error, 'input[name="om-app-auth"]'); }
   try {
-    if (localTiming.status !== "fulfilled") throw localTiming.reason;
     const box = document.getElementById("om-detail-local-timing");
-    box.checked = ommegaLocalTimingEnabled(localTiming.value, state.pkg);
-    box.disabled = false;
-    ommegaDetailMessage("om-detail-local-timing-status", box.checked
-      ? ommegaDetailText("已启用：本应用所有本地 keygen 会等待远程 EWMA；仅用于时序检测器。", "Enabled: all local keygen for this app waits for the remote EWMA; for timing detectors only.")
-      : ommegaDetailText("默认关闭；仅有时序要求的检测器建议启用。", "Off by default; enable only for timing-sensitive detectors."));
-  } catch (error) { failed("om-detail-local-timing-status", error); document.getElementById("om-detail-local-timing").disabled = true; }
+    if (box) {
+      if (localTiming?.status !== "fulfilled") throw localTiming?.reason || new Error("Local timing policy unavailable");
+      box.checked = ommegaLocalTimingEnabled(localTiming.value, state.pkg);
+      box.disabled = false;
+      ommegaDetailMessage("om-detail-local-timing-status", box.checked
+        ? ommegaDetailText("已启用：本应用所有本地 keygen 会等待远程 EWMA；仅用于时序检测器。", "Enabled: all local keygen for this app waits for the remote EWMA; for timing detectors only.")
+        : ommegaDetailText("默认关闭；仅有时序要求的检测器建议启用。", "Off by default; enable only for timing-sensitive detectors."));
+    }
+  } catch (error) {
+    failed("om-detail-local-timing-status", error);
+    const box = document.getElementById("om-detail-local-timing");
+    if (box) box.disabled = true;
+  }
   try {
     if (cpu.status !== "fulfilled") throw cpu.reason;
     const box = document.getElementById("om-detail-cpu");
@@ -3769,7 +3775,8 @@ function ommegaOpenAppDetail(card) {
   document.getElementById("om-detail-scope").onchange = event => ommegaDetailSaveScope(event.target);
   detail.querySelectorAll('input[name="om-app-mode"]').forEach(input => input.onchange = () => ommegaDetailSaveMode(input));
   detail.querySelectorAll('input[name="om-app-auth"]').forEach(input => input.onchange = () => ommegaDetailSaveAuth(input));
-  document.getElementById("om-detail-local-timing").onchange = event => ommegaDetailSaveLocalTiming(event.target);
+  const localTiming = document.getElementById("om-detail-local-timing");
+  if (localTiming) localTiming.onchange = event => ommegaDetailSaveLocalTiming(event.target);
   document.getElementById("om-detail-cpu").onchange = event => ommegaDetailSaveCpu(event.target);
   document.getElementById("om-detail-cpu-settings").onclick = () => {
     for (const id of ["ommega-cpu-policy-dialog", "ommega-cpu-app-dialog"]) {
