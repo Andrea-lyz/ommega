@@ -6,7 +6,8 @@ const aSource = readFileSync(new URL('../../a-side/source/template/webroot/moder
   .replace(/from '\.\/ui-kit\.js(?:\?[^']*)?'/,`from '${new URL('../shared/ui-kit.js',import.meta.url).href}'`)
   .replace(/from '\.\/app-search\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/app-search.js',import.meta.url).href}'`)
   .replace(/from '\.\/soter\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/soter.js',import.meta.url).href}'`);
-const {relayVerdict,requestIcon,deviceSnapshot,formatRelayLatency,parseBStatusConfig,bOnlineState,mergeAttestationHealth,bBatterySnapshot} = await import(`data:text/javascript;base64,${Buffer.from(aSource).toString('base64')}`);
+const {relayVerdict,requestIcon,deviceSnapshot,formatRelayLatency,parseBStatusConfig,bOnlineState,mergeAttestationHealth,bBatterySnapshot,
+  relayMode,parseRelaySettings,parseTomlRemote,certificateBytes,certificateSummary,keyboxSummary,formatKeyboxDays} = await import(`data:text/javascript;base64,${Buffer.from(aSource).toString('base64')}`);
 
 test('Chinese locales map to Chinese; unsupported system languages fall back to English', () => {
   for (const locale of ['zh-CN','zh-TW','zh-HK','zh']) assert.equal(resolveLanguage('auto',[locale]),'zh-CN');
@@ -120,3 +121,89 @@ test('new B forms retain their controller targets and all static labels have Eng
   for (const match of controller.matchAll(/\$\('([^']+)'\)/g)) assert.ok(ids.has(match[1]),'Missing controller target '+match[1]);
   for (const match of html.matchAll(/data-(?:msg|placeholder|label)="([^"]+)"/g)) assert.ok(dictionary.includes(`'${match[1]}':`),'Untranslated label '+match[1]);
 });
+
+/** Minimal DER encoder so the keybox summary can be tested without a real chain. */
+const derTlv = (tag, content) => {
+  const body = Buffer.from(content);
+  if (body.length < 0x80) return Buffer.concat([Buffer.from([tag, body.length]), body]);
+  const length = [];
+  for (let value = body.length; value > 0; value = Math.floor(value / 256)) length.unshift(value % 256);
+  return Buffer.concat([Buffer.from([tag, 0x80 | length.length]), Buffer.from(length), body]);
+};
+const derSeq = (...parts) => derTlv(0x30, Buffer.concat(parts));
+const derOid = bytes => derTlv(0x06, Buffer.from(bytes));
+const derString = value => derTlv(0x13, Buffer.from(value, 'ascii'));
+function testCertificate({o = 'TEE', notAfter = '270101000000Z'} = {}) {
+  const name = value => derSeq(derTlv(0x31, derSeq(derOid([0x55,0x04,0x0a]), derString(value))));
+  const validity = derSeq(derTlv(0x17, Buffer.from('250101000000Z', 'ascii')), derTlv(0x17, Buffer.from(notAfter, 'ascii')));
+  const tbs = derSeq(derTlv(0xa0, derTlv(0x02, Buffer.from([2]))), derTlv(0x02, Buffer.from([1])),
+    derSeq(), name('Issuer Org'), validity, name(o), derSeq());
+  return derSeq(tbs, derSeq(), derTlv(0x03, Buffer.from([0])));
+}
+const pem = der => '-----BEGIN CERTIFICATE-----\n' + der.toString('base64').replace(/(.{64})/g, '$1\n') + '-----END CERTIFICATE-----';
+const FIXTURE_NOW = Date.UTC(2026, 10, 2);
+
+test('local mode is the effective flat relay setting, with config.toml as the fallback', () => {
+  assert.equal(relayMode('url: https://relay.example.test\ndevice_id: b-one\nremote: false\n', ''), 'local');
+  assert.equal(relayMode('url: https://relay.example.test\ndevice_id: b-one\nremote: true\n', ''), 'remote');
+  assert.equal(relayMode('url: https://relay.example.test\ndevice_id: b-one\n', ''), 'remote');
+  assert.equal(relayMode('url: none\ndevice_id: b-one\n', ''), 'local');
+  assert.equal(relayMode('', '[remote]\nenabled = true\nurl = "https://relay.example.test"\n'), 'remote');
+  assert.equal(relayMode('', '[remote]\nenabled = false\nurl = "https://relay.example.test"\n'), 'local');
+  assert.equal(relayMode('', ''), 'unknown');
+  assert.equal(relayMode('url: https://flat.test\ndevice_id: b-one\nremote: false\n',
+    '[remote]\nenabled = true\nurl = "https://table.test"\n'), 'local', 'the flat file wins, as it does in config.rs');
+  assert.equal(parseRelaySettings(''), null);
+  assert.equal(parseTomlRemote(''), null);
+  assert.equal(parseRelaySettings('url: https://relay.example.test\ndevice_id: b-one\ntls_insecure: true\n').insecure, true);
+});
+
+test('keybox material reports the level it was issued for and flags a wrong slot', () => {
+  const tee = keyboxSummary(pem(testCertificate({o: 'TEE'})), 'TEE', FIXTURE_NOW);
+  assert.equal(tee.state, 'loaded');
+  assert.equal(tee.level, 'TEE');
+  assert.equal(tee.mismatch, false);
+  assert.equal(tee.o, 'TEE', 'the leaf subject, never the issuer');
+
+  const strongbox = keyboxSummary(pem(testCertificate({o: 'StrongBox'})), 'StrongBox', FIXTURE_NOW);
+  assert.equal(strongbox.level, 'StrongBox');
+  assert.equal(strongbox.mismatch, false);
+
+  const wrongSlot = keyboxSummary(pem(testCertificate({o: 'StrongBox'})), 'TEE', FIXTURE_NOW);
+  assert.equal(wrongSlot.level, 'StrongBox');
+  assert.equal(wrongSlot.mismatch, true, 'a StrongBox chain in the TEE slot is what the detector reports as A20');
+
+  assert.equal(keyboxSummary('', 'TEE', FIXTURE_NOW).state, 'missing');
+  assert.equal(keyboxSummary('   ', 'TEE', FIXTURE_NOW).state, 'missing');
+  assert.equal(keyboxSummary('-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----', 'TEE', FIXTURE_NOW).state, 'invalid');
+  assert.equal(certificateBytes('@@@'), null, 'nothing decodable');
+  assert.equal(keyboxSummary('not a certificate', 'TEE', FIXTURE_NOW).state, 'invalid');
+  assert.equal(certificateSummary(new Uint8Array([0x31, 0x00])), null);
+});
+
+
+test('the local-mode overview targets exist and the status read collects them', () => {
+  for (const id of ['om-b-summary','om-local-summary','om-local-tee','om-local-strongbox','om-local-last',
+    'om-local-attest','om-local-scope','om-local-mode','om-local-relay','om-local-expiry','om-local-warnings',
+    'om-request-kind','om-route-mid','om-route-mid-detail','om-route-end','om-route-end-detail']) {
+    assert.ok(aSource.includes('id="' + id + '"'), 'Missing overview target ' + id);
+  }
+  const required = /const complete = \[([^\]]+)\]/.exec(aSource);
+  assert.ok(required, 'the status read must declare its required sections');
+  for (const name of ['MODE','REMOTE','KEYBOX_TEE','KEYBOX_STRONGBOX']) {
+    assert.ok(aSource.includes('[' + name + ']'), 'the status command must emit ' + name);
+    assert.ok(required[1].includes("'" + name + "'"), 'the completeness list must require ' + name);
+  }
+});
+
+test('keybox validity counts down and never hides an expired chain', () => {
+  const certificate = pem(testCertificate({notAfter: '260102000000Z'}));
+  assert.equal(keyboxSummary(certificate, 'TEE', Date.UTC(2026, 0, 2)).days, 0);
+  assert.equal(keyboxSummary(certificate, 'TEE', Date.UTC(2026, 0, 3)).days, -1);
+  assert.equal(keyboxSummary(certificate, 'TEE', Date.UTC(2025, 11, 1)).days, 32);
+  assert.match(formatKeyboxDays(0), /今天|today/i);
+  assert.match(formatKeyboxDays(-1), /过期|expired/i);
+  assert.match(formatKeyboxDays(9), /9/);
+  assert.equal(formatKeyboxDays(null), '—');
+});
+
