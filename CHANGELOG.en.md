@@ -12,6 +12,41 @@ running Server and does not install the optional APKs.
 The README no longer embeds per-version notes: a release only bumps the version
 and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
 
+## 2.2.2 — 2026-11-01
+
+Per-application SOTER identities and request counters on A.
+
+- The A-side SOTER TA resolves an application to a named identity: local random,
+  imported private key, or remote relay, chosen per package. Packages without an
+  assignment use the default identity. The store lives at
+  `/data/misc/keystore/ommega/data/soter/identities.json` (0600) and any parse
+  error fails closed.
+- A master switch on the identity page writes only the watchdog flag: turning
+  SOTER off keeps assignments but falls back to the stock HAL for every app. The
+  separate "restart software TA" action is gone.
+- The application list shows a "SOTER N" badge with the same pill shape as the
+  certificate counter in a different colour, rendered only while SOTER is on.
+- Identity management uses the Rust writer (`soter-read` / `soter-write` /
+  `soter-import`) with a directory lock, compare-and-swap, atomic replace, fsync
+  and readback; private keys are read on device by path and never enter the page.
+- Relay identities work per application with optional UID mapping and TLS-skip,
+  and a named relay no longer receives this device ledger id.
+- The anti-rollback counter is monotonic per application with a clock floor,
+  fixing `counter is not greater than that in server` when registering WeChat.
+- The watchdog status note is derived from the published state, so a re-enable no
+  longer repeats an old failure reason.
+- Fixes a compatibility regression in automatic authentication signing.
+
+Upgrade: only the A module and its WebUI change; B and Server have no code
+changes in this release (versions stay in step). Installing the A module restarts
+the injector and the bare service; SOTER state and identity assignments persist,
+so bound applications such as WeChat do not need to register again.
+
+Validation: local Rust (fmt / clippy `-D warnings` / 52 tests) and UI (148 tests,
+including a packaged browser run) pass; on device A, WeChat fingerprint payment
+registration, `SoterChecker`, and a loopback relay probe for one application were
+verified. B was not re-tested because it does not change in this release.
+
 ## 2.1.4 — 2026-10-29
 
 B WebUI server-status card fix.
