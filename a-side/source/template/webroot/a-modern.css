@@ -84,8 +84,8 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 .om-modern.om-app-detail-ready #apps-list .card { cursor:pointer; }
 .om-modern.om-app-detail-ready #apps-list .card > md-checkbox { display:none; }
 .om-modern.om-app-detail-ready #apps-list .card::after { content:'›'; color:var(--om-muted); font-size:25px; margin-left:auto; }
-.om-modern.om-app-detail-ready #apps-list .app-name { display:flex; align-items:center; flex-wrap:nowrap; gap:5px 7px; min-width:0; }
-.om-modern.om-app-detail-ready #apps-list .om-app-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.om-modern.om-app-detail-ready #apps-list .app-name { display:flex; align-items:center; flex-wrap:wrap; gap:5px 7px; min-width:0; }
+.om-modern.om-app-detail-ready #apps-list .om-app-badges { display:inline-flex; align-items:center; flex:none; gap:5px; }
 .om-cert-count { display:inline-flex; flex:none; max-width:100%; padding:3px 7px; border-radius:99px; background:var(--om-accent-bg); color:var(--om-accent); font-size:10px; font-weight:700; line-height:1.3; white-space:nowrap; }
 .om-soter-count { display:inline-flex; flex:none; max-width:100%; padding:3px 7px; border-radius:99px; background:#ddf3ea; color:#0e6a4e; font-size:10px; font-weight:700; line-height:1.3; white-space:nowrap; }
 @media(prefers-color-scheme:dark){ :root:not([data-theme=light]) .om-soter-count { background:#1d3b31; color:#8fd8bc; } }

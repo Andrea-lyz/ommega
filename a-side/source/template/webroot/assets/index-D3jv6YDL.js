@@ -3407,21 +3407,19 @@ function ommegaUpdateAppCount(card) {
   const name = card.querySelector(".app-name"), pkg = card.getAttribute("data-package");
   if (!name || !pkg) return;
   if (!card.dataset.omOriginalName) card.dataset.omOriginalName = name.textContent;
-  // Keep the name on one line so both badges sit beside it instead of stacking:
-  // a wrapped name pushes a badge onto a line of its own.
-  let title = name.querySelector(".om-app-title");
-  if (!title) {
-    title = document.createElement("span");
-    title.className = "om-app-title";
-    title.textContent = card.dataset.omOriginalName;
-    name.textContent = "";
-    name.appendChild(title);
+  // Both counters share one group so they stay together: a short name keeps
+  // them on its line, a long one wraps the pair, never a single pill.
+  let group = name.querySelector(".om-app-badges");
+  if (!group) {
+    group = document.createElement("span");
+    group.className = "om-app-badges";
+    name.appendChild(group);
   }
   const count = ommegaCertificateCount(ommegaCertificateCounts?.[pkg]);
-  let badge = name.querySelector(".om-cert-count");
+  let badge = group.querySelector(".om-cert-count");
   if (!count) { badge?.remove(); }
   else {
-    if (!badge) { badge = document.createElement("span"); badge.className = "om-cert-count"; name.appendChild(badge); }
+    if (!badge) { badge = document.createElement("span"); badge.className = "om-cert-count"; group.appendChild(badge); }
     const formatted = new Intl.NumberFormat().format(count.count);
     const label = count.shared
       ? ommegaDetailText("证书 " + formatted + " 次 · 共享 UID", "Certificates " + formatted + " · shared UID")
@@ -3434,15 +3432,16 @@ function ommegaUpdateAppCount(card) {
   // The SOTER badge only exists while SOTER is switched on; a disabled device
   // would otherwise advertise counters that cannot grow.
   const soterCount = ommegaSoterEnabled && ommegaSoterCounts ? Number(ommegaSoterCounts[pkg]) : 0;
-  let soterBadge = name.querySelector(".om-soter-count");
+  let soterBadge = group.querySelector(".om-soter-count");
   if (!Number.isSafeInteger(soterCount) || soterCount <= 0) { soterBadge?.remove(); }
   else {
-    if (!soterBadge) { soterBadge = document.createElement("span"); soterBadge.className = "om-soter-count"; name.appendChild(soterBadge); }
+    if (!soterBadge) { soterBadge = document.createElement("span"); soterBadge.className = "om-soter-count"; group.appendChild(soterBadge); }
     const formatted = new Intl.NumberFormat().format(soterCount);
     const label = ommegaDetailText("SOTER " + formatted + " 次", "SOTER " + formatted);
     if (soterBadge.textContent !== label) soterBadge.textContent = label;
     soterBadge.title = ommegaDetailText("该应用发起的 SOTER 请求次数", "SOTER requests from this application");
   }
+  if (!group.querySelector(".om-cert-count") && !group.querySelector(".om-soter-count")) group.remove();
   const description = ommegaDetailText("打开应用设置", "Open app settings") + ": " + card.dataset.omOriginalName;
   card.setAttribute("aria-label", count ? description + ", " + badge.title + ": " + count.count : description);
   ommegaUpdateAppScope(card);
