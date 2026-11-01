@@ -534,7 +534,13 @@ pub(crate) fn answer_with_policy(
             .store(&shared.path)
             .map_err(|e| e.to_string())?;
         let route = shared.state.routing.prepare(relay, tx, request)?;
-        (route, shared.state.cpu_id.clone())
+        // A named relay is another device's server: our ledger id is neither its
+        // identity nor something it needs to learn.
+        let cpu_id = match &selection {
+            identities::Selection::Relay { .. } => String::new(),
+            _ => shared.state.cpu_id.clone(),
+        };
+        (route, cpu_id)
     };
     if route.backend == Backend::Remote {
         let config = config.as_ref().ok_or("Missing SOTER relay target")?;

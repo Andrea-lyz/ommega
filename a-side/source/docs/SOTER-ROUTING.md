@@ -26,7 +26,9 @@ The anti-rollback counter is one monotonic sequence per application and never re
 
 Each successful initSign yields an opaque handle bound to UID, effective identity revision, backend, original vendor handle and AuthKey generation. finishSign resolves the original UID before choosing configuration. It cannot redirect an existing session to another server, identity or newly created same-name AuthKey. Revision fingerprints include the key and device id or complete relay configuration digest. Changed or in-flight-edited policy rejects the response before publication.
 
-Named relays use their own validated HTTP(S) URL, token, device id, UID mapping and TLS setting for the complete transaction sequence, regardless of the global relay. Transport, malformed-response and vendor failures never select local signing. A named relay local_only verdict is rejected instead of synthesizing another identity. The compatible global relay retains its scoped local_only verdict and local ASK export barrier. Authentication failures remain failures on the selected backend.
+Named relays use their own validated HTTP(S) URL, token, device id, UID mapping and TLS setting for the complete transaction sequence, regardless of the global relay. The UID mapping and the TLS-skip switch are edited on the identity page and travel with the identity. Transport, malformed-response and vendor failures never select local signing. A named relay local_only verdict is rejected instead of synthesizing another identity. The compatible global relay retains its scoped local_only verdict and local ASK export barrier. Authentication failures remain failures on the selected backend.
+
+A named relay never receives this device ledger id: that id belongs to another device view, and the server needs nothing from it. Only the compatible global relay keeps sending the ledger id, because there it describes the device that the relay fronts.
 
 ## Management and WebUI
 

@@ -67,3 +67,16 @@ test('enabling writes the flag atomically and keeps policy untouched',async()=>{
   assert.equal(JSON.stringify(h.state.store),before);
   assert.equal(h.writes.length,0);
 });
+test('relay settings are saved with the identity, including mapping and TLS',async()=>{
+  const h=harness();
+  h.state.store.identities.push({id:'r',name:'Relay',type:'relay',url:'',device_id:'',token:'',uid_map:'',tls_insecure:false});
+  await h.run('soterShow("detail","r")');
+  h.node('om-soter-relay-url').value='https://relay.example';
+  h.node('om-soter-relay-device').value='dev-b';
+  h.node('om-soter-relay-token').value='token';
+  h.node('om-soter-relay-map').value='10001=10002';
+  h.node('om-soter-relay-insecure').checked=true;
+  await h.node('om-soter-relay-save').onclick();
+  const saved=h.state.store.identities.find(item=>item.id==='r');
+  assert.deepEqual([saved.url,saved.device_id,saved.token,saved.uid_map,saved.tls_insecure],['https://relay.example','dev-b','token','10001=10002',true]);
+});

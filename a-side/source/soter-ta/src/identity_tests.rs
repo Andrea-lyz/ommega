@@ -490,3 +490,30 @@ fn uid_less_metadata_follows_the_default_identity_and_never_relays() {
     );
     fs::remove_dir_all(dir).unwrap();
 }
+#[test]
+fn a_named_relay_keeps_our_ledger_id_to_itself() {
+    let _guard = ffi::TEST_LOCK.lock().unwrap();
+    let dir = fixture();
+    init(&dir);
+    let seen = Cell::new(String::from("unset"));
+    let policy = policy(relay("r", "https://identity-a.invalid"));
+    ffi::answer_with_policy(
+        d::TX_HAS_ASK,
+        Request::Uid(UID),
+        Ok(remote::Config::default()),
+        false,
+        &policy,
+        "",
+        |_, _, _, cpu_id| {
+            seen.set(cpu_id.to_owned());
+            Ok(Some(Outcome::Code(0)))
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        seen.take(),
+        "",
+        "a third-party relay must not learn our ledger id"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
