@@ -3810,7 +3810,7 @@ function ommegaOpenAppDetail(card) {
       ommegaDetailRadio("om-app-mode", "tee", "TEE", ommegaDetailText("为此应用选择 TEE。", "Use TEE for this app."))) +
       '<p class="om-detail-status" id="om-detail-mode-status" role="status"></p>') +
     ommegaDetailCard('lock', ommegaDetailText("认证签名策略", "Authentication signing"), ommegaDetailText("选择一项", "Choose one"),
-      (ommegaDetailRadio("om-app-auth", "auto", ommegaDetailText("自动", "Auto"), ommegaDetailText("按自动策略处理。", "Use the automatic policy.")) +
+      (ommegaDetailRadio("om-app-auth", "auto", ommegaDetailText("自动", "Auto"), ommegaDetailText("已知认证检测探针保留认证要求，其余符合条件的请求使用支付兼容。", "Preserve known authentication probes; use payment compatibility for other eligible requests.")) +
       ommegaDetailRadio("om-app-auth", "compatibility", ommegaDetailText("支付兼容", "Payment compatibility"), ommegaDetailText("在本机验证认证，由远端签名。", "Authenticate locally and sign remotely.")) +
       ommegaDetailRadio("om-app-auth", "preserve", ommegaDetailText("保持认证要求", "Preserve authentication"), ommegaDetailText("远端保留认证要求。", "Keep the remote authentication requirement."))) +
       '<p class="om-detail-status" id="om-detail-auth-status" role="status"></p>') +

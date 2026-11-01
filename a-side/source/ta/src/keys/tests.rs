@@ -25,6 +25,7 @@ struct TestRemote {
     version_tags: Option<device::KeyMintVersionTags>,
     cert_chain: Option<Vec<Vec<u8>>>,
     expected_purpose: Option<KeyPurpose>,
+    expected_purposes: Option<Vec<i32>>,
     expected_issuer: Option<String>,
     unavailable: bool,
     expected_user_auth: Option<Vec<(u32, i64)>>,
@@ -56,10 +57,11 @@ impl device::RemoteBackend for TestRemote {
         if let Some(expected) = &self.expected_user_auth {
             assert_eq!(&params.user_auth, expected);
         }
-        assert_eq!(
-            params.purpose,
-            [self.expected_purpose.unwrap_or(KeyPurpose::Sign) as i32]
-        );
+        let expected_purposes = self
+            .expected_purposes
+            .clone()
+            .unwrap_or_else(|| vec![self.expected_purpose.unwrap_or(KeyPurpose::Sign) as i32]);
+        assert_eq!(params.purpose, expected_purposes);
         assert_eq!(
             params
                 .attestation_key
