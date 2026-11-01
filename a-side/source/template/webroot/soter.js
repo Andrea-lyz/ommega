@@ -1,5 +1,5 @@
 // Full-page SOTER identities. Private keys are read and validated only by Rust.
-import {icon,text,createBridge} from './ui-kit.js?v=material-ui-29';
+import {icon,text,createBridge} from './ui-kit.js?v=material-ui-30';
 const TYPES=[['local','本地随机身份','Local random'],['key','私钥身份','Private key'],['relay','远程中继身份','Remote relay']];
 let exec=null,writeExec=null,snapshot=null,adding=false,generation=0,busy=false;
 function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -69,12 +69,11 @@ function switchHtml(enabled,ta){
   const state = enabled
     ? (ta&&ta.running?text('软件 TA 运行中','Software TA running'):text('已启用，等待看门狗接管…','Enabled; waiting for the watchdog'))
     : text('已关闭：所有应用回落到原厂 HAL，SOTER 检查会失败','Off: every app falls back to the stock HAL and SOTER checks fail');
-  const id = ta&&ta.device_id&&ta.device_id!=='-'?' · '+esc(ta.device_id):'';
   return panel(text('SOTER 总控','SOTER master switch'),
     '<label class="policy-row"><span class="toggle-copy"><strong>'+text('启用 SOTER','Enable SOTER')+'</strong><small>'+
     text('关闭后所有应用都不再使用软件 TA；应用里的身份分配会保留，但不会生效。','When off no app uses the software TA; per-app assignments are kept but inactive.')+
     '</small></span><span class="switch"><input type="checkbox" id="om-soter-enabled" role="switch" aria-label="'+esc(text('启用 SOTER','Enable SOTER'))+'"'+(enabled?' checked':'')+'><span></span></span></label>'+
-    '<p class="note" id="om-soter-switch-state" style="padding:0 20px 16px">'+state+id+'</p>');
+    '<p class="note" id="om-soter-switch-state" style="padding:0 20px 16px">'+state+'</p>');
 }
 
 /// The flag is the whole request; the watchdog publishes the outcome a moment later,
@@ -119,6 +118,9 @@ async function renderDetail(id){
     const status=fresh.status[id];const values=[[text('类型','Type'),label(item.type)],[text('配置','Configuration'),status?.ready?text('完整','Ready'):status?.note||text('未知','Unknown')]];
     if(ta)values.push([text('软件 TA','Software TA'),ta.running?text('运行中','Running'):text('未运行','Stopped')]);
     if(status?.cpu_id)values.push(['cpu_id',status.cpu_id]);
+    const isDefault = snapshot.store.default===item.id;
+    values.push([text('默认身份','Default identity'), isDefault?text('是：无 UID 的设备 ID 用它','Yes: the UID-less device id') : text('否','No')]);
+    if(!isDefault)values.push([text('作用范围','Scope'),text('只对分配给它的应用生效','Only for the apps assigned to it')]);
     if(status?.fingerprint)values.push([text('公钥摘要','Public key digest'),'SHA-256 '+status.fingerprint]);
     if(item.type==='local')values.push([text('材料','Material'),status?.cpu_id?text('独立身份已生成','Independent material generated'):text('首次调用时生成独立密钥','Independent material is generated on first use')]);
     if(item.type==='relay')values.push([text('连接状态','Connection'),text('配置已保存不代表已连通','Saved configuration is not proof of connectivity')]);
