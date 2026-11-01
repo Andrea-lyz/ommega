@@ -10,6 +10,8 @@ The A/B module WebUIs share local CSS tokens and small JavaScript presentation h
 | B module WebUI | Overview / Connection / Settings | Local relay PID, current OS/SPL properties, saved connection summary |
 | B Android app | Overview / Connection / Settings | Android relay StateFlow, configuration drafts, manual diagnostic results |
 
+A SOTER identity management opens full list/detail pages. App policy cards inherit the configured default or select one ready identity, with shared-UID groups updated together. Private-key import submits only an on-device file path to the Rust policy writer; no private PEM enters the WebUI. Changes compare the loaded snapshot and are verified before showing success. See the [SOTER identity contract](../a-side/source/docs/SOTER-ROUTING.md) for session, failure and UID-less metadata semantics.
+
 KeyMint and SOTER are separate paths from A through Server to B. A SOTER `ledger` value indicates that its ledger file exists; it is not a key count. The A relay health file is event driven, not a heartbeat. A running B process is not proof of a server connection. Missing data stays unknown, and expired SOTER snapshots are labeled stale.
 
 Language defaults to the system: Chinese locales use simplified Chinese; other locales use English. System / Chinese / English and system / light / dark overrides are available. Only appearance preferences are written to WebView storage. Tokens are masked, and configuration credentials stay in the existing device configuration files. Language changes ask before discarding unsaved form values.
@@ -71,13 +73,15 @@ Browser smoke test (against the preview server, with Playwright installed or `PL
 node ui/tests/browser-smoke.mjs
 ```
 
-It checks Chinese/English, light/dark, 320–1024 px layout, refresh loading/duplicate-click/error/retry behavior, reduced-motion support, A remote/SOTER dialogs, B form loading and token visibility, B SPL minimum/applied-target display, and the OpenUI prototype. Screenshots and results are written to ignored `ui/test-results/`.
+It checks Chinese/English, light/dark, 320–1024 px layout, refresh loading/duplicate-click/error/retry behavior, reduced-motion support, A remote dialogs and SOTER identity pages, B form loading and token visibility, B SPL minimum/applied-target display, and the OpenUI prototype. Screenshots and results are written to ignored `ui/test-results/`.
 
 `node ui/tests/refresh-battery-smoke.mjs` loads the actual packaged A/B pages with in-memory bridge fixtures and local browser routes, without a listening server or device. It checks percentage boundaries, charging/unknown/stale/offline/device isolation, app list and settings rereads, delayed-bootstrap and cross-control queuing, retained drafts/search, forced server polling, completion ordering, missing-callback retry and 320–1024 px layouts in Chinese/dark and English/light. `ui/tests/refresh.test.mjs` covers shared forced/queued/hidden/error semantics; `ui/tests/b-refresh.test.mjs` executes the B controller with mock DOM/bridge and virtual timers.
 
 `node ui/tests/capability-smoke.mjs` checks the A capability dialog with the same
 Playwright setup. It loads packaged assets directly with an in-memory bridge,
 requires no preview server and writes screenshots to `ui/test-results/`.
+
+`node ui/tests/soter-smoke.mjs` loads the actual packaged A page with local asset routes and an in-memory bridge. It covers identity list/detail navigation, rename, file-path-only key imports with persistence failure/success, defaults, shared-UID app selection, stale-write rejection, disabled empty defaults and 320/393/1024 px layouts. It never contacts a device or relay. `ui/tests/soter-policy.test.mjs` covers the same management error boundaries without a browser.
 
 ## Android preview and validation
 

@@ -179,13 +179,30 @@ pub fn handle_request(
     request: Request,
     platform: Platform,
 ) -> Option<Outcome> {
-    match &request {
-        Request::Uid(uid) => state.sync_identity(*uid),
-        Request::UidKey { uid, .. } => state.sync_identity(*uid),
-        Request::InitSign { uid, .. } => state.sync_identity(*uid),
-        _ => {}
-    }
-    Some(match (tx, request) {
+    handle_request_with_identity(
+        state,
+        tx,
+        request,
+        platform,
+        &crate::identities::Selection::Global,
+    )
+    .ok()
+    .flatten()
+}
+
+pub(crate) fn handle_request_with_identity(
+    state: &mut TaState,
+    tx: u32,
+    request: Request,
+    platform: Platform,
+    selection: &crate::identities::Selection,
+) -> Result<Option<Outcome>, String> {
+    let uid = crate::remote::request_uid(&request).or_else(|| match &request {
+        Request::Session(handle) => state.sessions.get(handle).map(|s| s.uid),
+        _ => None,
+    });
+    state.prepare_identity(uid, selection)?;
+    Ok(Some(match (tx, request) {
         (TX_GET_DEVICE_ID, Request::None) => {
             let (code, data) = state.device_id();
             Outcome::Buffer {
@@ -249,8 +266,8 @@ pub fn handle_request(
         }
         (TX_GENERATE_ATTK, Request::Magic(magic)) => Outcome::Code(state.generate_attk(magic)),
         (TX_VERIFY_ATTK, Request::None) => Outcome::Code(state.verify_attk()),
-        _ => return None,
-    })
+        _ => return Ok(None),
+    }))
 }
 
 /// Build the reply for one transaction, or `None` when the transaction belongs

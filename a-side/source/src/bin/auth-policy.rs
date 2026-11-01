@@ -99,11 +99,70 @@ fn write_request() -> Result<()> {
 }
 
 fn main() {
-    if let Err(error) = write_request() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // The legacy operations answer with the single word "saved"; the SOTER
+    // management interface answers with one JSON document. They must never
+    // share a process path, or the extra word corrupts the JSON the WebUI reads.
+    let result = match args.first() {
+        Some(command) if command.starts_with("soter-") => soter_request(&args),
+        _ => write_request().map(|()| println!("saved")),
+    };
+    if let Err(error) = result {
         eprintln!("{error:#}");
         std::process::exit(1);
     }
-    println!("saved");
+}
+
+fn soter_request(args: &[String]) -> Result<()> {
+    let command = args
+        .first()
+        .ok_or_else(|| anyhow!("Expected one SOTER management operation"))?;
+    if command != "soter-read" && args.len() != 1 {
+        return Err(anyhow!("SOTER management takes no extra argument"));
+    }
+    let _lock = if command != "soter-read" {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = Path::new(soter_ta::identities::STORE).parent().unwrap();
+        std::fs::create_dir_all(directory.join("keys"))?;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        let lock = std::fs::File::open(directory.join("keys"))?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(anyhow!(
+                "Another SOTER write is active; reload before saving"
+            ));
+        }
+        Some(lock)
+    } else {
+        None
+    };
+    let _live_guard = if command != "soter-read" {
+        soter_ta::identities::lock_policy(true).map_err(|e| anyhow!(e))?
+    } else {
+        None
+    };
+    let response = if command == "soter-read" {
+        soter_ta::management::read_for(args.get(1).map(String::as_str)).map_err(|e| anyhow!(e))?
+    } else {
+        let mut raw = Vec::new();
+        std::io::stdin()
+            .take((3 * MAX_CONFIG + 1) as u64)
+            .read_to_end(&mut raw)?;
+        if raw.len() > 3 * MAX_CONFIG {
+            return Err(anyhow!("SOTER request too large"));
+        }
+        let request = serde_json::from_slice(&raw).context("parse SOTER management request")?;
+        soter_ta::management::mutate(command, request, |expected, replacement| {
+            let path = Path::new(soter_ta::identities::STORE);
+            std::fs::create_dir_all(path.parent().unwrap())
+                .map_err(|_| "Cannot create SOTER policy directory")?;
+            atomic_compare_replace_preserving_metadata(path, expected, replacement, 0o600, 0, 0)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| anyhow!(e))?
+    };
+    println!("{}", serde_json::to_string(&response)?);
+    Ok(())
 }
 
 #[cfg(test)]

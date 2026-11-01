@@ -21,6 +21,8 @@ struct Session {
     uid: u32,
     backend: Backend,
     handle: u64,
+    #[serde(default)]
+    scope: String,
 }
 
 /// Stored with the existing ledger; no separate policy or credential file.
@@ -32,6 +34,8 @@ pub(crate) struct Routing {
     local_uids: BTreeMap<u32, bool>,
     sessions: BTreeMap<u64, Session>,
     next_session: u64,
+    #[serde(default)]
+    uid_scopes: BTreeMap<u32, String>,
 }
 
 #[derive(Debug)]
@@ -40,39 +44,75 @@ pub(crate) struct Route {
     pub request: Request,
     pub uid: Option<u32>,
     session: Option<u64>,
+    scope: String,
 }
 
 impl Routing {
+    #[cfg(test)]
     pub fn configure(&mut self, scope: &str) {
         if self.scope != scope {
             self.scope = scope.to_owned();
             self.local_uids.clear();
             self.sessions.clear();
+            self.uid_scopes.clear();
             // Never reuse a handle still held by a client of the old scope.
         }
     }
 
-    pub fn is_scope(&self, scope: &str) -> bool {
-        self.scope == scope
+    pub fn configure_legacy(&mut self, scope: &str) {
+        if self.scope != scope {
+            self.scope = scope.to_owned();
+            self.local_uids.retain(|uid, _| {
+                self.uid_scopes
+                    .get(uid)
+                    .is_some_and(|s| !s.starts_with("legacy:"))
+            });
+            self.sessions.retain(|_, session| {
+                self.uid_scopes
+                    .get(&session.uid)
+                    .is_some_and(|s| !s.starts_with("legacy:"))
+            });
+        }
     }
 
     pub fn remote_was_active(&self) -> bool {
         !self.scope.is_empty() && self.scope != "local"
     }
 
-    /// Route a request that a relay identity owns, ignoring the local-only
-    /// verdict this uid may have received from the global configuration.
-    pub fn prepare_forced_remote(
-        &self,
-        relay: bool,
-        tx: u32,
-        request: Request,
-    ) -> Result<Route, String> {
-        let mut route = self.prepare(relay, tx, request)?;
-        if route.backend == Backend::Local {
-            route.backend = Backend::Remote;
+    pub fn session_uid(&self, handle: u64) -> Option<u32> {
+        self.sessions.get(&handle).map(|s| s.uid)
+    }
+
+    pub fn invalidate_uid_sessions(&mut self, uid: u32) {
+        self.sessions.retain(|_, s| s.uid != uid);
+    }
+
+    pub fn configure_uid(&mut self, uid: u32, scope: &str) {
+        if self.uid_scopes.get(&uid).is_none_or(|old| old != scope) {
+            self.local_uids.remove(&uid);
+            self.invalidate_uid_sessions(uid);
+            self.uid_scopes.insert(uid, scope.to_owned());
         }
-        Ok(route)
+    }
+
+    fn scope_for(&self, uid: Option<u32>) -> &str {
+        uid.and_then(|uid| self.uid_scopes.get(&uid))
+            .map(String::as_str)
+            .unwrap_or(&self.scope)
+    }
+
+    pub fn check_route(&self, route: &Route) -> Result<(), String> {
+        if route
+            .scope
+            .strip_prefix("legacy:")
+            .is_some_and(|scope| scope != self.scope)
+        {
+            return Err("SOTER relay configuration changed during the request".into());
+        }
+        if self.scope_for(route.uid) != route.scope {
+            return Err("SOTER identity changed while the request was in flight".into());
+        }
+        Ok(())
     }
 
     pub fn prepare(&self, relay: bool, tx: u32, request: Request) -> Result<Route, String> {
@@ -81,6 +121,9 @@ impl Routing {
                 .sessions
                 .get(&handle)
                 .ok_or("unknown SOTER sign session")?;
+            if session.scope != self.scope_for(Some(session.uid)) {
+                return Err("SOTER sign identity changed".into());
+            }
             if session.backend == Backend::Remote
                 && (!relay || self.local_uids.contains_key(&session.uid))
             {
@@ -91,6 +134,7 @@ impl Routing {
                 request: Request::Session(session.handle),
                 uid: Some(session.uid),
                 session: Some(handle),
+                scope: session.scope.clone(),
             });
         }
         let uid = request_uid(&request);
@@ -107,6 +151,7 @@ impl Routing {
             request,
             uid,
             session: None,
+            scope: self.scope_for(uid).to_owned(),
         })
     }
 
@@ -144,6 +189,7 @@ impl Routing {
         route: &Route,
         outcome: Outcome,
     ) -> Result<Outcome, String> {
+        self.check_route(route)?;
         if route.backend == Backend::Remote
             && route
                 .uid
@@ -202,6 +248,7 @@ impl Routing {
                     uid: route.uid.ok_or("SOTER initSign has no UID")?,
                     backend: route.backend,
                     handle: session,
+                    scope: route.scope.clone(),
                 },
             );
             return Ok(Outcome::Init {

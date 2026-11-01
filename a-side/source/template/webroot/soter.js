@@ -1,29 +1,9 @@
-// SOTER identities: full page (list) and detail page in the modern shell.
-// Store: /data/adb/ommega/soterta/identities.json; key material in identities/<id>.pem.
-import {icon, text} from './ui-kit.js';
-import {describe} from './soter-key.js';
-
-const DIR = '/data/adb/ommega/soterta';
-const STORE = DIR + '/identities.json';
-const KEYDIR = DIR + '/identities';
-
-const TYPES = [
-  ['local', '本地随机身份', 'Local random', '本机现场生成的随机设备身份'],
-  ['key', '私钥身份', 'Private key', '导入一把 ATTK 私钥，对应已登记的设备 id'],
-  ['relay', '远程中继身份', 'Remote relay', '转发到另一台设备的软件 TA'],
-];
-
-let exec = null;
-let store = null;
-let adding = false;
-
-function esc(value) {
-  return String(value === undefined || value === null ? '' : value)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-function blank() { return {version: 1, default: '', identities: [], apps: {}}; }
-function label(type) { const e = TYPES.find(t => t[0] === type); return e ? text(e[1], e[2]) : type; }
-
+// Full-page SOTER identities. Private keys are read and validated only by Rust.
+import {icon,text,createBridge} from './ui-kit.js?v=material-ui-28';
+const TYPES=[['local','本地随机身份','Local random'],['key','私钥身份','Private key'],['relay','远程中继身份','Remote relay']];
+let exec=null,writeExec=null,snapshot=null,adding=false,generation=0,busy=false;
+function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function label(type){const row=TYPES.find(row=>row[0]===type);return row?text(row[1],row[2]):type;}
 function injectStyle() {
   if (document.getElementById('om-soter-style')) return;
   const style = document.createElement('style');
@@ -48,220 +28,80 @@ function injectStyle() {
   document.head.appendChild(style);
 }
 
-async function loadStore() {
-  const result = await exec('cat "' + STORE + '" 2>/dev/null');
-  let data = null;
-  try { data = JSON.parse(String(result.stdout || '')); } catch (error) { data = null; }
-  if (!data || !Array.isArray(data.identities)) data = blank();
-  if (!data.apps || typeof data.apps !== 'object') data.apps = {};
-  return data;
+function encode(value){return btoa(Array.from(new TextEncoder().encode(JSON.stringify(value)),b=>String.fromCharCode(b)).join(''));}
+export async function policyCall(operation,payload=null,packageName=null){
+  if(!['soter-read','soter-write','soter-import'].includes(operation))throw new Error('Unsupported SOTER operation');
+  if(packageName!==null&&(operation!=='soter-read'||!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(packageName)))throw new Error('Invalid SOTER package');
+  const command=['set -e','w=/data/adb/modules/ommega/libs/arm64-v8a/ommega-auth-policy','[ -x "$w" ] || w=/data/adb/modules/ommega/libs/x86_64/ommega-auth-policy','[ -x "$w" ] || { echo "Install the complete updated A module" >&2; exit 1; }',
+    payload===null?'"$w" '+operation+(packageName===null?'':' "'+packageName+'"'):'printf %s \''+encode(payload)+'\' | base64 -d | "$w" '+operation].join('\n');
+  if(command.length>120000)throw new Error(text('配置过大，无法通过模块管理器安全保存，请使用设备端管理工具。','Policy is too large for the manager bridge; use the on-device management tool.'));
+  const result=await (operation==='soter-read'?exec:writeExec)(command);
+  if(!result||Number(result.errno)!==0)throw new Error(result?.stderr||text('SOTER 操作失败','SOTER operation failed'));
+  let response;try{response=JSON.parse(result.stdout);}catch{throw new Error(text('管理接口返回格式错误','Invalid management response'));}
+  if(!response?.store||!Array.isArray(response.store.identities)||!response.status)throw new Error('Invalid SOTER policy response');
+  if(operation!=="soter-read"&&response.warnings?.length)window.alert?.(response.warnings.join("\n"));
+  return response;
 }
-function b64utf8(value) {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
+function request(base,store){return {expected:base.expected??null,legacy_revision:base.legacy_revision??null,store};}
+function currentHost(){return document.getElementById('om-soter-identity')?.hidden===false?document.getElementById('om-soter-identity'):document.getElementById('om-soter-page');}
+function message(value){const node=currentHost()?.querySelector?.('[data-soter-message]')||document.getElementById('om-soter-msg');if(node)node.textContent=value;}
+async function action(run){
+  if(busy)return;busy=true;
+  const host=currentHost();host?.querySelectorAll('button,input').forEach(n=>{n.dataset.soterDisabled=n.disabled?'1':'0';n.disabled=true;});
+  try{await run();}catch(error){message(String(error.message||error));}finally{busy=false;host?.querySelectorAll('[data-soter-disabled]').forEach(n=>{n.disabled=n.dataset.soterDisabled==='1';delete n.dataset.soterDisabled;});}
 }
-async function saveStore() {
-  const payload = b64utf8(JSON.stringify(store, null, 2) + '\n');
-  const command = ['set -e', 'mkdir -p "' + DIR + '"',
-    'printf %s \'' + payload + '\' | base64 -d > "' + STORE + '.tmp"',
-    'chmod 600 "' + STORE + '.tmp"', 'mv "' + STORE + '.tmp" "' + STORE + '"'].join('\n');
-  const result = await exec(command);
-  if (result && result.errno) throw new Error(String(result.stderr || ('errno ' + result.errno)).trim());
+function header(title,description,back,extra=''){return '<div class="page-heading"><div><span class="section-kicker">SOTER</span><h1>'+esc(title)+'</h1><p>'+esc(description)+'</p></div></div><div class="om-soter-toolbar"><button type="button" class="om-button secondary" id="'+back+'">'+text('返回','Back')+'</button>'+extra+'</div>';}
+function panel(title,body){return '<article class="panel settings-group"><div class="group-header"><h2 class="group-heading">'+esc(title)+'</h2></div>'+body+'</article>';}
+function note(message){return '<p class="note" style="padding:0 20px 18px">'+esc(message)+'</p>';}
+function row(item){const status=snapshot.status[item.id];const meta=label(item.type)+(status?.ready?'':text(' · 尚未配置完整',' · incomplete'));
+  return '<a class="action-row" href="#om-soter/'+encodeURIComponent(item.id)+'"><span class="row-icon">'+icon(item.type==='key'?'key':item.type==='relay'?'server':'shield')+'</span><span class="row-text"><strong>'+esc(item.name)+(snapshot.store.default===item.id?text(' · 默认',' · default'):'')+'</strong><small>'+esc(meta)+'</small></span>'+icon('chevron')+'</a>';
 }
-
-function headHtml(title, subtitle, backId, extra) {
-  return '<div class="page-heading"><div><span class="section-kicker">SOTER</span><h1>' + title + '</h1><p>' + subtitle + '</p></div></div>' +
-    '<div class="om-soter-toolbar"><button type="button" class="om-button secondary" id="' + backId + '">' + text('返回', 'Back') + '</button>' +
-    (extra || '') + '</div>';
+function errorPage(host,error,back,target,retry){host.innerHTML=header('SOTER',String(error.message||error),back)+'<button type="button" class="om-button secondary" id="om-soter-retry">'+text('重新读取','Retry')+'</button>';document.getElementById(back).onclick=()=>{location.hash=target;};document.getElementById('om-soter-retry').onclick=retry;}
+async function renderList(){
+  const host=document.getElementById('om-soter-page');if(!host)return;const turn=++generation;
+  try{const fresh=await policyCall('soter-read');if(turn!==generation)return;snapshot=fresh;
+    const types=TYPES.map(t=>'<button type="button" class="action-row" data-add="'+t[0]+'"><span class="row-icon">'+icon(t[0]==='key'?'key':t[0]==='relay'?'server':'shield')+'</span><span class="row-text"><strong>'+text(t[1],t[2])+'</strong></span>'+icon('chevron')+'</button>').join('');
+    host.innerHTML=header(text('SOTER 身份','SOTER identities'),text('在应用策略中选择身份；错误配置不会自动换用其他身份。','Choose an identity per app; configuration errors never select another identity.'),'om-soter-back','<button class="om-button" id="om-soter-add" type="button">+ '+text('添加身份','Add identity')+'</button>')+
+      '<div class="stack">'+(adding?panel(text('选择身份类型','Choose a type'),types):'')+panel(text('已添加的身份','Identities'),fresh.store.identities.length?fresh.store.identities.map(row).join(''):note(text('还没有身份，点击「添加身份」创建。','No identities yet. Choose Add identity.')))+'</div><p id="om-soter-list-msg" data-soter-message class="om-soter-msg" role="status"></p>';
+    document.getElementById('om-soter-back').onclick=()=>history.back();
+    document.getElementById('om-soter-add').onclick=()=>{if(!busy){adding=!adding;renderList();}};
+    host.onclick=event=>{if(busy){event.preventDefault();return;}const button=event.target.closest?.('[data-add]');if(!button)return;
+      action(async()=>{const base=snapshot;const store=JSON.parse(JSON.stringify(base.store));const id=button.dataset.add+'-'+crypto.randomUUID().replaceAll('-','');store.identities.push({id,name:text('身份 ','Identity ')+(store.identities.length+1),type:button.dataset.add});
+        snapshot=await policyCall('soter-write',request(base,store));adding=false;location.hash='om-soter/'+id;});};
+  }catch(error){if(turn===generation)errorPage(host,error,'om-soter-back','om-settings',renderList);}
 }
-
-function panel(title, body) {
-  return '<article class="panel settings-group"><div class="group-header"><h2 class="group-heading">' + title +
-    '</h2></div>' + body + '</article>';
+function field(id,title,value='',type='text',extra=''){return '<div class="om-soter-field"><label for="'+id+'">'+esc(title)+'</label><input id="'+id+'" type="'+type+'" value="'+esc(value)+'" '+extra+'></div>';}
+async function taStatus(){const result=await exec('cat /data/adb/ommega/soterta/status.json 2>/dev/null');if(Number(result?.errno)!==0)return null;try{return JSON.parse(result.stdout);}catch{return null;}}
+async function renderDetail(id){
+  const host=document.getElementById('om-soter-identity');if(!host)return;const turn=++generation;
+  try{const fresh=await policyCall('soter-read');const ta=await taStatus();if(turn!==generation)return;snapshot=fresh;
+    const item=fresh.store.identities.find(i=>i.id===id);if(!item)throw new Error(text('身份不存在，请返回列表。','Identity not found; return to the list.'));
+    const status=fresh.status[id];const values=[[text('类型','Type'),label(item.type)],[text('配置','Configuration'),status?.ready?text('完整','Ready'):status?.note||text('未知','Unknown')]];
+    if(ta)values.push([text('软件 TA','Software TA'),ta.running?text('运行中','Running'):text('未运行','Stopped')]);
+    if(status?.cpu_id)values.push(['cpu_id',status.cpu_id]);
+    if(status?.fingerprint)values.push([text('公钥摘要','Public key digest'),'SHA-256 '+status.fingerprint]);
+    if(item.type==='local')values.push([text('材料','Material'),status?.cpu_id?text('独立身份已生成','Independent material generated'):text('首次调用时生成独立密钥','Independent material is generated on first use')]);
+    if(item.type==='relay')values.push([text('连接状态','Connection'),text('配置已保存不代表已连通','Saved configuration is not proof of connectivity')]);
+    const kv='<div class="om-soter-kv">'+values.map(([k,v])=>'<div class="k">'+esc(k)+'</div><div class="v">'+esc(v)+'</div>').join('')+'</div>';
+    let editor='';
+    if(item.type==='key')editor=field('om-soter-key-path',text('设备上的私钥文件路径（PEM 或 JSON）','Key file on this device (PEM or JSON)'),'','text','placeholder="/sdcard/Download/identity.pem"')+field('om-soter-cpu-id',text('设备 ID（PEM 必填，JSON 可自带）','Device ID (required for PEM, optional for JSON)'),item.cpu_id||'','text','maxlength="32" autocomplete="off"')+'<button class="om-button secondary" type="button" id="om-soter-key-import">'+text('导入私钥','Import key')+'</button>';
+    if(item.type==='relay')editor=field('om-soter-relay-url',text('服务器 URL','Server URL'),item.url||'')+field('om-soter-relay-device',text('设备 ID','Device ID'),item.device_id||'')+field('om-soter-relay-token','Token',item.token||'','password','autocomplete="off"')+'<button class="om-button secondary" type="button" id="om-soter-relay-save">'+text('保存','Save')+'</button>';
+    const actions=field('om-soter-name',text('名称','Name'),item.name,'text','maxlength="80"')+'<div class="om-soter-actions"><button class="om-button" type="button" id="om-soter-rename">'+text('保存名称','Save name')+'</button><button class="om-button secondary" type="button" id="om-soter-default" '+(status?.ready?'':'disabled')+'>'+text('设为默认','Set as default')+'</button><button class="om-button secondary" type="button" id="om-soter-apply" '+(ta?.enabled&&ta?.running?'':'disabled')+'>'+text('重启软件 TA','Restart software TA')+'</button><button class="om-button secondary" type="button" id="om-soter-delete">'+text('删除','Delete')+'</button></div>';
+    host.innerHTML=header(item.name,label(item.type),'om-soter-detail-back')+'<div class="stack">'+panel(text('身份信息','Identity'),'<div style="padding:2px 20px 18px">'+kv+editor+'</div>')+panel(text('操作','Actions'),'<div style="padding:2px 20px 18px">'+actions+'<p id="om-soter-msg" data-soter-message class="om-soter-msg" role="status"></p></div>')+'</div>';
+    document.getElementById('om-soter-detail-back').onclick=()=>history.back();
+    const save=async(change)=>{const base=snapshot;const store=JSON.parse(JSON.stringify(base.store));change(store,store.identities.find(i=>i.id===id));snapshot=await policyCall('soter-write',request(base,store));await renderDetail(id);message(text('已保存；该身份的材料变更会使旧签名会话失效。','Saved; material changes invalidate old signing sessions.'));};
+    document.getElementById('om-soter-rename').onclick=()=>action(()=>save((_,record)=>{record.name=document.getElementById('om-soter-name').value.trim();if(!record.name)throw new Error(text('名称不能为空','Name cannot be empty'));}));
+    document.getElementById('om-soter-default').onclick=()=>action(()=>save(store=>{store.default=id;}));
+    document.getElementById('om-soter-delete').onclick=()=>action(async()=>{const count=Object.values(snapshot.store.apps).filter(v=>v===id).length;if(!window.confirm(text('删除身份并移除 '+count+' 个应用分配？受影响应用需重新注册。','Delete this identity and '+count+' app assignments? Affected apps must register again.')))return;
+      const base=snapshot;const store=JSON.parse(JSON.stringify(base.store));store.identities=store.identities.filter(i=>i.id!==id);if(store.default===id)store.default='';for(const [pkg,value]of Object.entries(store.apps))if(value===id)delete store.apps[pkg];snapshot=await policyCall('soter-write',request(base,store));history.back();});
+    document.getElementById('om-soter-apply').onclick=()=>action(async()=>{if(!window.confirm(text('这会重启所有应用共用的软件 TA，请勿在支付中操作。继续？','This restarts the software TA shared by all apps. Do not use during payment. Continue?')))return;
+      const result=await writeExec('set -e\nsh /data/adb/modules/ommega/soterta.sh disable >/dev/null\nsh /data/adb/modules/ommega/soterta.sh enable');
+      if(Number(result?.errno)!==0)throw new Error(result?.stderr||'TA restart failed');const after=await taStatus();if(!after?.running||after.owner!=='us'||Number(after.pid)===Number(ta.pid))throw new Error(text('未确认 TA 完成重启，请重新读取状态。','TA restart was not verified; reload status.'));await renderDetail(id);message(text('已确认软件 TA 重启。','Software TA restart verified.'));});
+    const imp=document.getElementById('om-soter-key-import');if(imp)imp.onclick=()=>action(async()=>{const path=document.getElementById('om-soter-key-path').value.trim();const cpu_id=document.getElementById('om-soter-cpu-id').value.trim();if(!path.startsWith('/')||path.includes('\0'))throw new Error(text('请输入设备上的绝对文件路径','Enter an absolute device path'));
+      if(item.pem&&!window.confirm(text('更换私钥会作废该身份下的旧注册与签名会话。继续？','Replacing this key invalidates old registrations and sign sessions. Continue?')))return;
+      snapshot=await policyCall('soter-import',{...request(snapshot,null),id,path,cpu_id});await renderDetail(id);message(text('私钥已在设备端校验并保存，未经过页面。','Key validated and saved on-device; private material never entered this page.'));});
+    const relay=document.getElementById('om-soter-relay-save');if(relay)relay.onclick=()=>action(()=>save((_,record)=>{record.url=document.getElementById('om-soter-relay-url').value.trim();record.device_id=document.getElementById('om-soter-relay-device').value.trim();record.token=document.getElementById('om-soter-relay-token').value.trim();}));
+  }catch(error){if(turn===generation)errorPage(host,error,'om-soter-detail-back','om-soter',()=>renderDetail(id));}
 }
-
-function listHtml() {
-  const rows = store.identities.map(item => {
-    let meta = label(item.type);
-    if (item.type === 'key') meta += ' · ' + (item.cpu_id || text('未填写私钥', 'no key yet'));
-    if (item.type === 'relay') meta += ' · ' + (item.url || text('未填写服务器', 'no server yet'));
-    return '<a class="action-row" href="#om-soter/' + esc(item.id) + '" data-open="' + esc(item.id) + '">' +
-      '<span class="row-icon">' + icon(item.type === 'key' ? 'key' : item.type === 'relay' ? 'server' : 'shield') + '</span>' +
-      '<span class="row-text"><strong>' + esc(item.name) + (store.default === item.id ? ' · ' + text('默认', 'default') : '') +
-      '</strong><small>' + esc(meta) + '</small></span>' + icon('chevron') + '</a>';
-  }).join('');
-  const types = TYPES.map(t => '<button type="button" class="action-row" data-add="' + t[0] + '">' +
-    '<span class="row-icon">' + icon(t[0] === 'key' ? 'key' : t[0] === 'relay' ? 'server' : 'shield') + '</span>' +
-    '<span class="row-text"><strong>' + text(t[1], t[2]) + '</strong><small>' + text(t[3], t[3]) + '</small></span>' +
-    icon('chevron') + '</button>').join('');
-  const empty = '<p class="note" style="padding:0 20px 18px">' +
-    text('还没有身份。点「添加身份」创建第一个。', 'No identity yet. Use Add identity to create one.') + '</p>';
-  return headHtml(text('SOTER 身份', 'SOTER identities'),
-      text('每个身份是一套设备凭证；应用策略里选择用哪一套。', 'Each identity is a device credential; pick one per app policy.'),
-      'om-soter-back',
-      '<button type="button" class="om-button" id="om-soter-add">+ ' + text('添加身份', 'Add identity') + '</button>') +
-    '<div class="stack">' +
-    (adding ? panel(text('选择身份类型', 'Choose a type'), types) : '') +
-    panel(text('已添加的身份', 'Identities'), store.identities.length ? rows : empty) +
-    '</div>';
-}
-
-function detailHtml(item, status) {
-  const rows = [['类型 / Type', label(item.type)]];
-  if (status) {
-    rows.push(['软件 TA / TA', status.running ? text('运行中', 'running') + ' · pid ' + (status.pid || '-') : text('未运行', 'not running')]);
-    if (status.device_id && status.device_id !== '-') rows.push(['当前设备 / Active id', status.device_id]);
-  }
-  if (item.type === 'key') {
-    rows.push(['cpu_id', item.cpu_id || '—']);
-    rows.push(['私钥 / Key', item.pem ? text('已导入', 'imported') : text('未导入', 'missing')]);
-    if (item.fingerprint) rows.push(['指纹 / Fingerprint', 'SHA-256 ' + item.fingerprint + '…']);
-    if (item.cpu_id && status && status.device_id) {
-      rows.push(['生效 / Applied', status.device_id === item.cpu_id ? text('是', 'yes') : text('否', 'no')]);
-    }
-  } else if (item.type === 'relay') {
-    rows.push(['服务器 / Server', item.url || '—']);
-    rows.push(['设备 ID / Device', item.device_id || '—']);
-    rows.push(['Token', item.token ? text('已填写', 'set') : text('未填写', 'missing')]);
-  } else {
-    rows.push(['说明 / Note', text('使用本机账本当前的随机身份', 'Uses the local ledger identity')]);
-  }
-  const kv = rows.map(r => { const parts = r[0].split(' / '); return '<div class="k">' + esc(text(parts[0], parts[1] || parts[0])) + '</div><div class="v">' + esc(r[1]) + '</div>'; }).join('');
-  let editor = '';
-  if (item.type === 'key') {
-    editor = '<div class="om-soter-field"><label>' + text('私钥文件路径', 'Private key file path') + '</label>' +
-      '<input id="om-soter-key-path" placeholder="/sdcard/Download/ommega-soter.json"></div>' +
-      '<div class="om-soter-actions"><button type="button" class="om-button secondary" id="om-soter-key-import">' +
-      text('导入私钥', 'Import key') + '</button></div>';
-  } else if (item.type === 'relay') {
-    editor = '<div class="om-soter-field"><label>' + text('服务器 URL', 'Server URL') + '</label><input id="om-soter-relay-url" value="' + esc(item.url || '') + '"></div>' +
-      '<div class="om-soter-field"><label>' + text('设备 ID', 'Device id') + '</label><input id="om-soter-relay-device" value="' + esc(item.device_id || '') + '"></div>' +
-      '<div class="om-soter-field"><label>Token</label><input id="om-soter-relay-token" type="password" value="' + esc(item.token || '') + '"></div>' +
-      '<div class="om-soter-actions"><button type="button" class="om-button secondary" id="om-soter-relay-save">' +
-      text('保存', 'Save') + '</button></div>';
-  }
-  const body = '<div style="padding:2px 20px 6px"><div class="om-soter-kv">' + kv + '</div>' + editor + '</div>';
-  const settings = '<div style="padding:2px 20px 18px">' +
-    '<div class="om-soter-field"><label>' + text('名称', 'Name') + '</label><input id="om-soter-name" value="' + esc(item.name) + '"></div>' +
-    '<div class="om-soter-actions">' +
-      '<button type="button" class="om-button" id="om-soter-apply">' + text('重启软件 TA', 'Restart software TA') + '</button>' +
-      '<button type="button" class="om-button secondary" id="om-soter-rename">' + text('保存名称', 'Save name') + '</button>' +
-      '<button type="button" class="om-button secondary" id="om-soter-default">' + text('设为默认', 'Set as default') + '</button>' +
-      '<button type="button" class="om-button secondary" id="om-soter-delete">' + text('删除', 'Delete') + '</button>' +
-    '</div><p class="om-soter-msg" id="om-soter-msg"></p></div>';
-  return headHtml(esc(item.name), label(item.type), 'om-soter-detail-back', '') +
-    '<div class="stack">' + panel(text('身份信息', 'Identity'), body) +
-    panel(text('操作', 'Actions'), settings) + '</div>';
-}
-
-async function readTaStatus() {
-  try {
-    const result = await exec('cat /data/adb/ommega/soterta/status.json 2>/dev/null');
-    return JSON.parse(String(result.stdout || ''));
-  } catch (error) { return null; }
-}
-
-async function restartSoftwareTa() {
-  const dir = '/data/adb/ommega/soterta';
-  await exec('rm -f ' + dir + '/enabled');
-  await new Promise(resolve => setTimeout(resolve, 3500));
-  await exec('mkdir -p ' + dir + ' && date +%s > ' + dir + '/enabled.tmp && chmod 0600 ' + dir + '/enabled.tmp && mv ' + dir + '/enabled.tmp ' + dir + '/enabled');
-  await new Promise(resolve => setTimeout(resolve, 3500));
-}
-
-async function renderList() {
-  const host = document.getElementById('om-soter-page');
-  if (!host) return;
-  store = await loadStore();
-  host.innerHTML = listHtml();
-  document.getElementById('om-soter-back').onclick = () => { history.back(); };
-  document.getElementById('om-soter-add').onclick = () => { adding = !adding; renderList(); };
-  host.onclick = async event => {
-    const row = event.target.closest ? event.target.closest('[data-open]') : null;
-    if (row) { location.hash = 'om-soter/' + row.dataset.open; return; }
-    const button = event.target.closest ? event.target.closest('[data-add]') : null;
-    if (!button) return;
-    {
-    const type = button.dataset.add;
-    const id = type + '-' + Date.now().toString(36);
-    const item = {id: id, name: text('身份 ', 'Identity ') + (store.identities.length + 1), type: type};
-    if (type === 'relay') { item.url = ''; item.device_id = ''; item.token = ''; item.uid_map = ''; item.tls_insecure = false; }
-    store.identities.push(item);
-    try { await saveStore(); } catch (error) { window.alert(String(error)); return; }
-    adding = false;
-    location.hash = 'om-soter/' + id;
-    }
-  };
-}
-
-async function renderDetail(id) {
-  const host = document.getElementById('om-soter-identity');
-  if (!host) return;
-  store = await loadStore();
-  const item = store.identities.find(entry => entry.id === id);
-  if (!item) { host.innerHTML = '<p class="note" style="padding:0 20px">' + text('身份不存在', 'Identity not found') + '</p>'; return; }
-  const status = await readTaStatus();
-  host.innerHTML = detailHtml(item, status);
-  const msg = value => { const node = document.getElementById('om-soter-msg'); if (node) node.textContent = value; };
-  document.getElementById('om-soter-detail-back').onclick = () => { history.back(); };
-  document.getElementById('om-soter-rename').onclick = async () => {
-    const value = document.getElementById('om-soter-name').value.trim();
-    if (!value) { msg(text('名称不能为空', 'The name cannot be empty')); return; }
-    item.name = value;
-    try { await saveStore(); await renderDetail(id); msg(text('名称已保存', 'Name saved')); } catch (error) { msg(String(error)); }
-  };
-  document.getElementById('om-soter-default').onclick = async () => {
-    store.default = item.id;
-    try { await saveStore(); msg(text('已设为默认', 'Set as default')); } catch (error) { msg(String(error)); }
-  };
-  document.getElementById('om-soter-delete').onclick = async () => {
-    if (!window.confirm(text('删除这个身份？', 'Delete this identity?'))) return;
-    store.identities = store.identities.filter(entry => entry.id !== item.id);
-    if (store.default === item.id) store.default = '';
-    try { await saveStore(); history.back(); } catch (error) { msg(String(error)); }
-  };
-  document.getElementById('om-soter-apply').onclick = async () => {
-    msg(text('正在重启软件 TA…', 'Restarting the software TA…'));
-    try {
-      await restartSoftwareTa();
-      await renderDetail(id);
-      msg(text('已重启；身份分配由 TA 按应用实时读取', 'Restarted; the TA reads app assignments live'));
-    } catch (error) { msg(String(error)); }
-  };
-  const keyButton = document.getElementById('om-soter-key-import');
-  if (keyButton) keyButton.onclick = async () => {
-    const path = document.getElementById('om-soter-key-path').value.trim();
-    if (!/^[A-Za-z0-9._\/-]+$/.test(path)) { msg(text('路径非法', 'Invalid path')); return; }
-    msg(text('读取中…', 'Reading…'));
-    try {
-      const cat = await exec('cat "' + path + '" 2>/dev/null');
-      const raw = String(cat.stdout || '').trim();
-      if (!raw) throw new Error(text('文件为空', 'the file is empty'));
-      let pem = raw; let cpu = '';
-      if (raw.startsWith('{')) {
-        const bundle = JSON.parse(raw);
-        cpu = String(bundle.cpu_id || '').toLowerCase();
-        pem = String(bundle.attk_private_pem || bundle.attk_priv || bundle.private_pem || '');
-      }
-      if (!/^[0-9a-f]{32}$/.test(cpu)) throw new Error(text('cpu_id 必须是 32 位十六进制', 'cpu_id must be 32 hex'));
-      const info = await describe(pem);
-      await exec('mkdir -p "' + KEYDIR + '" && printf %s \'' + b64utf8(info.privatePem) + '\' | base64 -d > "' + KEYDIR + '/' + item.id + '.pem" && chmod 600 "' + KEYDIR + '/' + item.id + '.pem"');
-      item.cpu_id = cpu; item.fingerprint = info.fingerprint; item.pem = KEYDIR + '/' + item.id + '.pem';
-      await saveStore();
-      await renderDetail(id);
-      msg(text('私钥已保存，TA 下一次调用即生效', 'Key saved; the TA picks it up on the next call'));
-    } catch (error) { msg(String(error)); }
-  };
-  const relaySave = document.getElementById('om-soter-relay-save');
-  if (relaySave) relaySave.onclick = async () => {
-    item.url = document.getElementById('om-soter-relay-url').value.trim();
-    item.device_id = document.getElementById('om-soter-relay-device').value.trim();
-    item.token = document.getElementById('om-soter-relay-token').value.trim();
-    try { await saveStore(); msg(text('已保存', 'Saved')); } catch (error) { msg(String(error)); }
-  };
-}
-
-export function mountSoter(bridge) { exec = bridge; injectStyle(); }
-export function soterShow(page, id) { return page === 'detail' ? renderDetail(id) : renderList(); }
+export function mountSoter(bridge,mutations=createBridge('soter_write',0)){exec=bridge;writeExec=mutations;injectStyle();document.addEventListener('ommega-soter-policy',event=>{event.detail.promise=policyCall(event.detail.operation,event.detail.payload??null,event.detail.package??null);});}
+export function soterShow(page,id){return page==='detail'?renderDetail(id):renderList();}

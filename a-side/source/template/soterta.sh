@@ -398,6 +398,12 @@ converge() {
     rm -f "$MARKER"
   fi
 
+  # Re-enabling while the daemon is already up needs no start, so clear a note
+  # left by an earlier disable instead of publishing a stale reason forever.
+  if [ "$g_enabled" = 1 ] && [ "$g_running" = 1 ] && [ "$g_owner" = us ]; then
+    g_note=""
+  fi
+
   if [ "$g_enabled" = 1 ]; then
     if [ "$g_running" = 0 ] || [ "$g_owner" != us ]; then
       log "converge: wanted, running=$g_running owner=$g_owner hal=$g_hal"

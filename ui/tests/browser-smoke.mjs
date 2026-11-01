@@ -127,9 +127,10 @@ try {
       assert.equal(await page.locator('#remote-config-disable-native-strongbox').isVisible(),true);
       await page.locator('#cancel-remote-config').click();
       await page.locator('[data-om-action=ommega-soterta]').click();
-      await page.locator('#ommega-soterta-dialog').waitFor({state:'visible'});
-      assert.equal(await page.locator('#ommega-soterta-refresh').textContent(),locale.startsWith('zh')?'刷新':'Refresh');
-      await page.locator('#ommega-soterta-close').click();
+      await page.locator('#om-soter-page').waitFor({state:'visible'});
+      await page.locator('#om-soter-add').waitFor();
+      assert.equal(await page.locator('.om-nav [data-om-view="settings"]').getAttribute('aria-current'),'page');
+      await page.locator('#om-soter-back').click();
       await page.locator('[data-om-view=apps]').click();
       await page.locator('#apps-list').waitFor({state:'visible'});
       const search=page.locator('#om-app-search');

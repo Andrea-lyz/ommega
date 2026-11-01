@@ -58,6 +58,8 @@ window.ksu = {
       if ((!isTarget && !isSecurity && !isSystem) || !request || request.expected !== current) {errno=75; stdout='';}
       else {if (isTarget) targetList=request.replacement; else if (isSecurity) targetSecurity=request.replacement; else systemApps=request.replacement; stdout='saved';}
     }
+    else if (/soter-read(\s|$)/.test(command)) stdout=JSON.stringify({store:{version:1,default:'',identities:[],apps:{}},expected:null,legacy_revision:null,status:{},shared:{},warnings:[]});
+    else if (command.endsWith('soter-write') || command.endsWith('soter-import')) errno=1;
     else if (command.includes('ommega-auth-policy') && command.includes('base64 -d')) {
       const match = command.match(/printf '%s' '([^']+)'/);
       const request = match && JSON.parse(utf8Decode(match[1]));
