@@ -1,5 +1,5 @@
 // Full-page SOTER identities. Private keys are read and validated only by Rust.
-import {icon,text,createBridge} from './ui-kit.js?v=material-ui-28';
+import {icon,text,createBridge} from './ui-kit.js?v=material-ui-29';
 const TYPES=[['local','本地随机身份','Local random'],['key','私钥身份','Private key'],['relay','远程中继身份','Remote relay']];
 let exec=null,writeExec=null,snapshot=null,adding=false,generation=0,busy=false;
 function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -57,14 +57,54 @@ function row(item){const status=snapshot.status[item.id];const meta=label(item.t
   return '<a class="action-row" href="#om-soter/'+encodeURIComponent(item.id)+'"><span class="row-icon">'+icon(item.type==='key'?'key':item.type==='relay'?'server':'shield')+'</span><span class="row-text"><strong>'+esc(item.name)+(snapshot.store.default===item.id?text(' · 默认',' · default'):'')+'</strong><small>'+esc(meta)+'</small></span>'+icon('chevron')+'</a>';
 }
 function errorPage(host,error,back,target,retry){host.innerHTML=header('SOTER',String(error.message||error),back)+'<button type="button" class="om-button secondary" id="om-soter-retry">'+text('重新读取','Retry')+'</button>';document.getElementById(back).onclick=()=>{location.hash=target;};document.getElementById('om-soter-retry').onclick=retry;}
+/// Ask the watchdog for the software TA: the flag is the only request it reads,
+/// and it applies the change on its own poll.
+function flagCommand(on){
+  return on
+    ? ['set -e','mkdir -p /data/adb/ommega/soterta','date +%s > /data/adb/ommega/soterta/enabled.tmp','chmod 0600 /data/adb/ommega/soterta/enabled.tmp','mv /data/adb/ommega/soterta/enabled.tmp /data/adb/ommega/soterta/enabled'].join('\n')
+    : 'rm -f /data/adb/ommega/soterta/enabled';
+}
+
+function switchHtml(enabled,ta){
+  const state = enabled
+    ? (ta&&ta.running?text('软件 TA 运行中','Software TA running'):text('已启用，等待看门狗接管…','Enabled; waiting for the watchdog'))
+    : text('已关闭：所有应用回落到原厂 HAL，SOTER 检查会失败','Off: every app falls back to the stock HAL and SOTER checks fail');
+  const id = ta&&ta.device_id&&ta.device_id!=='-'?' · '+esc(ta.device_id):'';
+  return panel(text('SOTER 总控','SOTER master switch'),
+    '<label class="policy-row"><span class="toggle-copy"><strong>'+text('启用 SOTER','Enable SOTER')+'</strong><small>'+
+    text('关闭后所有应用都不再使用软件 TA；应用里的身份分配会保留，但不会生效。','When off no app uses the software TA; per-app assignments are kept but inactive.')+
+    '</small></span><span class="switch"><input type="checkbox" id="om-soter-enabled" role="switch" aria-label="'+esc(text('启用 SOTER','Enable SOTER'))+'"'+(enabled?' checked':'')+'><span></span></span></label>'+
+    '<p class="note" id="om-soter-switch-state" style="padding:0 20px 16px">'+state+id+'</p>');
+}
+
+/// The flag is the whole request; the watchdog publishes the outcome a moment later,
+/// so the page samples the status twice instead of pretending the change is instant.
+function applySwitch(on){
+  return action(async()=>{
+    const result=await writeExec(flagCommand(on));
+    if(!result||Number(result.errno)!==0)throw new Error(result?.stderr||text('写入开关失败','Failed to write the switch'));
+    message(text('开关已写入，等待看门狗应用…','Switch written; waiting for the watchdog…'));
+    await new Promise(resolve=>setTimeout(resolve,3000));
+    await renderList();
+    await new Promise(resolve=>setTimeout(resolve,6000));
+    await renderList();
+  });
+}
+
 async function renderList(){
   const host=document.getElementById('om-soter-page');if(!host)return;const turn=++generation;
-  try{const fresh=await policyCall('soter-read');if(turn!==generation)return;snapshot=fresh;
+  try{const fresh=await policyCall('soter-read');const ta=await taStatus();if(turn!==generation)return;snapshot=fresh;
     const types=TYPES.map(t=>'<button type="button" class="action-row" data-add="'+t[0]+'"><span class="row-icon">'+icon(t[0]==='key'?'key':t[0]==='relay'?'server':'shield')+'</span><span class="row-text"><strong>'+text(t[1],t[2])+'</strong></span>'+icon('chevron')+'</button>').join('');
     host.innerHTML=header(text('SOTER 身份','SOTER identities'),text('在应用策略中选择身份；错误配置不会自动换用其他身份。','Choose an identity per app; configuration errors never select another identity.'),'om-soter-back','<button class="om-button" id="om-soter-add" type="button">+ '+text('添加身份','Add identity')+'</button>')+
-      '<div class="stack">'+(adding?panel(text('选择身份类型','Choose a type'),types):'')+panel(text('已添加的身份','Identities'),fresh.store.identities.length?fresh.store.identities.map(row).join(''):note(text('还没有身份，点击「添加身份」创建。','No identities yet. Choose Add identity.')))+'</div><p id="om-soter-list-msg" data-soter-message class="om-soter-msg" role="status"></p>';
+      '<div class="stack">'+switchHtml(fresh.enabled!==false,ta)+(adding?panel(text('选择身份类型','Choose a type'),types):'')+panel(text('已添加的身份','Identities'),fresh.store.identities.length?fresh.store.identities.map(row).join(''):note(text('还没有身份，点击「添加身份」创建。','No identities yet. Choose Add identity.')))+'</div><p id="om-soter-list-msg" data-soter-message class="om-soter-msg" role="status"></p>';
     document.getElementById('om-soter-back').onclick=()=>history.back();
     document.getElementById('om-soter-add').onclick=()=>{if(!busy){adding=!adding;renderList();}};
+    const master=document.getElementById('om-soter-enabled');
+    if(master)master.onchange=()=>{
+      const on=master.checked;
+      if(!on&&!window.confirm(text('关闭后所有应用的 SOTER 都会失效，直到再次启用。继续？','Turning SOTER off disables it for every app until you enable it again. Continue?'))){master.checked=true;return;}
+      applySwitch(on);
+    };
     host.onclick=event=>{if(busy){event.preventDefault();return;}const button=event.target.closest?.('[data-add]');if(!button)return;
       action(async()=>{const base=snapshot;const store=JSON.parse(JSON.stringify(base.store));const id=button.dataset.add+'-'+crypto.randomUUID().replaceAll('-','');store.identities.push({id,name:text('身份 ','Identity ')+(store.identities.length+1),type:button.dataset.add});
         snapshot=await policyCall('soter-write',request(base,store));adding=false;location.hash='om-soter/'+id;});};
@@ -86,7 +126,7 @@ async function renderDetail(id){
     let editor='';
     if(item.type==='key')editor=field('om-soter-key-path',text('设备上的私钥文件路径（PEM 或 JSON）','Key file on this device (PEM or JSON)'),'','text','placeholder="/sdcard/Download/identity.pem"')+field('om-soter-cpu-id',text('设备 ID（PEM 必填，JSON 可自带）','Device ID (required for PEM, optional for JSON)'),item.cpu_id||'','text','maxlength="32" autocomplete="off"')+'<button class="om-button secondary" type="button" id="om-soter-key-import">'+text('导入私钥','Import key')+'</button>';
     if(item.type==='relay')editor=field('om-soter-relay-url',text('服务器 URL','Server URL'),item.url||'')+field('om-soter-relay-device',text('设备 ID','Device ID'),item.device_id||'')+field('om-soter-relay-token','Token',item.token||'','password','autocomplete="off"')+'<button class="om-button secondary" type="button" id="om-soter-relay-save">'+text('保存','Save')+'</button>';
-    const actions=field('om-soter-name',text('名称','Name'),item.name,'text','maxlength="80"')+'<div class="om-soter-actions"><button class="om-button" type="button" id="om-soter-rename">'+text('保存名称','Save name')+'</button><button class="om-button secondary" type="button" id="om-soter-default" '+(status?.ready?'':'disabled')+'>'+text('设为默认','Set as default')+'</button><button class="om-button secondary" type="button" id="om-soter-apply" '+(ta?.enabled&&ta?.running?'':'disabled')+'>'+text('重启软件 TA','Restart software TA')+'</button><button class="om-button secondary" type="button" id="om-soter-delete">'+text('删除','Delete')+'</button></div>';
+    const actions=field('om-soter-name',text('名称','Name'),item.name,'text','maxlength="80"')+'<div class="om-soter-actions"><button class="om-button" type="button" id="om-soter-rename">'+text('保存名称','Save name')+'</button><button class="om-button secondary" type="button" id="om-soter-default" '+(status?.ready?'':'disabled')+'>'+text('设为默认','Set as default')+'</button><button class="om-button secondary" type="button" id="om-soter-delete">'+text('删除','Delete')+'</button></div>';
     host.innerHTML=header(item.name,label(item.type),'om-soter-detail-back')+'<div class="stack">'+panel(text('身份信息','Identity'),'<div style="padding:2px 20px 18px">'+kv+editor+'</div>')+panel(text('操作','Actions'),'<div style="padding:2px 20px 18px">'+actions+'<p id="om-soter-msg" data-soter-message class="om-soter-msg" role="status"></p></div>')+'</div>';
     document.getElementById('om-soter-detail-back').onclick=()=>history.back();
     const save=async(change)=>{const base=snapshot;const store=JSON.parse(JSON.stringify(base.store));change(store,store.identities.find(i=>i.id===id));snapshot=await policyCall('soter-write',request(base,store));await renderDetail(id);message(text('已保存；该身份的材料变更会使旧签名会话失效。','Saved; material changes invalidate old signing sessions.'));};
@@ -94,9 +134,6 @@ async function renderDetail(id){
     document.getElementById('om-soter-default').onclick=()=>action(()=>save(store=>{store.default=id;}));
     document.getElementById('om-soter-delete').onclick=()=>action(async()=>{const count=Object.values(snapshot.store.apps).filter(v=>v===id).length;if(!window.confirm(text('删除身份并移除 '+count+' 个应用分配？受影响应用需重新注册。','Delete this identity and '+count+' app assignments? Affected apps must register again.')))return;
       const base=snapshot;const store=JSON.parse(JSON.stringify(base.store));store.identities=store.identities.filter(i=>i.id!==id);if(store.default===id)store.default='';for(const [pkg,value]of Object.entries(store.apps))if(value===id)delete store.apps[pkg];snapshot=await policyCall('soter-write',request(base,store));history.back();});
-    document.getElementById('om-soter-apply').onclick=()=>action(async()=>{if(!window.confirm(text('这会重启所有应用共用的软件 TA，请勿在支付中操作。继续？','This restarts the software TA shared by all apps. Do not use during payment. Continue?')))return;
-      const result=await writeExec('set -e\nsh /data/adb/modules/ommega/soterta.sh disable >/dev/null\nsh /data/adb/modules/ommega/soterta.sh enable');
-      if(Number(result?.errno)!==0)throw new Error(result?.stderr||'TA restart failed');const after=await taStatus();if(!after?.running||after.owner!=='us'||Number(after.pid)===Number(ta.pid))throw new Error(text('未确认 TA 完成重启，请重新读取状态。','TA restart was not verified; reload status.'));await renderDetail(id);message(text('已确认软件 TA 重启。','Software TA restart verified.'));});
     const imp=document.getElementById('om-soter-key-import');if(imp)imp.onclick=()=>action(async()=>{const path=document.getElementById('om-soter-key-path').value.trim();const cpu_id=document.getElementById('om-soter-cpu-id').value.trim();if(!path.startsWith('/')||path.includes('\0'))throw new Error(text('请输入设备上的绝对文件路径','Enter an absolute device path'));
       if(item.pem&&!window.confirm(text('更换私钥会作废该身份下的旧注册与签名会话。继续？','Replacing this key invalidates old registrations and sign sessions. Continue?')))return;
       snapshot=await policyCall('soter-import',{...request(snapshot,null),id,path,cpu_id});await renderDetail(id);message(text('私钥已在设备端校验并保存，未经过页面。','Key validated and saved on-device; private material never entered this page.'));});

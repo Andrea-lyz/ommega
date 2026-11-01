@@ -36,7 +36,11 @@ Mutations are serialized by a directory lock, compare original bytes, commit by 
 
 Both identity pages and app cards use this management interface. Reads may time out without terminating a process. Writes have no timeout, cancellation or automatic retry, and keep controls busy until the actual callback. Read errors never create an empty writable policy. Errors retain drafts. Incomplete identities cannot be selected. With no identities the Default option is selected but disabled and accompanied by a note.
 
-The restart action warns that it affects every application, uses the established disable/enable lifecycle, checks return codes, and verifies a new running daemon PID. It never edits identity material or reports success based on a fixed sleep. A stopped TA is not silently enabled by restart.
+The identity page owns one master switch. It writes or removes the watchdog flag (`/data/adb/ommega/soterta/enabled`) and nothing else: the watchdog performs the takeover or the rollback on its next poll, so the page samples the published status twice instead of pretending the change is instant. Turning SOTER off keeps every identity and assignment on disk but stops the software TA, so all applications fall back to the stock HAL until it is enabled again.
+
+There is no separate restart action. A restart that the user cannot tie to an intention is what makes the shared TA look unreliable, and the switch already covers the legitimate case (off, then on).
+
+The per-application card follows the switch: while SOTER is off it shows a single disabled Default row and says so, because no assignment can take effect in that state.
 
 ## Validation
 

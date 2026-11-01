@@ -10,8 +10,8 @@ const bridge=await readFile(new URL('../preview-bridge.js',import.meta.url),'utf
 const mock=bridge+String.raw`
 (()=>{
  const original=window.ksu.exec.bind(window.ksu);
- const test=window.__SOTER_TEST={store:{version:1,default:'',identities:[],apps:{}},expected:null,failRead:false,failWrite:false,failImport:false,calls:[],shared:{}};
- const response=()=>({store:test.store,expected:test.expected,legacy_revision:null,status:Object.fromEntries(test.store.identities.map(i=>[i.id,{ready:i.type==='local'||i.type==='key'&&!!i.pem||i.type==='relay'&&!!i.url&&!!i.token&&!!i.device_id,cpu_id:i.cpu_id||null,fingerprint:i.pem?'a'.repeat(64):null}])),warnings:[],shared:test.shared});
+ const test=window.__SOTER_TEST={store:{version:1,default:'',identities:[],apps:{}},expected:null,failRead:false,failWrite:false,failImport:false,calls:[],shared:{},enabled:true};
+ const response=()=>({store:test.store,expected:test.expected,legacy_revision:null,status:Object.fromEntries(test.store.identities.map(i=>[i.id,{ready:i.type==='local'||i.type==='key'&&!!i.pem||i.type==='relay'&&!!i.url&&!!i.token&&!!i.device_id,cpu_id:i.cpu_id||null,fingerprint:i.pem?'a'.repeat(64):null}])),warnings:[],shared:test.shared,enabled:test.enabled!==false});
  window.ksu.exec=(command,options,callback)=>{
   const read=command.match(/soter-read(?:\s+(\S+))?$/);
   if(read||command.endsWith('soter-write')||command.endsWith('soter-import')){
@@ -66,6 +66,14 @@ try{
   await page.evaluate(()=>window.__SOTER_TEST.expected='changed elsewhere');const key=await page.evaluate(()=>window.__SOTER_TEST.store.identities.find(i=>i.type==='key').id);
   await page.locator('input[name="om-app-soter"][value="'+key+'"]').check({force:true});await page.locator('#om-detail-soter-status').filter({hasText:/Config changed/}).waitFor();assert.ok(await page.locator('input[name="om-app-soter"][value="'+local+'"]').isChecked());
   await page.evaluate(()=>{window.__SOTER_TEST.store={version:1,default:'',identities:[],apps:{}};window.__SOTER_TEST.expected=null;});await page.locator('#om-detail-back').click();await page.locator('.card[data-package="com.example.wallet"]').click();const def=page.locator('input[name="om-app-soter"][value=""]');await page.waitForFunction(()=>document.querySelectorAll('input[name="om-app-soter"]').length===1);assert.ok(await def.isChecked());assert.ok(await def.isDisabled());
+  await page.evaluate(()=>{location.hash='om-soter';});
+  await page.locator('#om-soter-add').waitFor();
+  assert.equal(await page.locator('#om-soter-enabled').count(),1,'the master switch lives on the identity page');
+  assert.equal(await page.locator('#om-soter-apply').count(),0,'the restart action is gone');
+  await page.evaluate(()=>{window.__SOTER_TEST.enabled=false;location.hash='om-apps';});
+  await page.locator('.card[data-package="com.example.wallet"]').click();
+  await page.waitForFunction(()=>document.querySelector('input[name="om-app-soter"]'));
+  assert.ok(await page.locator('input[name="om-app-soter"]').first().isDisabled(),'the app card is inert while SOTER is off');
   assert.deepEqual(errors,[]);console.log('PASS SOTER '+locale+' '+theme+' '+width+': list/detail, rename, file-only import failure/success, defaults, app CAS, disabled empty default');await context.close();
  }
 }finally{await browser.close();}

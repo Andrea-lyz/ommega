@@ -7,6 +7,9 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+/// Presence of this flag asks the watchdog to run the software TA.
+pub const FLAG: &str = "/data/adb/ommega/soterta/enabled";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -37,6 +40,8 @@ pub struct Response {
     pub status: BTreeMap<String, IdentityStatus>,
     pub warnings: Vec<String>,
     pub shared: BTreeMap<String, Vec<String>>,
+    /// Whether the software TA is switched on for the whole device.
+    pub enabled: bool,
 }
 /// The packages sharing the requested package UID, when that UID has more than one.
 ///
@@ -147,6 +152,7 @@ pub fn read_for(package: Option<&str>) -> Result<Response, String> {
         status,
         warnings: Vec::new(),
         shared,
+        enabled: Path::new(FLAG).is_file(),
     })
 }
 fn verify_expected(request: &Request, current: &Response) -> Result<(), String> {
@@ -387,6 +393,7 @@ mod tests {
             status: BTreeMap::new(),
             warnings: Vec::new(),
             shared: BTreeMap::new(),
+            enabled: true,
         }
     }
     #[test]

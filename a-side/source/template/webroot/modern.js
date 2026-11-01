@@ -1,6 +1,6 @@
-import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js?v=material-ui-28';
+import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js?v=material-ui-29';
 import {installAppSearch,prepareSearchEditor} from './app-search.js?v=app-search-3';
-import {mountSoter, soterShow} from './soter.js?v=material-ui-28';
+import {mountSoter, soterShow} from './soter.js?v=material-ui-29';
 
 if (typeof document !== 'undefined') {
   const style = document.createElement('link');

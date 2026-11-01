@@ -3189,6 +3189,15 @@ async function ommegaLoadSoterOptions(pkg,session) {
   }
   if(!store.identities.length)body+='<p class="om-detail-status">'+ommegaDetailText("还没有添加身份，请在「设置 → SOTER」里添加。","No identities yet. Add one under Settings → SOTER.")+'</p>';
   body+='<p class="om-detail-status">'+ommegaDetailText("切换身份会作废旧注册与签名会话。共享 UID 的应用必须使用同一身份。","Switching invalidates old registrations and sign sessions. Apps sharing a UID must use the same identity.")+'</p>';
+  // While SOTER is switched off nothing an application asks for reaches the TA,
+  // so the card must not look like a live choice.
+  if (base.enabled === false) {
+    host.innerHTML = ommegaDetailRow(ommegaDetailText("默认","Default"),
+      ommegaDetailText("SOTER 已在「设置 → SOTER」中关闭，所有应用暂时回落到原厂 HAL。","SOTER is switched off under Settings → SOTER; every app falls back to the stock HAL."),
+      '<input type="radio" name="om-app-soter" value="" checked disabled>') +
+      '<p class="om-detail-status">' + ommegaDetailText("启用后这里的选择才会生效。","These choices apply again once it is enabled.") + '</p>';
+    return;
+  }
   host.innerHTML=body;
   let saving=false;
   host.querySelectorAll('input[name="om-app-soter"]').forEach(input=>{
