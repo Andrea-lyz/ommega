@@ -19,6 +19,7 @@ pub mod blob;
 pub mod dispatch;
 pub mod error;
 pub mod ffi;
+pub mod identities;
 pub mod parcel;
 pub mod platform;
 pub mod remote;

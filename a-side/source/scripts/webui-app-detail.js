@@ -4,6 +4,83 @@
 const OMMEGA_APP_TARGET = "/data/adb/ommega/ommegadata/target.txt";
 const OMMEGA_SYSTEM_APPS = "/data/adb/ommega/ommegadata/system_app";
 const OMMEGA_LOCAL_KEYGEN = "/data/adb/ommega/ommegadata/data/local-keygen.txt";
+const OMMEGA_SOTER_IDENTITIES = "/data/adb/ommega/soterta/identities.json";
+const OMMEGA_SOTER_TYPES = {local: ["本地随机", "Local"], key: ["私钥", "Key"], relay: ["中继", "Relay"]};
+
+async function ommegaReadSoterStore() {
+  const result = await _('if [ -f "' + OMMEGA_SOTER_IDENTITIES + '" ]; then base64 < "' + OMMEGA_SOTER_IDENTITIES + '"; fi');
+  const raw = String(result && result.stdout || "").replace(/\s+/g, "");
+  if (!raw) return {version: 1, default: "", identities: [], apps: {}};
+  try {
+    const text = new TextDecoder("utf-8", {fatal: true}).decode(Uint8Array.from(atob(raw), c => c.charCodeAt(0)));
+    const store = JSON.parse(text);
+    if (!store || !Array.isArray(store.identities)) return null;
+    if (!store.apps || typeof store.apps !== "object") store.apps = {};
+    return store;
+  } catch (error) { return null; }
+}
+
+async function ommegaWriteSoterStore(store) {
+  const bytes = new TextEncoder().encode(JSON.stringify(store, null, 2) + "\n");
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const payload = btoa(binary);
+  const command = ["set -e",
+    'mkdir -p /data/adb/ommega/soterta',
+    "printf %s '" + payload + "' | base64 -d > \"" + OMMEGA_SOTER_IDENTITIES + ".tmp\"",
+    'chmod 600 "' + OMMEGA_SOTER_IDENTITIES + '.tmp"',
+    'mv "' + OMMEGA_SOTER_IDENTITIES + '.tmp" "' + OMMEGA_SOTER_IDENTITIES + '"'].join("\n");
+  const result = await _(command);
+  if (result && result.errno) throw new Error(String(result.stderr || ("errno " + result.errno)).trim());
+}
+
+function ommegaSoterTypeLabel(type) {
+  const entry = OMMEGA_SOTER_TYPES[type] || OMMEGA_SOTER_TYPES.local;
+  return ommegaDetailText(entry[0], entry[1]);
+}
+
+async function ommegaLoadSoterOptions(pkg, session) {
+  const host = document.getElementById("om-detail-soter-options");
+  if (!host) return;
+  const store = await ommegaReadSoterStore();
+  if (!ommegaDetailCurrent(session)) return;
+  const identities = store && Array.isArray(store.identities) ? store.identities : [];
+  const current = (store && store.apps && store.apps[pkg]) || "";
+  const row = (value, title, description) => ommegaDetailRow(title, description,
+    '<input type="radio" name="om-app-soter" value="' + ommegaEsc(value) + '"' + (current === value ? ' checked' : '') + '>');
+  // Default is always offered: an app with no identity assigned uses whatever
+  // the software TA currently holds, and that is a valid choice on its own.
+  // With no identity to choose from there is nothing to route, so the default
+  // row is shown disabled instead of pretending to be a choice.
+  const fixed = !store || identities.length === 0;
+  const rows = [ommegaDetailRow(ommegaDetailText("默认", "Default"),
+    ommegaDetailText("跟随软件 TA 当前的全局身份。", "Follow the software TA global identity."),
+    '<input type="radio" name="om-app-soter" value=""' + (current === "" ? ' checked' : '') + (fixed ? ' disabled' : '') + '>')];
+  for (const item of identities) rows.push(row(item.id, item.name, ommegaSoterTypeLabel(item.type)));
+  const hint = !store ? ommegaDetailText("身份列表不可读，暂时只能使用默认身份。", "The identity list could not be read; only the default is available.")
+    : identities.length ? "" : ommegaDetailText("还没有添加身份，所有应用都用默认身份。可在「设置 → SOTER」里添加。", "No identity yet; every app uses the default. Add one under Settings - SOTER.");
+  host.innerHTML = rows.join("") + (hint ? '<p class="om-detail-status">' + hint + '</p>' : "");
+  host.querySelectorAll('input[name="om-app-soter"]').forEach(input => {
+    input.onchange = async () => {
+      if (!store) {
+        ommegaDetailMessage("om-detail-soter-status", ommegaDetailText("身份列表不可读，无法保存", "The identity list could not be read"), true);
+        return;
+      }
+      const value = input.value;
+      const fresh = await ommegaReadSoterStore();
+      if (!fresh) { ommegaDetailMessage("om-detail-soter-status", ommegaDetailText("身份列表不可读", "The identity list could not be read"), true); return; }
+      fresh.apps = fresh.apps || {};
+      if (value) fresh.apps[pkg] = value; else delete fresh.apps[pkg];
+      try {
+        await ommegaWriteSoterStore(fresh);
+        ommegaDetailMessage("om-detail-soter-status", ommegaDetailText("已保存", "Saved"));
+      } catch (error) {
+        ommegaDetailMessage("om-detail-soter-status", String(error), true);
+      }
+    };
+  });
+}
+
 let ommegaTargetSnapshot = undefined;
 let ommegaTargetSnapshotGeneration = 0;
 let ommegaDetail = null;
@@ -601,6 +678,9 @@ function ommegaOpenAppDetail(card) {
       ommegaDetailRadio("om-app-auth", "compatibility", ommegaDetailText("支付兼容", "Payment compatibility"), ommegaDetailText("在本机验证认证，由远端签名。", "Authenticate locally and sign remotely.")) +
       ommegaDetailRadio("om-app-auth", "preserve", ommegaDetailText("保持认证要求", "Preserve authentication"), ommegaDetailText("远端保留认证要求。", "Keep the remote authentication requirement."))) +
       '<p class="om-detail-status" id="om-detail-auth-status" role="status"></p>') +
+    ommegaDetailCard('shield', ommegaDetailText("SOTER 身份", "SOTER identity"), ommegaDetailText("选择一项", "Choose one"),
+      '<div id="om-detail-soter-options"><p class="om-detail-status">' + ommegaDetailText("正在读取身份…", "Reading identities…") + '</p></div>' +
+      '<p class="om-detail-status" id="om-detail-soter-status" role="status"></p>') +
     ommegaDetailCard('cpu', ommegaDetailText("本地 keygen 时序整形（EWMA）", "Local keygen timing (EWMA)"), ommegaDetailText("仅用于有时序要求的检测器；日常不推荐开启。", "For timing-sensitive detectors only; not recommended for daily use."),
       ommegaDetailRow(ommegaDetailText("启用 EWMA 补时", "Enable EWMA equalization"), ommegaDetailText("将本应用远程-本地差值维持在约 85ms 内，尽量减少本地补时；默认关闭。", "Keep the remote-local delta near 85ms with minimal local padding; off by default."), '<input id="om-detail-local-timing" type="checkbox" role="switch">') +
       '<p class="om-detail-status" id="om-detail-local-timing-status" role="status"></p>') +
@@ -620,6 +700,7 @@ function ommegaOpenAppDetail(card) {
   const localTiming = document.getElementById("om-detail-local-timing");
   if (localTiming) localTiming.onchange = event => ommegaDetailSaveLocalTiming(event.target);
   document.getElementById("om-detail-cpu").onchange = event => ommegaDetailSaveCpu(event.target);
+  ommegaLoadSoterOptions(pkg, session);
   document.getElementById("om-detail-cpu-settings").onclick = () => {
     for (const id of ["ommega-cpu-policy-dialog", "ommega-cpu-app-dialog"]) {
       const dialog = document.getElementById(id); if (dialog && dialog.parentNode !== document.body) document.body.appendChild(dialog);

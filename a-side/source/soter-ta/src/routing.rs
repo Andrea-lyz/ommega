@@ -60,6 +60,21 @@ impl Routing {
         !self.scope.is_empty() && self.scope != "local"
     }
 
+    /// Route a request that a relay identity owns, ignoring the local-only
+    /// verdict this uid may have received from the global configuration.
+    pub fn prepare_forced_remote(
+        &self,
+        relay: bool,
+        tx: u32,
+        request: Request,
+    ) -> Result<Route, String> {
+        let mut route = self.prepare(relay, tx, request)?;
+        if route.backend == Backend::Local {
+            route.backend = Backend::Remote;
+        }
+        Ok(route)
+    }
+
     pub fn prepare(&self, relay: bool, tx: u32, request: Request) -> Result<Route, String> {
         if let Request::Session(handle) = request {
             let session = self

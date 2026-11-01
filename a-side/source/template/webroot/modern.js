@@ -1,5 +1,6 @@
 import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js?v=material-ui-9';
 import {installAppSearch,prepareSearchEditor} from './app-search.js?v=app-search-3';
+import {mountSoter, soterShow} from './soter.js';
 
 if (typeof document !== 'undefined') {
   const style = document.createElement('link');
@@ -283,10 +284,13 @@ function install() {
         </section></div></div>
         <p class="om-description" id="om-action-message" role="status"></p>
       </section>
+      <section id="om-soter-page" class="om-view" hidden aria-label="${text('SOTER 身份','SOTER identities')}"></section>
+      <section id="om-soter-identity" class="om-view" hidden aria-label="${text('身份详情','Identity detail')}"></section>
       <p class="om-description" id="om-updated" role="status" aria-live="polite" aria-atomic="true"></p>
       </main>
     <nav class="om-nav" aria-label="${text('主导航','Main navigation')}">${[['overview','概览','Overview'],['apps','应用','Apps'],['settings','设置','Settings']].map(([id,zh,en]) => `<button type="button" data-om-view="${id}" aria-current="${id==='overview'?'page':'false'}">${icon(id)}${text(zh,en)}</button>`).join('')}</nav>`;
   document.body.prepend(shell);
+  mountSoter(exec);
   adaptRemoteDialog();
   document.getElementById('om-appearance-open').onclick = () => document.getElementById('om-appearance-dialog').showModal();
   const closeAppearance = () => document.getElementById('om-appearance-dialog').close();
@@ -339,23 +343,33 @@ function install() {
     caption.addEventListener('click', () => { if (!button.disabled) button.click(); });
   }
   const denylist = document.getElementById('select-denylist'); if (denylist) denylist.hidden = true;
-  function navigate(view) {
-    if (!['overview','apps','settings'].includes(view)) view = 'overview';
+  function navigate(raw) {
+    const parts = String(raw || '').split('/');
+    const known = ['overview','apps','settings','soter'];
+    let view = known.includes(parts[0]) ? parts[0] : 'overview';
+    if (view === 'soter' && parts[1]) view = 'soter-identity';
     document.body.dataset.omView = view;
-    for (const id of ['overview','settings']) document.getElementById('om-' + id).hidden = view !== id;
+    for (const id of ['overview','settings','soter-page','soter-identity']) {
+      const section = document.getElementById('om-' + id);
+      if (section) section.hidden = 'om-' + id !== ('om-' + (view === 'soter' ? 'soter-page' : view));
+    }
+    if (view === 'soter') soterShow('list');
+    if (view === 'soter-identity') soterShow('detail', parts[1]);
     document.getElementById('om-apps-heading').hidden = view !== 'apps';
-    document.querySelectorAll('[data-om-view]').forEach(button => button.setAttribute('aria-current', button.dataset.omView === view ? 'page' : 'false'));
-    document.querySelector('.om-nav').dataset.active = String(['overview','apps','settings'].indexOf(view));
+    const navView = (view === 'soter' || view === 'soter-identity') ? 'settings' : view;
+    document.querySelectorAll('[data-om-view]').forEach(button => button.setAttribute('aria-current', button.dataset.omView === navView ? 'page' : 'false'));
+    document.querySelector('.om-nav').dataset.active = String(['overview','apps','settings'].indexOf(navView));
     if (searchRegion) searchRegion.hidden = view !== 'apps';
     // A parsed input never gets an Android text-editor connection; swap in a
     // fresh node before the user taps it, and leave focus to that tap.
     if (view === 'apps') prepareSearchEditor();
     // Keep the user's navigation focus. A route change is not an edit action.
   }
-  document.querySelectorAll('[data-om-view]').forEach(button => button.onclick = () => { location.hash = 'om-' + button.dataset.omView; });
+  document.querySelectorAll('[data-om-view]').forEach(button => button.onclick = () => { location.replace('#om-' + button.dataset.omView); });
   window.addEventListener('hashchange', () => { navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview'); });
   navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview');
   for (const button of document.querySelectorAll('[data-om-action]')) button.onclick = () => {
+    if (button.dataset.omAction === 'ommega-soterta') { location.hash = 'om-soter'; return; }
     const target = document.getElementById(button.dataset.omAction);
     if (target) { target.click(); setText('om-action-message',''); }
     else setText('om-action-message',text('界面尚未就绪，请稍后重试。','The interface is still loading. Try again shortly.'));

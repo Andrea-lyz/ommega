@@ -12,6 +12,7 @@ use rsa::{BigUint, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 
 use crate::blob;
+use crate::identities;
 use crate::error::{
     SOTER_ERR_BAD_VALUE, SOTER_ERR_NO_AUTH_KEY, SOTER_ERR_NO_FINGERPRINT, SOTER_ERR_NO_KEY,
     SOTER_ERR_NO_SESSION, SOTER_ERR_TA_UNAVAILABLE, SOTER_OK,
@@ -85,10 +86,24 @@ impl KeyPair {
     }
 }
 
+/// Material the TA minted for a local identity: its own device id and key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IdentityKey {
+    pub cpu_id: String,
+    pub key: KeyPair,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UidState {
     /// Anti-rollback counter, strictly increasing per uid on the wire.
     pub counter: u64,
+    /// Counters for uids that were assigned an identity. Every identity is a
+    /// different device to the server, so each one keeps its own sequence.
+    #[serde(default)]
+    pub counters: BTreeMap<String, u64>,
+    /// Identity this uid's material belongs to; None is the ledger-wide one.
+    #[serde(default)]
+    pub identity: Option<String>,
     #[serde(default)]
     pub ask: Option<KeyPair>,
     #[serde(default)]
@@ -123,6 +138,10 @@ pub struct TaState {
     pub attk: KeyPair,
     #[serde(default)]
     pub uids: BTreeMap<u32, UidState>,
+    /// Per-identity material for "local" identities. A local identity owns its
+    /// own device id and key instead of borrowing the ledger-wide pair.
+    #[serde(default)]
+    pub identities: BTreeMap<String, IdentityKey>,
     #[serde(default)]
     pub sessions: BTreeMap<u64, Session>,
     #[serde(default)]
@@ -155,6 +174,7 @@ impl TaState {
             next_session: 0,
             fingerprints: BTreeMap::new(),
             bio_watermark: 0,
+            identities: BTreeMap::new(),
             routing: crate::routing::Routing::default(),
         })
     }
@@ -232,6 +252,41 @@ impl TaState {
         entry.counter
     }
 
+    /// Counter for one (uid, identity) pair. Without an identity the uid keeps
+    /// its single legacy sequence.
+    fn next_counter_for(&mut self, uid: u32, identity: Option<&str>) -> u64 {
+        match identity {
+            None => self.next_counter(uid),
+            Some(id) => {
+                let entry = self.uids.entry(uid).or_default();
+                let value = entry.counters.entry(id.to_string()).or_insert(0);
+                *value = value.wrapping_add(1);
+                *value
+            }
+        }
+    }
+
+    /// Identity assigned to the caller's package, if any.
+    fn identity_id_for(&self, uid: u32) -> Option<String> {
+        identities::for_uid(uid).map(|identity| identity.id)
+    }
+
+    /// Drop material that belongs to a device the caller no longer routes to.
+    ///
+    /// A uid's ASK and AuthKey are bound to one device id; when the app is moved
+    /// to another identity the old material can only produce signatures the
+    /// server rejects, so it is cleared and the client registers again.
+    pub fn sync_identity(&mut self, uid: u32) {
+        let current = self.identity_id_for(uid);
+        let entry = self.uids.entry(uid).or_default();
+        if entry.identity != current {
+            entry.identity = current;
+            entry.ask = None;
+            entry.auth.clear();
+            entry.counters.clear();
+        }
+    }
+
     fn fingerprint_id(&mut self, uid: u32) -> String {
         if let Some(id) = self.fingerprints.get(&uid) {
             return id.clone();
@@ -274,16 +329,65 @@ impl TaState {
         }
     }
 
+    /// Device id every blob for this uid must carry. An identity assigned to the
+    /// caller's package wins; otherwise the ledger-wide id is used.
+    fn cpu_id_for(&self, uid: u32) -> String {
+        if let Some(identity) = identities::for_uid(uid) {
+            if let Some(cpu_id) = identity.cpu_id {
+                return cpu_id;
+            }
+            if let Some(material) = self.identities.get(&identity.id) {
+                return material.cpu_id.clone();
+            }
+        }
+        self.cpu_id.clone()
+    }
+
+    /// Material for the identity the caller's package was assigned to. A local
+    /// identity owns its own device id and key, minted on first use and kept in
+    /// the ledger; an imported key identity carries both in its own file.
+    fn identity_material(&mut self, uid: u32) -> Option<(String, RsaPrivateKey)> {
+        let identity = identities::for_uid(uid)?;
+        if let (Some(cpu_id), Some(key)) = (identity.cpu_id, identity.key) {
+            return Some((cpu_id, key));
+        }
+        if identity.kind != "local" {
+            return None;
+        }
+        if !self.identities.contains_key(&identity.id) {
+            let pair = KeyPair::generate()?;
+            let mut rng = OsRng;
+            let mut id = [0u8; 12];
+            rng.fill_bytes(&mut id);
+            self.identities.insert(
+                identity.id.clone(),
+                IdentityKey {
+                    cpu_id: format!("00000000{}", hex::encode(id)),
+                    key: pair,
+                },
+            );
+        }
+        let material = self.identities.get(&identity.id)?;
+        Some((material.cpu_id.clone(), material.key.private()?))
+    }
+
     /// `exportAskPublicKey`: ASK blob signed with the device key.
     pub fn export_ask(&mut self, uid: u32) -> (i32, Vec<u8>) {
         let Some(pair) = self.ask_of(uid) else {
             return (SOTER_ERR_NO_KEY, Vec::new());
         };
-        let Some(device_key) = self.attk.private() else {
-            return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
+        let (cpu_id, device_key) = match self.identity_material(uid) {
+            Some((cpu_id, key)) => (cpu_id, key),
+            None => {
+                let Some(key) = self.attk.private() else {
+                    return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
+                };
+                (self.cpu_id.clone(), key)
+            }
         };
-        let counter = self.next_counter(uid);
-        let json = blob::key_json(&pair.public_pem, &self.cpu_id, counter, uid);
+        let identity_id = self.identity_id_for(uid);
+        let counter = self.next_counter_for(uid, identity_id.as_deref());
+        let json = blob::key_json(&pair.public_pem, &cpu_id, counter, uid);
         let Some(signature) = blob::sign(&device_key, &json) else {
             return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
         };
@@ -370,8 +474,10 @@ impl TaState {
         let Some(ask_key) = ask.private() else {
             return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
         };
-        let counter = self.next_counter(uid);
-        let json = blob::key_json(&auth.public_pem, &self.cpu_id, counter, uid);
+        let identity_id = self.identity_id_for(uid);
+        let counter = self.next_counter_for(uid, identity_id.as_deref());
+        let cpu_id = self.cpu_id_for(uid);
+        let json = blob::key_json(&auth.public_pem, &cpu_id, counter, uid);
         let Some(signature) = blob::sign(&ask_key, &json) else {
             return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
         };
@@ -447,6 +553,9 @@ impl TaState {
         if !self.biometric_ok(&entry, platform) {
             return (SOTER_ERR_NO_FINGERPRINT, Vec::new());
         }
+        // Material that belonged to another identity is gone; the session cannot
+        // finish with a key the server would reject.
+        self.sync_identity(entry.uid);
         self.sessions.remove(&session);
         let Some(key) = self.auth_of(entry.uid, &entry.kname) else {
             return (SOTER_ERR_NO_AUTH_KEY, Vec::new());
@@ -454,9 +563,11 @@ impl TaState {
         let Some(private) = key.private() else {
             return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
         };
-        let counter = self.next_counter(entry.uid);
+        let identity_id = self.identity_id_for(entry.uid);
+        let counter = self.next_counter_for(entry.uid, identity_id.as_deref());
         let fid = self.fingerprint_id(entry.uid);
-        let json = blob::result_json(&entry.challenge, &fid, counter, &self.cpu_id, entry.uid);
+        let cpu_id = self.cpu_id_for(entry.uid);
+        let json = blob::result_json(&entry.challenge, &fid, counter, &cpu_id, entry.uid);
         let Some(signature) = blob::sign(&private, &json) else {
             return (SOTER_ERR_TA_UNAVAILABLE, Vec::new());
         };

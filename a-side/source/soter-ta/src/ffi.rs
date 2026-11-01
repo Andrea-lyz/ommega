@@ -18,6 +18,7 @@ use crate::dispatch::{self, Outcome, Request};
 use crate::platform::{self, Platform};
 use crate::remote;
 use crate::routing::Backend;
+use crate::identities;
 use crate::state::TaState;
 
 /// Reply kinds, mirrored by `SOTERTA_KIND_*` in the daemon.
@@ -368,7 +369,12 @@ pub(crate) fn answer_request(
     forward: impl FnOnce(&remote::Config, u32, &Request, &str) -> Result<Option<Outcome>, String>,
 ) -> Result<Option<Outcome>, String> {
     // ATTK stays local, including when a remote configuration is unreadable.
-    let relay = relays(relay_active, tx);
+    // A relay identity owns the uid it is assigned to: that call goes through
+    // its own server even when the global relay is off.
+    let relay_identity = remote::request_uid(&request)
+        .filter(|_| !dispatch::ATTK_TRANSACTIONS.contains(&tx))
+        .and_then(identities::relay_config);
+    let relay = relays(relay_active, tx) || relay_identity.is_some();
     let scope = match &remote_config {
         Ok(config) if config.enabled => Some(config.route_scope()),
         Ok(_) if !relay_active => Some("local".to_owned()),
@@ -384,14 +390,18 @@ pub(crate) fn answer_request(
         if let Some(scope) = &scope {
             shared.state.routing.configure(scope);
         }
-        (
-            shared.state.routing.prepare(relay, tx, request)?,
-            shared.state.cpu_id.clone(),
-            changed,
-        )
+        let route = if relay_identity.is_some() {
+            shared.state.routing.prepare_forced_remote(relay, tx, request)?
+        } else {
+            shared.state.routing.prepare(relay, tx, request)?
+        };
+        (route, shared.state.cpu_id.clone(), changed)
     };
     if route.backend == Backend::Remote {
-        let config = remote_config?;
+        let config = match relay_identity.clone() {
+            Some(config) => config,
+            None => remote_config?,
+        };
         match forward(&config, tx, &route.request, &cpu_id)? {
             Some(outcome) => {
                 let mut slot = lock(&SHARED);

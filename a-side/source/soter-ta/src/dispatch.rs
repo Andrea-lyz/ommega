@@ -179,6 +179,12 @@ pub fn handle_request(
     request: Request,
     platform: Platform,
 ) -> Option<Outcome> {
+    match &request {
+        Request::Uid(uid) => state.sync_identity(*uid),
+        Request::UidKey { uid, .. } => state.sync_identity(*uid),
+        Request::InitSign { uid, .. } => state.sync_identity(*uid),
+        _ => {}
+    }
     Some(match (tx, request) {
         (TX_GET_DEVICE_ID, Request::None) => {
             let (code, data) = state.device_id();
