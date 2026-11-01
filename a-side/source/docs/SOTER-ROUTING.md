@@ -44,6 +44,8 @@ There is no separate restart action. A restart that the user cannot tie to an in
 
 The per-application card follows the switch: while SOTER is off it shows a single disabled Default row and says so, because no assignment can take effect in that state.
 
+The application list shows a SOTER badge with the number of transactions that application has issued. The count is kept by the TA per uid, exposed by `soter-read` as a package map, and rendered only while SOTER is switched on; a disabled device would otherwise advertise counters that cannot grow.
+
 ## Validation
 
 Regressions use synthetic keys, isolated files and mock transports: default selection; malformed/incomplete policy; shared UIDs/profiles; key rotation; old-session revocation; revision counters; local overrides of global relay; full named-relay init/finish with global relay on/off; named local_only refusal; missing policy; CAS conflicts; import validation. No test issues a real HAL/TEE request.

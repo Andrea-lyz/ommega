@@ -114,7 +114,7 @@ test("certificate badges only use positive safe counts with explicit sharing met
 test("certificate badges appear after the app name and identify shared UID counts", () => {
   const ctx = loadGlue({language:'zh-CN'});
   let badge = null, label = '';
-  const name = {textContent:'示例应用',querySelector:()=>badge,appendChild:value=>{badge=value;}};
+  const name = {textContent:'示例应用',querySelector:selector=>selector==='.om-cert-count'?badge:null,appendChild:value=>{badge=value;}};
   const card = {dataset:{},querySelector:()=>name,getAttribute:()=> 'com.example.app',setAttribute:(_, value)=>{label=value;}};
   ctx.document.createElement = () => ({textContent:'',title:'',remove(){badge=null;}});
   ctx.fixtureCounts = {'com.example.app':{count:12,shared:true}};
@@ -125,6 +125,20 @@ test("certificate badges appear after the app name and identify shared UID count
   ctx.fixtureCounts['com.example.app'] = {count:0,shared:false};
   ctx.ommegaUpdateAppCount(card);
   assert.equal(badge,null);
+});
+
+test("soter badges appear only while SOTER is enabled", () => {
+  const ctx = loadGlue({language:'zh-CN'});
+  let soter = null;
+  const name = {textContent:'示例应用',querySelector:selector=>selector==='.om-soter-count'?soter:null,appendChild:value=>{soter=value;}};
+  const card = {dataset:{},querySelector:()=>name,getAttribute:()=>'com.example.app',setAttribute(){}};
+  ctx.document.createElement = () => ({textContent:'',title:'',className:'',remove(){soter=null;}});
+  vm.runInContext('ommegaSoterEnabled = true; ommegaSoterCounts = {"com.example.app":7}',ctx);
+  ctx.ommegaUpdateAppCount(card);
+  assert.match(soter.textContent,/SOTER 7 次/);
+  vm.runInContext("ommegaSoterEnabled = false",ctx);
+  ctx.ommegaUpdateAppCount(card);
+  assert.equal(soter,null);
 });
 
 test("editing one app mode preserves other app policies and removes only its own override", () => {

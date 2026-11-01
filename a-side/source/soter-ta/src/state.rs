@@ -111,6 +111,9 @@ pub struct UidState {
     /// different device to the server, so each one keeps its own sequence.
     #[serde(default)]
     pub counters: BTreeMap<String, u64>,
+    /// SOTER transactions this uid has issued, for the per-app badge.
+    #[serde(default)]
+    pub requests: u64,
     /// Identity this uid's material belongs to; None is the ledger-wide one.
     #[serde(default)]
     pub identity: Option<String>,
@@ -286,6 +289,12 @@ impl TaState {
     /// wall clock. Regenerating a key, re-importing material or clearing the
     /// ledger therefore cannot offer a verifier a value it already rejected, and
     /// the counter still increases by one for every signature afterwards.
+    /// Count one handled transaction for the application badge.
+    pub fn note_soter_request(&mut self, uid: u32) {
+        let entry = self.uids.entry(uid).or_default();
+        entry.requests = entry.requests.saturating_add(1);
+    }
+
     fn next_counter(&mut self, uid: u32) -> u64 {
         let floor = SystemTime::now()
             .duration_since(UNIX_EPOCH)

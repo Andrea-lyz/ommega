@@ -42,6 +42,8 @@ pub struct Response {
     pub shared: BTreeMap<String, Vec<String>>,
     /// Whether the software TA is switched on for the whole device.
     pub enabled: bool,
+    /// SOTER transactions per package, for the application badge.
+    pub counts: BTreeMap<String, u64>,
 }
 /// The packages sharing the requested package UID, when that UID has more than one.
 ///
@@ -69,6 +71,38 @@ fn shared_packages(raw: &str, package: &str) -> Option<Vec<String>> {
         .find(|group| group.len() > 1 && group.contains(package))
         .map(|group| group.iter().cloned().collect())
 }
+/// Transactions per installed package, so the app list can badge a row without
+/// asking the daemon once per application.
+fn request_counts(ledger: Option<&crate::state::TaState>, packages: &str) -> BTreeMap<String, u64> {
+    const MAX_ENTRIES: usize = 2048;
+    let Some(ledger) = ledger else {
+        return BTreeMap::new();
+    };
+    let mut names: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+    for line in packages.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(package), Some(uid)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if let Ok(uid) = uid.parse::<u32>() {
+            names.entry(uid).or_default().push(package.to_owned());
+        }
+    }
+    let mut counts = BTreeMap::new();
+    for (uid, entry) in &ledger.uids {
+        if entry.requests == 0 || counts.len() >= MAX_ENTRIES {
+            continue;
+        }
+        for package in names.get(uid).into_iter().flatten() {
+            if counts.len() >= MAX_ENTRIES {
+                break;
+            }
+            counts.insert(package.clone(), entry.requests);
+        }
+    }
+    counts
+}
+
 fn read_policy(path: &Path) -> Result<Option<String>, String> {
     match fs::read(path) {
         Ok(raw) => {
@@ -137,6 +171,10 @@ pub fn read_for(package: Option<&str>) -> Result<Response, String> {
             },
         );
     }
+    let counts = request_counts(
+        ledger.as_ref(),
+        &fs::read_to_string(identities::PACKAGES).unwrap_or_default(),
+    );
     let shared = package
         .filter(|package| identities::valid_package(package))
         .and_then(|package| {
@@ -153,6 +191,7 @@ pub fn read_for(package: Option<&str>) -> Result<Response, String> {
         warnings: Vec::new(),
         shared,
         enabled: Path::new(FLAG).is_file(),
+        counts,
     })
 }
 fn verify_expected(request: &Request, current: &Response) -> Result<(), String> {
@@ -394,6 +433,7 @@ mod tests {
             warnings: Vec::new(),
             shared: BTreeMap::new(),
             enabled: true,
+            counts: BTreeMap::new(),
         }
     }
     #[test]

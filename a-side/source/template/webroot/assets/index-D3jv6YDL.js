@@ -3232,6 +3232,8 @@ let ommegaDetail = null;
 let ommegaDetailSession = 0;
 let ommegaAppScopeSaving = false;
 let ommegaCertificateCounts = null;
+let ommegaSoterCounts = null;
+let ommegaSoterEnabled = false;
 let ommegaCountsBusy = false;
 
 async function ommegaReadAppFile(path) {
@@ -3419,6 +3421,18 @@ function ommegaUpdateAppCount(card) {
       ? ommegaDetailText("包含共享 UID 应用的成功远程证明调用", "Includes successful remote attestations from apps sharing this UID")
       : ommegaDetailText("成功的远程证明请求", "Successful remote attestation requests");
   }
+  // The SOTER badge only exists while SOTER is switched on; a disabled device
+  // would otherwise advertise counters that cannot grow.
+  const soterCount = ommegaSoterEnabled && ommegaSoterCounts ? Number(ommegaSoterCounts[pkg]) : 0;
+  let soterBadge = name.querySelector(".om-soter-count");
+  if (!Number.isSafeInteger(soterCount) || soterCount <= 0) { soterBadge?.remove(); }
+  else {
+    if (!soterBadge) { soterBadge = document.createElement("span"); soterBadge.className = "om-soter-count"; name.appendChild(soterBadge); }
+    const formatted = new Intl.NumberFormat().format(soterCount);
+    const label = ommegaDetailText("SOTER " + formatted + " 次", "SOTER " + formatted);
+    if (soterBadge.textContent !== label) soterBadge.textContent = label;
+    soterBadge.title = ommegaDetailText("该应用发起的 SOTER 请求次数", "SOTER requests from this application");
+  }
   const description = ommegaDetailText("打开应用设置", "Open app settings") + ": " + card.dataset.omOriginalName;
   card.setAttribute("aria-label", count ? description + ", " + badge.title + ": " + count.count : description);
   ommegaUpdateAppScope(card);
@@ -3432,6 +3446,11 @@ async function ommegaRefreshCertificateCounts() {
     ommegaCertificateCounts = state.attestation_counts && typeof state.attestation_counts === "object" && !Array.isArray(state.attestation_counts)
       ? state.attestation_counts : null;
   } catch (_) { ommegaCertificateCounts = null; }
+  try {
+    const soter = await ommegaSoterPolicy("soter-read");
+    ommegaSoterEnabled = soter ? soter.enabled !== false : false;
+    ommegaSoterCounts = soter && soter.counts && typeof soter.counts === "object" && !Array.isArray(soter.counts) ? soter.counts : null;
+  } catch (_) { ommegaSoterEnabled = false; ommegaSoterCounts = null; }
   finally {
     ommegaCountsBusy = false;
     document.querySelectorAll("#apps-list .card[data-package]").forEach(ommegaUpdateAppCount);

@@ -523,6 +523,7 @@ pub(crate) fn answer_with_policy(
         };
         if let Some(uid) = uid {
             shared.state.routing.configure_uid(uid, &uid_scope);
+            shared.state.note_soter_request(uid);
         }
         if matches!(selection, identities::Selection::Relay { .. }) {
             shared.state.bind_identity(uid, &selection);
