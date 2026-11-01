@@ -1,3 +1,14 @@
+Ommega 2.2.2
+
+- A 端 SOTER 支持按应用分配身份：本地随机 / 导入私钥 / 远程中继，每个应用单独指定；未指定时用默认身份。
+- A 端新增 SOTER 总控开关，关闭后所有应用回落到原厂 HAL，分配关系保留；界面移除「重启软件 TA」。
+- A 端应用列表新增「SOTER N 次」角标，仅在总控开启时显示，与「证书 N 次」同款样式、不同配色。
+- A 端 SOTER 身份管理改走 Rust 管理接口（soter-read / soter-write / soter-import），私钥只在设备端按路径读取。
+- 反回滚计数器改为每应用只增不减（带时钟下限），修复微信开通时 counter is not greater than that in server。
+- 中继身份按应用生效，支持 UID 映射与跳过 TLS 校验；具名中继不再收到本机账本设备 ID。
+- 修复自动认证签名的兼容性回归；看门狗状态备注改为按状态推导。
+- 本版只有 A 端模块与界面变化，B 端与 Server 无代码改动（版本号统一）。
+
 Ommega 2.2.1
 
 - B 端 service 启动时关闭 wlan0 Wi-Fi power-save，降低 relay 抖动。
