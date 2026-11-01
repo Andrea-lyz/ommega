@@ -207,9 +207,13 @@ fn counters_are_strictly_increasing_per_uid() {
     let (_, first) = state.export_ask(UID);
     let (_, second) = state.export_ask(UID);
     let (_, independent) = state.export_ask(other);
+    let (_, independent_again) = state.export_ask(other);
     assert_eq!(counter_of(&second), counter_of(&first) + 1);
     assert!(counter_of(&independent) > 0);
-    assert_ne!(counter_of(&independent), counter_of(&second));
+    // Each uid keeps its own monotonic sequence. It may equal another uid's
+    // value: two accounts can be served in the same second, so comparing across
+    // uids would make this test depend on a clock tick.
+    assert_eq!(counter_of(&independent_again), counter_of(&independent) + 1);
 }
 
 #[test]
