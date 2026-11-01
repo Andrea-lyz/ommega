@@ -439,6 +439,22 @@ converge() {
   return 0
 }
 
+# The note describes the record, so it is derived instead of remembered: a
+# re-enable while the daemon is already up must not publish a stale reason.
+status_note() {
+  # A disabled record never repeats a start failure from an earlier pass.
+  if [ "$g_enabled" = 0 ]; then
+    if [ "$g_owner" = us ] || [ -f "$MARKER" ]; then
+      printf '%s' "已停用，正在恢复原厂 HAL / disabled; restoring the stock HAL"
+    else
+      printf '%s' "已停用，原厂 HAL 已恢复 / disabled, stock HAL restored"
+    fi
+    return 0
+  fi
+  if [ -n "$g_note" ]; then printf '%s' "$g_note"; fi
+  return 0
+}
+
 print_status() {
   echo "enabled=$g_enabled"
   echo "running=$g_running"
@@ -452,14 +468,14 @@ print_status() {
   [ -n "$g_id_note" ] && echo "id_note=$g_id_note"
   echo "failures=$g_failures"
   echo "updated=$(date +%s)"
-  [ -n "$g_note" ] && echo "note=$g_note"
+  note=$(status_note); [ -n "$note" ] && echo "note=$note"
   return 0
 }
 
 # JSON is built by hand because the values are all ours: no quotes, no newlines.
 write_status() {
   mkdir -p "$TA_DIR"
-  body='{"enabled":'"$g_enabled"',"running":'"$g_running"',"pid":'"$g_pid"',"mode":"'"$g_mode"'","hal":"'"$g_hal"'","owner":"'"$g_owner"'","device_id":"'"$g_device_id"'","ledger":'"$g_ledger"',"id_changed":'"$g_id_changed"',"id_note":"'"$g_id_note"'","failures":'"$g_failures"',"updated":'"$(date +%s)"',"note":"'"$g_note"'"}'
+  body='{"enabled":'"$g_enabled"',"running":'"$g_running"',"pid":'"$g_pid"',"mode":"'"$g_mode"'","hal":"'"$g_hal"'","owner":"'"$g_owner"'","device_id":"'"$g_device_id"'","ledger":'"$g_ledger"',"id_changed":'"$g_id_changed"',"id_note":"'"$g_id_note"'","failures":'"$g_failures"',"updated":'"$(date +%s)"',"note":"'"$(status_note)"'"}'
   if [ "$body" != "$g_last_body" ] || [ $(( $(date +%s) - g_last_write )) -ge "$HEARTBEAT" ]; then
     printf '%s\n' "$body" > "$STATUS.tmp"
     chmod 0644 "$STATUS.tmp" 2>/dev/null
