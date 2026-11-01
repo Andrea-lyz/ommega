@@ -18,6 +18,8 @@ use kmr_common::crypto::Ec as _;
 use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
 use p256::ecdsa::SigningKey as SkP256;
 use p384::ecdsa::SigningKey as SkP384;
+use p521::ecdsa::SigningKey as SkP521;
+use p521::ecdsa::VerifyingKey as VkP521;
 
 const MESSAGE: &[u8] = b"ommega ecdsa signing";
 
@@ -81,6 +83,46 @@ fn ecdsa_sign_uses_the_requested_digest() {
             );
         }
     }
+}
+
+fn p521_verifying_key(private: &[u8]) -> VkP521 {
+    VkP521::from(&SkP521::from_slice(private).expect("P-521 key"))
+}
+
+/// P-521 signing used to fail with `UnsupportedEcCurve` for every request, which
+/// AndroidKeyStore surfaced as SignatureException: an application that created a
+/// secp521r1 key simply could not sign. AOSP signs these through BoringSSL, and
+/// AndroidKeyStore also allows a P-521 key restricted to SHA-256, where the digest
+/// is shorter than the field and has to be left-padded into the 66-byte `z`.
+#[test]
+fn ecdsa_p521_signs_every_requested_digest() {
+    let (key, private) = test_key(ec::NistCurve::P521);
+    let verifying = p521_verifying_key(&private);
+    for digest in [Digest::Sha256, Digest::Sha384, Digest::Sha512] {
+        let signature = sign(&key, digest, MESSAGE);
+        let hashed = hash_digest(digest, MESSAGE).expect("digest");
+        let z = prehash_to_field_bytes(ec::NistCurve::P521, &hashed).expect("z value");
+        let signature = SigP521::from_der(&signature).expect("DER signature");
+        assert!(
+            verifying.verify_prehash(&z, &signature).is_ok(),
+            "P-521 with {digest:?} must sign the requested digest"
+        );
+    }
+}
+
+/// `Digest::None` signs the input as the prehash, which for P-521 is the 66-byte
+/// `z` value itself.
+#[test]
+fn ecdsa_p521_sign_with_no_digest_signs_the_input_as_a_prehash() {
+    let (key, private) = test_key(ec::NistCurve::P521);
+    let verifying = p521_verifying_key(&private);
+    // P-521 coordinates are 66 bytes; `coord_len` is not const, so name the size.
+    let z = [0x5au8; 66];
+    let signature = SigP521::from_der(&sign(&key, Digest::None, &z)).expect("DER signature");
+    assert!(
+        verifying.verify_prehash(&z, &signature).is_ok(),
+        "Digest::None must sign the input as a prehash"
+    );
 }
 
 /// Digest::None means the caller supplies the hash, so the input must be signed

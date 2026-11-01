@@ -21,17 +21,19 @@
 use der::Decode as _;
 use der::Encode as _;
 use ecdsa::signature::hazmat::PrehashSigner as _;
+use ecdsa::signature::hazmat::RandomizedPrehashSigner as _;
 use ecdsa::signature::SignatureEncoding as _;
 use ecdsa::SigningKey as EcdsaSigningKey;
 use kmr_common::{
     crypto,
     crypto::{ec, ec::Key, AccumulatingOperation, CurveType, OpaqueOr},
-    explicit, km_err, Error, FallibleAllocExt,
+    explicit, km_err, vec_try, Error, FallibleAllocExt,
 };
 use kmr_wire::keymint::{self, Digest, EcCurve};
 use p224::ecdsa::Signature as SigP224;
 use p256::ecdsa::Signature as SigP256;
 use p384::ecdsa::Signature as SigP384;
+use p521::ecdsa::Signature as SigP521;
 
 use elliptic_curve::sec1::ToEncodedPoint as _;
 use sec1::EcPrivateKey;
@@ -426,15 +428,39 @@ fn sign_ecdsa_prehash(key: &Key, curve: ec::NistCurve, prehash: &[u8]) -> Result
             s.to_der().to_vec()
         }
         ec::NistCurve::P521 => {
-            // RustCrypto's P-521 has no `DigestPrimitive`/`PrehashSigner` impl, so
-            // signing is unsupported here. (P-256/P-384 cover normal usage.)
-            return Err(km_err!(
-                UnsupportedEcCurve,
-                "P-521 ECDSA signing unsupported"
-            ));
+            // The generic `ecdsa::SigningKey<NistP521>` has no `DigestPrimitive`,
+            // so the shared `sign_prehash` path does not exist for this curve.
+            // `p521::ecdsa::SigningKey` implements `RandomizedPrehashSigner`
+            // itself; feed it the platform RNG and the same `z` value the other
+            // curves derive through `bits2field`.
+            let z = prehash_to_field_bytes(ec::NistCurve::P521, prehash)?;
+            let sk = p521::ecdsa::SigningKey::from_slice(&priv_bytes)
+                .map_err(|e| km_err!(UnknownError, "P-521 key: {e:?}"))?;
+            let s: SigP521 = sk
+                .sign_prehash_with_rng(&mut rand_core::OsRng, &z)
+                .map_err(|e| km_err!(UnknownError, "P-521 ECDSA sign failed: {e:?}"))?;
+            s.to_der().to_vec()
         }
     };
     Ok(sig)
+}
+
+/// Build the ECDSA `z` value for a prehash the way OpenSSL does.
+///
+/// A digest shorter than the curve order is used as a big-endian integer, which
+/// is the same as left-padding it with zeros; a longer one keeps its most
+/// significant bytes. RustCrypto's `bits2field` agrees for 33 bytes and up, but
+/// rejects anything shorter than half the field, which would leave a P-521 key
+/// created with a SHA-256 digest (KeyMint allows it) unsignable.
+fn prehash_to_field_bytes(curve: ec::NistCurve, prehash: &[u8]) -> Result<Vec<u8>, Error> {
+    let width = curve.coord_len();
+    let mut z = vec_try![0; width]?;
+    if prehash.len() >= width {
+        z.copy_from_slice(&prehash[..width]);
+    } else {
+        z[width - prehash.len()..].copy_from_slice(prehash);
+    }
+    Ok(z)
 }
 
 /// EdDSA signing operation for Ed25519.
