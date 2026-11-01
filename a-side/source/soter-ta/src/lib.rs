@@ -19,6 +19,8 @@ pub mod blob;
 pub mod dispatch;
 pub mod error;
 pub mod ffi;
+pub mod identities;
+pub mod management;
 pub mod parcel;
 pub mod platform;
 pub mod remote;
@@ -30,5 +32,7 @@ pub use error::{
 };
 pub use state::TaState;
 
+#[cfg(test)]
+mod identity_tests;
 #[cfg(test)]
 mod tests;

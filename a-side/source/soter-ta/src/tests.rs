@@ -621,6 +621,7 @@ fn dead_replies_match_captured_hal_failures() {
 /// disk. Everything the daemon needs must work without a parcel.
 #[test]
 fn ffi_serves_the_daemon_path_end_to_end() {
+    let _guard = crate::ffi::TEST_LOCK.lock().unwrap();
     use crate::ffi::{self, SotertaReply};
     use std::ffi::{c_char, CStr, CString};
     use std::ptr;

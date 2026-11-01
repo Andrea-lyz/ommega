@@ -1,6 +1,6 @@
 //! Creation-time policy for A-authorized remote signing. No routing or app-name heuristics.
 
-use kmr_wire::keymint::{Algorithm, KeyParam, KeyPurpose};
+use kmr_wire::keymint::{Algorithm, Digest, EcCurve, KeyParam, KeyPurpose};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -80,17 +80,57 @@ pub fn eligible(params: &[KeyParam]) -> bool {
         && !params.iter().any(|p| matches!(p, KeyParam::NoAuthRequired | KeyParam::TrustedUserPresenceRequired | KeyParam::TrustedConfirmationRequired | KeyParam::AllowWhileOnBody))
 }
 
-/// Aliases are application-owned names, not evidence for an authentication policy.
-/// Auto preserves the requested hardware authorization. Relaxing it requires an
-/// explicit compatibility setting for the caller.
-pub fn authorize_on_a(mode: Mode, _alias: Option<&str>, params: &[KeyParam]) -> bool {
-    eligible(params) && matches!(mode, Mode::Compatibility)
+/// Recognize one known authentication probe by its full creation contract.
+/// An alias alone, a random challenge or an auth type is never sufficient.
+pub fn known_probe(alias: Option<&str>, params: &[KeyParam]) -> bool {
+    let Some(uuid) = alias.and_then(|name| name.strip_prefix("TrustAttestor_silent_auth_")) else {
+        return false;
+    };
+    let bytes = uuid.as_bytes();
+    let uuid_v4 = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B');
+
+    uuid_v4
+        && eligible(params)
+        && params.contains(&KeyParam::Algorithm(Algorithm::Ec))
+        && params.contains(&KeyParam::EcCurve(EcCurve::P256))
+        && params.contains(&KeyParam::Purpose(KeyPurpose::Verify))
+        && params.contains(&KeyParam::Digest(Digest::Sha256))
+        && params.contains(&KeyParam::UserAuthType(3))
+        && params
+            .iter()
+            .any(|p| matches!(p, KeyParam::AttestationChallenge(value) if value.len() == 32))
+        && !params
+            .iter()
+            .any(|p| matches!(p, KeyParam::AuthTimeout(value) if *value != 0))
+        && !params
+            .iter()
+            .any(|p| matches!(p, KeyParam::Digest(value) if *value != Digest::Sha256))
+        && !params.contains(&KeyParam::UnlockedDeviceRequired)
+}
+
+/// Auto uses payment compatibility except for a recognized probe. The choice
+/// changes only this new key's authorization placement, never caller routing.
+pub fn authorize_on_a(mode: Mode, alias: Option<&str>, params: &[KeyParam]) -> bool {
+    eligible(params)
+        && match mode {
+            Mode::Auto => !known_probe(alias, params),
+            Mode::Compatibility => true,
+            Mode::Preserve => false,
+        }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kmr_wire::keymint::{Digest, EcCurve};
     const ALIAS: &str = "TrustAttestor_silent_auth_14c21f61-4c15-4e09-92d7-3a33d665458c";
 
     fn probe() -> Vec<KeyParam> {
@@ -107,24 +147,66 @@ mod tests {
     }
 
     #[test]
-    fn auto_and_preserve_are_alias_independent() {
-        let mut timed = probe();
-        timed.push(KeyParam::AuthTimeout(30));
-        let mut unlocked = probe();
-        unlocked.push(KeyParam::UnlockedDeviceRequired);
-        for params in [probe(), timed, unlocked] {
-            for alias in [
-                None,
-                Some("payment"),
-                Some(ALIAS),
-                Some("TrustAttestor_silent_auth_bad"),
-                Some("arbitrary-auth-key"),
-            ] {
-                assert!(!authorize_on_a(Mode::Auto, alias, &params));
-                assert!(!authorize_on_a(Mode::Preserve, alias, &params));
-                assert!(authorize_on_a(Mode::Compatibility, alias, &params));
-            }
+    fn auto_defaults_to_payment_compatibility_and_respects_explicit_modes() {
+        for alias in [
+            None,
+            Some("ommega-auth-repro"),
+            Some("payment"),
+            Some("arbitrary-auth-key"),
+            Some("TrustAttestor_silent_auth_bad"),
+            Some("TrustAttestor_silent_other_14c21f61-4c15-4e09-92d7-3a33d665458c"),
+        ] {
+            let params = probe();
+            assert!(authorize_on_a(Mode::Auto, alias, &params));
+            assert!(authorize_on_a(Mode::Compatibility, alias, &params));
+            assert!(!authorize_on_a(Mode::Preserve, alias, &params));
         }
+        let params = probe();
+        assert!(known_probe(Some(ALIAS), &params));
+        assert!(!authorize_on_a(Mode::Auto, Some(ALIAS), &params));
+        assert!(authorize_on_a(Mode::Compatibility, Some(ALIAS), &params));
+        assert!(!authorize_on_a(Mode::Preserve, Some(ALIAS), &params));
+    }
+
+    #[test]
+    fn a_probe_name_without_the_full_probe_contract_stays_compatible() {
+        let mutations = [
+            (KeyParam::AuthTimeout(30), None),
+            (KeyParam::UnlockedDeviceRequired, None),
+            (KeyParam::UserAuthType(2), Some(KeyParam::UserAuthType(3))),
+            (
+                KeyParam::AttestationChallenge(vec![7; 16]),
+                Some(KeyParam::AttestationChallenge(vec![7; 32])),
+            ),
+            (
+                KeyParam::EcCurve(EcCurve::P384),
+                Some(KeyParam::EcCurve(EcCurve::P256)),
+            ),
+            (
+                KeyParam::Digest(Digest::Sha512),
+                Some(KeyParam::Digest(Digest::Sha256)),
+            ),
+        ];
+        for (extra, removed) in mutations {
+            let mut params = probe();
+            if let Some(removed) = removed {
+                params.retain(|p| p != &removed);
+            }
+            params.push(extra);
+            assert!(!known_probe(Some(ALIAS), &params));
+            assert!(authorize_on_a(Mode::Auto, Some(ALIAS), &params));
+        }
+        for alias in [
+            "TrustAttestor_silent_auth_14c21f61-4c15-1e09-92d7-3a33d665458c",
+            "TrustAttestor_silent_auth_14c21f61-4c15-4e09-12d7-3a33d665458c",
+            "TrustAttestor_silent_auth_14c21f61-4c15-4e09-92d7-3a33d665458c-extra",
+        ] {
+            assert!(!known_probe(Some(alias), &probe()));
+            assert!(authorize_on_a(Mode::Auto, Some(alias), &probe()));
+        }
+        let mut params = probe();
+        params.retain(|p| *p != KeyParam::Purpose(KeyPurpose::Verify));
+        assert!(!known_probe(Some(ALIAS), &params));
     }
 
     #[test]
@@ -139,7 +221,9 @@ mod tests {
         ] {
             let mut params = probe();
             params.push(extra);
-            assert!(!authorize_on_a(Mode::Compatibility, None, &params));
+            for mode in [Mode::Auto, Mode::Compatibility, Mode::Preserve] {
+                assert!(!authorize_on_a(mode, None, &params));
+            }
         }
         let mut params = probe();
         params.retain(|p| !matches!(p, KeyParam::UserSecureId(_)));
@@ -177,6 +261,24 @@ mod tests {
         assert!(config.validate().is_ok());
         config.apps.insert("com.bad;command".into(), Mode::Auto);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn app_auto_override_restores_payment_compatibility_under_preserve_default() {
+        let config = Config {
+            default: Mode::Preserve,
+            apps: BTreeMap::from([("com.ommega.authrepro".into(), Mode::Auto)]),
+            ..Config::default()
+        };
+        let mode = config.mode_for_packages(["com.ommega.authrepro"]);
+        assert!(authorize_on_a(mode, Some("ommega-auth-repro"), &probe()));
+        assert!(!authorize_on_a(mode, Some(ALIAS), &probe()));
+        let inherited = config.mode_for_packages(["com.other.app"]);
+        assert!(!authorize_on_a(
+            inherited,
+            Some("ommega-auth-repro"),
+            &probe()
+        ));
     }
 
     #[test]

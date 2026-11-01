@@ -4,12 +4,78 @@
 const OMMEGA_APP_TARGET = "/data/adb/ommega/ommegadata/target.txt";
 const OMMEGA_SYSTEM_APPS = "/data/adb/ommega/ommegadata/system_app";
 const OMMEGA_LOCAL_KEYGEN = "/data/adb/ommega/ommegadata/data/local-keygen.txt";
+const OMMEGA_SOTER_TYPES = {local:["本地随机","Local"],key:["私钥","Key"],relay:["中继","Relay"]};
+function ommegaSoterPolicy(operation,payload=null,packageName=null) {
+  const detail={operation,payload,package:packageName,promise:null};
+  document.dispatchEvent(new CustomEvent("ommega-soter-policy",{detail}));
+  return detail.promise || Promise.reject(new Error(ommegaDetailText("SOTER 管理接口尚未就绪，请重新打开页面。","SOTER management is not ready; reopen this page.")));
+}
+async function ommegaLoadSoterOptions(pkg,session) {
+  const host=document.getElementById("om-detail-soter-options");if(!host)return;
+  let base;
+  try {base=await ommegaSoterPolicy("soter-read",null,pkg);} catch(error) {
+    if(!ommegaDetailCurrent(session)||document.getElementById("om-detail-soter-options")!==host)return;
+    host.innerHTML=ommegaDetailRow(ommegaDetailText("默认","Default"),ommegaDetailText("读取失败，未修改当前分配。","Read failed; the current assignment is unchanged."),'<input type="radio" name="om-app-soter" value="" disabled>');
+    ommegaDetailMessage("om-detail-soter-status",String(error.message||error),true);return;
+  }
+  if(!ommegaDetailCurrent(session)||document.getElementById("om-detail-soter-options")!==host)return;
+  const store=base.store,current=store.apps[pkg]||"";
+  const radio=(value,title,description,disabled)=>ommegaDetailRow(title,description,'<input type="radio" name="om-app-soter" value="'+ommegaEsc(value)+'"'+(current===value?' checked':'')+(disabled?' disabled':'')+'>');
+  const inherited=store.identities.find(i=>i.id===store.default);
+  const description=inherited?ommegaDetailText("跟随默认身份：","Default identity: ")+inherited.name:ommegaDetailText("使用兼容的全局 SOTER 配置。","Use the legacy global SOTER configuration.");
+  let body=radio("",ommegaDetailText("默认","Default"),description,!store.identities.length);
+  for(const item of store.identities) {
+    const type=OMMEGA_SOTER_TYPES[item.type]||[item.type,item.type];const state=base.status[item.id];
+    const hint=ommegaDetailText(type[0],type[1])+(state?.ready?'':ommegaDetailText(" · 尚未配置完整"," · incomplete"));
+    body+=radio(item.id,item.name,hint,!state?.ready);
+  }
+  if(!store.identities.length)body+='<p class="om-detail-status">'+ommegaDetailText("还没有添加身份，请在「设置 → SOTER」里添加。","No identities yet. Add one under Settings → SOTER.")+'</p>';
+  body+='<p class="om-detail-status">'+ommegaDetailText("切换身份会作废旧注册与签名会话。共享 UID 的应用必须使用同一身份。","Switching invalidates old registrations and sign sessions. Apps sharing a UID must use the same identity.")+'</p>';
+  // While SOTER is switched off nothing an application asks for reaches the TA,
+  // so the card must not look like a live choice.
+  if (base.enabled === false) {
+    host.innerHTML = ommegaDetailRow(ommegaDetailText("默认","Default"),
+      ommegaDetailText("SOTER 已在「设置 → SOTER」中关闭，所有应用暂时回落到原厂 HAL。","SOTER is switched off under Settings → SOTER; every app falls back to the stock HAL."),
+      '<input type="radio" name="om-app-soter" value="" checked disabled>') +
+      '<p class="om-detail-status">' + ommegaDetailText("启用后这里的选择才会生效。","These choices apply again once it is enabled.") + '</p>';
+    return;
+  }
+  host.innerHTML=body;
+  let saving=false;
+  host.querySelectorAll('input[name="om-app-soter"]').forEach(input=>{
+    input.onchange=async()=>{
+      if(saving)return;saving=true;
+      const controls=[...host.querySelectorAll('input[name="om-app-soter"]')];controls.forEach(i=>i.disabled=true);
+      const previous=base.store.apps[pkg]||"";
+      try {
+        if(!window.confirm(ommegaDetailText("切换 SOTER 身份可能需要重新开通应用内指纹功能。继续？","Changing the SOTER identity may require registering fingerprint features again. Continue?")))return;
+        const group=base.shared?.[pkg]||[pkg];
+        if(group.length>1&&!window.confirm(ommegaDetailText("此选择将同时应用到共享 UID 的应用：","This also applies to apps sharing the UID: ")+group.join(", ")))return;
+        const candidate=JSON.parse(JSON.stringify(base.store));for(const name of group){if(input.value)candidate.apps[name]=input.value;else delete candidate.apps[name];}
+        const result=await ommegaSoterPolicy("soter-write",{expected:base.expected??null,legacy_revision:base.legacy_revision??null,store:candidate});
+        if(!ommegaDetailCurrent(session)||document.getElementById("om-detail-soter-options")!==host)return;
+        base=result;ommegaDetailMessage("om-detail-soter-status",ommegaDetailText("已保存；将用于新的 SOTER 调用。","Saved for new SOTER calls."));
+      } catch(error) {
+        if(ommegaDetailCurrent(session))ommegaDetailMessage("om-detail-soter-status",String(error.message||error),true);
+      } finally {
+        saving=false;
+        if(ommegaDetailCurrent(session)&&document.getElementById("om-detail-soter-options")===host) {
+          const selected=base.store.apps[pkg]||"";
+          controls.forEach(i=>{i.checked=i.value===selected;i.disabled=i.value? !base.status[i.value]?.ready:!base.store.identities.length;});
+        }
+      }
+    };
+  });
+}
+
 let ommegaTargetSnapshot = undefined;
 let ommegaTargetSnapshotGeneration = 0;
 let ommegaDetail = null;
 let ommegaDetailSession = 0;
 let ommegaAppScopeSaving = false;
 let ommegaCertificateCounts = null;
+let ommegaSoterCounts = null;
+let ommegaSoterEnabled = false;
 let ommegaCountsBusy = false;
 
 async function ommegaReadAppFile(path) {
@@ -197,6 +263,18 @@ function ommegaUpdateAppCount(card) {
       ? ommegaDetailText("包含共享 UID 应用的成功远程证明调用", "Includes successful remote attestations from apps sharing this UID")
       : ommegaDetailText("成功的远程证明请求", "Successful remote attestation requests");
   }
+  // The SOTER badge only exists while SOTER is switched on; a disabled device
+  // would otherwise advertise counters that cannot grow.
+  const soterCount = ommegaSoterEnabled && ommegaSoterCounts ? Number(ommegaSoterCounts[pkg]) : 0;
+  let soterBadge = name.querySelector(".om-soter-count");
+  if (!Number.isSafeInteger(soterCount) || soterCount <= 0) { soterBadge?.remove(); }
+  else {
+    if (!soterBadge) { soterBadge = document.createElement("span"); soterBadge.className = "om-soter-count"; name.appendChild(soterBadge); }
+    const formatted = new Intl.NumberFormat().format(soterCount);
+    const label = ommegaDetailText("SOTER " + formatted + " 次", "SOTER " + formatted);
+    if (soterBadge.textContent !== label) soterBadge.textContent = label;
+    soterBadge.title = ommegaDetailText("该应用发起的 SOTER 请求次数", "SOTER requests from this application");
+  }
   const description = ommegaDetailText("打开应用设置", "Open app settings") + ": " + card.dataset.omOriginalName;
   card.setAttribute("aria-label", count ? description + ", " + badge.title + ": " + count.count : description);
   ommegaUpdateAppScope(card);
@@ -210,6 +288,11 @@ async function ommegaRefreshCertificateCounts() {
     ommegaCertificateCounts = state.attestation_counts && typeof state.attestation_counts === "object" && !Array.isArray(state.attestation_counts)
       ? state.attestation_counts : null;
   } catch (_) { ommegaCertificateCounts = null; }
+  try {
+    const soter = await ommegaSoterPolicy("soter-read");
+    ommegaSoterEnabled = soter ? soter.enabled !== false : false;
+    ommegaSoterCounts = soter && soter.counts && typeof soter.counts === "object" && !Array.isArray(soter.counts) ? soter.counts : null;
+  } catch (_) { ommegaSoterEnabled = false; ommegaSoterCounts = null; }
   finally {
     ommegaCountsBusy = false;
     document.querySelectorAll("#apps-list .card[data-package]").forEach(ommegaUpdateAppCount);
@@ -597,10 +680,13 @@ function ommegaOpenAppDetail(card) {
       ommegaDetailRadio("om-app-mode", "tee", "TEE", ommegaDetailText("为此应用选择 TEE。", "Use TEE for this app."))) +
       '<p class="om-detail-status" id="om-detail-mode-status" role="status"></p>') +
     ommegaDetailCard('lock', ommegaDetailText("认证签名策略", "Authentication signing"), ommegaDetailText("选择一项", "Choose one"),
-      (ommegaDetailRadio("om-app-auth", "auto", ommegaDetailText("自动", "Auto"), ommegaDetailText("按自动策略处理。", "Use the automatic policy.")) +
+      (ommegaDetailRadio("om-app-auth", "auto", ommegaDetailText("自动", "Auto"), ommegaDetailText("已知认证检测探针保留认证要求，其余符合条件的请求使用支付兼容。", "Preserve known authentication probes; use payment compatibility for other eligible requests.")) +
       ommegaDetailRadio("om-app-auth", "compatibility", ommegaDetailText("支付兼容", "Payment compatibility"), ommegaDetailText("在本机验证认证，由远端签名。", "Authenticate locally and sign remotely.")) +
       ommegaDetailRadio("om-app-auth", "preserve", ommegaDetailText("保持认证要求", "Preserve authentication"), ommegaDetailText("远端保留认证要求。", "Keep the remote authentication requirement."))) +
       '<p class="om-detail-status" id="om-detail-auth-status" role="status"></p>') +
+    ommegaDetailCard('shield', ommegaDetailText("SOTER 身份", "SOTER identity"), ommegaDetailText("选择一项", "Choose one"),
+      '<div id="om-detail-soter-options"><p class="om-detail-status">' + ommegaDetailText("正在读取身份…", "Reading identities…") + '</p></div>' +
+      '<p class="om-detail-status" id="om-detail-soter-status" role="status"></p>') +
     ommegaDetailCard('cpu', ommegaDetailText("本地 keygen 时序整形（EWMA）", "Local keygen timing (EWMA)"), ommegaDetailText("仅用于有时序要求的检测器；日常不推荐开启。", "For timing-sensitive detectors only; not recommended for daily use."),
       ommegaDetailRow(ommegaDetailText("启用 EWMA 补时", "Enable EWMA equalization"), ommegaDetailText("将本应用远程-本地差值维持在约 85ms 内，尽量减少本地补时；默认关闭。", "Keep the remote-local delta near 85ms with minimal local padding; off by default."), '<input id="om-detail-local-timing" type="checkbox" role="switch">') +
       '<p class="om-detail-status" id="om-detail-local-timing-status" role="status"></p>') +
@@ -620,6 +706,7 @@ function ommegaOpenAppDetail(card) {
   const localTiming = document.getElementById("om-detail-local-timing");
   if (localTiming) localTiming.onchange = event => ommegaDetailSaveLocalTiming(event.target);
   document.getElementById("om-detail-cpu").onchange = event => ommegaDetailSaveCpu(event.target);
+  ommegaLoadSoterOptions(pkg, session);
   document.getElementById("om-detail-cpu-settings").onclick = () => {
     for (const id of ["ommega-cpu-policy-dialog", "ommega-cpu-app-dialog"]) {
       const dialog = document.getElementById(id); if (dialog && dialog.parentNode !== document.body) document.body.appendChild(dialog);

@@ -22,6 +22,7 @@ name = "ommega-capability-policy"
 path = "src/bin/capability-policy.rs"
 
 [dependencies]
+soter-ta = { path = "soter-ta" }
 kmr-common = { path = "common" }
 kmr-crypto-ommega = { path = "crypto" }
 kmr-ta = { path = "ta" }

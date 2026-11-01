@@ -17,8 +17,11 @@ use der::Decode;
 
 use crate::{attestation_counts, plat::aaid::AttestationApplicationId};
 
+// Android uses OS-backed TLS: even a const block expands into a runtime init
+// function, which Clippy 1.96 incorrectly flags as missing const. Default makes
+// the same empty per-thread stack without that affected macro expansion.
 thread_local! {
-    static REQUESTS: RefCell<Vec<RequestState>> = const { RefCell::new(Vec::new()) };
+    static REQUESTS: RefCell<Vec<RequestState>> = RefCell::default();
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -233,6 +236,36 @@ mod tests {
         }
         .to_der()
         .unwrap()
+    }
+
+    #[test]
+    fn request_stacks_are_thread_local_and_scoped() {
+        REQUESTS.with(|requests| assert!(requests.borrow().is_empty()));
+        let mut outer = begin_request();
+        mark_verified(&app_id(&["com.example.outer"]), Some(120));
+        std::thread::spawn(|| {
+            REQUESTS.with(|requests| assert!(requests.borrow().is_empty()));
+            let mut inner = begin_request();
+            mark_verified(&app_id(&["com.example.worker"]), Some(50));
+            assert_eq!(
+                inner.take(),
+                Some(Observation {
+                    packages: vec!["com.example.worker".into()],
+                    latency_ms: Some(50),
+                })
+            );
+            REQUESTS.with(|requests| assert!(requests.borrow().is_empty()));
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            outer.take(),
+            Some(Observation {
+                packages: vec!["com.example.outer".into()],
+                latency_ms: Some(120),
+            })
+        );
+        REQUESTS.with(|requests| assert!(requests.borrow().is_empty()));
     }
 
     #[test]

@@ -5,7 +5,7 @@ authentication-signing keys. It has three modes:
 
 | Mode | New eligible key |
 | --- | --- |
-| Auto (default) | Preserve the requested B authentication policy for every alias. Payment compatibility must be selected explicitly. |
+| Auto (default) | Preserve the requested B authentication policy for a recognized probe; use payment compatibility for other eligible requests. |
 | Payment compatibility | A authenticates the operation; a physical no-auth key on B signs it. |
 | Preserve authentication | Send the original authentication requirements to B. A's HAT cannot authenticate to B, so real authenticated operations can still fail with -26. |
 
@@ -45,12 +45,22 @@ No credential, CE super-key, request-flag or key-storage policy is changed.
 
 ## Creation policy
 
-Auto and Preserve send the caller's original authentication requirements to B,
-including authentication type, timeout and the unlocked-device requirement.
-Application aliases, UUIDs, challenge shapes and detector names never change
-this decision. A hardware-bound B key cannot be authenticated with A's HAT;
-applications that require A-authorized remote signing must explicitly select
-Payment compatibility and accept its different certificate policy.
+Auto makes a decision for each new key. Its known authentication probe must
+match the complete TrustAttestor creation contract: alias
+`TrustAttestor_silent_auth_<UUID-v4>`, EC P-256, SIGN/VERIFY, SHA-256, auth type 3,
+a 32-byte attestation challenge, per-operation authentication (timeout absent
+or zero), and no unlocked-device requirement. The general eligibility checks
+above also apply. A probe name alone or generic biometric key parameters do not
+select preservation. Unknown patterns use payment compatibility. Recognition
+does not use a package-name list or classify all keys belonging to one app.
+
+Preserve always sends the original requested authentication policy to B.
+Payment compatibility always uses A-authorized B signing for eligible keys,
+including recognized probes. These explicit choices override Auto recognition.
+B's real certificate is returned unchanged in every case. A hardware-bound B
+key cannot be authenticated with A's HAT; preserved keys can therefore return
+-26 after A authentication. Probe acceptance does not establish hardware user
+authentication guarantees for the other, compatible keys.
 
 The decision is resolved once per creation and reused through retries. There is
 no mutable global or thread-local request mode. Existing keys are not changed.

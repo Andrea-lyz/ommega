@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::dispatch::{self, Outcome, Request};
+use crate::identities;
 use crate::platform::{self, Platform};
 use crate::remote;
 use crate::routing::Backend;
@@ -63,6 +64,8 @@ struct Shared {
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// A missing config after remote mode was active must not silently switch the
 /// native HAL to a different local key identity.
@@ -367,102 +370,250 @@ pub(crate) fn answer_request(
     relay_active: bool,
     forward: impl FnOnce(&remote::Config, u32, &Request, &str) -> Result<Option<Outcome>, String>,
 ) -> Result<Option<Outcome>, String> {
-    // ATTK stays local, including when a remote configuration is unreadable.
-    let relay = relays(relay_active, tx);
-    let scope = match &remote_config {
-        Ok(config) if config.enabled => Some(config.route_scope()),
-        Ok(_) if !relay_active => Some("local".to_owned()),
-        _ if relay => return Err("SOTER remote config is unavailable while active".into()),
-        _ => None,
+    #[cfg(not(test))]
+    let _policy_guard = identities::lock_policy(false)?;
+    #[cfg(not(test))]
+    let policy = identities::Snapshot::load()?;
+    #[cfg(test)]
+    let policy = identities::Snapshot::absent();
+    let packages = if policy.store.apps.is_empty() {
+        String::new()
+    } else {
+        std::fs::read_to_string(identities::PACKAGES)
+            .map_err(|_| "Cannot resolve SOTER caller packages")?
     };
-    let (mut route, cpu_id, scope_changed) = {
+    answer_with_policy(
+        tx,
+        request,
+        remote_config,
+        relay_active,
+        &policy,
+        &packages,
+        forward,
+    )
+}
+
+pub(crate) fn answer_with_policy(
+    tx: u32,
+    request: Request,
+    remote_config: Result<remote::Config, String>,
+    relay_active: bool,
+    policy: &identities::Snapshot,
+    packages: &str,
+    forward: impl FnOnce(&remote::Config, u32, &Request, &str) -> Result<Option<Outcome>, String>,
+) -> Result<Option<Outcome>, String> {
+    let uid = if let Request::Session(handle) = &request {
+        let slot = lock(&SHARED);
+        let shared = slot.as_ref().ok_or("state is not initialized")?;
+        Some(
+            shared
+                .state
+                .routing
+                .session_uid(*handle)
+                .ok_or("Unknown SOTER sign session")?,
+        )
+    } else {
+        remote::request_uid(&request)
+    };
+    // getDeviceId and the ATTK trio carry no caller UID, so they cannot know which
+    // application is asking. They answer with the configured default identity -
+    // the device identity - and never relay: routing an unattributable call would
+    // hand one application another device's identity, and a relay that happens to
+    // be down would make a healthy TA look dead during registration.
+    //
+    // A client that compares getDeviceId with the cpu_id inside its own ASK is
+    // therefore consistent as long as it uses the default identity. An application
+    // given a different identity carries a different device id by design, which no
+    // UID-less call can report; that mismatch is inherent to per-app identities.
+    if uid.is_none() {
+        policy.unchanged()?;
         let mut slot = lock(&SHARED);
         let shared = slot.as_mut().ok_or("state is not initialized")?;
-        let changed = scope
-            .as_ref()
-            .is_some_and(|scope| !shared.state.routing.is_scope(scope));
-        if let Some(scope) = &scope {
-            shared.state.routing.configure(scope);
+        if shared.state.identity_policy_seen && !policy.present {
+            return Err("SOTER identity policy disappeared; refusing to change identities".into());
         }
-        (
-            shared.state.routing.prepare(relay, tx, request)?,
-            shared.state.cpu_id.clone(),
-            changed,
-        )
+        if policy.present {
+            shared.state.identity_policy_canonical |= policy.is_canonical();
+            shared.state.identity_policy_seen = true;
+            shared.state.reconcile_identities(&policy.store);
+        }
+        // A relay default has no local material, and an unusable default must not
+        // break device metadata; both fall back to the ledger identity.
+        let metadata = match policy.resolve(None, "") {
+            Ok(selection @ identities::Selection::Local { .. })
+            | Ok(selection @ identities::Selection::Key { .. }) => selection,
+            _ => identities::Selection::Global,
+        };
+        let outcome = dispatch::handle_request_with_identity(
+            &mut shared.state,
+            tx,
+            request,
+            Platform::default(),
+            &metadata,
+        )?;
+        shared
+            .state
+            .store(&shared.path)
+            .map_err(|e| e.to_string())?;
+        return Ok(outcome);
+    }
+    // Resolve once. Errors cannot clear keys, select defaults, or change backend.
+    //
+    // getDeviceId and the ATTK trio carry no caller UID, so they cannot know
+    // which application is asking. They keep the ledger-wide identity instead of
+    // guessing: a client whose ASK uses an imported identity normally imports
+    // that device's own ATTK, which is exactly the global one, and every other
+    // client still sees the id it has always seen. Refusing instead would look
+    // like a dead TA and break registration in every application.
+    let selection = policy.resolve(uid, packages)?;
+    policy.unchanged()?;
+    let (config, relay, legacy) = match &selection {
+        identities::Selection::Relay { config, .. } => {
+            if dispatch::ATTK_TRANSACTIONS.contains(&tx) {
+                return Err("Relay identities do not expose local ATTK material".into());
+            }
+            (Some(config.clone()), true, false)
+        }
+        identities::Selection::Global => {
+            let relay = relays(relay_active, tx);
+            if relay {
+                let config = remote_config.clone()?;
+                if !config.enabled {
+                    return Err("SOTER remote config is unavailable while active".into());
+                }
+                config.validate()?;
+                (Some(config), true, true)
+            } else {
+                (None, false, true)
+            }
+        }
+        _ => (None, false, false),
+    };
+    let revision = selection.revision();
+    let scope = if legacy {
+        config
+            .as_ref()
+            .map(remote::Config::route_scope)
+            .unwrap_or_else(|| "local".into())
+    } else {
+        revision.clone()
+    };
+    let (mut route, cpu_id) = {
+        let mut slot = lock(&SHARED);
+        let shared = slot.as_mut().ok_or("state is not initialized")?;
+        if shared.state.identity_policy_seen && !policy.present {
+            return Err("SOTER identity policy disappeared; refusing to change identities".into());
+        }
+        if shared.state.identity_policy_canonical && !policy.is_canonical() {
+            return Err("Canonical SOTER policy disappeared; legacy fallback is forbidden".into());
+        }
+        if policy.present {
+            shared.state.identity_policy_canonical |= policy.is_canonical();
+            shared.state.identity_policy_seen = true;
+            shared.state.reconcile_identities(&policy.store);
+        }
+        // Keep legacy global verdicts scoped, but named identities have independent scopes.
+        if legacy && !dispatch::ATTK_TRANSACTIONS.contains(&tx) {
+            shared.state.routing.configure_legacy(&scope);
+        }
+        let uid_scope = if legacy {
+            format!("legacy:{scope}")
+        } else {
+            scope.clone()
+        };
+        if let Some(uid) = uid {
+            shared.state.routing.configure_uid(uid, &uid_scope);
+            shared.state.note_soter_request(uid);
+        }
+        if matches!(selection, identities::Selection::Relay { .. }) {
+            shared.state.bind_identity(uid, &selection);
+        } else {
+            shared.state.prepare_identity(uid, &selection)?;
+        }
+        shared
+            .state
+            .store(&shared.path)
+            .map_err(|e| e.to_string())?;
+        let route = shared.state.routing.prepare(relay, tx, request)?;
+        // A named relay is another device's server: our ledger id is neither its
+        // identity nor something it needs to learn.
+        let cpu_id = match &selection {
+            identities::Selection::Relay { .. } => String::new(),
+            _ => shared.state.cpu_id.clone(),
+        };
+        (route, cpu_id)
     };
     if route.backend == Backend::Remote {
-        let config = remote_config?;
-        match forward(&config, tx, &route.request, &cpu_id)? {
-            Some(outcome) => {
-                let mut slot = lock(&SHARED);
-                let shared = slot.as_mut().ok_or("state is not initialized")?;
-                if scope
-                    .as_ref()
-                    .is_some_and(|scope| !shared.state.routing.is_scope(scope))
-                {
-                    return Err("SOTER relay configuration changed during the request".into());
-                }
-                let outcome = shared.state.routing.complete(tx, &route, outcome)?;
-                if scope_changed
-                    || matches!(
-                        tx,
-                        dispatch::TX_INIT_SIGN
-                            | dispatch::TX_FINISH_SIGN
-                            | dispatch::TX_REMOVE_ALL_UID_KEY
-                    )
-                {
-                    shared
-                        .state
-                        .store(&shared.path)
-                        .map_err(|error| error.to_string())?;
-                }
-                return Ok(Some(outcome));
-            }
-            None => {
-                let mut slot = lock(&SHARED);
-                let shared = slot.as_mut().ok_or("state is not initialized")?;
-                if scope
-                    .as_ref()
-                    .is_some_and(|scope| !shared.state.routing.is_scope(scope))
-                {
-                    return Err("SOTER relay configuration changed during the request".into());
-                }
-                let policy = shared.state.routing.local_only(tx, &mut route);
-                // Persist the verdict even when this transaction must fail:
-                // no AuthKey can succeed until the client receives a local ASK.
-                shared
-                    .state
-                    .store(&shared.path)
-                    .map_err(|error| error.to_string())?;
-                policy?;
-            }
+        let config = config.as_ref().ok_or("Missing SOTER relay target")?;
+        let response = forward(config, tx, &route.request, &cpu_id)?;
+        verify_legacy_relay(Some(config), legacy)?;
+        policy.unchanged()?;
+        let mut slot = lock(&SHARED);
+        let shared = slot.as_mut().ok_or("state is not initialized")?;
+        shared.state.routing.check_route(&route)?;
+        policy.unchanged()?;
+        if let Some(outcome) = response {
+            let outcome = shared.state.routing.complete(tx, &route, outcome)?;
+            shared
+                .state
+                .store(&shared.path)
+                .map_err(|e| e.to_string())?;
+            return Ok(Some(outcome));
         }
+        if !legacy {
+            return Err(
+                "The selected relay identity declined the request; local fallback is forbidden"
+                    .into(),
+            );
+        }
+        let policy = shared.state.routing.local_only(tx, &mut route);
+        shared
+            .state
+            .store(&shared.path)
+            .map_err(|e| e.to_string())?;
+        policy?;
     }
-    // Platform hooks can block on Binder; never hold the ledger lock here.
+    verify_legacy_relay(config.as_ref(), legacy)?;
     let platform = if dispatch::consults_platform(tx) {
         platform::current()
     } else {
         Platform::default()
     };
+    policy.unchanged()?;
     let mut slot = lock(&SHARED);
     let shared = slot.as_mut().ok_or("state is not initialized")?;
-    if scope
-        .as_ref()
-        .is_some_and(|scope| !shared.state.routing.is_scope(scope))
-    {
-        return Err("SOTER relay configuration changed during the request".into());
-    }
-    let Some(outcome) =
-        dispatch::handle_request(&mut shared.state, tx, route.request.clone(), platform)
+    shared.state.routing.check_route(&route)?;
+    let Some(outcome) = dispatch::handle_request_with_identity(
+        &mut shared.state,
+        tx,
+        route.request.clone(),
+        platform,
+        &selection,
+    )?
     else {
         return Ok(None);
     };
+    policy.unchanged()?;
     let outcome = shared.state.routing.complete(tx, &route, outcome)?;
     shared
         .state
         .store(&shared.path)
-        .map_err(|error| error.to_string())?;
+        .map_err(|e| e.to_string())?;
     Ok(Some(outcome))
+}
+
+fn verify_legacy_relay(config: Option<&remote::Config>, legacy: bool) -> Result<(), String> {
+    #[cfg(not(test))]
+    if legacy {
+        if let Some(expected) = config {
+            if &remote::Config::load()? != expected {
+                return Err("SOTER global relay changed during the operation".into());
+            }
+        }
+    }
+    #[cfg(test)]
+    let _ = (config, legacy);
+    Ok(())
 }
 
 /// The answer the stock HAL gives for `tx` while its TA is dead.

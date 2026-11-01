@@ -68,6 +68,12 @@ impl Config {
                 _ => return Err("unknown SOTER remote config key".to_string()),
             }
         }
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let config = self;
         if config.enabled {
             let url = reqwest::Url::parse(&config.url).map_err(|_| "invalid SOTER URL")?;
             if !matches!(url.scheme(), "http" | "https")
@@ -91,7 +97,7 @@ impl Config {
                 return Err("SOTER remote config contains a newline".to_string());
             }
         }
-        Ok(config)
+        Ok(())
     }
 
     pub fn load() -> Result<Self, String> {

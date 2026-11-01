@@ -48,12 +48,12 @@ export function setText(id, value) { const element = document.getElementById(id)
 // The icon set is shared with the design prototype; see icons.js.
 export {icon} from './icons.js';
 
-export function createBridge(scope) {
+export function createBridge(scope, timeoutMs = 12000) {
   let sequence = 0;
   return command => new Promise(resolve => {
     const callback = `ommega_${scope}_${Date.now()}_${sequence++}`;
     // Read operations may fail to deliver a callback. Never interrupt a device process.
-    const timer = setTimeout(() => { delete window[callback]; resolve({errno:1, stdout:'', stderr:text('读取超时，请刷新重试。', 'Read timed out. Refresh to retry.')}); }, 12000);
+    const timer = timeoutMs > 0 ? setTimeout(() => { delete window[callback]; resolve({errno:1, stdout:'', stderr:text('读取超时，请刷新重试。', 'Read timed out. Refresh to retry.')}); }, timeoutMs) : null;
     window[callback] = (errno, stdout, stderr) => {
       clearTimeout(timer); delete window[callback]; resolve({errno:Number(errno), stdout:stdout || '', stderr:stderr || ''});
     };

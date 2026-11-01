@@ -15,7 +15,7 @@ console.log(check ? 'Shared UI assets verified.' : 'Shared UI assets copied to A
 const indexPath = new URL('a-side/source/template/webroot/index.html', root);
 const original = await readFile(indexPath, 'utf8');
 // Set the legacy translation preference before its deferred bundle starts.
-const assetVersion = 'material-ui-11';
+const assetVersion = 'material-ui-33';
 const integration = `<!--ommega-modern--><script>try{var l=localStorage.getItem('ommega.ui.language')||'auto';localStorage.setItem('trickyAddonLanguage',l==='auto'?(/^zh\\b/i.test(navigator.language)?'zh-CN':'en'):l);document.documentElement.dataset.theme=localStorage.getItem('ommega.ui.theme')||'auto'}catch(e){}</script><link rel="stylesheet" href="./modern.css?v=${assetVersion}"><link rel="stylesheet" href="./material-you.css?v=${assetVersion}"><link rel="stylesheet" href="./a-modern.css?v=${assetVersion}"><script type="module" src="./modern.js?v=${assetVersion}"></script><!--/ommega-modern-->`;
 let clean = original.replace(/<!--ommega-modern-->[\s\S]*?<!--\/ommega-modern-->/g, '')
   .replace(/(src="\.\/assets\/index-[^"]+\.js)(?:\?[^\"]*)?"/, `$1?v=${assetVersion}"`);

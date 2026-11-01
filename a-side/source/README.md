@@ -21,9 +21,10 @@ relay_server.
   mismatched local profile. Profile or certificate mismatches fail closed;
   enabling local fallback does not bypass identity checks.
 - **Authentication-signing policy** is configured at runtime in the WebUI.
-  The default **Auto** mode preserves the requested B authentication policy for
-  every alias. A authorization with B signing requires an explicit **Payment
-  compatibility** selection for eligible EC/RSA authentication-signing keys.
+  The default **Auto** mode preserves B authentication for known detector probes
+  and uses A authorization with B signing for other eligible EC/RSA
+  authentication-signing keys. **Payment compatibility** uses that signing path
+  for all eligible requests, including recognized probes.
   **Preserve authentication** also keeps the requested
   B policy, which may return `KeyUserNotAuthenticated` (-26) when A authenticates.
   Every remote path returns B's certificate unchanged. Per-app exceptions work
@@ -271,8 +272,9 @@ A does not add a synthetic child leaf for authentication or unlock constraints.
 Existing keys retain their key material and credential-encryption state.
 
 The relay's physical authorization policy is distinct from A-side application
-policy. Auto/Preserve retain requested B user-auth tags. Explicit Payment
-compatibility replaces user-auth requirements with `NO_AUTH_REQUIRED` because B
+policy. Preserve and Auto's recognized probes retain requested B user-auth tags.
+Payment compatibility, including Auto's other eligible requests, replaces
+user-auth requirements with `NO_AUTH_REQUIRED` because B
 cannot validate A's user token. Requested purposes and `UNLOCKED_DEVICE_REQUIRED`
 (509) remain intact. In compatibility mode A enforces the original authentication
 policy and timeout without alias-specific extensions.

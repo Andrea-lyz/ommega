@@ -27,6 +27,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(timeout: Option<u32>) -> Self {
+        Self::with_policy(timeout, kmr_common::auth_signing::Mode::Compatibility)
+    }
+
+    fn with_policy(timeout: Option<u32>, mode: kmr_common::auth_signing::Mode) -> Self {
         let mut source = DelegationFixture::new();
         let calls = Arc::new(AtomicUsize::new(0));
         source.ta.dev.remote = Some(Arc::new(TestRemote {
@@ -45,8 +49,13 @@ impl Fixture {
         if let Some(timeout) = timeout {
             params.push(KeyParam::AuthTimeout(timeout));
         }
-        let key = source.ta.generate_key(&params, None, true).unwrap();
-        // The B certificate must remain byte-for-byte the no-auth fixture.
+        let authorize_on_a =
+            kmr_common::auth_signing::authorize_on_a(mode, Some("ommega-auth-repro"), &params);
+        let key = source
+            .ta
+            .generate_key(&params, None, authorize_on_a)
+            .unwrap();
+        // B's certificate remains unchanged; only A retains the auth policy.
         assert_eq!(
             key.certificate_chain[0].encoded_certificate,
             source.chain[0]
@@ -129,6 +138,28 @@ fn valid_per_operation_auth_allows_exactly_one_remote_finish() {
     assert_eq!(f.finish(handle, Some(token.clone())).error_code, 0);
     assert_ne!(f.finish(handle, Some(token)).error_code, 0);
     assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn auto_payment_key_signs_only_after_valid_per_operation_authentication() {
+    for authenticated in [false, true] {
+        let mut fixture = Fixture::with_policy(None, kmr_common::auth_signing::Mode::Auto);
+        let begin = fixture.begin(None).unwrap();
+        let token = authenticated.then(|| fixture.token(begin.challenge));
+        let response = fixture.finish(begin.op_handle, token);
+        assert_eq!(
+            response.error_code,
+            if authenticated {
+                0
+            } else {
+                ErrorCode::KeyUserNotAuthenticated as i32
+            },
+        );
+        assert_eq!(
+            fixture.calls.load(Ordering::SeqCst),
+            usize::from(authenticated)
+        );
+    }
 }
 
 #[test]
@@ -307,6 +338,45 @@ fn signed_auth_fixture(timeout: Option<u32>) -> DelegationFixture {
             params.push(KeyParam::AuthTimeout(timeout));
         }
     })
+}
+
+#[test]
+fn auto_known_probe_keeps_the_signed_b_authentication_policy() {
+    let mut source = DelegationFixture::with_child_policy(false, |params| {
+        params.retain(|p| {
+            !matches!(
+                p,
+                KeyParam::NoAuthRequired | KeyParam::AttestationChallenge(_)
+            )
+        });
+        params.extend([
+            KeyParam::UserSecureId(42),
+            KeyParam::UserAuthType(3),
+            KeyParam::Purpose(KeyPurpose::Verify),
+            KeyParam::AttestationChallenge(vec![7; 32]),
+        ]);
+    });
+    let chain = source.chain.clone();
+    source.ta.dev.remote = Some(Arc::new(TestRemote {
+        cert_chain: Some(chain.clone()),
+        expected_user_auth: Some(vec![(502, 42), (504, 3)]),
+        expected_purposes: Some(vec![KeyPurpose::Sign as i32, KeyPurpose::Verify as i32]),
+        ..TestRemote::default()
+    }));
+    let decision = kmr_common::auth_signing::authorize_on_a(
+        kmr_common::auth_signing::Mode::Auto,
+        Some("TrustAttestor_silent_auth_14c21f61-4c15-4e09-92d7-3a33d665458c"),
+        &source.params,
+    );
+    assert!(
+        !decision,
+        "the complete probe must preserve B authentication"
+    );
+    let key = source
+        .ta
+        .generate_key(&source.params, None, decision)
+        .unwrap();
+    assert_eq!(key.certificate_chain[0].encoded_certificate, chain[0]);
 }
 
 #[test]
