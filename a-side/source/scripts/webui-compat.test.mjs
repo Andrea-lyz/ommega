@@ -114,7 +114,7 @@ test("certificate badges only use positive safe counts with explicit sharing met
 test("certificate badges appear after the app name and identify shared UID counts", () => {
   const ctx = loadGlue({language:'zh-CN'});
   let badge = null, label = '';
-  const name = {textContent:'示例应用',querySelector:selector=>selector==='.om-cert-count'?badge:null,appendChild:value=>{badge=value;}};
+  const name = {textContent:'示例应用',querySelector:selector=>selector==='.om-cert-count'?badge:null,appendChild:value=>{if(value.className==='om-cert-count')badge=value;}};
   const card = {dataset:{},querySelector:()=>name,getAttribute:()=> 'com.example.app',setAttribute:(_, value)=>{label=value;}};
   ctx.document.createElement = () => ({textContent:'',title:'',remove(){badge=null;}});
   ctx.fixtureCounts = {'com.example.app':{count:12,shared:true}};
@@ -130,7 +130,7 @@ test("certificate badges appear after the app name and identify shared UID count
 test("soter badges appear only while SOTER is enabled", () => {
   const ctx = loadGlue({language:'zh-CN'});
   let soter = null;
-  const name = {textContent:'示例应用',querySelector:selector=>selector==='.om-soter-count'?soter:null,appendChild:value=>{soter=value;}};
+  const name = {textContent:'示例应用',querySelector:selector=>selector==='.om-soter-count'?soter:null,appendChild:value=>{if(value.className==='om-soter-count')soter=value;}};
   const card = {dataset:{},querySelector:()=>name,getAttribute:()=>'com.example.app',setAttribute(){}};
   ctx.document.createElement = () => ({textContent:'',title:'',className:'',remove(){soter=null;}});
   vm.runInContext('ommegaSoterEnabled = true; ommegaSoterCounts = {"com.example.app":7}',ctx);

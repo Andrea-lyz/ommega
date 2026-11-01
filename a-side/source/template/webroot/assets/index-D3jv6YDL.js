@@ -3407,6 +3407,16 @@ function ommegaUpdateAppCount(card) {
   const name = card.querySelector(".app-name"), pkg = card.getAttribute("data-package");
   if (!name || !pkg) return;
   if (!card.dataset.omOriginalName) card.dataset.omOriginalName = name.textContent;
+  // Keep the name on one line so both badges sit beside it instead of stacking:
+  // a wrapped name pushes a badge onto a line of its own.
+  let title = name.querySelector(".om-app-title");
+  if (!title) {
+    title = document.createElement("span");
+    title.className = "om-app-title";
+    title.textContent = card.dataset.omOriginalName;
+    name.textContent = "";
+    name.appendChild(title);
+  }
   const count = ommegaCertificateCount(ommegaCertificateCounts?.[pkg]);
   let badge = name.querySelector(".om-cert-count");
   if (!count) { badge?.remove(); }

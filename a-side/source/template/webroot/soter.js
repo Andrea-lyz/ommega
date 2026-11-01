@@ -1,5 +1,5 @@
 // Full-page SOTER identities. Private keys are read and validated only by Rust.
-import {icon,text,createBridge} from './ui-kit.js?v=material-ui-33';
+import {icon,text,createBridge} from './ui-kit.js?v=material-ui-34';
 const TYPES=[['local','本地随机身份','Local random'],['key','私钥身份','Private key'],['relay','远程中继身份','Remote relay']];
 let exec=null,writeExec=null,snapshot=null,adding=false,generation=0,busy=false;
 function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
