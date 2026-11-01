@@ -154,9 +154,16 @@ export function certificateSummary(der) {
   const name = derName(der, subject);
   return {o:name.o, t:name.t, notBefore:derTime(der, times[0]), notAfter:derTime(der, times[1])};
 }
-/** Decode one `<Certificate>` body (PEM armour or bare base64) into DER bytes. */
+/**
+ * Decode the first `<Certificate>` body (PEM armour or bare base64) into DER
+ * bytes. More than one certificate may arrive (the keybox chain is a sequence,
+ * and a truncated range glues several of them together), so only the first
+ * block is decoded; the leaf is the one that carries the level and the validity.
+ */
 export function certificateBytes(raw) {
-  const body = String(raw || '').replace(/-----BEGIN[^-]*-----|-----END[^-]*-----/g, '').replace(/<[^>]*>/g, '').replace(/[^A-Za-z0-9+/=]/g, '');
+  const text = String(raw || '');
+  const block = /-----BEGIN[^-]*-----([\s\S]*?)-----END[^-]*-----/.exec(text);
+  const body = (block ? block[1] : text).replace(/<[^>]*>/g, '').replace(/[^A-Za-z0-9+/=]/g, '');
   if (!body) return null;
   try {
     const binary = atob(body);
@@ -687,9 +694,9 @@ if [ -r /data/adb/ommega/ommegadata/config ]; then grep -iE '^[[:space:]]*(url|d
 printf '\\n[REMOTE]\\n'
 grep -A10 -E '^\\[remote\\]' /data/misc/keystore/ommega/config.toml 2>/dev/null | grep -iE '^[[:space:]]*(url|enabled)[[:space:]]*='
 printf '\\n[KEYBOX_TEE]\\n'
-sed -n '/<Certificate[ >]/,/<\\/Certificate>/p' /data/misc/keystore/ommega/keybox.xml 2>/dev/null | head -n 40
+awk '/<Certificate[ >]/{held=1} held{print} held&&index($0,"</Certificate>"){exit}' /data/misc/keystore/ommega/keybox.xml 2>/dev/null
 printf '\\n[KEYBOX_STRONGBOX]\\n'
-sed -n '/<Certificate[ >]/,/<\\/Certificate>/p' /data/misc/keystore/ommega/keybox-strongbox.xml 2>/dev/null | head -n 40
+awk '/<Certificate[ >]/{held=1} held{print} held&&index($0,"</Certificate>"){exit}' /data/misc/keystore/ommega/keybox-strongbox.xml 2>/dev/null
 printf '\\n[TARGET]\\n'
 if [ -f /data/adb/ommega/ommegadata/target.txt ]; then printf 'present\n'; cat /data/adb/ommega/ommegadata/target.txt; else printf 'missing'; fi
 printf '\\n[END]\\n'`);

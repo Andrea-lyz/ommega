@@ -176,6 +176,10 @@ test('keybox material reports the level it was issued for and flags a wrong slot
   assert.equal(keyboxSummary('', 'TEE', FIXTURE_NOW).state, 'missing');
   assert.equal(keyboxSummary('   ', 'TEE', FIXTURE_NOW).state, 'missing');
   assert.equal(keyboxSummary('-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----', 'TEE', FIXTURE_NOW).state, 'invalid');
+  // The chain is a sequence: a second block must never be glued onto the leaf.
+  const chained = pem(testCertificate({o: 'TEE'})) + '\n' + pem(testCertificate({o: 'StrongBox'}));
+  assert.equal(keyboxSummary(chained, 'TEE', FIXTURE_NOW).level, 'TEE');
+  assert.equal(keyboxSummary(chained, 'TEE', FIXTURE_NOW).days, 60, 'the default fixture expires 2027-01-01');
   assert.equal(certificateBytes('@@@'), null, 'nothing decodable');
   assert.equal(keyboxSummary('not a certificate', 'TEE', FIXTURE_NOW).state, 'invalid');
   assert.equal(certificateSummary(new Uint8Array([0x31, 0x00])), null);
