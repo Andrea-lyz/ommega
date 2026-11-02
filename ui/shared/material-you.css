@@ -269,6 +269,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .app-symbol-large { width: 62px; height: 62px; border-radius: 21px; font-size: 22px; }
 .app-policy-stack { display: grid; gap: 12px; }
 .policy-card { overflow: hidden; }
+/* Relay-only policy cards (authentication signing, local keygen EWMA, CPU and
+   device properties) have no effect without a relay, so local mode hides them. */
+body[data-om-relay-mode="local"] .om-relay-only { display: none; }
 .policy-heading { display: flex; align-items: center; gap: 12px; padding: 17px 17px 12px; }
 .policy-heading h2 { margin: 0; font-size: 15px; letter-spacing: -.02em; }
 .policy-heading p { margin: 3px 0 0; color: var(--subtle); font-size: 11px; }

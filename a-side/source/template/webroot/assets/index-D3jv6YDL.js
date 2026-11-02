@@ -3235,6 +3235,29 @@ let ommegaCertificateCounts = null;
 let ommegaSoterCounts = null;
 let ommegaSoterEnabled = false;
 let ommegaCountsBusy = false;
+// "local" / "remote" as published by the daemon, or null while unknown. The
+// per-app policy cards below only mean something with a relay in the path, so
+// they are rendered with .om-relay-only and hidden by CSS in local mode.
+let ommegaRelayMode = null;
+
+async function ommegaRefreshRelayMode() {
+  try {
+    const result = await ommegaReadOnly('cat /data/misc/keystore/ommega/data/relay-mode 2>/dev/null');
+    const text = Number(result?.errno) === 0 ? String(result.stdout || "").trim().toLowerCase() : "";
+    ommegaRelayMode = text === "remote" ? "remote" : text === "local" ? "local" : null;
+  } catch {
+    ommegaRelayMode = null;
+  }
+  if (typeof document !== "undefined" && document.body) {
+    if (ommegaRelayMode) document.body.dataset.omRelayMode = ommegaRelayMode;
+    else delete document.body.dataset.omRelayMode;
+  }
+  return ommegaRelayMode;
+}
+
+function ommegaRelayOnly(card) {
+  return String(card).replace('class="panel policy-card"', 'class="panel policy-card om-relay-only"');
+}
 
 async function ommegaReadAppFile(path) {
   if (![OMMEGA_APP_TARGET, OMMEGA_TARGET_SECURITY, OMMEGA_SYSTEM_APPS, OMMEGA_LOCAL_KEYGEN].includes(path)) throw new Error("Unsupported app policy");
@@ -3837,6 +3860,9 @@ function ommegaCloseAppDetail() {
 function ommegaOpenAppDetail(card) {
   const pkg = card.getAttribute("data-package"), box = card.querySelector("md-checkbox");
   if (!ommegaAuthPackage(pkg) || !box || !ommegaGlobalScopeKnown || ommegaGlobalScopePending) return;
+  // Refresh before building the page so a local device never paints the
+  // relay-only cards; the value only drives CSS, so a late answer is still safe.
+  void ommegaRefreshRelayMode();
   const session = ++ommegaDetailSession;
   const name = card.dataset.omOriginalName || card.querySelector(".app-name")?.textContent || pkg;
   ommegaDetail = {pkg, card, box, session, scrollY:window.scrollY};
@@ -3855,20 +3881,20 @@ function ommegaOpenAppDetail(card) {
       ommegaDetailRadio("om-app-mode", "strongbox", "StrongBox", ommegaDetailText("为此应用选择 StrongBox。", "Use StrongBox for this app.")) +
       ommegaDetailRadio("om-app-mode", "tee", "TEE", ommegaDetailText("为此应用选择 TEE。", "Use TEE for this app."))) +
       '<p class="om-detail-status" id="om-detail-mode-status" role="status"></p>') +
-    ommegaDetailCard('lock', ommegaDetailText("认证签名策略", "Authentication signing"), ommegaDetailText("选择一项", "Choose one"),
+    ommegaRelayOnly(ommegaDetailCard('lock', ommegaDetailText("认证签名策略", "Authentication signing"), ommegaDetailText("选择一项", "Choose one"),
       (ommegaDetailRadio("om-app-auth", "auto", ommegaDetailText("自动", "Auto"), ommegaDetailText("已知认证检测探针保留认证要求，其余符合条件的请求使用支付兼容。", "Preserve known authentication probes; use payment compatibility for other eligible requests.")) +
       ommegaDetailRadio("om-app-auth", "compatibility", ommegaDetailText("支付兼容", "Payment compatibility"), ommegaDetailText("在本机验证认证，由远端签名。", "Authenticate locally and sign remotely.")) +
       ommegaDetailRadio("om-app-auth", "preserve", ommegaDetailText("保持认证要求", "Preserve authentication"), ommegaDetailText("远端保留认证要求。", "Keep the remote authentication requirement."))) +
-      '<p class="om-detail-status" id="om-detail-auth-status" role="status"></p>') +
+      '<p class="om-detail-status" id="om-detail-auth-status" role="status"></p>')) +
     ommegaDetailCard('shield', ommegaDetailText("SOTER 身份", "SOTER identity"), ommegaDetailText("选择一项", "Choose one"),
       '<div id="om-detail-soter-options"><p class="om-detail-status">' + ommegaDetailText("正在读取身份…", "Reading identities…") + '</p></div>' +
       '<p class="om-detail-status" id="om-detail-soter-status" role="status"></p>') +
-    ommegaDetailCard('cpu', ommegaDetailText("本地 keygen 时序整形（EWMA）", "Local keygen timing (EWMA)"), ommegaDetailText("仅用于有时序要求的检测器；日常不推荐开启。", "For timing-sensitive detectors only; not recommended for daily use."),
+    ommegaRelayOnly(ommegaDetailCard('cpu', ommegaDetailText("本地 keygen 时序整形（EWMA）", "Local keygen timing (EWMA)"), ommegaDetailText("仅用于有时序要求的检测器；日常不推荐开启。", "For timing-sensitive detectors only; not recommended for daily use."),
       ommegaDetailRow(ommegaDetailText("启用 EWMA 补时", "Enable EWMA equalization"), ommegaDetailText("将本应用远程-本地差值维持在约 85ms 内，尽量减少本地补时；默认关闭。", "Keep the remote-local delta near 85ms with minimal local padding; off by default."), '<input id="om-detail-local-timing" type="checkbox" role="switch">') +
-      '<p class="om-detail-status" id="om-detail-local-timing-status" role="status"></p>') +
-    ommegaDetailCard('cpu', 'CPU ' + ommegaDetailText("与设备属性", "and device properties"), '',
+      '<p class="om-detail-status" id="om-detail-local-timing-status" role="status"></p>')) +
+    ommegaRelayOnly(ommegaDetailCard('cpu', 'CPU ' + ommegaDetailText("与设备属性", "and device properties"), '',
       ommegaDetailRow(ommegaDetailText("启用", "Enable"), ommegaDetailText("为此应用启用 CPU 与设备属性策略。", "Enable the property view for this app."), '<input id="om-detail-cpu" type="checkbox" role="switch" disabled>') +
-      '<p class="om-detail-status" id="om-detail-cpu-status" role="status"></p><div class="form-actions"><button type="button" id="om-detail-cpu-settings" class="secondary-button" hidden>' + ommegaDetailText("CPU 总设置", "CPU feature settings") + '</button></div>') + '</div>';
+      '<p class="om-detail-status" id="om-detail-cpu-status" role="status"></p><div class="form-actions"><button type="button" id="om-detail-cpu-settings" class="secondary-button" hidden>' + ommegaDetailText("CPU 总设置", "CPU feature settings") + '</button></div>')) + '</div>';
   const icon = card.querySelector(".app-icon")?.cloneNode(true);
   if (icon?.getAttribute("src")) { icon.removeAttribute("id"); icon.alt = ""; document.getElementById("om-detail-icon").appendChild(icon); }
   else document.getElementById("om-detail-icon").textContent = name.slice(0, 1).toUpperCase();
@@ -4156,8 +4182,9 @@ function ommegaUseAppReader() {
   if (typeof qt === "function") qt = ommegaLoadApps;
 }
 ommegaInstallAppDetail();
+void ommegaRefreshRelayMode();
 if (typeof window !== "undefined") {
   ommegaUseAppReader();
-  window.addEventListener("ommega-settings-ready", () => { ommegaInstallAppDetail(); ommegaHideBulkScopeActions(); ommegaBindAppRefresh(); ommegaUseAppReader(); });
+  window.addEventListener("ommega-settings-ready", () => { ommegaInstallAppDetail(); ommegaHideBulkScopeActions(); void ommegaRefreshRelayMode(); ommegaBindAppRefresh(); ommegaUseAppReader(); });
   ommegaBindAppRefresh();
 }
