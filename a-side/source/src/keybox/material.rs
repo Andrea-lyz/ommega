@@ -232,11 +232,18 @@ impl KeyBox {
             // The issuer key type and the leaf key type are independent: an RSA
             // leaf can be signed by an EC key. Most distributed keyboxes carry
             // only an EC entry, so fall back to the other algorithm instead of
-            // failing every RSA attestation. StrongBox material stays separate.
+            // failing every RSA attestation. The fallback stays inside one
+            // security level; StrongBox never borrows the batch/TEE chain.
             (false, SigningAlgorithm::Rsa) => self.rsa_info.as_ref().or(self.ec_info.as_ref()),
             (false, SigningAlgorithm::Ec) => self.ec_info.as_ref().or(self.rsa_info.as_ref()),
-            (true, SigningAlgorithm::Rsa) => self.strongbox_rsa_info.as_ref(),
-            (true, SigningAlgorithm::Ec) => self.strongbox_ec_info.as_ref(),
+            (true, SigningAlgorithm::Rsa) => self
+                .strongbox_rsa_info
+                .as_ref()
+                .or(self.strongbox_ec_info.as_ref()),
+            (true, SigningAlgorithm::Ec) => self
+                .strongbox_ec_info
+                .as_ref()
+                .or(self.strongbox_rsa_info.as_ref()),
         };
         let info = info.ok_or_else(|| {
             if strongbox {
@@ -682,8 +689,11 @@ mod tests {
             keybox.ec_info.as_ref().unwrap().chain
         );
 
-        // The batch RSA entry must stay invisible to the StrongBox level.
-        assert!(keybox
+        // An RSA leaf is signed by the same EC StrongBox issuer: an RSA 2048 key
+        // with a dedicated EC-only StrongBox keybox used to fail with
+        // AttestationKeysNotProvisioned, which broke every RSA StrongBox
+        // attestation request (Key Attestation 2.0.4 "认证 RSA 密钥").
+        let strongbox_rsa = keybox
             .signing_info_at(
                 keymint::SecurityLevel::Strongbox,
                 SigningKeyType {
@@ -691,7 +701,12 @@ mod tests {
                     algo_hint: SigningAlgorithm::Rsa,
                 },
             )
-            .is_err());
+            .expect("an RSA leaf must use the StrongBox EC issuer");
+        assert_eq!(
+            strongbox_rsa.cert_chain,
+            keybox.ec_info.as_ref().unwrap().chain
+        );
+        assert_eq!(strongbox_rsa.identity_digest, keybox.identity_digest());
         assert!(keybox
             .signing_info(SigningKeyType {
                 which: SigningKey::Batch,
