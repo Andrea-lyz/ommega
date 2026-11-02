@@ -439,10 +439,25 @@ async function renderAutomation() {
 
   const policy = status.policy || {};
   const tee = status.tee || {}, sb = status.strongbox || {};
-  const rkpBox = tee.rkp ? tee : (sb.rkp ? sb : null);
-  setText('om-rkp-kind', rkpBox ? 'RKP' + (rkpBox.level ? ' · ' + rkpBox.level : '') : text('非 RKP 证书','Not an RKP chain'));
-  const expiry = [tee, sb].filter(box => Number.isSafeInteger(box.not_after_ms)).map(box => box.not_after_ms).sort((a, b) => a - b)[0];
-  setText('om-rkp-expiry', expiry ? formatDay(expiry) + ' · ' + formatKeyboxDays(Math.floor((expiry - Date.now()) / 86400000)) : '—');
+  // The whole card follows the slot that expires first, so the level it names is
+  // the level the deadline belongs to.
+  const slots = [['TEE', tee], ['StrongBox', sb]]
+    .filter(([, box]) => box.present === true && !box.unreadable && Number.isSafeInteger(box.not_after_ms))
+    .sort((a, b) => a[1].not_after_ms - b[1].not_after_ms);
+  const soonest = slots[0] || null;
+  const rkpBox = (soonest && soonest[1].rkp) ? soonest[1] : (tee.rkp ? tee : (sb.rkp ? sb : null));
+  setText('om-rkp-kind', rkpBox
+    ? 'RKP' + (rkpBox.level ? ' · ' + rkpBox.level : '')
+    : text('非 RKP 证书','Not an RKP chain'));
+  const expiry = soonest ? soonest[1].not_after_ms : null;
+  setText('om-rkp-expiry', expiry
+    ? (soonest[1].level || soonest[0]) + ' ' + formatDay(expiry) + ' · ' + formatKeyboxDays(Math.floor((expiry - Date.now()) / 86400000))
+    : '—');
+  setText('om-rkp-slots', slots.length
+    ? text('两个槽位：','Slots: ') + slots.map(([label, box]) =>
+        (box.level || label) + ' ' + formatKeyboxDays(Number.isSafeInteger(box.days) ? box.days : 0)).join(' · ')
+      + text('；按最早到期者判断临期。',' — the earliest expiry drives the deadline.')
+    : text('未安装 RKP 证书。','No RKP chain installed.'));
   setText('om-rkp-policy', (policy.refresh_hours || 0) + ' ' + text('小时','hours') + ' · ' + text('提前量','lead time'));
   setText('om-rkp-due', Number.isSafeInteger(policy.due_at_ms) && policy.due_at_ms > 0
     ? formatDay(policy.due_at_ms) + (policy.due ? ' · ' + text('已临期','due now') : '')
@@ -786,7 +801,8 @@ function install() {
             <p class="note" id="om-rkp-keybox-message" role="status"></p>
           </section>
           <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">RKP ${text('续签','renewal')}</h2><p>${text('按服务器下发的 time_to_refresh_hours 判断临期','Renew when the server-provided time_to_refresh_hours says the chain is near expiry')}</p></div>
-            <dl class="b-summary-details"><div><dt>${text('链路类型','Chain kind')}</dt><dd id="om-rkp-kind">—</dd></div><div><dt>${text('到期','Expires')}</dt><dd id="om-rkp-expiry">—</dd></div><div><dt>${text('续签策略','Policy')}</dt><dd id="om-rkp-policy">—</dd></div><div><dt>${text('临期时间','Refresh due')}</dt><dd id="om-rkp-due">—</dd></div></dl>
+            <dl class="b-summary-details"><div><dt>${text('链路类型','Chain kind')}</dt><dd id="om-rkp-kind">—</dd></div><div><dt>${text('到期（最早）','Expires (earliest)')}</dt><dd id="om-rkp-expiry">—</dd></div><div><dt>${text('续签策略','Policy')}</dt><dd id="om-rkp-policy">—</dd></div><div><dt>${text('临期时间','Refresh due')}</dt><dd id="om-rkp-due">—</dd></div></dl>
+            <p class="note" id="om-rkp-slots">—</p>
             <button type="button" class="action-row" id="om-rkp-auto-row"><span class="row-icon">${icon('refresh')}</span><span class="row-text"><strong>${text('临期自动签发','Automatic renewal')}</strong><small>${text('到期前按策略重新签发并替换 keybox；仅在存在有效种子与本机 RKP 证书时生效','Re-issue and replace the keybox before expiry, only with a valid seed and an RKP chain')}</small></span><span class="switch"><input id="om-rkp-auto" type="checkbox" role="switch"><span></span></span></button>
             <div class="om-automation-actions"><button type="button" id="om-rkp-issue-tee" class="om-button secondary">${text('签发并替换 TEE','Issue and replace TEE')}</button><button type="button" id="om-rkp-issue-sb" class="om-button secondary">${text('签发并替换 StrongBox','Issue and replace StrongBox')}</button></div>
             <p class="note" id="om-rkp-issue-warning" hidden>${text('频繁签发有风险：同一台设备的注册身份被 Google 记录，短时间重复申请可能被标记或限流。确认要现在签发吗？','Frequent issuance is risky: the registration identity is tracked by Google, and repeated requests in a short window can be flagged or throttled. Issue now?')}</p>
