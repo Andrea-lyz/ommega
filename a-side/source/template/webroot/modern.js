@@ -452,7 +452,10 @@ async function renderAutomation() {
     auto.checked = policy.auto === true;
     auto.disabled = !(seed.present && seed.decryptable !== false && rkpBox && policy.refresh_hours);
   }
-  const issueable = Boolean(seed.present && seed.decryptable !== false && rkpBox);
+  // A manual issuance only needs usable material: it replaces whatever the slot
+  // holds, including a static keybox. Automatic renewal needs a chain with a
+  // known expiry, so that switch stays tied to an RKP chain.
+  const issueable = Boolean(seed.present && seed.decryptable !== false);
   for (const id of ['om-rkp-issue-tee', 'om-rkp-issue-sb']) {
     const button = document.getElementById(id);
     if (button) button.disabled = !issueable;
@@ -760,7 +763,7 @@ function install() {
           <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('CDI 种子','CDI seed')}</h2><p>${text('由你自己导入并加密保存在本机；模块不内置任何种子','Imported by you and stored encrypted on this device; the module ships no seed')}</p></div>
             <div class="om-automation-field wide"><label for="om-rkp-seed-path">${text('种子包路径','Seed bundle path')}</label><input id="om-rkp-seed-path" type="text" value="/sdcard/Download/rkp-seed.json" spellcheck="false" autocomplete="off"><button type="button" id="om-rkp-seed-import" class="om-button secondary">${text('导入','Import')}</button><button type="button" id="om-rkp-seed-remove" class="om-button secondary">${text('删除','Remove')}</button></div>
             <dl class="b-summary-details"><div><dt>${text('状态','State')}</dt><dd id="om-rkp-seed-state">—</dd></div><div><dt>${text('指纹','Fingerprint')}</dt><dd id="om-rkp-seed-fingerprint">—</dd></div><div><dt>${text('导入时间','Imported')}</dt><dd id="om-rkp-seed-time">—</dd></div><div><dt>DICE ${text('链','chain')}</dt><dd id="om-rkp-seed-chain">—</dd></div></dl>
-            <p class="note">${text('种子包为 JSON：version、seed_hex（64 位十六进制）、stock_csr_b64（真机 CSR 的 base64）、device_info。','The bundle is JSON with version, seed_hex (64 hex chars), stock_csr_b64 (base64 of the device CSR) and device_info.')}</p>
+            <p class="note">${text('种子包为 JSON：version、dice_chain_hex（真机 DICE 链的 CBOR hex）、signing（kind 与 bytes_hex）、device、issuance（fingerprint 与 server_url）。','The bundle is JSON with version, dice_chain_hex (the CBOR DICE chain in hex), signing (kind and bytes_hex), device and issuance (fingerprint and server_url).')}</p>
             <p class="note" id="om-rkp-seed-message" role="status"></p>
           </section>
           <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('Keybox 导入','Keybox import')}</h2><p>${text('TEE 与 StrongBox 各自一个槽位，互不复用','TEE and StrongBox keep separate slots and never share material')}</p></div>

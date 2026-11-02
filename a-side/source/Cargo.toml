@@ -26,6 +26,7 @@ name = "ommega-rkp"
 path = "src/bin/rkp.rs"
 
 [dependencies]
+ommega-rkp-engine = { path = "rkp-engine" }
 soter-ta = { path = "soter-ta" }
 kmr-common = { path = "common" }
 kmr-crypto-ommega = { path = "crypto" }
@@ -83,6 +84,7 @@ members = [
   "wire",
   "watchdog",
   "ommega-injector",
+  "rkp-engine",
   "soter-ta",
 ]
 

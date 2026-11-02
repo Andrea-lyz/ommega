@@ -51,6 +51,8 @@ struct SeedMeta {
     imported_at_ms: u64,
     has_chain: bool,
     source: String,
+    #[serde(default)]
+    algorithm: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,27 +130,78 @@ fn master_key(create: bool) -> Result<Option<[u8; 32]>> {
     }
 }
 
-/// One imported seed bundle: the CDI private scalar plus everything the RKP
-/// server needs to recognise the device (DICE chain and DeviceInfo).
-#[derive(Debug, Serialize, Deserialize)]
-struct SeedBundle {
+/// The imported material bundle, using the Duck ToolBox version 1 contract.
+///
+/// It carries the device's real DICE chain, the key that signs the CSR challenge
+/// and the identity the RKP server expects; a bare seed cannot be issued against
+/// because the server validates the registered chain, not just a leaf key.
+#[derive(Debug, Deserialize)]
+struct DuckBundle {
     version: u32,
-    seed_hex: String,
+    dice_chain_hex: String,
+    signing: DuckSigning,
     #[serde(default)]
-    stock_csr_b64: String,
+    device: Value,
     #[serde(default)]
-    device_info: Value,
+    issuance: Value,
     #[serde(default)]
-    fingerprint: String,
+    uds_certs_hex: Option<String>,
 }
 
-fn decode_seed(hex_text: &str) -> Result<[u8; 32]> {
-    let text = hex_text.trim().trim_start_matches("0x");
-    let bytes = hex::decode(text).context("seed_hex is not hexadecimal")?;
-    if bytes.len() != 32 {
-        bail!("seed_hex must be 32 bytes, got {}", bytes.len());
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DuckSigning {
+    kind: String,
+    bytes_hex: String,
+    #[serde(default)]
+    derivation: Option<String>,
+}
+
+/// Validates the parts of the bundle this tool can check without the engine.
+fn check_bundle(bundle: &DuckBundle) -> Result<(String, String)> {
+    if bundle.version != 1 {
+        bail!("unsupported bundle version {}", bundle.version);
     }
-    Ok(bytes.try_into().unwrap())
+    let expected = match bundle.signing.kind.as_str() {
+        "p256-scalar" | "p256-seed" | "ed25519-seed" => 32,
+        "p384-scalar" => 48,
+        other => bail!("unsupported signing kind {other}"),
+    };
+    if let Some(derivation) = bundle.signing.derivation.as_deref() {
+        let known = ["direct", "none", "duck-rkp-legacy-mod-n-minus-1-plus-1"];
+        if !known.contains(&derivation) {
+            bail!("unsupported signing derivation {derivation}");
+        }
+    }
+    let secret = hex::decode(bundle.signing.bytes_hex.trim())
+        .context("signing.bytes_hex is not hexadecimal")?;
+    if secret.len() != expected {
+        bail!(
+            "{0} expects {expected} bytes, got {1}",
+            bundle.signing.kind,
+            secret.len()
+        );
+    }
+    let chain =
+        hex::decode(bundle.dice_chain_hex.trim()).context("dice_chain_hex is not hexadecimal")?;
+    if chain.len() < 16 {
+        bail!("dice_chain_hex is too short to be a DICE chain");
+    }
+    if !bundle.device.is_null() && !bundle.device.is_object() {
+        bail!("device must be a JSON object");
+    }
+    if let Some(uds) = bundle.uds_certs_hex.as_deref() {
+        if !uds.trim().is_empty() {
+            hex::decode(uds.trim()).context("uds_certs_hex is not hexadecimal")?;
+        }
+    }
+    let fingerprint = bundle
+        .issuance
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Ok((bundle.signing.kind.clone(), fingerprint))
 }
 
 fn encrypt_seed(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -401,6 +454,40 @@ fn keybox_status(path: &str, expected: &str) -> Value {
     }
 }
 
+fn slot_for(level: &str) -> Result<(&'static str, &'static str)> {
+    match level {
+        "tee" => Ok((KEYBOX_TEE, "TEE")),
+        "strongbox" | "sb" => Ok((KEYBOX_STRONGBOX, "StrongBox")),
+        other => bail!("unknown level {other}; use tee or strongbox"),
+    }
+}
+
+/// Validate a keybox and place it in its slot. Shared by the file import and by
+/// the issuance path so an issued chain gets the same checks as a downloaded one.
+fn install_keybox(level: &str, bytes: &[u8]) -> Result<Value> {
+    let (target, expected) = slot_for(level)?;
+    let text = std::str::from_utf8(bytes).context("keybox must be UTF-8 XML")?;
+    let (info, _count) =
+        keybox_leaf(text).ok_or_else(|| anyhow!("no readable certificate in the keybox"))?;
+    if !text.contains("<PrivateKey") {
+        bail!("the keybox has no <PrivateKey> entry");
+    }
+    let label = info.subject_o.clone().unwrap_or_default();
+    let contradicts = (expected == "TEE" && label.eq_ignore_ascii_case("StrongBox"))
+        || (expected == "StrongBox" && label.eq_ignore_ascii_case("TEE"));
+    if !label.is_empty() && contradicts {
+        bail!("this keybox carries a {label} chain but the {level} slot was selected");
+    }
+    ensure_dir()?;
+    write_private(target, bytes)?;
+    Ok(json!({
+        "saved": true,
+        "level": level,
+        "path": target,
+        "switch": keybox_status(target, expected),
+    }))
+}
+
 fn import_keybox(args: &[String]) -> Result<Value> {
     let level = args
         .first()
@@ -409,67 +496,110 @@ fn import_keybox(args: &[String]) -> Result<Value> {
     let source = args
         .get(1)
         .ok_or_else(|| anyhow!("usage: keybox-import <tee|strongbox> <keybox.xml>"))?;
-    let target = match level.as_str() {
-        "tee" => KEYBOX_TEE,
-        "strongbox" | "sb" => KEYBOX_STRONGBOX,
-        other => bail!("unknown level {other}; use tee or strongbox"),
-    };
     let bytes = read_limited(source, KEYBOX_LIMIT)?;
-    let text = String::from_utf8(bytes.clone()).context("keybox must be UTF-8 XML")?;
-    let (info, _count) =
-        keybox_leaf(&text).ok_or_else(|| anyhow!("no readable certificate in the keybox"))?;
-    if !text.contains("<PrivateKey") {
-        bail!("the keybox has no <PrivateKey> entry");
-    }
-    let level_label = info.subject_o.clone().unwrap_or_default();
-    if !level_label.is_empty()
-        && ((level == "tee" && level_label.eq_ignore_ascii_case("StrongBox"))
-            || (level != "tee" && level_label.eq_ignore_ascii_case("TEE")))
-    {
-        bail!(
-            "this keybox carries a {} chain but the {level} slot was selected",
-            level_label
-        );
-    }
+    install_keybox(&level, &bytes)
+}
+
+fn write_feedback(message: &str, error: bool) -> Result<()> {
     ensure_dir()?;
-    write_private(target, &bytes)?;
-    let _ = fs::set_permissions(target, fs::Permissions::from_mode(0o600));
-    Ok(
-        json!({"saved": true, "level": level, "path": target, "switch": keybox_status(target, &level.to_uppercase())}),
-    )
+    let payload = json!({"message": message, "at_ms": now_ms(), "error": error});
+    write_private(FEEDBACK, &serde_json::to_vec_pretty(&payload)?)
+}
+
+/// Ask the engine to obtain fresh certificates for the stored bundle and install
+/// the result in the requested slot.
+fn issue(args: &[String]) -> Result<Value> {
+    let level = args
+        .first()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| "tee".to_string());
+    slot_for(&level)?;
+    let meta = load_meta().ok_or_else(|| anyhow!("尚未导入 CDI 种子包，请先导入"))?;
+    let key = master_key(false)?.ok_or_else(|| anyhow!("种子主密钥丢失，请重新导入种子包"))?;
+    let blob = fs::read(SEED_BLOB).context("读取已保存的种子包")?;
+    let plain = decrypt_seed(&key, &blob)?;
+    ensure_dir()?;
+    let temp_dir = Path::new(STATE_DIR).join("tmp");
+    fs::create_dir_all(&temp_dir)?;
+    let _ = fs::set_permissions(&temp_dir, fs::Permissions::from_mode(0o700));
+    let temporary = temp_dir.join(format!("issue-{}.json", std::process::id()));
+    let temporary_text = temporary.display().to_string();
+    write_private(&temporary_text, &plain)?;
+    let paths =
+        ommega_rkp_engine::paths::AppPaths::for_root(Path::new(STATE_DIR), Path::new(STATE_DIR));
+    let outcome = ommega_rkp_engine::issue_from_bundle(&paths, Path::new(&temporary_text));
+    let _ = fs::remove_file(&temporary_text);
+    let produced = match outcome {
+        Ok(value) => value,
+        Err(error) => {
+            let message = format!("{error:#}");
+            let mut policy = load_policy();
+            policy.last_error = message.clone();
+            let _ = save_policy(&policy);
+            let _ = write_feedback(&format!("签发失败：{message}"), true);
+            return Err(error);
+        }
+    };
+    let keybox_path = produced
+        .get("keybox_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("引擎没有返回 keybox 路径"))?
+        .to_string();
+    let bytes = fs::read(&keybox_path).with_context(|| format!("读取 {keybox_path}"))?;
+    if bytes.len() as u64 > KEYBOX_LIMIT {
+        bail!("签发结果超过 {KEYBOX_LIMIT} 字节");
+    }
+    let installed = install_keybox(&level, &bytes)?;
+    let mut policy = load_policy();
+    policy.last_issue_ms = now_ms();
+    policy.last_error.clear();
+    save_policy(&policy)?;
+    let _ = write_feedback(
+        &format!("{} 级 keybox 已签发（{}）", level, meta.fingerprint),
+        false,
+    );
+    Ok(json!({
+        "issued": true,
+        "level": level,
+        "fingerprint": meta.fingerprint,
+        "keybox_path": keybox_path,
+        "chain_summary": produced.get("chain_summary").cloned().unwrap_or(Value::Null),
+        "installed": installed,
+        "policy": due_state(&policy),
+    }))
 }
 
 fn import_seed(source: &str) -> Result<Value> {
     let bytes = read_limited(source, BUNDLE_LIMIT)?;
-    let bundle: SeedBundle = serde_json::from_slice(&bytes).context("parse the seed bundle")?;
-    if bundle.version != 1 {
-        bail!("unsupported seed bundle version {}", bundle.version);
-    }
-    let seed = decode_seed(&bundle.seed_hex)?;
-    let mut payload = serde_json::to_vec(&json!({
-        "seed_hex": hex::encode(seed),
-        "stock_csr_b64": bundle.stock_csr_b64,
-        "device_info": bundle.device_info,
-        "fingerprint": bundle.fingerprint,
-    }))?;
+    let bundle: DuckBundle = serde_json::from_slice(&bytes).context("parse the material bundle")?;
+    let (algorithm, fingerprint) = check_bundle(&bundle)?;
+    // The bundle is stored verbatim so the engine sees exactly the bytes the
+    // user imported; the plaintext never touches the filesystem.
+    let mut payload = bytes.clone();
     let key = master_key(true)?.ok_or_else(|| anyhow!("master key unavailable"))?;
     let blob = encrypt_seed(&key, &payload)?;
     payload.fill(0);
     ensure_dir()?;
     write_private(SEED_BLOB, &blob)?;
     let digest = OmmegaSha256 {}
-        .hash(&seed)
-        .map_err(|error| anyhow!("hash the seed: {error:?}"))?;
+        .hash(&bytes)
+        .map_err(|error| anyhow!("hash the bundle: {error:?}"))?;
     let meta = SeedMeta {
-        fingerprint: hex::encode(&digest[..8]),
+        fingerprint: if fingerprint.is_empty() {
+            hex::encode(&digest[..8])
+        } else {
+            fingerprint
+        },
         imported_at_ms: now_ms(),
-        has_chain: !bundle.stock_csr_b64.is_empty(),
+        has_chain: true,
         source: source.to_string(),
+        algorithm,
     };
     write_private(SEED_META, &serde_json::to_vec_pretty(&meta)?)?;
     Ok(json!({
         "saved": true,
         "fingerprint": meta.fingerprint,
+        "algorithm": meta.algorithm,
         "has_chain": meta.has_chain,
         "seed": secret_summary(),
     }))
@@ -491,6 +621,7 @@ fn secret_summary() -> Value {
         "fingerprint": meta.fingerprint,
         "imported_at_ms": meta.imported_at_ms,
         "has_chain": meta.has_chain,
+        "algorithm": meta.algorithm,
         "source": meta.source,
         "decryptable": decryptable,
     })
@@ -574,9 +705,7 @@ fn main() {
         Some("keybox-import") => import_keybox(&args[1..]),
         Some("policy") => policy_command(&args[1..]),
         Some("due") => Ok(due_state(&load_policy())),
-        Some("issue") => Err(anyhow!(
-            "RKP 签发引擎尚未启用：需要先在 PC 上用同一份材料联调通过，之后才会上设备"
-        )),
+        Some("issue") => issue(&args[1..]),
         _ => Err(anyhow!(
             "usage: ommega-rkp status|due|seed-import <json>|seed-remove|keybox-import <tee|strongbox> <xml>|policy [--auto on|off] [--refresh-hours N]"
         )),

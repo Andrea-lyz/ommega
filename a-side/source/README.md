@@ -256,14 +256,32 @@ The WebUI **Settings → Automation** page (a full page, not a sheet) manages th
 material this device signs with. The module ships no seed and no keybox; every
 file comes from the user.
 
-- **CDI seed bundle.** A JSON document
-  `{"version":1,"seed_hex":"<64 hex>","stock_csr_b64":"<base64>","device_info":{…}}`.
-  The bundle carries what the RKP server needs to recognise the device, because a
-  bare seed cannot be issued against: the server validates the registered DICE
-  chain, not just the leaf key. The seed is stored AES-256-GCM encrypted at
-  `data/rkp/seed.enc` with a per-install key at `data/rkp/master.key` (both
-  0600, only the keystore uid). A blob copied from another installation shows up
-  as undecryptable instead of failing at issue time.
+- **CDI seed bundle.** The version 1 material contract of the RKP engine: the
+  device's own CBOR DICE chain, the key that signs the CSR challenge, the identity
+  the server matches and the endpoint to use.
+
+  ```json
+  {
+    "version": 1,
+    "dice_chain_hex": "<CBOR DICE chain, hex>",
+    "signing": {"kind": "p256-scalar", "bytes_hex": "<32-byte scalar>"},
+    "device": {"brand": "…", "model": "…", "device": "…", "product": "…",
+               "manufacturer": "…", "fused": 1, "vb_state": "green",
+               "os_version": "15", "security_level": "tee",
+               "bootloader_state": "locked", "boot_patch_level": 20250801,
+               "system_patch_level": 20250801, "vendor_patch_level": 20250801},
+    "issuance": {"fingerprint": "…",
+                 "server_url": "https://remoteprovisioning.googleapis.com/v1",
+                 "protocol": "v3"}
+  }
+  ```
+
+  A bare seed cannot be issued against: the server validates the registered DICE
+  chain, not just the leaf key. The whole bundle is stored AES-256-GCM encrypted
+  at `data/rkp/seed.enc` with a per-install key at `data/rkp/master.key` (both
+  0600, only the keystore uid), and the plaintext only exists in a 0600 temporary
+  file for the duration of one issuance. A blob copied from another installation
+  shows up as undecryptable instead of failing at issue time.
 - **Keybox import.** `keybox-import <tee|strongbox> <file>` validates the XML,
   refuses a chain whose subject `O` contradicts the chosen slot, and writes it to
   `/data/misc/keystore/ommega/keybox.xml` or `keybox-strongbox.xml` (0600). The
@@ -273,16 +291,23 @@ file comes from the user.
   `time_to_refresh_hours` (default 72) is applied to the earliest expiry, and
   `due` turns true once now passes that point. `policy --auto on|off` and
   `policy --refresh-hours <n>` persist it in `data/rkp/policy.json`.
-- **Issuance.** A manual issuance is two clicks, the second one after a warning,
-  because the registration identity behind a chain is tracked server-side.
+- **Issuance.** `issue <tee|strongbox>` runs the ported RKP engine
+  (`rkp-engine/`, from Duck ToolBox `crates/duck-rkp`, MIT): it requests a fresh
+  challenge, generates a new P-256 attestation key, signs CSR v3 with the imported
+  leaf identity, verifies every returned chain and exports a keybox that then
+  passes the same slot checks as a downloaded one. A manual issuance is two clicks
+  in the UI, the second one after a warning, because the registration identity
+  behind a chain is tracked server-side.
 
 The tool is `/data/adb/modules/ommega/libs/arm64-v8a/ommega-rkp`; every command
 prints one JSON document and exits non-zero on failure.
 
 ```
 ommega-rkp status
-ommega-rkp seed-import /sdcard/Download/rkp-seed.json
+ommega-rkp seed-import /sdcard/Download/rkp-bundle.json
 ommega-rkp seed-remove
+ommega-rkp issue tee
+ommega-rkp issue strongbox
 ommega-rkp keybox-import tee /sdcard/Download/keybox.xml
 ommega-rkp policy --auto on --refresh-hours 72
 ommega-rkp due
