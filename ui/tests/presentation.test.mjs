@@ -228,6 +228,17 @@ test('the local emblem keeps the shield the relay icon drops on an old result', 
   assert.notEqual(localVerdictIcon('ok'), localVerdictIcon('muted'), 'the inner mark still follows the outcome');
 });
 
+test('automation is a page with seed, keybox and renewal controls, not a sheet', () => {
+  for (const id of ['om-automation-page','om-rkp-seed-path','om-rkp-seed-import','om-rkp-seed-remove',
+    'om-rkp-tee-path','om-rkp-tee-import','om-rkp-sb-path','om-rkp-sb-import','om-rkp-auto',
+    'om-rkp-issue-tee','om-rkp-issue-sb','om-rkp-issue-warning','om-rkp-issue-state']) {
+    assert.ok(aSource.includes('id="' + id + '"'), 'Missing automation target ' + id);
+  }
+  assert.match(aSource, /'om-automation-open','自动化'/, 'the settings row must open the page');
+  assert.doesNotMatch(aSource, /action\('automation-settings'/, 'the vendor sheet must be gone');
+  assert.match(aSource, /if \(automationIssueArm === level\)/, 'issuance must be two-step');
+});
+
 test('the local-mode overview targets exist and the status read collects them', () => {
   for (const id of ['om-b-summary','om-local-summary','om-local-tee','om-local-strongbox','om-local-last',
     'om-local-attest','om-local-scope','om-local-mode','om-local-relay','om-local-expiry','om-local-warnings',

@@ -21,6 +21,10 @@ path = "src/bin/cpu-policy.rs"
 name = "ommega-capability-policy"
 path = "src/bin/capability-policy.rs"
 
+[[bin]]
+name = "ommega-rkp"
+path = "src/bin/rkp.rs"
+
 [dependencies]
 soter-ta = { path = "soter-ta" }
 kmr-common = { path = "common" }
@@ -30,6 +34,7 @@ kmr-wire = { path = "wire" }
 libc = "0.2.189"
 prost = "0.14.4"
 hex = "0.4.3"
+aes-gcm = "0.10"
 log4rs = "1.4.0"
 log = "0.4.33"
 rsbinder = { version = "0.10.0", features = ["android_12_plus", "rpc"] }

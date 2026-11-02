@@ -1984,6 +1984,7 @@ dependencies = [
 name = "ommega"
 version = "2.2.2"
 dependencies = [
+ "aes-gcm",
  "android_logger",
  "anyhow",
  "async-trait",

@@ -41,6 +41,7 @@ BINARY_SPECS = (
     {"package": None, "bin": "ommega-auth-policy", "output_name": "ommega-auth-policy"},
     {"package": None, "bin": "ommega-cpu-policy", "output_name": "ommega-cpu-policy"},
     {"package": None, "bin": "ommega-capability-policy", "output_name": "ommega-capability-policy"},
+    {"package": None, "bin": "ommega-rkp", "output_name": "ommega-rkp"},
     {"package": "ommega-injector", "bin": "ommega-inject", "output_name": "ommega-inject"},
 )
 
