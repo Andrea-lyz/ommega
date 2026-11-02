@@ -1349,6 +1349,34 @@ test("app inventory never owns or binds the retired search editor", () => {
   assert.match(adapter,/ommega-apps-rendered/);
 });
 
+
+test("relay-only policy cards hide themselves in local mode", async () => {
+  const adapter = readFileSync(join(here, "webui-app-detail.js"), "utf8");
+  for (const marker of [
+    /ommegaRelayOnly\(ommegaDetailCard\('lock', ommegaDetailText\("认证签名策略"/,
+    /ommegaRelayOnly\(ommegaDetailCard\('cpu', ommegaDetailText\("本地 keygen 时序整形（EWMA）"/,
+    /ommegaRelayOnly\(ommegaDetailCard\('cpu', 'CPU '/,
+  ]) assert.match(adapter, marker, "the card must carry .om-relay-only: " + marker);
+  const css = readFileSync(join(here, "../../../ui/shared/material-you.css"), "utf8");
+  assert.match(css, /body\[data-om-relay-mode="local"\] \.om-relay-only \{ display: none; \}/);
+});
+
+test("the relay mode is read from the daemon file and drives the body flag", async () => {
+  for (const [payload, expected] of [["local\n", "local"], ["remote\n", "remote"], ["", null], ["garbage", null]]) {
+    const ctx = loadGlue();
+    ctx.document.body = {dataset:{}};
+    ctx._ = async () => ({errno:0, stdout:payload});
+    assert.equal(await ctx.ommegaRefreshRelayMode(), expected);
+    assert.equal(ctx.document.body.dataset.omRelayMode, expected || undefined);
+  }
+  const ctx = loadGlue();
+  ctx.document.body = {dataset:{omRelayMode:"local"}};
+  ctx._ = async () => ({errno:1, stdout:""});
+  assert.equal(await ctx.ommegaRefreshRelayMode(), null);
+  assert.equal(ctx.document.body.dataset.omRelayMode, undefined,
+    "an unreadable mode must not keep the relay-only cards hidden");
+});
+
 test("app names recover from a failed label batch instead of showing package ids", async () => {
   const ctx=loadGlue();
   const calls=[];
