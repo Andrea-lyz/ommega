@@ -513,11 +513,26 @@ fn issue(args: &[String]) -> Result<Value> {
         .first()
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_else(|| "tee".to_string());
-    slot_for(&level)?;
+    let (_, expected) = slot_for(&level)?;
     let meta = load_meta().ok_or_else(|| anyhow!("尚未导入 CDI 种子包，请先导入"))?;
     let key = master_key(false)?.ok_or_else(|| anyhow!("种子主密钥丢失，请重新导入种子包"))?;
     let blob = fs::read(SEED_BLOB).context("读取已保存的种子包")?;
     let plain = decrypt_seed(&key, &blob)?;
+    // The claimed level decides the level of the issued chain, so the stored
+    // bundle is retargeted at the slot the user picked. Without this a bundle
+    // captured for TEE would return a TEE chain on both buttons, and the second
+    // one would be refused by the slot check after spending an issuance.
+    let mut bundle: Value = serde_json::from_slice(&plain).context("种子包不是合法 JSON")?;
+    let wanted = if expected == "StrongBox" { "strongbox" } else { "tee" };
+    let device = bundle
+        .get_mut("device")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("种子包缺少 device 段，无法确定签发级别"))?;
+    device.insert(
+        "security_level".to_string(),
+        Value::String(wanted.to_string()),
+    );
+    let plain = serde_json::to_vec(&bundle)?;
     ensure_dir()?;
     let temp_dir = Path::new(STATE_DIR).join("tmp");
     fs::create_dir_all(&temp_dir)?;
@@ -549,7 +564,14 @@ fn issue(args: &[String]) -> Result<Value> {
     if bytes.len() as u64 > KEYBOX_LIMIT {
         bail!("签发结果超过 {KEYBOX_LIMIT} 字节");
     }
-    let installed = install_keybox(&level, &bytes)?;
+    let installed = install_keybox(&level, &bytes).map_err(|error| {
+        let message = format!("{error:#}");
+        let mut policy = load_policy();
+        policy.last_error = message.clone();
+        let _ = save_policy(&policy);
+        let _ = write_feedback(&format!("签发失败：{message}"), true);
+        error
+    })?;
     let mut policy = load_policy();
     policy.last_issue_ms = now_ms();
     policy.last_error.clear();

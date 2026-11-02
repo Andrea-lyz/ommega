@@ -475,24 +475,36 @@ function armAutomationIssue(level) {
     automationIssueArm = null;
     if (warning) warning.hidden = true;
     button.dataset.armed = 'false';
+    if (button.dataset.label) button.textContent = button.dataset.label;
     void runAutomationIssue(level);
     return;
   }
   automationIssueArm = level;
   if (warning) warning.hidden = false;
   button.dataset.armed = 'true';
+  button.dataset.label = button.textContent;
+  button.textContent = text('再次点击确认签发', 'Click again to issue');
+  automationMessage('om-rkp-issue-state', text('已选择 ', 'Selected ')
+    + (level === 'strongbox' ? 'StrongBox' : 'TEE')
+    + text('，15 秒内再点一次才会真正签发。', '; the next click within 15 seconds issues.'), false);
   window.setTimeout(() => {
     if (automationIssueArm !== level) return;
     automationIssueArm = null;
     if (warning) warning.hidden = true;
     button.dataset.armed = 'false';
+    if (button.dataset.label) button.textContent = button.dataset.label;
+    automationMessage('om-rkp-issue-state', text('已取消，未签发。', 'Cancelled; nothing was issued.'), false);
   }, 15000);
 }
 async function runAutomationIssue(level) {
-  automationMessage('om-rkp-issue-state', text('正在签发…','Issuing…'), false);
+  automationMessage('om-rkp-issue-state', text('正在签发 ', 'Issuing ')
+    + (level === 'strongbox' ? 'StrongBox' : 'TEE') + text('…', '…'), false);
   try {
     const result = await rkpCommand('issue ' + level);
-    automationMessage('om-rkp-issue-state', text('签发完成：','Issued: ') + (result.level || level), false);
+    const summary = result.chain_summary && Number.isSafeInteger(result.chain_summary.certificates)
+      ? ' · ' + result.chain_summary.certificates + text(' 张证书', ' certificates') : '';
+    automationMessage('om-rkp-issue-state', text('已签发并替换 ', 'Issued and installed ')
+      + (result.level === 'strongbox' ? 'StrongBox' : 'TEE') + summary, false);
   } catch (error) {
     automationMessage('om-rkp-issue-state', String(error.message || error), true);
   }
