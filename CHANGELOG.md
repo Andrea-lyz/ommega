@@ -10,6 +10,37 @@
 README 不再内嵌逐版本更新要点：发版时只更新版本号，并在这里追加条目。发布步骤见
 [RELEASING.md](RELEASING.md)。
 
+## 2.3.0 — 2026-11-02
+
+A 端自动化页与 RKP 签发（仅 A 端；B、Server 无改动，无需单独更新 Server）。
+
+- 「设置 → 自动化」由浮窗改为完整二级页面，移除原有的四项 keybox 下载来源：改为导入用户自备的
+  CDI 材料包与 keybox，TEE 与 StrongBox 各自一个槽位，互不复用。
+- 材料包沿用 RKP 工作台的 version 1 约定（`dice_chain_hex` / `signing` / `device` /
+  `issuance`）。内容以 AES-256-GCM 加密保存于 `data/rkp/seed.enc`，密钥是每台设备随机生成的
+  `data/rkp/master.key`（均 0600）；从其它设备拷回的密文会显示「无法解密」，而不是等到签发时才
+  失败。模块不内置任何种子或证书。
+- 移植 Duck ToolBox 的 RKP 引擎（MIT，`a-side/source/rkp-engine`）：每次签发取新 challenge、
+  生成新的 P-256 证明密钥、用导入的叶身份签 CSR v3，校验返回链后导出 keybox。签发结果与手工导入
+  走同一套槽位校验，链的级别与 `O=` 必须和所选槽位一致。
+- 新增 `ommega-rkp` 工具：`status` / `due` / `seed-import` / `seed-remove` /
+  `keybox-import` / `policy` / `issue` / `auto-run`。签发前会按目标槽位自动改写材料包里的
+  `security_level`，避免用为 TEE 捕获的材料去签 StrongBox。
+- 自动续签：按服务器下发的 `time_to_refresh_hours` 计算临期。keymint 守护进程启动 5 分钟后首次
+  检查，之后**睡到下一个临期时刻**（上限 1 天，空闲时每天一次），失败后 6 小时内不重试；与手动
+  签发共用文件锁，网络与 keybox 写入都在子进程，不会阻塞 TA。
+- 应用策略页在本地模式下自动隐藏「认证签名策略」「本地 keygen 时序整形（EWMA）」「CPU 与设备
+  属性」三张卡片，远程模式照常显示。
+- 修复本地模式下顶部刷新总是提示「部分状态无法读取，请重试」。
+- 修复 keybox 到期时间解析把 UTCTime 的两位年当成四位年，导致显示成 2611 年。
+
+升级说明：只更新 A 端模块 ZIP 即可，B 端与 Server 无需改动。更新后刷新 WebUI 生效；keymint 由
+部署流程重载，无需重启设备。
+
+验证：CI 全绿（A、B、Server、APK、UI）。真机 PJZ110 上验证了 TEE 与 StrongBox 两级签发并安装
+到对应槽位（链为 `O=TEE` / `O=StrongBox`，各 4 张证书）、引擎 29 项单元测试在设备通过、自动
+续签首轮判定「未临期」且未消耗请求。
+
 ## 2.2.2 — 2026-11-01
 
 A 端 SOTER 多身份与应用列表计数。

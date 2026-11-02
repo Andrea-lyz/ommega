@@ -12,6 +12,48 @@ running Server and does not install the optional APKs.
 The README no longer embeds per-version notes: a release only bumps the version
 and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
 
+## 2.3.0 — 2026-11-02
+
+A-side automation page and RKP issuance (A only; B and Server are unchanged, no
+Server update is required).
+
+- Settings → Automation is a full page instead of a sheet. The four keybox
+  download sources are gone: the page imports the user's own CDI material bundle
+  and keybox files, one slot each for TEE and StrongBox, never shared.
+- The bundle keeps the RKP workbench version 1 contract (`dice_chain_hex`,
+  `signing`, `device`, `issuance`). It is stored AES-256-GCM encrypted at
+  `data/rkp/seed.enc` with a per-install key at `data/rkp/master.key` (both 0600);
+  a blob copied from another device reports as undecryptable instead of failing at
+  issue time. The module ships no seed and no keybox.
+- The RKP engine is ported from Duck ToolBox (MIT, `a-side/source/rkp-engine`):
+  each issuance requests a fresh challenge, generates a new P-256 attestation key,
+  signs CSR v3 with the imported leaf identity and exports the verified chain. An
+  issued keybox passes the same slot checks as an imported one: the chain level and
+  `O=` must match the slot.
+- New `ommega-rkp` tool: `status`, `due`, `seed-import`, `seed-remove`,
+  `keybox-import`, `policy`, `issue`, `auto-run`. Issuance rewrites
+  `security_level` in the stored bundle to the target slot, so material captured
+  for TEE cannot be spent on a StrongBox request.
+- Automatic renewal follows the server-provided `time_to_refresh_hours`. The
+  keymint daemon checks five minutes after start and then sleeps to the next
+  renewal instant (capped at one day, so one check per day while idle); a failed
+  attempt is not retried for six hours. It shares an flock with the manual path,
+  and the network and keybox work run in a child process, never in the TA.
+- The per-app policy page hides the authentication-signing, local-keygen EWMA and
+  CPU/device-property cards in local mode; remote mode is unchanged.
+- Fixed the top refresh reporting "some status could not be read" in local mode.
+- Fixed keybox expiry parsing treating a two-digit UTCTime year as four digits,
+  which displayed 2611.
+
+Upgrade: update the A module ZIP only. B and Server need no change. Refresh the
+WebUI afterwards; the deploy flow reloads keymint, no reboot needed.
+
+Verified: CI green (A, B, Server, APKs, UI). On a PJZ110 device both TEE and
+StrongBox issuance completed and installed into their slots (chains
+`O=TEE` / `O=StrongBox`, four certificates each), the 29 engine unit tests pass on
+the device, and the first automatic check reported "not due" without spending a
+request.
+
 ## 2.2.2 — 2026-11-01
 
 Per-application SOTER identities and request counters on A.
