@@ -35,6 +35,17 @@ fn sign(imp: &OmmegaRsa, der: &[u8], mode: SignMode, message: &[u8]) -> Result<V
     op.finish()
 }
 
+fn decrypt(
+    imp: &OmmegaRsa,
+    der: &[u8],
+    mode: DecryptionMode,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut op = imp.begin_decrypt(RsaKey(der.to_vec()).into(), mode)?;
+    op.update(ciphertext)?;
+    op.finish()
+}
+
 fn recover_signature(public: &RsaPublicKey, signature: &[u8]) -> Vec<u8> {
     assert_eq!(signature.len(), public.size());
     let recovered = rsa::BigUint::from_bytes_be(signature)
@@ -184,6 +195,53 @@ fn no_padding_rejects_representatives_at_or_above_modulus() {
             kmr_common::ErrorKind::Hal(keymint::ErrorCode::InvalidArgument, _)
         ));
     }
+}
+
+#[test]
+fn no_padding_decrypt_rejects_representatives_at_or_above_modulus() {
+    let imp = OmmegaRsa::default();
+    let (der, public) = test_key();
+    for ciphertext in [public.n().to_bytes_be(), vec![0xff; public.size()]] {
+        let error = decrypt(&imp, &der, DecryptionMode::NoPadding, &ciphertext)
+            .expect_err("out-of-range ciphertext must not be reduced modulo n");
+        assert!(matches!(
+            error.kind(),
+            kmr_common::ErrorKind::Hal(keymint::ErrorCode::InvalidArgument, _)
+        ));
+    }
+}
+
+#[test]
+fn no_padding_decrypt_accepts_in_range_representatives() {
+    let imp = OmmegaRsa::default();
+    let (der, public) = test_key();
+
+    // (n - 1)^d mod n is n - 1, so an in-range representative still decrypts.
+    let ciphertext = (public.n() - rsa::BigUint::from(1u8)).to_bytes_be();
+    let plain = decrypt(&imp, &der, DecryptionMode::NoPadding, &ciphertext)
+        .expect("in-range ciphertext must decrypt");
+    let key_len = public.size();
+    let mut expected = vec![0; key_len];
+    expected[key_len - ciphertext.len()..].copy_from_slice(&ciphertext);
+    assert_eq!(
+        plain.len(),
+        key_len,
+        "plaintext must be exactly one key wide"
+    );
+    assert_eq!(plain, expected);
+
+    // A short ciphertext is left padded instead of being rejected, matching
+    // BoringSSL's RSA_NO_PADDING; the result is the raw private-key
+    // exponentiation of the padded value, so check it by exponentiating back.
+    let short = decrypt(&imp, &der, DecryptionMode::NoPadding, &[1, 0x02])
+        .expect("short ciphertext must decrypt");
+    assert_eq!(
+        short.len(),
+        key_len,
+        "short input must still decrypt one key wide"
+    );
+    let recovered = rsa::BigUint::from_bytes_be(&short).modpow(public.e(), public.n());
+    assert_eq!(recovered, rsa::BigUint::from(0x0102u32));
 }
 
 #[test]

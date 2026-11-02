@@ -83,7 +83,12 @@ impl crypto::Rsa for OmmegaRsa {
         mode: DecryptionMode,
     ) -> Result<Box<dyn crypto::AccumulatingOperation>, Error> {
         let key = explicit!(key)?;
-        let max_size = key.size();
+        // `Key::size()` reports the length of the DER-encoded modulus INTEGER,
+        // which carries a sign byte when the leading bit is set and is therefore
+        // one byte longer than the modulus for those keys. Parse the key so that
+        // `max_input_size` and the NoPadding output padding use the same width
+        // BoringSSL's `RSA_size` reports.
+        let max_size = parse_key(&key)?.size();
         Ok(Box::new(OmmegaRsaDecryptOperation {
             key,
             mode,
@@ -138,15 +143,24 @@ impl crypto::AccumulatingOperation for OmmegaRsaDecryptOperation {
         let decrypted = match self.mode {
             DecryptionMode::NoPadding => {
                 // Raw RSA decrypt: m = c^d mod n, big-endian zero-padded to key size.
-                let n = priv_key.n();
-                let c = rsa::BigUint::from_bytes_be(ciphertext);
-                let m = c.modpow(priv_key.d(), n);
+                // Short ciphertexts are left-padded the way BoringSSL does, and a
+                // representative at or above the modulus is refused before the
+                // private operation: reducing it modulo n would silently accept
+                // `c == n` and decrypt `0`. AndroidKeyStore maps the resulting
+                // INVALID_ARGUMENT to BadPaddingException, which is what a stock
+                // HAL reports for the same input.
                 let key_len = self.max_size;
-                let mut out = vec_try![0; key_len]?;
-                let m_bytes = m.to_bytes_be();
-                let offset = key_len.saturating_sub(m_bytes.len());
-                out[offset..].copy_from_slice(&m_bytes);
-                out
+                let input = zero_pad_left(ciphertext, key_len)?;
+                let n = priv_key.n();
+                let c = rsa::BigUint::from_bytes_be(&input);
+                if &c >= n {
+                    return Err(km_err!(
+                        InvalidArgument,
+                        "RSA ciphertext is not less than the modulus"
+                    ));
+                }
+                let m = c.modpow(priv_key.d(), n);
+                zero_pad_left(&m.to_bytes_be(), key_len)?
             }
             DecryptionMode::OaepPadding {
                 msg_digest,
