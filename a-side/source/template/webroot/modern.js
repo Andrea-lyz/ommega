@@ -24,6 +24,54 @@ export function relayVerdict(health, now = Date.now()) {
   if (failed) return {tone: fresh ? 'error' : 'warn', label:fresh ? text('最近请求失败', 'Recent request failed') : text('上次请求失败', 'Last request failed'), at, age, failed:true};
   return {tone: fresh ? 'ok' : 'muted', label:fresh ? text('最近请求成功', 'Recent request succeeded') : text('上次请求成功', 'Last request succeeded'), at, age, failed:false};
 }
+/** Timestamp of the newest keymint log line, which is always UTC. */
+export function parseLogTime(line) {
+  const match = /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(String(line || ''));
+  if (!match) return 0;
+  const at = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]));
+  return Number.isFinite(at) ? at : 0;
+}
+/** Short "how long ago" text for a timestamp in milliseconds. */
+export function formatAge(atMs, now = Date.now()) {
+  if (!Number.isSafeInteger(atMs) || atMs <= 0) return '—';
+  const seconds = Math.max(0, Math.round((now - atMs) / 1000));
+  if (seconds < 60) return text('刚刚', 'just now');
+  if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60);
+    return text(minutes + ' 分钟前', minutes + ' min ago');
+  }
+  if (seconds < 86400) {
+    const hours = Math.floor(seconds / 3600);
+    return text(hours + ' 小时前', hours + ' h ago');
+  }
+  const days = Math.floor(seconds / 86400);
+  return text(days + ' 天前', days + ' d ago');
+}
+/**
+ * The local-mode verdict. There is no relay request to report, so the card
+ * follows the newest `event=generate_total` line of the local keymint log: that
+ * is the work the software TA actually performed here. The attestation counters
+ * in the profile are relay-only, so they must not drive this card.
+ */
+export function localActivityVerdict(lastActivityMs, now = Date.now()) {
+  const at = Number.isSafeInteger(lastActivityMs) && lastActivityMs > 0 ? Math.floor(lastActivityMs / 1000) : 0;
+  if (!at) return {tone:'unknown', label:text('尚无本机记录', 'No local record yet'), at:0, age:Infinity, failed:false};
+  const age = now / 1000 - at;
+  return {tone:age >= -60 && age <= 600 ? 'ok' : 'muted', label:formatAge(at * 1000, now), at, age, failed:false};
+}
+/**
+ * The local-mode emblem. The relay icon drops the shield for a bare clock once a
+ * result is old, which would read as "no attestation"; local mode always keeps
+ * the shield because the material is on this device, and only the inner mark
+ * follows the outcome.
+ */
+export function localVerdictIcon(tone) {
+  const shield = '<path d="M12 2.8 19 5.5v5.7c0 4.4-2.6 7.8-7 10-4.4-2.2-7-5.6-7-10V5.5L12 2.8Z"/>';
+  const mark = tone === 'ok' ? '<path d="m9 12.2 2 2 4-4"/>'
+    : tone === 'error' || tone === 'warn' ? '<path d="M12 8.6v3.7m0 2.3h.01"/>'
+    : '<circle cx="12" cy="10.2" r="1.15"/><path d="M12 11.35v3.4"/>';
+  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${shield}${mark}</svg>`;
+}
 export function requestIcon(tone) {
   const mark = tone === 'error' ? '<path d="m9.5 9.5 5 5m0-5-5 5"/>'
     : tone === 'warn' ? '<path d="M12 8v4.5m0 3h.01"/>'
@@ -41,6 +89,159 @@ export function deviceSnapshot(profile) {
 }
 export function formatRelayLatency(value) {
   return Number.isSafeInteger(value) && value >= 0 ? `${value}ms` : '—';
+}
+/** Flat client-a config (`/data/adb/ommega/ommegadata/config`) → relay fields. */
+export function parseRelaySettings(raw) {
+  const fields = Object.create(null);
+  for (const line of String(raw || '').split(/\r?\n/)) {
+    const at = line.indexOf(':');
+    if (at < 0) continue;
+    const key = line.slice(0,at).trim().toLowerCase();
+    if (['url','device_id','remote','tls_insecure','tls_skip_verify','insecure_tls'].includes(key)) fields[key] = line.slice(at+1).trim();
+  }
+  if (!Object.keys(fields).length) return null;
+  const url = fields.url || '';
+  const urlOff = !url || /^(none|off)$/i.test(url);
+  const flag = fields.remote || '';
+  const remote = /^(0|false|no|off)$/i.test(flag) ? false : /^(1|true|yes|on)$/i.test(flag) ? true : !urlOff;
+  return {url, deviceId:fields.device_id || '', remote:remote && !urlOff,
+    insecure:/^(1|true|yes|on)$/i.test(fields.tls_insecure || fields.tls_skip_verify || fields.insecure_tls || '')};
+}
+/** `[remote]` table of config.toml, consulted only when the flat file is absent. */
+export function parseTomlRemote(raw) {
+  const body = String(raw || '');
+  const url = /^[ \t]*url[ \t]*=[ \t]*"([^"]*)"/m.exec(body);
+  const enabled = /^[ \t]*enabled[ \t]*=[ \t]*(true|false)/m.exec(body);
+  if (!url && !enabled) return null;
+  return {url:url ? url[1] : '', enabled:enabled ? enabled[1] === 'true' : Boolean(url && url[1])};
+}
+/** Effective relay mode: the flat file wins, exactly like the daemon config. */
+export function relayMode(flatRaw, tomlRaw) {
+  const flat = parseRelaySettings(flatRaw);
+  if (flat) return flat.remote ? 'remote' : 'local';
+  const toml = parseTomlRemote(tomlRaw);
+  if (toml) return toml.enabled && toml.url ? 'remote' : 'local';
+  return 'unknown';
+}
+function derLength(bytes, offset) {
+  const first = bytes[offset];
+  if (first === undefined) return null;
+  if (first < 0x80) return {length:first, offset:offset + 1};
+  const count = first & 0x7f;
+  if (count === 0 || count > 4 || offset + count >= bytes.length) return null;
+  let length = 0;
+  for (let index = 0; index < count; index += 1) length = length * 256 + bytes[offset + 1 + index];
+  return {length, offset:offset + 1 + count};
+}
+function derItem(bytes, offset) {
+  const tag = bytes[offset];
+  const head = tag === undefined ? null : derLength(bytes, offset + 1);
+  if (!head) return null;
+  const end = head.offset + head.length;
+  if (end > bytes.length) return null;
+  return {tag, start:head.offset, end};
+}
+function derChildren(bytes, item) {
+  const children = [];
+  for (let offset = item.start; offset < item.end;) {
+    const child = derItem(bytes, offset);
+    if (!child || child.end <= offset) break;
+    children.push(child);
+    offset = child.end;
+  }
+  return children;
+}
+const decoder = typeof TextDecoder === 'function' ? new TextDecoder() : null;
+function derText(bytes, item) {
+  const slice = bytes.subarray(item.start, item.end);
+  if (decoder) return decoder.decode(slice);
+  let value = '';
+  for (const byte of slice) value += String.fromCharCode(byte);
+  return value;
+}
+function derTime(bytes, item) {
+  const raw = derText(bytes, item).trim();
+  const match = /^(\d{2}|\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?Z?$/.exec(raw);
+  if (!match) return null;
+  let year = Number(match[1]);
+  if (match[1].length === 2) year += year < 50 ? 2000 : 1900;
+  const at = Date.UTC(year, Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6] || 0));
+  return Number.isFinite(at) ? at : null;
+}
+const OID_O = [0x55,0x04,0x0a];
+const OID_T = [0x55,0x04,0x0c];
+function derName(bytes, item) {
+  const name = {o:null, t:null};
+  for (const set of derChildren(bytes, item)) for (const attribute of derChildren(bytes, set)) {
+    const parts = derChildren(bytes, attribute);
+    if (parts.length < 2) continue;
+    const oid = bytes.subarray(parts[0].start, parts[0].end);
+    const matches = wanted => oid.length === wanted.length && wanted.every((value, index) => oid[index] === value);
+    if (matches(OID_O)) name.o = derText(bytes, parts[1]);
+    else if (matches(OID_T)) name.t = derText(bytes, parts[1]);
+  }
+  return name;
+}
+/**
+ * Subject O/T and validity of one DER certificate. The keybox leaf carries the
+ * security level it was issued for (`O=TEE` or `O=StrongBox`), which is what a
+ * verifier compares against the requested level.
+ */
+export function certificateSummary(der) {
+  const certificate = derItem(der, 0);
+  if (!certificate || certificate.tag !== 0x30) return null;
+  const tbs = derChildren(der, certificate)[0];
+  if (!tbs || tbs.tag !== 0x30) return null;
+  const fields = derChildren(der, tbs);
+  let index = fields[0] && fields[0].tag === 0xa0 ? 1 : 0;
+  index += 3; // serialNumber, signature, issuer
+  const validity = fields[index], subject = fields[index + 1];
+  if (!validity || validity.tag !== 0x30 || !subject || subject.tag !== 0x30) return null;
+  const times = derChildren(der, validity);
+  if (times.length < 2) return null;
+  const name = derName(der, subject);
+  return {o:name.o, t:name.t, notBefore:derTime(der, times[0]), notAfter:derTime(der, times[1])};
+}
+/**
+ * Decode the first `<Certificate>` body (PEM armour or bare base64) into DER
+ * bytes. More than one certificate may arrive (the keybox chain is a sequence,
+ * and a truncated range glues several of them together), so only the first
+ * block is decoded; the leaf is the one that carries the level and the validity.
+ */
+export function certificateBytes(raw) {
+  const text = String(raw || '');
+  const block = /-----BEGIN[^-]*-----([\s\S]*?)-----END[^-]*-----/.exec(text);
+  const body = (block ? block[1] : text).replace(/<[^>]*>/g, '').replace(/[^A-Za-z0-9+/=]/g, '');
+  if (!body) return null;
+  try {
+    const binary = atob(body);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch { return null; }
+}
+/**
+ * One keybox slot: whether it is installed, which level it claims and how long
+ * it stays valid. `expected` is the level the slot must carry.
+ */
+export function keyboxSummary(raw, expected, now = Date.now()) {
+  if (!String(raw || '').trim()) return {state:'missing', expected, level:null, mismatch:false, days:null};
+  const certificate = certificateBytes(raw);
+  if (!certificate) return {state:'invalid', expected, level:null, mismatch:false, days:null};
+  const summary = certificateSummary(certificate);
+  if (!summary) return {state:'invalid', expected, level:null, mismatch:false, days:null};
+  const level = [summary.t, summary.o].find(value => value && /tee|strongbox/i.test(value)) || null;
+  const canonical = level && /strongbox/i.test(level) ? 'StrongBox' : level ? 'TEE' : null;
+  const days = Number.isFinite(summary.notAfter) ? Math.floor((summary.notAfter - now) / 86400000) : null;
+  return {state:'loaded', expected, level:canonical, mismatch:Boolean(canonical) && canonical !== expected,
+    days, notAfter:summary.notAfter, o:summary.o, t:summary.t};
+}
+/** Short "remaining validity" text for the material card. */
+export function formatKeyboxDays(days) {
+  if (!Number.isSafeInteger(days)) return '—';
+  if (days < 0) return text('已过期','Expired');
+  if (days === 0) return text('今天到期','Expires today');
+  return text(`剩 ${days} 天`, `${days}d left`);
 }
 export function mergeAttestationHealth(health, completedMs) {
   if (!Number.isSafeInteger(completedMs) || completedMs <= 0) return health;
@@ -93,6 +294,85 @@ function renderBBattery(snapshot) {
   if (element) element.title = snapshot
     ? `${text('Server 收到电量上报于','Battery report received by server at')} ${formatTime(snapshot.at / 1000)}`
     : text('等待已配置 B 端上报电量；离线、过期或不支持时不显示旧值。','Waiting for the configured B device. Offline, stale or unsupported data is not shown.');
+}
+function keyboxRow(summary) {
+  if (summary.state === 'missing') return text('未配置','Not configured');
+  if (summary.state === 'invalid') return text('无法解析','Unreadable');
+  return (summary.level || text('已加载','Loaded')) + ' · ' + formatKeyboxDays(summary.days);
+}
+function setBadge(id, label, tone) {
+  const badge = document.getElementById(id);
+  if (!badge) return;
+  badge.textContent = label;
+  badge.className = 'badge latency-badge' + (tone === 'ok' ? '' : ' ' + tone);
+  badge.dataset.tone = tone;
+}
+/**
+ * Local mode has no relay and no B-side snapshot, so the overview swaps the
+ * B-device card for the material this device actually signs with.
+ */
+function applyOverviewMode(mode) {
+  const local = mode === 'local';
+  const deviceCard = document.getElementById('om-b-summary');
+  const materialCard = document.getElementById('om-local-summary');
+  if (deviceCard) deviceCard.hidden = local;
+  if (materialCard) materialCard.hidden = !local;
+  setText('om-request-kind', local ? text('KeyMint · 本机','KeyMint · local') : 'KeyMint');
+  setText('om-verdict-label', local ? text('最近证明','Last attestation') : text('最近请求','Last request'));
+  setText('om-verdict-title', local ? text('本机证明','Local attestation') : text('证明链路','Attestation relay'));
+  setText('om-health-time-label', local ? text('签发时间','Issued at') : text('记录时间','Recorded'));
+  setText('om-health-kind-label', local ? text('执行方','Performed by') : text('请求类型','Request'));
+  const route = document.getElementById('om-route');
+  if (local) {
+    setText('om-route-mid', text('本机 TA','Local TA'));
+    setText('om-route-mid-detail', text('软件 KeyMint','Software KeyMint'));
+    setText('om-route-end', 'Keybox');
+    setText('om-route-end-detail', text('证书材料','Certificate material'));
+  } else {
+    setText('om-route-mid', 'Server');
+    setText('om-route-mid-detail', text('转发','Relay'));
+    setText('om-route-end', 'B');
+    setText('om-route-end-detail', text('硬件 TEE','Hardware TEE'));
+  }
+  if (route) route.setAttribute('aria-label', local ? 'A → ' + text('本机 TA','Local TA') + ' → Keybox' : 'A → Server → B');
+}
+function renderLocalSummary({tee, strongbox, activity, profile, packages}) {
+  const now = Date.now();
+  const teeBox = keyboxSummary(tee, 'TEE', now);
+  const strongBox = keyboxSummary(strongbox, 'StrongBox', now);
+  setText('om-local-tee', keyboxRow(teeBox));
+  setText('om-local-strongbox', keyboxRow(strongBox));
+  setText('om-local-last', activity > 0 ? formatTime(activity / 1000) : text('暂无记录','No record yet'));
+  // The status reader already reports the counter table that matches the active
+  // mode, so this total is the local one whenever local mode is active.
+  const counts = profile?.attestation_counts;
+  const total = counts && typeof counts === 'object'
+    ? Object.values(counts).reduce((sum, entry) => sum + (Number.isSafeInteger(entry?.count) ? entry.count : 0), 0) : null;
+  setText('om-local-attest', total === null ? '—' : total === 0 ? text('暂无','None') : text(total + ' 次', total + ' total'));
+  setText('om-local-scope', packages ? String(packages.size) : '—');
+  setText('om-local-mode', text('未启用','Disabled'));
+  const loaded = [teeBox, strongBox].filter(box => Number.isFinite(box.days)).sort((left, right) => left.days - right.days);
+  const soonest = loaded[0];
+  setBadge('om-local-expiry', text('最近到期','Next expiry') + ' · ' + (soonest ? formatKeyboxDays(soonest.days) : '—'),
+    !soonest ? 'unknown' : soonest.days < 0 ? 'error' : soonest.days <= 7 ? 'warn' : 'ok');
+  const warnings = [];
+  if (teeBox.state === 'missing') warnings.push([text('TEE 材料缺失','TEE material missing'), 'error']);
+  if (teeBox.state === 'invalid') warnings.push([text('TEE 材料无法解析','TEE material unreadable'), 'error']);
+  if (teeBox.mismatch) warnings.push([text('TEE 槽位装的是 StrongBox 链','TEE slot holds a StrongBox chain'), 'error']);
+  if (strongBox.mismatch) warnings.push([text('StrongBox 槽位装的是 TEE 链','StrongBox slot holds a TEE chain'), 'error']);
+  if (Number.isFinite(teeBox.days) && teeBox.days < 0) warnings.push([text('TEE 证书已过期','TEE certificate expired'), 'error']);
+  if (Number.isFinite(strongBox.days) && strongBox.days < 0) warnings.push([text('StrongBox 证书已过期','StrongBox certificate expired'), 'error']);
+  if (strongBox.state === 'missing') warnings.push([text('StrongBox 未配置（可选）','StrongBox not configured (optional)'), 'muted']);
+  const holder = document.getElementById('om-local-warnings');
+  if (holder) {
+    holder.hidden = !warnings.length;
+    holder.replaceChildren(...warnings.map(([label, tone]) => {
+      const chip = document.createElement('span');
+      chip.className = 'chip ' + tone;
+      chip.textContent = label;
+      return chip;
+    }));
+  }
 }
 const exec = createBridge('a_dashboard');
 const execBStatus = createBridge('a_b_status');
@@ -241,22 +521,28 @@ function install() {
         <div class="page-heading"><div><span class="section-kicker">OVERVIEW</span><h1>${text('概览','Overview')}</h1><p>${text('查看请求端最近的运行记录。','View recent client activity.')}</p></div></div>
         <div class="dashboard-grid" data-dashboard-side="a">
           <article class="panel status-panel">
-            <div class="status-head"><div class="panel-label">${icon('clock')}<span>${text('最近请求','Last request')}</span></div><span class="badge unknown" id="om-relay-state">${text('读取状态中','Reading status')}</span></div>
-            <div class="status-body"><div><h2>${text('证明链路','Attestation relay')}</h2><p id="om-health-detail">—</p></div><span class="status-emblem unknown" id="om-request-icon">${requestIcon('unknown')}</span></div>
-            <div class="status-footer"><div><small>${text('记录时间','Recorded')}</small><strong id="om-health-time">—</strong></div><div><small>${text('请求类型','Request')}</small><strong>KeyMint</strong></div></div>
+            <div class="status-head"><div class="panel-label">${icon('clock')}<span id="om-verdict-label">${text('最近请求','Last request')}</span></div><span class="badge unknown" id="om-relay-state">${text('读取状态中','Reading status')}</span></div>
+            <div class="status-body"><div><h2 id="om-verdict-title">${text('证明链路','Attestation relay')}</h2><p id="om-health-detail">—</p></div><span class="status-emblem unknown" id="om-request-icon">${requestIcon('unknown')}</span></div>
+            <div class="status-footer"><div><small id="om-health-time-label">${text('记录时间','Recorded')}</small><strong id="om-health-time">—</strong></div><div><small id="om-health-kind-label">${text('请求类型','Request')}</small><strong id="om-request-kind">KeyMint</strong></div></div>
             <p class="note" id="om-health-message"></p>
           </article>
-          <article class="panel metric-card b-summary">
+          <article class="panel metric-card b-summary" id="om-b-summary">
             <div class="b-summary-header"><div class="b-summary-title"><div class="panel-label">${icon('phone')}<span>${text('B 端概览','B device')}</span></div><h2 id="om-b-model">—</h2></div><div class="b-summary-statuses"><span class="badge unknown" id="om-b-connection">${text('连接状态未知','Connection unknown')}</span><span class="badge unknown latency-badge" id="om-b-latency">${text('最近延迟','Last latency')} · —</span></div></div>
             <dl class="b-summary-details"><div><dt>${text('品牌 / 厂商','Brand / manufacturer')}</dt><dd id="om-b-brand">—</dd></div><div><dt>${text('设备代号','Device code')}</dt><dd id="om-b-device">—</dd></div><div><dt>${text('产品代号','Product code')}</dt><dd id="om-b-product">—</dd></div><div><dt>CPU / SoC</dt><dd id="om-b-soc">—</dd></div><div><dt>${text('已配置设备 ID','Configured device ID')}</dt><dd id="om-b-relay-id">—</dd></div></dl>
             <div class="battery-summary">${icon('battery')}<span>${text('电量','Battery')}</span><strong id="om-b-battery">${text('暂无新数据','No recent data')}</strong></div>
             <p class="note">${text('设备信息来自本地保存的 B 端属性快照。','Device details come from the locally saved B property snapshot.')}</p>
           </article>
+          <article class="panel metric-card b-summary" id="om-local-summary" hidden>
+            <div class="b-summary-header"><div class="b-summary-title"><div class="panel-label">${icon('shield')}<span>${text('本机证明材料','Local material')}</span></div><h2>${text('本地模式','Local mode')}</h2></div><div class="b-summary-statuses"><span class="badge neutral" id="om-local-relay">${text('中继未启用','Relay disabled')}</span><span class="badge unknown latency-badge" id="om-local-expiry">${text('最近到期','Next expiry')} · —</span></div></div>
+            <dl class="b-summary-details"><div><dt>TEE</dt><dd id="om-local-tee">—</dd></div><div><dt>StrongBox</dt><dd id="om-local-strongbox">—</dd></div><div><dt>${text('最近签发','Last issuance')}</dt><dd id="om-local-last">—</dd></div><div><dt>${text('累计证明','Attestations')}</dt><dd id="om-local-attest">—</dd></div><div><dt>${text('应用作用域','App scope')}</dt><dd id="om-local-scope">—</dd></div><div><dt>${text('中继','Relay')}</dt><dd id="om-local-mode">—</dd></div></dl>
+            <div class="metric-chips om-local-warnings" id="om-local-warnings" hidden></div>
+            <p class="note">${text('本机软件 TA 用自己的 keybox 直接签发证明，材料不经过网络。','This device signs attestations with its own software TA and keybox; no material leaves the device.')}</p>
+          </article>
           ${card('cpu','KEYMINT','om-keymint',text('本机守护进程','Local daemon'))}
           ${card('key','SOTER','om-soter',text('软件 TA 状态','Software TA status'),'om-soter-detail')}
           ${card('apps',text('应用范围','App scope'),'om-scope-count',text('已保存的单独作用域','Saved individual scope'))}
           ${card('file',text('模块版本','MODULE VERSION'),'om-version',text('当前安装','Installed build'))}
-          <article class="panel wide-card"><div class="card-heading"><h2>${text('证明路径','Attestation path')}</h2><small>${text('示意图','Diagram')}</small></div><div class="route" aria-label="A → Server → B"><div class="route-node"><strong>A</strong><span>${text('请求端','Client')}</span></div><span class="route-arrow" aria-hidden="true">${icon('arrow')}</span><div class="route-node"><strong>Server</strong><span>${text('转发','Relay')}</span></div><span class="route-arrow" aria-hidden="true">${icon('arrow')}</span><div class="route-node"><strong>B</strong><span>${text('硬件 TEE','Hardware TEE')}</span></div></div><p class="dashboard-note">${text('路径仅展示组成，不表示各节点当前的连接状态。','The diagram does not report current connection status.')}</p></article>
+          <article class="panel wide-card"><div class="card-heading"><h2>${text('证明路径','Attestation path')}</h2><small>${text('示意图','Diagram')}</small></div><div class="route" id="om-route" aria-label="A → Server → B"><div class="route-node"><strong>A</strong><span>${text('请求端','Client')}</span></div><span class="route-arrow" aria-hidden="true">${icon('arrow')}</span><div class="route-node"><strong id="om-route-mid">Server</strong><span id="om-route-mid-detail">${text('转发','Relay')}</span></div><span class="route-arrow" aria-hidden="true">${icon('arrow')}</span><div class="route-node"><strong id="om-route-end">B</strong><span id="om-route-end-detail">${text('硬件 TEE','Hardware TEE')}</span></div></div><p class="dashboard-note">${text('路径仅展示组成，不表示各节点当前的连接状态。','The diagram does not report current connection status.')}</p></article>
         </div>
       </section>
       <section id="om-apps-heading" class="om-view" hidden><div class="om-page-heading"><span class="om-eyebrow">APPLICATIONS</span><h1>${text('应用','Apps')}</h1><p>${text('管理应用作用域与策略。','Manage app scope and policies.')}</p></div></section>
@@ -456,12 +742,22 @@ p=/data/adb/modules/ommega/libs/arm64-v8a/ommega-cpu-policy
 [ ! -x "$p" ] || "$p" status 2>/dev/null || true
 printf '\\n[REMOTE_DEVICE]\\n'
 sed -n 's/^device_id:[[:space:]]*//p' /data/adb/ommega/ommegadata/config 2>/dev/null | head -n 1
+printf '\\n[MODE]\\n'
+if [ -r /data/adb/ommega/ommegadata/config ]; then grep -iE '^[[:space:]]*(url|device_id|remote|tls_insecure|tls_skip_verify|insecure_tls)[[:space:]]*:' /data/adb/ommega/ommegadata/config 2>/dev/null; else printf 'absent\\n'; fi
+printf '\\n[REMOTE]\\n'
+grep -A10 -E '^\\[remote\\]' /data/misc/keystore/ommega/config.toml 2>/dev/null | grep -iE '^[[:space:]]*(url|enabled)[[:space:]]*='
+printf '\\n[KEYBOX_TEE]\\n'
+awk '/<Certificate[ >]/{held=1} held{print} held&&index($0,"</Certificate>"){exit}' /data/misc/keystore/ommega/keybox.xml 2>/dev/null
+printf '\\n[KEYBOX_STRONGBOX]\\n'
+awk '/<Certificate[ >]/{held=1} held{print} held&&index($0,"</Certificate>"){exit}' /data/misc/keystore/ommega/keybox-strongbox.xml 2>/dev/null
+printf '\\n[ACTIVITY]\\n'
+grep 'event=generate_total' /data/misc/keystore/ommega/logs/keymint.log 2>/dev/null | tail -n 1
 printf '\\n[TARGET]\\n'
 if [ -f /data/adb/ommega/ommegadata/target.txt ]; then printf 'present\n'; cat /data/adb/ommega/ommegadata/target.txt; else printf 'missing'; fi
 printf '\\n[END]\\n'`);
   result.stdout = result.stdout.replace(/\r\n/g, '\n');
   const markers = new Set(result.stdout.split('\n'));
-  const complete = ['HEALTH','SOTER','VERSION','DAEMON','PROFILE','REMOTE_DEVICE','TARGET','END'].every(name => markers.has('[' + name + ']'));
+  const complete = ['HEALTH','SOTER','VERSION','DAEMON','PROFILE','REMOTE_DEVICE','MODE','REMOTE','KEYBOX_TEE','KEYBOX_STRONGBOX','ACTIVITY','TARGET','END'].every(name => markers.has('[' + name + ']'));
   if (result.errno || !complete) {
     for (const id of ['om-keymint','om-soter']) setText(id,text('不可用','Unavailable'));
     const badge = document.getElementById('om-relay-state');
@@ -472,19 +768,28 @@ printf '\\n[END]\\n'`);
     setText('om-b-latency',`${text('最近延迟','Last latency')} · —`);
     setText('om-health-time','—'); setText('om-health-detail',text('状态读取失败。','Could not read status.')); setText('om-health-message','');
     for (const id of ['om-b-model','om-b-brand','om-b-device','om-b-product','om-b-soc','om-b-relay-id','om-scope-count']) setText(id,'—');
+    applyOverviewMode('unknown');
+    for (const id of ['om-local-tee','om-local-strongbox','om-local-last','om-local-attest','om-local-scope','om-local-mode']) setText(id,'—');
     throw new Error(result.stderr || text('本机状态读取失败或响应不完整。','Local status read failed or returned an incomplete response.'));
   }
   const section = name => result.stdout.split('['+name+']\n')[1]?.split('\n[')[0]?.trim() || '';
+  // Local mode has no relay to report on, so the overview renders the material
+  // this device signs with instead of a B-device snapshot.
+  const mode = relayMode(section('MODE'), section('REMOTE'));
+  applyOverviewMode(mode);
   const profile = parseJson(section('PROFILE'));
   const health = mergeAttestationHealth(parseJson(section('HEALTH')), profile?.attestation_completed_at_ms);
   const soter = parseJson(section('SOTER'));
-  const verdict = relayVerdict(health);
+  // Local mode has no relay request to report, so the card follows the last
+  // local attestation instead of a possibly stale relay verdict.
+  const verdict = mode === 'local' ? localActivityVerdict(parseLogTime(section('ACTIVITY'))) : relayVerdict(health);
   lastVerdict = verdict;
   const badge = document.getElementById('om-relay-state');
   const tone = verdict.tone === 'ok' ? '' : ' ' + verdict.tone;
   badge.textContent = verdict.label; badge.className = 'badge' + tone; badge.dataset.tone = verdict.tone;
   const emblem = document.getElementById('om-request-icon');
-  emblem.className = 'status-emblem' + tone; emblem.dataset.tone = verdict.tone; emblem.innerHTML = requestIcon(verdict.tone);
+  emblem.className = 'status-emblem' + tone; emblem.dataset.tone = verdict.tone;
+  emblem.innerHTML = mode === 'local' ? localVerdictIcon(verdict.tone) : requestIcon(verdict.tone);
   const latency = document.getElementById('om-b-latency');
   renderBConnection();
   latency.className = 'badge latency-badge' + (verdict.failed ? ' error' : verdict.tone === 'unknown' ? ' unknown' : '');
@@ -497,6 +802,7 @@ printf '\\n[END]\\n'`);
   const lines = targets.split(/\r?\n/);
   const packages = lines.shift() === 'present' ? new Set(lines.map(line => line.trim().replace(/[!?]+$/, '')).filter(line => /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$/.test(line))) : null;
   setText('om-scope-count',packages ? String(packages.size) : '—');
+  renderLocalSummary({tee:section('KEYBOX_TEE'),strongbox:section('KEYBOX_STRONGBOX'),activity:parseLogTime(section('ACTIVITY')),profile,packages});
   setText('om-keymint', /^\d+$/.test(section('DAEMON')) ? `PID ${section('DAEMON')}` : text('未确认运行','Not confirmed'));
   setText('om-version',section('VERSION').replace(/^version=/,'') || '—');
   const recent = freshness(soter?.updated) === 'recent';
@@ -505,8 +811,10 @@ printf '\\n[END]\\n'`);
   setText('om-health-time',formatTime(verdict.at));
   // The snapshot is event driven, not a heartbeat. Never infer a live connection from its age.
   const advice = {unauthorized:text('服务器拒绝凭据，请检查 Token。','The server rejected the credentials. Check the token.'),throttled:text('服务器限流或暂时不可用。','The server is busy or rate limiting.'),transport:text('最近一次网络请求失败。','The last network request failed.')};
-  setText('om-health-detail',verdict.failed ? `${health?.last_status || '—'} · ${advice[health?.last_kind] || text('请查看诊断详情。','See diagnostic details.')}` : text('这是最近一次请求的结果，不代表当前连接心跳。','This is the result of the last request, not a live connection heartbeat.'));
-  setText('om-health-message',verdict.failed ? healthMessage(health) : '');
+  setText('om-health-detail',verdict.failed ? `${health?.last_status || '—'} · ${advice[health?.last_kind] || text('请查看诊断详情。','See diagnostic details.')}`
+    : mode === 'local' ? text('本机软件 TA 最近一次生成密钥的时间，不代表当前连接心跳。','Time of the most recent local key generation, not a live connection heartbeat.')
+    : text('这是最近一次请求的结果，不代表当前连接心跳。','This is the result of the last request, not a live connection heartbeat.'));
+  setText('om-health-message',mode === 'local' || !verdict.failed ? '' : healthMessage(health));
   return true;
 }
 if (typeof document !== 'undefined') install();

@@ -11,6 +11,26 @@ use serde_json::json;
 use std::{io::Read, path::Path};
 
 const MAX_CONFIG: usize = 512 * 1024;
+/// Written by the daemon whenever it resolves the relay configuration.
+const RELAY_MODE_PATH: &str = "/data/misc/keystore/ommega/data/relay-mode";
+
+/// Which counter table the status output reports. A missing or unreadable file
+/// keeps the historical relay behaviour, so an older module still shows counts.
+fn read_relay_source() -> attestation_counts::Source {
+    match std::fs::read_to_string(RELAY_MODE_PATH) {
+        Ok(contents) if contents.trim().eq_ignore_ascii_case("local") => {
+            attestation_counts::Source::Local
+        }
+        _ => attestation_counts::Source::Remote,
+    }
+}
+
+fn attestation_source_name(source: attestation_counts::Source) -> &'static str {
+    match source {
+        attestation_counts::Source::Remote => "remote",
+        attestation_counts::Source::Local => "local",
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,12 +66,18 @@ fn execute() -> Result<()> {
             let standalone_active = standalone.is_dir()
                 && !standalone.join("disable").exists()
                 && !standalone.join("remove").exists();
+            // The counters follow the mode the daemon published, so the same
+            // tablet shows relay counts in remote mode and local counts in local
+            // mode without the reader having to know the rule.
+            let source = read_relay_source();
             let stats =
-                attestation_counts::read_at(Path::new(attestation_counts::DATABASE_PATH)).ok();
+                attestation_counts::read_at(source, Path::new(attestation_counts::DATABASE_PATH))
+                    .ok();
             println!(
                 "{}",
                 json!({"original": original, "config": config, "profile": profile,
                 "engine": "exp6", "standalone_active": standalone_active,
+                "attestation_source": attestation_source_name(source),
                 "attestation_counts": stats.as_ref().and_then(|value| value.counts.as_ref()),
                 "last_b_latency_ms": stats.as_ref().and_then(|value| value.last_b_latency_ms),
                 "attestation_completed_at_ms": stats.as_ref().and_then(|value| value.completed_at_ms)})

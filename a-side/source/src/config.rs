@@ -38,6 +38,9 @@ const CLIENTA_CONFIG_PATH: &str = "/data/misc/keystore/ommega/config";
 /// link on the next boot.
 const CLIENTA_CONFIG_UI_PATH: &str = "/data/adb/ommega/ommegadata/config";
 const CLIENTA_CONFIG_PATHS: [&str; 2] = [CLIENTA_CONFIG_PATH, CLIENTA_CONFIG_UI_PATH];
+/// Effective relay mode, published so tools that cannot load this config (the
+/// WebUI status reader) can pick the counter table that matches the mode.
+pub const RELAY_MODE_PATH: &str = "/data/misc/keystore/ommega/data/relay-mode";
 const CONFIG_VERSION_V1: u32 = 1;
 const CURRENT_CONFIG_VERSION: u32 = 2;
 
@@ -521,6 +524,7 @@ impl Config {
         let from_clienta = clienta.is_some();
         let remote = clienta.unwrap_or_else(|| config_file.remote.clone());
         log_remote_source(&remote, from_clienta);
+        publish_relay_mode(&remote);
         Self {
             main: config_file.main.clone(),
             crypto: config_file.crypto.clone(),
@@ -557,7 +561,41 @@ fn log_remote_source(remote: &RemoteConfig, from_webui: bool) {
     }
 }
 
-/// Reads the legacy A-side flat config and maps it onto a [`RemoteConfig`],
+/// Content published for the resolved mode. A relay without a URL is local,
+/// exactly like the runtime check.
+pub fn relay_mode_contents(remote: &RemoteConfig) -> &'static str {
+    if remote.enabled && !remote.url.is_empty() {
+        "remote\n"
+    } else {
+        "local\n"
+    }
+}
+
+fn publish_relay_mode(remote: &RemoteConfig) {
+    use std::os::unix::fs::PermissionsExt as _;
+    // Unit tests build a runtime config with a default (local) relay; they must
+    // not overwrite the mode the running daemon published.
+    if cfg!(test) {
+        return;
+    }
+    let path = Path::new(RELAY_MODE_PATH);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::write(path, relay_mode_contents(remote)) {
+        Ok(()) => {
+            if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o644)) {
+                log::warn!("failed to set relay mode permissions: {error}");
+            }
+        }
+        Err(error) => log::warn!(
+            "failed to publish relay mode to {}: {error}",
+            path.display()
+        ),
+    }
+}
+
+/// Reads the legacy A-side flat config and maps it onto a RemoteConfig,
 /// matching the old client-a semantics exactly.
 ///
 /// Two paths carry the same file: the keystore copy and the WebUI path, normally
@@ -1115,6 +1153,20 @@ impl Default for DeviceProperty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_mode_is_published_only_for_an_enabled_relay_with_a_url() {
+        assert_eq!(
+            relay_mode_contents(&webui_remote(true, "https://relay.test")),
+            "remote\n"
+        );
+        assert_eq!(relay_mode_contents(&webui_remote(true, "")), "local\n");
+        assert_eq!(
+            relay_mode_contents(&webui_remote(false, "https://relay.test")),
+            "local\n"
+        );
+        assert_eq!(relay_mode_contents(&RemoteConfig::default()), "local\n");
+    }
 
     fn webui_remote(remote_enabled: bool, url: &str) -> RemoteConfig {
         RemoteConfig {

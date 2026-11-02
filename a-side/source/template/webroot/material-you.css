@@ -181,6 +181,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .battery-placeholder { margin-left: auto; width: 46px; height: 5px; border-radius: 99px; background: var(--border); }
 .metric-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }
 .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-soft); color: var(--muted); border-radius: 10px; padding: 7px 9px; font-size: 11px; font-weight: 650; }
+.chip.warn { color: var(--warning); background: var(--warning-soft); }
+.chip.error { color: var(--error); background: var(--error-soft); }
+.chip.muted { color: var(--muted); background: var(--surface-soft); }
+.om-local-warnings { margin-top: 0; }
 .compact-card { grid-column: span 4; min-height: 147px; padding: 20px; display: flex; flex-direction: column; justify-content: space-between; }
 .dashboard-grid[data-dashboard-side="a"] .compact-card { grid-column: span 3; }
 .compact-card h2 { margin: 16px 0 5px; font-size: 19px; letter-spacing: -.035em; overflow-wrap: anywhere; }
