@@ -12,6 +12,20 @@ running Server and does not install the optional APKs.
 The README no longer embeds per-version notes: a release only bumps the version
 and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
 
+## 2.3.1 — 2026-11-02
+
+Fixes the missing `ommega-rkp` in the 2.3.0 package.
+
+- The 2.3.0 ZIP contained `ommega-rkp`, but the installer extracts binaries by
+  name and the new tool was never added to that list, so after installation the
+  whole Settings → Automation page reported its backend as unavailable.
+- The installer now extracts and verifies `ommega-rkp` per ABI and aborts instead
+  of silently leaving it out.
+- CI now checks in `prepare` that every binary packaged by `build.py` also appears
+  in the installer list.
+- Only the installer changed; A-side behaviour is identical to 2.3.0. Devices on
+  2.3.0 can install 2.3.1 over it and keep all data and issued keyboxes.
+
 ## 2.3.0 — 2026-11-02
 
 A-side automation page and RKP issuance (A only; B and Server are unchanged, no
