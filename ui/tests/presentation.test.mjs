@@ -215,7 +215,7 @@ test('the keymint log line drives the local timestamp', () => {
   assert.equal(parseLogTime(''), 0);
   assert.equal(parseLogTime('no timestamp here'), 0);
   assert.equal(formatAge(0), '—');
-  assert.match(formatAge(Date.UTC(2026, 10, 2, 0, 12, 49), Date.UTC(2026, 10, 2, 0, 13, 40)), /31|刚刚/);
+  assert.match(formatAge(Date.UTC(2026, 10, 2, 0, 12, 49), Date.UTC(2026, 10, 2, 0, 13, 40)), /刚刚|just now/);
   assert.match(formatAge(Date.UTC(2026, 9, 1), Date.UTC(2026, 10, 2)), /天|d ago/);
 });
 
