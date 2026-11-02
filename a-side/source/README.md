@@ -291,6 +291,16 @@ file comes from the user.
   `time_to_refresh_hours` (default 72) is applied to the earliest expiry, and
   `due` turns true once now passes that point. `policy --auto on|off` and
   `policy --refresh-hours <n>` persist it in `data/rkp/policy.json`.
+- **Automatic renewal.** The keymint daemon starts an `ommega-rkp-auto` thread
+  that runs `ommega-rkp auto-run` five minutes after start and then every 30
+  minutes. That subcommand owns the decision: it acts only when the page switch is
+  on, material is imported and a slot has entered its renewal window (expiry minus
+  `time_to_refresh_hours`). It takes an `flock` so a manual issuance and the timer
+  can never overlap, records every attempt in `policy.json`, and after a failure
+  waits six hours before trying again so a broken registration cannot burn a
+  request on every tick. The child does the network work, so a slow or hung
+  request cannot hold the TA. `auto-run --dry-run` reports what would happen
+  without spending a request.
 - **Issuance.** `issue <tee|strongbox>` runs the ported RKP engine
   (`rkp-engine/`, from Duck ToolBox `crates/duck-rkp`, MIT): it requests a fresh
   challenge, generates a new P-256 attestation key, signs CSR v3 with the imported
@@ -311,6 +321,7 @@ ommega-rkp issue strongbox
 ommega-rkp keybox-import tee /sdcard/Download/keybox.xml
 ommega-rkp policy --auto on --refresh-hours 72
 ommega-rkp due
+ommega-rkp auto-run --dry-run
 ```
 
 ## Restarting keymint and injector

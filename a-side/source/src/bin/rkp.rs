@@ -63,6 +63,8 @@ struct Policy {
     #[serde(default)]
     last_issue_ms: u64,
     #[serde(default)]
+    last_attempt_ms: u64,
+    #[serde(default)]
     last_error: String,
 }
 
@@ -76,6 +78,7 @@ impl Default for Policy {
             auto: false,
             refresh_hours: DEFAULT_REFRESH_HOURS,
             last_issue_ms: 0,
+            last_attempt_ms: 0,
             last_error: String::new(),
         }
     }
@@ -500,6 +503,30 @@ fn import_keybox(args: &[String]) -> Result<Value> {
     install_keybox(&level, &bytes)
 }
 
+/// One issuance at a time: the daemon may fire while a user is on the page, and
+/// two requests against the same registration identity must never overlap.
+struct IssuanceLock {
+    // Held only for its file descriptor: closing it releases the flock.
+    _file: std::fs::File,
+}
+
+fn lock_issuance() -> Result<Option<IssuanceLock>> {
+    use std::os::fd::AsRawFd;
+    ensure_dir()?;
+    let path = Path::new(STATE_DIR).join("issue.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .context("open the issuance lock")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Ok(None);
+    }
+    Ok(Some(IssuanceLock { _file: file }))
+}
+
 fn write_feedback(message: &str, error: bool) -> Result<()> {
     ensure_dir()?;
     let payload = json!({"message": message, "at_ms": now_ms(), "error": error});
@@ -514,6 +541,7 @@ fn issue(args: &[String]) -> Result<Value> {
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_else(|| "tee".to_string());
     let (_, expected) = slot_for(&level)?;
+    let _lock = lock_issuance()?.ok_or_else(|| anyhow!("已有签发在进行中，请稍后重试"))?;
     let meta = load_meta().ok_or_else(|| anyhow!("尚未导入 CDI 种子包，请先导入"))?;
     let key = master_key(false)?.ok_or_else(|| anyhow!("种子主密钥丢失，请重新导入种子包"))?;
     let blob = fs::read(SEED_BLOB).context("读取已保存的种子包")?;
@@ -523,7 +551,11 @@ fn issue(args: &[String]) -> Result<Value> {
     // captured for TEE would return a TEE chain on both buttons, and the second
     // one would be refused by the slot check after spending an issuance.
     let mut bundle: Value = serde_json::from_slice(&plain).context("种子包不是合法 JSON")?;
-    let wanted = if expected == "StrongBox" { "strongbox" } else { "tee" };
+    let wanted = if expected == "StrongBox" {
+        "strongbox"
+    } else {
+        "tee"
+    };
     let device = bundle
         .get_mut("device")
         .and_then(Value::as_object_mut)
@@ -542,6 +574,9 @@ fn issue(args: &[String]) -> Result<Value> {
     write_private(&temporary_text, &plain)?;
     let paths =
         ommega_rkp_engine::paths::AppPaths::for_root(Path::new(STATE_DIR), Path::new(STATE_DIR));
+    let mut attempt = load_policy();
+    attempt.last_attempt_ms = now_ms();
+    let _ = save_policy(&attempt);
     let outcome = ommega_rkp_engine::issue_from_bundle(&paths, Path::new(&temporary_text));
     let _ = fs::remove_file(&temporary_text);
     let produced = match outcome {
@@ -715,6 +750,86 @@ fn policy_command(args: &[String]) -> Result<Value> {
     Ok(due_state(&policy))
 }
 
+/// Unattended renewal: called by the keymint daemon. It only acts when the page
+/// switch is on, material exists and a slot is inside its renewal window.
+fn auto_run(args: &[String]) -> Result<Value> {
+    const BACKOFF_MS: u64 = 6 * 3_600_000;
+    let dry_run = args.iter().any(|value| value == "--dry-run");
+    let policy = load_policy();
+    if !policy.auto {
+        return Ok(json!({"skipped": "disabled"}));
+    }
+    if load_meta().is_none() {
+        return Ok(json!({"skipped": "no-seed"}));
+    }
+    let now = now_ms();
+    let mut due = Vec::new();
+    for (level, expected, path) in [
+        ("tee", "TEE", KEYBOX_TEE),
+        ("strongbox", "StrongBox", KEYBOX_STRONGBOX),
+    ] {
+        let status = keybox_status(path, expected);
+        let Some(expiry) = status.get("not_after_ms").and_then(Value::as_i64) else {
+            continue;
+        };
+        let due_at = expiry - (policy.refresh_hours as i64) * 3_600_000;
+        if now as i64 >= due_at {
+            due.push(level);
+        }
+    }
+    if due.is_empty() {
+        return Ok(json!({"skipped": "not-due", "refresh_hours": policy.refresh_hours}));
+    }
+    // A failed attempt must not burn a request every tick.
+    if policy.last_attempt_ms > 0
+        && now.saturating_sub(policy.last_attempt_ms) < BACKOFF_MS
+        && !policy.last_error.is_empty()
+    {
+        return Ok(json!({"skipped": "backoff", "due": due, "last_error": policy.last_error}));
+    }
+    if dry_run {
+        // Answers "what would happen" without spending a request.
+        return Ok(
+            json!({"dry_run": true, "would_issue": due, "refresh_hours": policy.refresh_hours}),
+        );
+    }
+    let Some(_lock) = lock_issuance()? else {
+        return Ok(json!({"skipped": "busy", "due": due}));
+    };
+    let mut issued = Vec::new();
+    let mut failures = Vec::new();
+    for level in &due {
+        match issue(&[level.to_string()]) {
+            Ok(value) => {
+                issued.push(json!({"level": level, "chain": value.get("chain_summary").cloned()}))
+            }
+            Err(error) => failures.push(json!({"level": level, "error": format!("{error:#}")})),
+        }
+    }
+    let message = if failures.is_empty() {
+        format!(
+            "自动续签完成：{}",
+            issued
+                .iter()
+                .filter_map(|item| item.get("level"))
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("、")
+        )
+    } else {
+        format!(
+            "自动续签失败：{}",
+            failures
+                .first()
+                .and_then(|item| item.get("error"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        )
+    };
+    let _ = write_feedback(&message, !failures.is_empty());
+    Ok(json!({"ran": true, "issued": issued, "failures": failures}))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -728,6 +843,7 @@ fn main() {
         Some("policy") => policy_command(&args[1..]),
         Some("due") => Ok(due_state(&load_policy())),
         Some("issue") => issue(&args[1..]),
+        Some("auto-run") => auto_run(&args[1..]),
         _ => Err(anyhow!(
             "usage: ommega-rkp status|due|seed-import <json>|seed-remove|keybox-import <tee|strongbox> <xml>|policy [--auto on|off] [--refresh-hours N]"
         )),
