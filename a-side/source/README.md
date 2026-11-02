@@ -90,6 +90,18 @@ software TA switch is turned off.
    also manages the optional per-package `global_default` / `strongbox` / `tee`
    policy stored in `/data/misc/keystore/ommega/target-security.toml`.
 
+   `tee` selects the TEE security level for that caller even when the
+   application explicitly asked for StrongBox: the request is attached to the TEE
+   level instead of failing with `HARDWARE_TYPE_UNAVAILABLE`. That is the point
+   of the switch — it keeps an application that demands StrongBox working on a
+   device whose StrongBox cannot be used — but it does hand the application a
+   weaker key than it asked for, so pick `tee` only for applications that must
+   run here. Every such rewrite is recorded in the injector log as
+   `event=security_level_policy … requested=SecurityLevel(2)
+   effective=SecurityLevel(1) mode=Some(Tee)`. For a device-wide, loud refusal
+   instead, keep the application on `global_default` and set
+   `disable_native_strongbox: true`.
+
    The WebUI's **Global scope** switch takes effect without clearing the list.
    It is off by default. Turning it on sets `[filter].enabled = false` in
    `injector.toml`: user apps and ordinary system apps with an application ID
@@ -203,8 +215,11 @@ chains. Installing dedicated StrongBox material, or enabling
 `main.use_native_strongbox` so the device's real StrongBox HAL serves that level,
 is what makes StrongBox attestation available again.
 
-A StrongBox request is never silently served from the TEE. A relay may answer an
-attestation with a `strongbox_demoted` marker, but that result is rejected with
+A StrongBox request is never silently served from the TEE. The one exception is
+an explicit per-package `tee` policy, which attaches that caller to the TEE
+level before the request reaches KeyMint (see the per-app policy above). A relay
+may answer an attestation with a `strongbox_demoted` marker, but that result is
+rejected with
 `HARDWARE_TYPE_UNAVAILABLE`: a physical KeyMint serves a StrongBox request from
 its StrongBox instance and a device without one fails the operation, so returning
 a TEE chain while `KeyMetadata.keySecurityLevel` still reports StrongBox would
