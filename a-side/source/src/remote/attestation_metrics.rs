@@ -15,7 +15,7 @@ use std::{
 
 use der::Decode;
 
-use crate::{attestation_counts, plat::aaid::AttestationApplicationId};
+use crate::{attestation_counts, attestation_counts::Source, plat::aaid::AttestationApplicationId};
 
 // Android uses OS-backed TLS: even a const block expands into a runtime init
 // function, which Clippy 1.96 incorrectly flags as missing const. Default makes
@@ -30,16 +30,55 @@ struct Observation {
     latency_ms: Option<u64>,
 }
 
-#[derive(Default)]
 struct RequestState {
     response_received: bool,
     verified: bool,
+    /// Which counter table this request belongs to. Defaults to the relay so a
+    /// request that never says otherwise is never counted as local.
+    source: Source,
     observation: Option<Observation>,
+}
+
+impl Default for RequestState {
+    fn default() -> Self {
+        Self {
+            response_received: false,
+            verified: false,
+            source: Source::Remote,
+            observation: None,
+        }
+    }
 }
 
 struct PersistEvent {
     observation: Observation,
     completed_at_ms: i64,
+    source: Source,
+}
+
+/// One pending write per counter source.
+#[derive(Default)]
+struct Batch {
+    counts: BTreeMap<String, attestation_counts::CountDelta>,
+    latest: Option<(Option<u64>, i64)>,
+}
+
+impl Batch {
+    fn add(&mut self, observation: &Observation, completed_at_ms: i64) {
+        let shared = observation.packages.len() > 1;
+        for package in &observation.packages {
+            let delta = self.counts.entry(package.clone()).or_default();
+            delta.count = delta.count.saturating_add(1);
+            delta.shared |= shared;
+        }
+        if self
+            .latest
+            .as_ref()
+            .is_none_or(|(_, at)| completed_at_ms >= *at)
+        {
+            self.latest = Some((observation.latency_ms, completed_at_ms));
+        }
+    }
 }
 static COUNT_SENDER: OnceLock<Option<SyncSender<PersistEvent>>> = OnceLock::new();
 
@@ -51,37 +90,34 @@ fn count_sender() -> Option<&'static SyncSender<PersistEvent>> {
                 .name("ommega-attest-count".into())
                 .spawn(move || {
                     while let Ok(first) = receiver.recv() {
-                        let mut counts: BTreeMap<String, attestation_counts::CountDelta> =
-                            BTreeMap::new();
-                        let mut latest = None;
+                        let mut remote = Batch::default();
+                        let mut local = Batch::default();
                         for event in std::iter::once(first).chain(receiver.try_iter().take(1023)) {
-                            let shared = event.observation.packages.len() > 1;
-                            for package in event.observation.packages {
-                                let delta = counts.entry(package).or_default();
-                                delta.count = delta.count.saturating_add(1);
-                                delta.shared |= shared;
-                            }
-                            if latest
-                                .as_ref()
-                                .is_none_or(|(_, at)| event.completed_at_ms >= *at)
-                            {
-                                latest =
-                                    Some((event.observation.latency_ms, event.completed_at_ms));
-                            }
+                            let batch = match event.source {
+                                Source::Remote => &mut remote,
+                                Source::Local => &mut local,
+                            };
+                            batch.add(&event.observation, event.completed_at_ms);
                         }
-                        for attempt in 0..3 {
-                            match attestation_counts::apply_batch_at(
-                                Path::new(attestation_counts::DATABASE_PATH),
-                                &counts,
-                                latest,
-                            ) {
-                                Ok(()) => break,
-                                Err(error) if attempt < 2 && is_busy(&error) => {
-                                    thread::sleep(Duration::from_millis(50 * (attempt + 1)))
-                                }
-                                Err(error) => {
-                                    log::warn!("could not persist attestation count: {error}");
-                                    break;
+                        for (source, batch) in [(Source::Remote, remote), (Source::Local, local)] {
+                            if batch.counts.is_empty() && batch.latest.is_none() {
+                                continue;
+                            }
+                            for attempt in 0..3 {
+                                match attestation_counts::apply_batch_at(
+                                    source,
+                                    Path::new(attestation_counts::DATABASE_PATH),
+                                    &batch.counts,
+                                    batch.latest,
+                                ) {
+                                    Ok(()) => break,
+                                    Err(error) if attempt < 2 && is_busy(&error) => {
+                                        thread::sleep(Duration::from_millis(50 * (attempt + 1)))
+                                    }
+                                    Err(error) => {
+                                        log::warn!("could not persist attestation count: {error}");
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -152,6 +188,22 @@ pub fn mark_response_received() {
     });
 }
 
+/// Record an attestation the software TA minted locally. No latency is
+/// reported: there is no round trip, so the relay latency stays untouched and
+/// the local counter carries its own "latest" row.
+pub fn mark_local_attestation(app_id_der: &[u8]) {
+    let observation = caller_packages(app_id_der).map(|packages| Observation {
+        packages,
+        latency_ms: None,
+    });
+    REQUESTS.with(|requests| {
+        if let Some(current) = requests.borrow_mut().last_mut() {
+            current.source = Source::Local;
+            current.observation = observation;
+        }
+    });
+}
+
 pub fn mark_verified(app_id_der: &[u8], latency_ms: Option<u64>) {
     let observation = caller_packages(app_id_der).map(|packages| Observation {
         packages,
@@ -198,6 +250,7 @@ impl RequestGuard {
             if let Err(error) = sender.try_send(PersistEvent {
                 observation,
                 completed_at_ms,
+                source: state.source,
             }) {
                 log::warn!("could not queue attestation count: {error}");
             }
@@ -283,6 +336,26 @@ mod tests {
                 latency_ms: Some(120)
             })
         );
+    }
+
+    #[test]
+    fn local_attestation_records_its_own_source_and_no_latency() {
+        let mut request = begin_request();
+        mark_local_attestation(&app_id(&["com.example.local"]));
+        let state = request.finish();
+        assert_eq!(state.source, Source::Local);
+        let observation = state.observation.expect("a local attestation is counted");
+        assert_eq!(observation.packages, vec!["com.example.local".to_string()]);
+        assert_eq!(
+            observation.latency_ms, None,
+            "a local attestation has no relay round trip"
+        );
+
+        // A relay request must stay attributed to the relay counter table.
+        let mut relay = begin_request();
+        mark_verified(&app_id(&["com.example.relay"]), Some(70));
+        let state = relay.finish();
+        assert_eq!(state.source, Source::Remote);
     }
 
     #[test]

@@ -909,6 +909,11 @@ impl KeystoreSecurityLevel {
             .context(ks_err!("Trying to get aaid."))?;
 
         let keybox_attestation_allowed = attestation_key_info.is_none();
+        let local_attestation_app_id = local_attestation_app_id(
+            &params,
+            keybox_attestation_allowed,
+            crate::remote::remote_enabled(),
+        );
         let attestation_count = crate::remote::attestation_metrics::begin_request();
         let creation_result = match attestation_key_info {
             Some(AttestationKeyInfo::RkpdProvisioned { key: rkp_key }) => {
@@ -1014,6 +1019,9 @@ impl KeystoreSecurityLevel {
             )
             .context(ks_err!());
         if result.is_ok() {
+            if let Some(app_id) = local_attestation_app_id.as_deref() {
+                crate::remote::attestation_metrics::mark_local_attestation(app_id);
+            }
             attestation_count.commit();
         }
         result
@@ -1378,6 +1386,29 @@ impl KeystoreSecurityLevel {
     }
 }
 
+/// AAID a locally served attestation is counted against, or none when this
+/// request must not touch the local counter: a relayed attestation, one signed
+/// by a caller-provided attestation key, or a request without a challenge (the
+/// parameters then carry no attestation application id at all).
+fn local_attestation_app_id(
+    params: &[KeyParameter],
+    keybox_attestation_allowed: bool,
+    remote_enabled: bool,
+) -> Option<Vec<u8>> {
+    if !keybox_attestation_allowed || remote_enabled {
+        return None;
+    }
+    params.iter().find_map(|param| {
+        if param.tag != Tag::ATTESTATION_APPLICATION_ID {
+            return None;
+        }
+        match &param.value {
+            KeyParameterValue::Blob(value) => Some(value.clone()),
+            _ => None,
+        }
+    })
+}
+
 fn is_keybox_bound_attestation_key(
     keybox_attestation_allowed: bool,
     has_attestation_chain: bool,
@@ -1733,6 +1764,38 @@ mod tests {
             )
             .unwrap();
         });
+    }
+
+    #[test]
+    fn local_attestation_is_attributed_only_to_a_keybox_local_request() {
+        let params = vec![KeyParameter {
+            tag: Tag::ATTESTATION_APPLICATION_ID,
+            value: KeyParameterValue::Blob(vec![1, 2, 3]),
+        }];
+        assert_eq!(
+            local_attestation_app_id(&params, true, false),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            local_attestation_app_id(&params, false, false),
+            None,
+            "a caller-provided attestation key signs this one, not the keybox"
+        );
+        assert_eq!(
+            local_attestation_app_id(&params, true, true),
+            None,
+            "the relay serves the attestation, so the local counter stays untouched"
+        );
+        assert_eq!(
+            local_attestation_app_id(&[], true, false),
+            None,
+            "no challenge means no attestation application id"
+        );
+        let wrong_type = vec![KeyParameter {
+            tag: Tag::ATTESTATION_APPLICATION_ID,
+            value: KeyParameterValue::Integer(1),
+        }];
+        assert_eq!(local_attestation_app_id(&wrong_type, true, false), None);
     }
 
     fn test_security_level() -> (TempDir, KeystoreSecurityLevel) {
