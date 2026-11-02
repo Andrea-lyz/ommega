@@ -116,6 +116,7 @@ if [ "$ARCH" = "x64" ] || [ "$ARCH" = "x86_64" ]; then
   extract "$ZIPFILE" 'libs/x86_64/ommega-capability-policy' "$MODPATH"
   extract "$ZIPFILE" 'zygisk/x86_64.so' "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/ommega-inject'  "$MODPATH"
+  extract "$ZIPFILE" 'libs/x86_64/ommega-rkp'    "$MODPATH"
   extract "$ZIPFILE" 'libs/x86_64/soterta-svc'   "$MODPATH"
 elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "arm64-v8a" ]; then
   ui_print "- Using packaged arm64 binaries"
@@ -126,6 +127,7 @@ elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "arm64-v8a" ]; then
   extract "$ZIPFILE" 'libs/arm64-v8a/ommega-capability-policy' "$MODPATH"
   extract "$ZIPFILE" 'zygisk/arm64-v8a.so' "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/ommega-inject'  "$MODPATH"
+  extract "$ZIPFILE" 'libs/arm64-v8a/ommega-rkp'    "$MODPATH"
   extract "$ZIPFILE" 'libs/arm64-v8a/soterta-svc'   "$MODPATH"
 else
   abort "! Unsupported platform: $ARCH"
@@ -136,8 +138,9 @@ fi
 [ -f "$BINDIR/ommega-cpu-policy" ] || abort "! Missing $BINDIR/ommega-cpu-policy"
 [ -f "$BINDIR/ommega-capability-policy" ] || abort "! Missing $BINDIR/ommega-capability-policy"
 [ -f "$BINDIR/ommega-inject" ] || abort "! Missing $BINDIR/ommega-inject"
+[ -f "$BINDIR/ommega-rkp" ] || abort "! Missing $BINDIR/ommega-rkp"
 [ -f "$BINDIR/soterta-svc" ] || abort "! Missing $BINDIR/soterta-svc"
-chmod 755 "$BINDIR/keymint" "$BINDIR/ommega-auth-policy" "$BINDIR/ommega-cpu-policy" "$BINDIR/ommega-inject" "$BINDIR/soterta-svc"
+chmod 755 "$BINDIR/keymint" "$BINDIR/ommega-auth-policy" "$BINDIR/ommega-cpu-policy" "$BINDIR/ommega-inject" "$BINDIR/ommega-rkp" "$BINDIR/soterta-svc"
 chmod 755 "$BINDIR/ommega-capability-policy"
 extract "$ZIPFILE" 'system/etc/permissions/ommega-capability-mask.xml' "$MODPATH"
 set_perm_recursive "$MODPATH/system" 0 0 0755 0644 u:object_r:system_file:s0

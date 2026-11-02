@@ -46,6 +46,19 @@ jobs:
             version=$(python3 .github/scripts/bump_version.py --check)
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check installer extracts every packaged binary
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          from pathlib import Path
+          spec = Path('a-side/source/build.py').read_text(encoding='utf-8')
+          names = re.findall(r'"output_name":\s*"([^"]+)"', spec) + ['soterta-svc']
+          installer = Path('a-side/source/template/customize.sh').read_text(encoding='utf-8')
+          missing = [n for n in names if f"/arm64-v8a/{n}'" not in installer]
+          if missing:
+              sys.exit('customize.sh never extracts: ' + ', '.join(missing))
+          print('customize.sh extracts every packaged binary: ' + ', '.join(names))
+          PY
       - name: Check KSU update changelog
         env:
           VERSION: ${{ steps.version.outputs.version }}
