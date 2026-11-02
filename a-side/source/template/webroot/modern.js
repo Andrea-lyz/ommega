@@ -24,17 +24,53 @@ export function relayVerdict(health, now = Date.now()) {
   if (failed) return {tone: fresh ? 'error' : 'warn', label:fresh ? text('最近请求失败', 'Recent request failed') : text('上次请求失败', 'Last request failed'), at, age, failed:true};
   return {tone: fresh ? 'ok' : 'muted', label:fresh ? text('最近请求成功', 'Recent request succeeded') : text('上次请求成功', 'Last request succeeded'), at, age, failed:false};
 }
+/** Timestamp of the newest keymint log line, which is always UTC. */
+export function parseLogTime(line) {
+  const match = /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(String(line || ''));
+  if (!match) return 0;
+  const at = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]));
+  return Number.isFinite(at) ? at : 0;
+}
+/** Short "how long ago" text for a timestamp in milliseconds. */
+export function formatAge(atMs, now = Date.now()) {
+  if (!Number.isSafeInteger(atMs) || atMs <= 0) return '—';
+  const seconds = Math.max(0, Math.round((now - atMs) / 1000));
+  if (seconds < 60) return text('刚刚', 'just now');
+  if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60);
+    return text(minutes + ' 分钟前', minutes + ' min ago');
+  }
+  if (seconds < 86400) {
+    const hours = Math.floor(seconds / 3600);
+    return text(hours + ' 小时前', hours + ' h ago');
+  }
+  const days = Math.floor(seconds / 86400);
+  return text(days + ' 天前', days + ' d ago');
+}
 /**
- * The local-mode verdict. There is no relay request to report, so the only
- * record is when the software TA last finished an attestation: a stale relay
- * failure from an earlier session must not leak into this card.
+ * The local-mode verdict. There is no relay request to report, so the card
+ * follows the newest `event=generate_total` line of the local keymint log: that
+ * is the work the software TA actually performed here. The attestation counters
+ * in the profile are relay-only, so they must not drive this card.
  */
-export function localAttestationVerdict(completedMs, now = Date.now()) {
-  const at = Number.isSafeInteger(completedMs) && completedMs > 0 ? Math.floor(completedMs / 1000) : 0;
-  if (!at) return {tone:'unknown', label:text('尚无证明记录', 'No attestation recorded'), at:0, age:Infinity, failed:false};
+export function localActivityVerdict(lastActivityMs, now = Date.now()) {
+  const at = Number.isSafeInteger(lastActivityMs) && lastActivityMs > 0 ? Math.floor(lastActivityMs / 1000) : 0;
+  if (!at) return {tone:'unknown', label:text('尚无本机记录', 'No local record yet'), at:0, age:Infinity, failed:false};
   const age = now / 1000 - at;
-  const fresh = age >= -60 && age <= 600;
-  return {tone:fresh ? 'ok' : 'muted', label:fresh ? text('最近证明成功', 'Recent attestation succeeded') : text('上次证明成功', 'Last attestation succeeded'), at, age, failed:false};
+  return {tone:age >= -60 && age <= 600 ? 'ok' : 'muted', label:formatAge(at * 1000, now), at, age, failed:false};
+}
+/**
+ * The local-mode emblem. The relay icon drops the shield for a bare clock once a
+ * result is old, which would read as "no attestation"; local mode always keeps
+ * the shield because the material is on this device, and only the inner mark
+ * follows the outcome.
+ */
+export function localVerdictIcon(tone) {
+  const shield = '<path d="M12 2.8 19 5.5v5.7c0 4.4-2.6 7.8-7 10-4.4-2.2-7-5.6-7-10V5.5L12 2.8Z"/>';
+  const mark = tone === 'ok' ? '<path d="m9 12.2 2 2 4-4"/>'
+    : tone === 'error' || tone === 'warn' ? '<path d="M12 8.6v3.7m0 2.3h.01"/>'
+    : '<circle cx="12" cy="10.2" r="1.15"/><path d="M12 11.35v3.4"/>';
+  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${shield}${mark}</svg>`;
 }
 export function requestIcon(tone) {
   const mark = tone === 'error' ? '<path d="m9.5 9.5 5 5m0-5-5 5"/>'
@@ -284,6 +320,8 @@ function applyOverviewMode(mode) {
   setText('om-request-kind', local ? text('KeyMint · 本机','KeyMint · local') : 'KeyMint');
   setText('om-verdict-label', local ? text('最近证明','Last attestation') : text('最近请求','Last request'));
   setText('om-verdict-title', local ? text('本机证明','Local attestation') : text('证明链路','Attestation relay'));
+  setText('om-health-time-label', local ? text('签发时间','Issued at') : text('记录时间','Recorded'));
+  setText('om-health-kind-label', local ? text('执行方','Performed by') : text('请求类型','Request'));
   const route = document.getElementById('om-route');
   if (local) {
     setText('om-route-mid', text('本机 TA','Local TA'));
@@ -298,18 +336,14 @@ function applyOverviewMode(mode) {
   }
   if (route) route.setAttribute('aria-label', local ? 'A → ' + text('本机 TA','Local TA') + ' → Keybox' : 'A → Server → B');
 }
-function renderLocalSummary({tee, strongbox, profile, packages}) {
+function renderLocalSummary({tee, strongbox, activity, daemon, packages}) {
   const now = Date.now();
   const teeBox = keyboxSummary(tee, 'TEE', now);
   const strongBox = keyboxSummary(strongbox, 'StrongBox', now);
   setText('om-local-tee', keyboxRow(teeBox));
   setText('om-local-strongbox', keyboxRow(strongBox));
-  const completed = Number(profile?.attestation_completed_at_ms);
-  setText('om-local-last', Number.isSafeInteger(completed) && completed > 0 ? formatTime(completed / 1000) : text('暂无记录','No record yet'));
-  const counts = profile?.attestation_counts;
-  const total = counts && typeof counts === 'object'
-    ? Object.values(counts).reduce((sum, entry) => sum + (Number.isSafeInteger(entry?.count) ? entry.count : 0), 0) : null;
-  setText('om-local-attest', total === null ? '—' : total === 0 ? text('暂无','None') : text(total + ' 次', total + ' total'));
+  setText('om-local-last', activity > 0 ? formatTime(activity / 1000) : text('暂无记录','No record yet'));
+  setText('om-local-daemon', /^\d+$/.test(String(daemon || '')) ? 'PID ' + daemon : text('未确认运行','Not confirmed'));
   setText('om-local-scope', packages ? String(packages.size) : '—');
   setText('om-local-mode', text('未启用','Disabled'));
   const loaded = [teeBox, strongBox].filter(box => Number.isFinite(box.days)).sort((left, right) => left.days - right.days);
@@ -484,7 +518,7 @@ function install() {
           <article class="panel status-panel">
             <div class="status-head"><div class="panel-label">${icon('clock')}<span id="om-verdict-label">${text('最近请求','Last request')}</span></div><span class="badge unknown" id="om-relay-state">${text('读取状态中','Reading status')}</span></div>
             <div class="status-body"><div><h2 id="om-verdict-title">${text('证明链路','Attestation relay')}</h2><p id="om-health-detail">—</p></div><span class="status-emblem unknown" id="om-request-icon">${requestIcon('unknown')}</span></div>
-            <div class="status-footer"><div><small>${text('记录时间','Recorded')}</small><strong id="om-health-time">—</strong></div><div><small>${text('请求类型','Request')}</small><strong id="om-request-kind">KeyMint</strong></div></div>
+            <div class="status-footer"><div><small id="om-health-time-label">${text('记录时间','Recorded')}</small><strong id="om-health-time">—</strong></div><div><small id="om-health-kind-label">${text('请求类型','Request')}</small><strong id="om-request-kind">KeyMint</strong></div></div>
             <p class="note" id="om-health-message"></p>
           </article>
           <article class="panel metric-card b-summary" id="om-b-summary">
@@ -495,7 +529,7 @@ function install() {
           </article>
           <article class="panel metric-card b-summary" id="om-local-summary" hidden>
             <div class="b-summary-header"><div class="b-summary-title"><div class="panel-label">${icon('shield')}<span>${text('本机证明材料','Local material')}</span></div><h2>${text('本地模式','Local mode')}</h2></div><div class="b-summary-statuses"><span class="badge neutral" id="om-local-relay">${text('中继未启用','Relay disabled')}</span><span class="badge unknown latency-badge" id="om-local-expiry">${text('最近到期','Next expiry')} · —</span></div></div>
-            <dl class="b-summary-details"><div><dt>TEE</dt><dd id="om-local-tee">—</dd></div><div><dt>StrongBox</dt><dd id="om-local-strongbox">—</dd></div><div><dt>${text('最近证明','Last attestation')}</dt><dd id="om-local-last">—</dd></div><div><dt>${text('累计证明','Attestations')}</dt><dd id="om-local-attest">—</dd></div><div><dt>${text('应用作用域','App scope')}</dt><dd id="om-local-scope">—</dd></div><div><dt>${text('中继','Relay')}</dt><dd id="om-local-mode">—</dd></div></dl>
+            <dl class="b-summary-details"><div><dt>TEE</dt><dd id="om-local-tee">—</dd></div><div><dt>StrongBox</dt><dd id="om-local-strongbox">—</dd></div><div><dt>${text('最近签发','Last issuance')}</dt><dd id="om-local-last">—</dd></div><div><dt>${text('守护进程','Daemon')}</dt><dd id="om-local-daemon">—</dd></div><div><dt>${text('应用作用域','App scope')}</dt><dd id="om-local-scope">—</dd></div><div><dt>${text('中继','Relay')}</dt><dd id="om-local-mode">—</dd></div></dl>
             <div class="metric-chips om-local-warnings" id="om-local-warnings" hidden></div>
             <p class="note">${text('本机软件 TA 用自己的 keybox 直接签发证明，材料不经过网络。','This device signs attestations with its own software TA and keybox; no material leaves the device.')}</p>
           </article>
@@ -711,12 +745,14 @@ printf '\\n[KEYBOX_TEE]\\n'
 awk '/<Certificate[ >]/{held=1} held{print} held&&index($0,"</Certificate>"){exit}' /data/misc/keystore/ommega/keybox.xml 2>/dev/null
 printf '\\n[KEYBOX_STRONGBOX]\\n'
 awk '/<Certificate[ >]/{held=1} held{print} held&&index($0,"</Certificate>"){exit}' /data/misc/keystore/ommega/keybox-strongbox.xml 2>/dev/null
+printf '\\n[ACTIVITY]\\n'
+grep 'event=generate_total' /data/misc/keystore/ommega/logs/keymint.log 2>/dev/null | tail -n 1
 printf '\\n[TARGET]\\n'
 if [ -f /data/adb/ommega/ommegadata/target.txt ]; then printf 'present\n'; cat /data/adb/ommega/ommegadata/target.txt; else printf 'missing'; fi
 printf '\\n[END]\\n'`);
   result.stdout = result.stdout.replace(/\r\n/g, '\n');
   const markers = new Set(result.stdout.split('\n'));
-  const complete = ['HEALTH','SOTER','VERSION','DAEMON','PROFILE','REMOTE_DEVICE','MODE','REMOTE','KEYBOX_TEE','KEYBOX_STRONGBOX','TARGET','END'].every(name => markers.has('[' + name + ']'));
+  const complete = ['HEALTH','SOTER','VERSION','DAEMON','PROFILE','REMOTE_DEVICE','MODE','REMOTE','KEYBOX_TEE','KEYBOX_STRONGBOX','ACTIVITY','TARGET','END'].every(name => markers.has('[' + name + ']'));
   if (result.errno || !complete) {
     for (const id of ['om-keymint','om-soter']) setText(id,text('不可用','Unavailable'));
     const badge = document.getElementById('om-relay-state');
@@ -741,13 +777,14 @@ printf '\\n[END]\\n'`);
   const soter = parseJson(section('SOTER'));
   // Local mode has no relay request to report, so the card follows the last
   // local attestation instead of a possibly stale relay verdict.
-  const verdict = mode === 'local' ? localAttestationVerdict(profile?.attestation_completed_at_ms) : relayVerdict(health);
+  const verdict = mode === 'local' ? localActivityVerdict(parseLogTime(section('ACTIVITY'))) : relayVerdict(health);
   lastVerdict = verdict;
   const badge = document.getElementById('om-relay-state');
   const tone = verdict.tone === 'ok' ? '' : ' ' + verdict.tone;
   badge.textContent = verdict.label; badge.className = 'badge' + tone; badge.dataset.tone = verdict.tone;
   const emblem = document.getElementById('om-request-icon');
-  emblem.className = 'status-emblem' + tone; emblem.dataset.tone = verdict.tone; emblem.innerHTML = requestIcon(verdict.tone);
+  emblem.className = 'status-emblem' + tone; emblem.dataset.tone = verdict.tone;
+  emblem.innerHTML = mode === 'local' ? localVerdictIcon(verdict.tone) : requestIcon(verdict.tone);
   const latency = document.getElementById('om-b-latency');
   renderBConnection();
   latency.className = 'badge latency-badge' + (verdict.failed ? ' error' : verdict.tone === 'unknown' ? ' unknown' : '');
@@ -760,7 +797,7 @@ printf '\\n[END]\\n'`);
   const lines = targets.split(/\r?\n/);
   const packages = lines.shift() === 'present' ? new Set(lines.map(line => line.trim().replace(/[!?]+$/, '')).filter(line => /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$/.test(line))) : null;
   setText('om-scope-count',packages ? String(packages.size) : '—');
-  renderLocalSummary({tee:section('KEYBOX_TEE'),strongbox:section('KEYBOX_STRONGBOX'),profile,packages});
+  renderLocalSummary({tee:section('KEYBOX_TEE'),strongbox:section('KEYBOX_STRONGBOX'),activity:parseLogTime(section('ACTIVITY')),daemon:section('DAEMON'),packages});
   setText('om-keymint', /^\d+$/.test(section('DAEMON')) ? `PID ${section('DAEMON')}` : text('未确认运行','Not confirmed'));
   setText('om-version',section('VERSION').replace(/^version=/,'') || '—');
   const recent = freshness(soter?.updated) === 'recent';
@@ -770,7 +807,7 @@ printf '\\n[END]\\n'`);
   // The snapshot is event driven, not a heartbeat. Never infer a live connection from its age.
   const advice = {unauthorized:text('服务器拒绝凭据，请检查 Token。','The server rejected the credentials. Check the token.'),throttled:text('服务器限流或暂时不可用。','The server is busy or rate limiting.'),transport:text('最近一次网络请求失败。','The last network request failed.')};
   setText('om-health-detail',verdict.failed ? `${health?.last_status || '—'} · ${advice[health?.last_kind] || text('请查看诊断详情。','See diagnostic details.')}`
-    : mode === 'local' ? text('最近一次本机证明的结果，不代表当前连接心跳。','Result of the most recent local attestation, not a live connection heartbeat.')
+    : mode === 'local' ? text('本机软件 TA 最近一次生成密钥的时间，不代表当前连接心跳。','Time of the most recent local key generation, not a live connection heartbeat.')
     : text('这是最近一次请求的结果，不代表当前连接心跳。','This is the result of the last request, not a live connection heartbeat.'));
   setText('om-health-message',mode === 'local' || !verdict.failed ? '' : healthMessage(health));
   return true;
