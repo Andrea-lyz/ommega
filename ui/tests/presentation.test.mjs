@@ -7,7 +7,8 @@ const aSource = readFileSync(new URL('../../a-side/source/template/webroot/moder
   .replace(/from '\.\/app-search\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/app-search.js',import.meta.url).href}'`)
   .replace(/from '\.\/soter\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/soter.js',import.meta.url).href}'`);
 const {relayVerdict,requestIcon,deviceSnapshot,formatRelayLatency,parseBStatusConfig,bOnlineState,mergeAttestationHealth,bBatterySnapshot,
-  relayMode,parseRelaySettings,parseTomlRemote,certificateBytes,certificateSummary,keyboxSummary,formatKeyboxDays} = await import(`data:text/javascript;base64,${Buffer.from(aSource).toString('base64')}`);
+  relayMode,parseRelaySettings,parseTomlRemote,certificateBytes,certificateSummary,keyboxSummary,formatKeyboxDays,
+  localAttestationVerdict} = await import(`data:text/javascript;base64,${Buffer.from(aSource).toString('base64')}`);
 
 test('Chinese locales map to Chinese; unsupported system languages fall back to English', () => {
   for (const locale of ['zh-CN','zh-TW','zh-HK','zh']) assert.equal(resolveLanguage('auto',[locale]),'zh-CN');
@@ -186,10 +187,34 @@ test('keybox material reports the level it was issued for and flags a wrong slot
 });
 
 
+
+test('the local verdict follows the last local attestation, not a stale relay record', () => {
+  const now = Date.UTC(2026, 10, 2, 0, 0, 0);
+  const none = localAttestationVerdict(undefined, now);
+  assert.equal(none.tone, 'unknown');
+  assert.equal(none.at, 0);
+  assert.equal(localAttestationVerdict(0, now).tone, 'unknown');
+  assert.equal(localAttestationVerdict(-1, now).tone, 'unknown');
+
+  const fresh = localAttestationVerdict(now - 5000, now);
+  assert.equal(fresh.tone, 'ok');
+  assert.equal(fresh.failed, false);
+  assert.equal(fresh.at, Math.floor((now - 5000) / 1000));
+
+  const stale = localAttestationVerdict(now - 3600000, now);
+  assert.equal(stale.tone, 'muted', 'an hour-old record stays a record, not an alarm');
+  assert.equal(localAttestationVerdict(now + 30000, now).tone, 'ok', 'a little clock skew is tolerated');
+
+  // Local mode never reads remote-health.json, so a relay failure cannot make
+  // this card report one.
+  assert.notEqual(localAttestationVerdict(now - 5000, now).label, relayVerdict({last_verdict:'error', last_error_unix:1, last_ok_unix:0}, now).label);
+});
+
 test('the local-mode overview targets exist and the status read collects them', () => {
   for (const id of ['om-b-summary','om-local-summary','om-local-tee','om-local-strongbox','om-local-last',
     'om-local-attest','om-local-scope','om-local-mode','om-local-relay','om-local-expiry','om-local-warnings',
-    'om-request-kind','om-route-mid','om-route-mid-detail','om-route-end','om-route-end-detail']) {
+    'om-request-kind','om-route-mid','om-route-mid-detail','om-route-end','om-route-end-detail',
+    'om-verdict-label','om-verdict-title']) {
     assert.ok(aSource.includes('id="' + id + '"'), 'Missing overview target ' + id);
   }
   const required = /const complete = \[([^\]]+)\]/.exec(aSource);

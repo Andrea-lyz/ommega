@@ -24,6 +24,18 @@ export function relayVerdict(health, now = Date.now()) {
   if (failed) return {tone: fresh ? 'error' : 'warn', label:fresh ? text('最近请求失败', 'Recent request failed') : text('上次请求失败', 'Last request failed'), at, age, failed:true};
   return {tone: fresh ? 'ok' : 'muted', label:fresh ? text('最近请求成功', 'Recent request succeeded') : text('上次请求成功', 'Last request succeeded'), at, age, failed:false};
 }
+/**
+ * The local-mode verdict. There is no relay request to report, so the only
+ * record is when the software TA last finished an attestation: a stale relay
+ * failure from an earlier session must not leak into this card.
+ */
+export function localAttestationVerdict(completedMs, now = Date.now()) {
+  const at = Number.isSafeInteger(completedMs) && completedMs > 0 ? Math.floor(completedMs / 1000) : 0;
+  if (!at) return {tone:'unknown', label:text('尚无证明记录', 'No attestation recorded'), at:0, age:Infinity, failed:false};
+  const age = now / 1000 - at;
+  const fresh = age >= -60 && age <= 600;
+  return {tone:fresh ? 'ok' : 'muted', label:fresh ? text('最近证明成功', 'Recent attestation succeeded') : text('上次证明成功', 'Last attestation succeeded'), at, age, failed:false};
+}
 export function requestIcon(tone) {
   const mark = tone === 'error' ? '<path d="m9.5 9.5 5 5m0-5-5 5"/>'
     : tone === 'warn' ? '<path d="M12 8v4.5m0 3h.01"/>'
@@ -270,6 +282,8 @@ function applyOverviewMode(mode) {
   if (deviceCard) deviceCard.hidden = local;
   if (materialCard) materialCard.hidden = !local;
   setText('om-request-kind', local ? text('KeyMint · 本机','KeyMint · local') : 'KeyMint');
+  setText('om-verdict-label', local ? text('最近证明','Last attestation') : text('最近请求','Last request'));
+  setText('om-verdict-title', local ? text('本机证明','Local attestation') : text('证明链路','Attestation relay'));
   const route = document.getElementById('om-route');
   if (local) {
     setText('om-route-mid', text('本机 TA','Local TA'));
@@ -468,8 +482,8 @@ function install() {
         <div class="page-heading"><div><span class="section-kicker">OVERVIEW</span><h1>${text('概览','Overview')}</h1><p>${text('查看请求端最近的运行记录。','View recent client activity.')}</p></div></div>
         <div class="dashboard-grid" data-dashboard-side="a">
           <article class="panel status-panel">
-            <div class="status-head"><div class="panel-label">${icon('clock')}<span>${text('最近请求','Last request')}</span></div><span class="badge unknown" id="om-relay-state">${text('读取状态中','Reading status')}</span></div>
-            <div class="status-body"><div><h2>${text('证明链路','Attestation relay')}</h2><p id="om-health-detail">—</p></div><span class="status-emblem unknown" id="om-request-icon">${requestIcon('unknown')}</span></div>
+            <div class="status-head"><div class="panel-label">${icon('clock')}<span id="om-verdict-label">${text('最近请求','Last request')}</span></div><span class="badge unknown" id="om-relay-state">${text('读取状态中','Reading status')}</span></div>
+            <div class="status-body"><div><h2 id="om-verdict-title">${text('证明链路','Attestation relay')}</h2><p id="om-health-detail">—</p></div><span class="status-emblem unknown" id="om-request-icon">${requestIcon('unknown')}</span></div>
             <div class="status-footer"><div><small>${text('记录时间','Recorded')}</small><strong id="om-health-time">—</strong></div><div><small>${text('请求类型','Request')}</small><strong id="om-request-kind">KeyMint</strong></div></div>
             <p class="note" id="om-health-message"></p>
           </article>
@@ -725,7 +739,9 @@ printf '\\n[END]\\n'`);
   const profile = parseJson(section('PROFILE'));
   const health = mergeAttestationHealth(parseJson(section('HEALTH')), profile?.attestation_completed_at_ms);
   const soter = parseJson(section('SOTER'));
-  const verdict = relayVerdict(health);
+  // Local mode has no relay request to report, so the card follows the last
+  // local attestation instead of a possibly stale relay verdict.
+  const verdict = mode === 'local' ? localAttestationVerdict(profile?.attestation_completed_at_ms) : relayVerdict(health);
   lastVerdict = verdict;
   const badge = document.getElementById('om-relay-state');
   const tone = verdict.tone === 'ok' ? '' : ' ' + verdict.tone;
