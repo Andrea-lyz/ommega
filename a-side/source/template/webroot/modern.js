@@ -411,14 +411,20 @@ function automationMessage(id, value, error) {
   element.textContent = value;
   element.dataset.tone = error ? 'error' : '';
 }
+function formatDay(ms) {
+  const date = new Date(ms);
+  return date.getFullYear() + '/' + (date.getMonth() + 1) + '/' + date.getDate();
+}
 async function renderAutomation() {
   let status;
   try {
     status = await rkpCommand('status');
   } catch (error) {
+    // The page reports its own failure inline; a missing tool must not make the
+    // global refresh claim that some other status could not be read.
     setText('om-rkp-seed-state', text('不可用','Unavailable'));
     automationMessage('om-rkp-issue-state', String(error.message || error), true);
-    return false;
+    return true;
   }
   const seed = status.seed || {};
   setText('om-rkp-seed-state', seed.present
@@ -436,10 +442,10 @@ async function renderAutomation() {
   const rkpBox = tee.rkp ? tee : (sb.rkp ? sb : null);
   setText('om-rkp-kind', rkpBox ? 'RKP' + (rkpBox.level ? ' · ' + rkpBox.level : '') : text('非 RKP 证书','Not an RKP chain'));
   const expiry = [tee, sb].filter(box => Number.isSafeInteger(box.not_after_ms)).map(box => box.not_after_ms).sort((a, b) => a - b)[0];
-  setText('om-rkp-expiry', expiry ? formatTime(expiry / 1000) + ' · ' + formatKeyboxDays(Math.floor((expiry - Date.now()) / 86400000)) : '—');
+  setText('om-rkp-expiry', expiry ? formatDay(expiry) + ' · ' + formatKeyboxDays(Math.floor((expiry - Date.now()) / 86400000)) : '—');
   setText('om-rkp-policy', (policy.refresh_hours || 0) + ' ' + text('小时','hours') + ' · ' + text('提前量','lead time'));
   setText('om-rkp-due', Number.isSafeInteger(policy.due_at_ms) && policy.due_at_ms > 0
-    ? formatTime(policy.due_at_ms / 1000) + (policy.due ? ' · ' + text('已临期','due now') : '')
+    ? formatDay(policy.due_at_ms) + (policy.due ? ' · ' + text('已临期','due now') : '')
     : '—');
   const auto = document.getElementById('om-rkp-auto');
   if (auto) {
@@ -566,8 +572,16 @@ async function readBConnection() {
 [ -r "$ommega_status_config" ] || exit 1
 grep -iE '^[[:space:]]*(url|device_id|remote|tls_insecure|tls_skip_verify|insecure_tls)[[:space:]]*:' "$ommega_status_config"`;
   const config = await execBStatus(configCommand);
-  const settings = !config.errno && parseBStatusConfig(config.stdout);
-  if (!settings) { bOnline = 'unknown'; renderBConnection(); renderBBattery(null); return false; }
+  if (Number(config.errno) !== 0) {
+    // The config could not be read at all: that is a failed read.
+    bOnline = 'unknown'; renderBConnection(); renderBBattery(null); return false;
+  }
+  const settings = parseBStatusConfig(config.stdout);
+  if (!settings) {
+    // Readable but without an active relay (local mode): there is nothing to
+    // read here, so this must not be reported as an incomplete refresh.
+    bOnline = 'unknown'; renderBConnection(); renderBBattery(null); return true;
+  }
   const bytes = new TextEncoder().encode(settings.url + '/api/status/');
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
   const encoded = btoa(binary);
@@ -744,9 +758,9 @@ function install() {
         <div class="page-heading"><div><span class="section-kicker">AUTOMATION</span><h1>${text('自动化','Automation')}</h1><p>${text('CDI 种子、Keybox 与 RKP 续签。','CDI seed, keybox and RKP renewal.')}</p></div></div>
         <div class="content-columns"><div class="stack">
           <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('CDI 种子','CDI seed')}</h2><p>${text('由你自己导入并加密保存在本机；模块不内置任何种子','Imported by you and stored encrypted on this device; the module ships no seed')}</p></div>
-            <div class="om-automation-field"><label for="om-rkp-seed-path">${text('种子包路径','Seed bundle path')}</label><input id="om-rkp-seed-path" type="text" value="/sdcard/Download/rkp-seed.json" spellcheck="false" autocomplete="off"><button type="button" id="om-rkp-seed-import" class="om-button secondary">${text('导入','Import')}</button><button type="button" id="om-rkp-seed-remove" class="om-button secondary">${text('删除','Remove')}</button></div>
+            <div class="om-automation-field wide"><label for="om-rkp-seed-path">${text('种子包路径','Seed bundle path')}</label><input id="om-rkp-seed-path" type="text" value="/sdcard/Download/rkp-seed.json" spellcheck="false" autocomplete="off"><button type="button" id="om-rkp-seed-import" class="om-button secondary">${text('导入','Import')}</button><button type="button" id="om-rkp-seed-remove" class="om-button secondary">${text('删除','Remove')}</button></div>
             <dl class="b-summary-details"><div><dt>${text('状态','State')}</dt><dd id="om-rkp-seed-state">—</dd></div><div><dt>${text('指纹','Fingerprint')}</dt><dd id="om-rkp-seed-fingerprint">—</dd></div><div><dt>${text('导入时间','Imported')}</dt><dd id="om-rkp-seed-time">—</dd></div><div><dt>DICE ${text('链','chain')}</dt><dd id="om-rkp-seed-chain">—</dd></div></dl>
-            <p class="note">${text('种子包是 JSON：{"version":1,"seed_hex":"64 位十六进制","stock_csr_b64":"真机 CSR 的 base64","device_info":{…}}','The bundle is JSON: {"version":1,"seed_hex":"64 hex chars","stock_csr_b64":"base64 of the device CSR","device_info":{…}}')}</p>
+            <p class="note">${text('种子包为 JSON：version、seed_hex（64 位十六进制）、stock_csr_b64（真机 CSR 的 base64）、device_info。','The bundle is JSON with version, seed_hex (64 hex chars), stock_csr_b64 (base64 of the device CSR) and device_info.')}</p>
             <p class="note" id="om-rkp-seed-message" role="status"></p>
           </section>
           <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('Keybox 导入','Keybox import')}</h2><p>${text('TEE 与 StrongBox 各自一个槽位，互不复用','TEE and StrongBox keep separate slots and never share material')}</p></div>
@@ -824,15 +838,19 @@ function install() {
     caption.addEventListener('click', () => { if (!button.disabled) button.click(); });
   }
   const denylist = document.getElementById('select-denylist'); if (denylist) denylist.hidden = true;
+
   function navigate(raw) {
     const parts = String(raw || '').split('/');
     const known = ['overview','apps','settings','soter','automation'];
     let view = known.includes(parts[0]) ? parts[0] : 'overview';
     if (view === 'soter' && parts[1]) view = 'soter-identity';
     document.body.dataset.omView = view;
+    // SOTER and automation live behind "-page" ids, so the target id cannot be
+    // derived from the route name alone.
+    const activeId = view === 'soter' ? 'om-soter-page' : view === 'automation' ? 'om-automation-page' : 'om-' + view;
     for (const id of ['overview','settings','soter-page','soter-identity','automation-page']) {
       const section = document.getElementById('om-' + id);
-      if (section) section.hidden = 'om-' + id !== ('om-' + (view === 'soter' ? 'soter-page' : view));
+      if (section) section.hidden = 'om-' + id !== activeId;
     }
     if (view === 'soter') soterShow('list');
     if (view === 'soter-identity') soterShow('detail', parts[1]);

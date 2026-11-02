@@ -247,23 +247,31 @@ fn der_text(bytes: &[u8], item: &DerItem) -> String {
 
 fn der_time(bytes: &[u8], item: &DerItem) -> Option<i64> {
     let raw = der_text(bytes, item);
-    let digits: Vec<u8> = raw.bytes().filter(|byte| byte.is_ascii_digit()).collect();
-    let text = String::from_utf8(digits).ok()?;
-    let (year, rest) = if text.len() >= 12 {
-        (text[0..4].parse::<i64>().ok()?, &text[4..])
-    } else if text.len() == 10 {
-        (text[0..2].parse::<i64>().ok()?, &text[2..])
-    } else {
-        return None;
-    };
-    let year = if text.len() == 12 && year < 100 {
-        if year < 50 {
-            year + 2000
-        } else {
-            year + 1900
+    // UTCTime (0x17) carries a two-digit year, GeneralizedTime (0x18) a
+    // four-digit one. Keying off the digit count instead read every
+    // "261112102405Z" as the year 2611.
+    let text: String = raw
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect();
+    let (year, rest) = if item.tag == 0x18 {
+        if text.len() < 12 {
+            return None;
         }
+        (text[0..4].parse::<i64>().ok()?, &text[4..])
     } else {
-        year
+        if text.len() < 10 {
+            return None;
+        }
+        let short = text[0..2].parse::<i64>().ok()?;
+        (
+            if short < 50 {
+                short + 2000
+            } else {
+                short + 1900
+            },
+            &text[2..],
+        )
     };
     let month = rest.get(0..2)?.parse::<i64>().ok()?;
     let day = rest.get(2..4)?.parse::<i64>().ok()?;
