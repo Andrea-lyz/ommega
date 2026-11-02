@@ -35,6 +35,7 @@ pub mod plat;
 pub mod proto;
 pub mod remote;
 pub mod remote_provisioning;
+pub mod rkp_auto;
 pub mod selinux;
 pub mod utils;
 pub mod watchdog;
@@ -353,6 +354,9 @@ fn run() -> Result<()> {
     repair_ommega_data_files();
 
     keybox::initialize().context("failed to initialize keybox runtime")?;
+
+    // Before the uid drop: the child needs to write the keybox slots.
+    crate::rkp_auto::spawn();
 
     info!("setting uid/gid={} role=keystore", KEYSTORE_UID);
     set_keystore_identity()?;

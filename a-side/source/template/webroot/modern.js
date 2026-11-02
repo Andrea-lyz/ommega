@@ -374,6 +374,212 @@ function renderLocalSummary({tee, strongbox, activity, profile, packages}) {
     }));
   }
 }
+
+// ---------------------------------------------------------------- automation
+const RKP_CLI = '/data/adb/modules/ommega/libs/arm64-v8a/ommega-rkp';
+const RKP_CLI_X86 = '/data/adb/modules/ommega/libs/x86_64/ommega-rkp';
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+async function rkpCommand(args) {
+  const result = await exec('p=' + RKP_CLI + '\n[ -x "$p" ] || p=' + RKP_CLI_X86
+    + '\n[ -x "$p" ] || { echo "ommega-rkp is not installed in this module" >&2; exit 1; }\n"$p" ' + args);
+  const output = String(result.stdout || '').trim();
+  if (result.errno) {
+    throw new Error(String(result.stderr || '').trim() || output || ('exit ' + result.errno));
+  }
+  try {
+    return JSON.parse(output);
+  } catch {
+    throw new Error(output || text('命令没有返回内容','The command returned nothing'));
+  }
+}
+function keyboxLine(box, slot) {
+  if (!box || box.present !== true) return text('未导入','Not imported');
+  if (box.unreadable) return text('文件存在但无法解析','The file exists but cannot be parsed');
+  const days = Number.isSafeInteger(box.days) ? formatKeyboxDays(box.days) : '—';
+  const level = box.level || text('未标注级别','No level');
+  const parts = [level, days];
+  if (box.rkp) parts.push('RKP');
+  if (box.chain) parts.push(box.chain + ' ' + text('张证书','certs'));
+  if (box.match === false) parts.push(text('槽位不符','slot mismatch'));
+  return parts.join(' · ') + (slot ? '' : '');
+}
+function automationMessage(id, value, error) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  element.textContent = value;
+  element.dataset.tone = error ? 'error' : '';
+}
+function formatDay(ms) {
+  const date = new Date(ms);
+  return date.getFullYear() + '/' + (date.getMonth() + 1) + '/' + date.getDate();
+}
+async function renderAutomation() {
+  let status;
+  try {
+    status = await rkpCommand('status');
+  } catch (error) {
+    // The page reports its own failure inline; a missing tool must not make the
+    // global refresh claim that some other status could not be read.
+    setText('om-rkp-seed-state', text('不可用','Unavailable'));
+    automationMessage('om-rkp-issue-state', String(error.message || error), true);
+    return true;
+  }
+  const seed = status.seed || {};
+  setText('om-rkp-seed-state', seed.present
+    ? (seed.decryptable === false ? text('已导入但无法解密（可能来自其他设备）','Imported but undecryptable on this device') : text('已导入','Imported'))
+    : text('未导入','Not imported'));
+  setText('om-rkp-seed-fingerprint', seed.fingerprint || '—');
+  setText('om-rkp-seed-time', Number.isSafeInteger(seed.imported_at_ms) && seed.imported_at_ms > 0 ? formatTime(seed.imported_at_ms / 1000) : '—');
+  setText('om-rkp-seed-chain', seed.has_chain ? text('已包含','Included') : text('缺少','Missing'));
+
+  setText('om-rkp-tee-state', keyboxLine(status.tee, 'tee'));
+  setText('om-rkp-sb-state', keyboxLine(status.strongbox, 'sb'));
+
+  const policy = status.policy || {};
+  const tee = status.tee || {}, sb = status.strongbox || {};
+  // The whole card follows the slot that expires first, so the level it names is
+  // the level the deadline belongs to.
+  const slots = [['TEE', tee], ['StrongBox', sb]]
+    .filter(([, box]) => box.present === true && !box.unreadable && Number.isSafeInteger(box.not_after_ms))
+    .sort((a, b) => a[1].not_after_ms - b[1].not_after_ms);
+  const soonest = slots[0] || null;
+  const rkpBox = (soonest && soonest[1].rkp) ? soonest[1] : (tee.rkp ? tee : (sb.rkp ? sb : null));
+  setText('om-rkp-kind', rkpBox
+    ? 'RKP' + (rkpBox.level ? ' · ' + rkpBox.level : '')
+    : text('非 RKP 证书','Not an RKP chain'));
+  const expiry = soonest ? soonest[1].not_after_ms : null;
+  setText('om-rkp-expiry', expiry
+    ? (soonest[1].level || soonest[0]) + ' ' + formatDay(expiry) + ' · ' + formatKeyboxDays(Math.floor((expiry - Date.now()) / 86400000))
+    : '—');
+  setText('om-rkp-slots', slots.length
+    ? text('两个槽位：','Slots: ') + slots.map(([label, box]) =>
+        (box.level || label) + ' ' + formatKeyboxDays(Number.isSafeInteger(box.days) ? box.days : 0)).join(' · ')
+      + text('；按最早到期者判断临期。',' — the earliest expiry drives the deadline.')
+    : text('未安装 RKP 证书。','No RKP chain installed.'));
+  setText('om-rkp-policy', (policy.refresh_hours || 0) + ' ' + text('小时','hours') + ' · ' + text('提前量','lead time'));
+  setText('om-rkp-due', Number.isSafeInteger(policy.due_at_ms) && policy.due_at_ms > 0
+    ? formatDay(policy.due_at_ms) + (policy.due ? ' · ' + text('已临期','due now') : '')
+    : '—');
+  const auto = document.getElementById('om-rkp-auto');
+  if (auto) {
+    auto.checked = policy.auto === true;
+    auto.disabled = !(seed.present && seed.decryptable !== false && rkpBox && policy.refresh_hours);
+  }
+  // A manual issuance only needs usable material: it replaces whatever the slot
+  // holds, including a static keybox. Automatic renewal needs a chain with a
+  // known expiry, so that switch stays tied to an RKP chain.
+  const issueable = Boolean(seed.present && seed.decryptable !== false);
+  for (const id of ['om-rkp-issue-tee', 'om-rkp-issue-sb']) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = !issueable;
+  }
+  if (status.last_feedback && status.last_feedback.message) {
+    automationMessage('om-rkp-issue-state', status.last_feedback.message, true);
+  }
+  return true;
+}
+let automationIssueArm = null;
+function armAutomationIssue(level) {
+  const warning = document.getElementById('om-rkp-issue-warning');
+  const buttons = { tee: document.getElementById('om-rkp-issue-tee'), strongbox: document.getElementById('om-rkp-issue-sb') };
+  const button = buttons[level];
+  if (!button) return;
+  if (automationIssueArm === level) {
+    automationIssueArm = null;
+    if (warning) warning.hidden = true;
+    button.dataset.armed = 'false';
+    if (button.dataset.label) button.textContent = button.dataset.label;
+    void runAutomationIssue(level);
+    return;
+  }
+  automationIssueArm = level;
+  if (warning) warning.hidden = false;
+  button.dataset.armed = 'true';
+  button.dataset.label = button.textContent;
+  button.textContent = text('再次点击确认签发', 'Click again to issue');
+  automationMessage('om-rkp-issue-state', text('已选择 ', 'Selected ')
+    + (level === 'strongbox' ? 'StrongBox' : 'TEE')
+    + text('，15 秒内再点一次才会真正签发。', '; the next click within 15 seconds issues.'), false);
+  window.setTimeout(() => {
+    if (automationIssueArm !== level) return;
+    automationIssueArm = null;
+    if (warning) warning.hidden = true;
+    button.dataset.armed = 'false';
+    if (button.dataset.label) button.textContent = button.dataset.label;
+    automationMessage('om-rkp-issue-state', text('已取消，未签发。', 'Cancelled; nothing was issued.'), false);
+  }, 15000);
+}
+async function runAutomationIssue(level) {
+  automationMessage('om-rkp-issue-state', text('正在签发 ', 'Issuing ')
+    + (level === 'strongbox' ? 'StrongBox' : 'TEE') + text('…', '…'), false);
+  try {
+    const result = await rkpCommand('issue ' + level);
+    const summary = result.chain_summary && Number.isSafeInteger(result.chain_summary.certificates)
+      ? ' · ' + result.chain_summary.certificates + text(' 张证书', ' certificates') : '';
+    automationMessage('om-rkp-issue-state', text('已签发并替换 ', 'Issued and installed ')
+      + (result.level === 'strongbox' ? 'StrongBox' : 'TEE') + summary, false);
+  } catch (error) {
+    automationMessage('om-rkp-issue-state', String(error.message || error), true);
+  }
+  void renderAutomation();
+}
+function bindAutomation() {
+  const page = document.getElementById('om-automation-page');
+  if (!page || page.dataset.omBound === 'true') return;
+  page.dataset.omBound = 'true';
+  const importSeed = document.getElementById('om-rkp-seed-import');
+  if (importSeed) importSeed.onclick = async () => {
+    const path = document.getElementById('om-rkp-seed-path');
+    automationMessage('om-rkp-seed-message', text('正在导入…','Importing…'), false);
+    try {
+      const result = await rkpCommand('seed-import ' + shellQuote(path ? path.value : ''));
+      automationMessage('om-rkp-seed-message', text('已导入，指纹 ','Imported, fingerprint ') + (result.fingerprint || '—'), false);
+    } catch (error) {
+      automationMessage('om-rkp-seed-message', String(error.message || error), true);
+    }
+    void renderAutomation();
+  };
+  const removeSeed = document.getElementById('om-rkp-seed-remove');
+  if (removeSeed) removeSeed.onclick = async () => {
+    try {
+      await rkpCommand('seed-remove');
+      automationMessage('om-rkp-seed-message', text('种子已删除','Seed removed'), false);
+    } catch (error) {
+      automationMessage('om-rkp-seed-message', String(error.message || error), true);
+    }
+    void renderAutomation();
+  };
+  const importKeybox = async (level, pathId, message) => {
+    const path = document.getElementById(pathId);
+    automationMessage(message, text('正在导入…','Importing…'), false);
+    try {
+      await rkpCommand('keybox-import ' + level + ' ' + shellQuote(path ? path.value : ''));
+      automationMessage(message, text('已导入，守护进程会立即重载','Imported; the daemon reloads it now'), false);
+    } catch (error) {
+      automationMessage(message, String(error.message || error), true);
+    }
+    void renderAutomation();
+  };
+  const teeImport = document.getElementById('om-rkp-tee-import');
+  if (teeImport) teeImport.onclick = () => importKeybox('tee', 'om-rkp-tee-path', 'om-rkp-keybox-message');
+  const sbImport = document.getElementById('om-rkp-sb-import');
+  if (sbImport) sbImport.onclick = () => importKeybox('strongbox', 'om-rkp-sb-path', 'om-rkp-keybox-message');
+  const auto = document.getElementById('om-rkp-auto');
+  if (auto) auto.onchange = async () => {
+    try {
+      await rkpCommand('policy --auto ' + (auto.checked ? 'on' : 'off'));
+    } catch (error) {
+      automationMessage('om-rkp-issue-state', String(error.message || error), true);
+    }
+    void renderAutomation();
+  };
+  const issueTee = document.getElementById('om-rkp-issue-tee');
+  if (issueTee) issueTee.onclick = () => armAutomationIssue('tee');
+  const issueSb = document.getElementById('om-rkp-issue-sb');
+  if (issueSb) issueSb.onclick = () => armAutomationIssue('strongbox');
+}
 const exec = createBridge('a_dashboard');
 const execBStatus = createBridge('a_b_status');
 if (typeof document !== 'undefined') document.addEventListener('ommega-readonly', event => {
@@ -396,8 +602,16 @@ async function readBConnection() {
 [ -r "$ommega_status_config" ] || exit 1
 grep -iE '^[[:space:]]*(url|device_id|remote|tls_insecure|tls_skip_verify|insecure_tls)[[:space:]]*:' "$ommega_status_config"`;
   const config = await execBStatus(configCommand);
-  const settings = !config.errno && parseBStatusConfig(config.stdout);
-  if (!settings) { bOnline = 'unknown'; renderBConnection(); renderBBattery(null); return false; }
+  if (Number(config.errno) !== 0) {
+    // The config could not be read at all: that is a failed read.
+    bOnline = 'unknown'; renderBConnection(); renderBBattery(null); return false;
+  }
+  const settings = parseBStatusConfig(config.stdout);
+  if (!settings) {
+    // Readable but without an active relay (local mode): there is nothing to
+    // read here, so this must not be reported as an incomplete refresh.
+    bOnline = 'unknown'; renderBConnection(); renderBBattery(null); return true;
+  }
   const bytes = new TextEncoder().encode(settings.url + '/api/status/');
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
   const encoded = btoa(binary);
@@ -558,7 +772,7 @@ function install() {
         </section></div><div class="stack">
         <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('连接与配置','Connection and configuration')}</h2></div>
         ${action('remote-config','远程连接','Remote connection','服务器、设备 ID 与凭据','Server, device ID and credentials','server')}
-        ${action('automation-settings','自动化','Automation','Keybox 与更新选项','Keybox and update options','sliders')}
+        ${action('om-automation-open','自动化','Automation','CDI 种子、Keybox 与 RKP 续签','CDI seed, keybox and RKP renewal','sliders')}
         ${action('boot-hash','启动哈希','Verified boot hash','配置证明参数','Configure attestation parameters','shield')}
         ${action('boot-key','启动公钥','Verified boot key','配置证明公钥','Configure the attestation public key','key')}
         </section><section class="panel settings-group om-hidden-policy-launchers"><div class="group-header"><h2 class="group-heading">${text('应用策略','App policies')}</h2></div>
@@ -569,6 +783,32 @@ function install() {
         ${action('about','关于 Ommega','About Ommega','版本与项目说明','Version and project details','info')}
         </section></div></div>
         <p class="om-description" id="om-action-message" role="status"></p>
+      </section>
+      <section id="om-automation-page" class="om-view" hidden aria-label="${text('自动化','Automation')}">
+        <div class="page-heading"><div><span class="section-kicker">AUTOMATION</span><h1>${text('自动化','Automation')}</h1><p>${text('CDI 种子、Keybox 与 RKP 续签。','CDI seed, keybox and RKP renewal.')}</p></div></div>
+        <div class="content-columns"><div class="stack">
+          <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('CDI 种子','CDI seed')}</h2><p>${text('由你自己导入并加密保存在本机；模块不内置任何种子','Imported by you and stored encrypted on this device; the module ships no seed')}</p></div>
+            <div class="om-automation-field wide"><label for="om-rkp-seed-path">${text('种子包路径','Seed bundle path')}</label><input id="om-rkp-seed-path" type="text" value="/sdcard/Download/rkp-seed.json" spellcheck="false" autocomplete="off"><button type="button" id="om-rkp-seed-import" class="om-button secondary">${text('导入','Import')}</button><button type="button" id="om-rkp-seed-remove" class="om-button secondary">${text('删除','Remove')}</button></div>
+            <dl class="b-summary-details"><div><dt>${text('状态','State')}</dt><dd id="om-rkp-seed-state">—</dd></div><div><dt>${text('指纹','Fingerprint')}</dt><dd id="om-rkp-seed-fingerprint">—</dd></div><div><dt>${text('导入时间','Imported')}</dt><dd id="om-rkp-seed-time">—</dd></div><div><dt>DICE ${text('链','chain')}</dt><dd id="om-rkp-seed-chain">—</dd></div></dl>
+            <p class="note">${text('种子包为 JSON：version、dice_chain_hex（真机 DICE 链的 CBOR hex）、signing（kind 与 bytes_hex）、device、issuance（fingerprint 与 server_url）。','The bundle is JSON with version, dice_chain_hex (the CBOR DICE chain in hex), signing (kind and bytes_hex), device and issuance (fingerprint and server_url).')}</p>
+            <p class="note" id="om-rkp-seed-message" role="status"></p>
+          </section>
+          <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('Keybox 导入','Keybox import')}</h2><p>${text('TEE 与 StrongBox 各自一个槽位，互不复用','TEE and StrongBox keep separate slots and never share material')}</p></div>
+            <div class="om-automation-field"><label for="om-rkp-tee-path">TEE keybox</label><input id="om-rkp-tee-path" type="text" value="/sdcard/Download/keybox.xml" spellcheck="false" autocomplete="off"><button type="button" id="om-rkp-tee-import" class="om-button secondary">${text('导入','Import')}</button></div>
+            <p class="note" id="om-rkp-tee-state">—</p>
+            <div class="om-automation-field"><label for="om-rkp-sb-path">StrongBox keybox</label><input id="om-rkp-sb-path" type="text" value="/sdcard/Download/keybox-strongbox.xml" spellcheck="false" autocomplete="off"><button type="button" id="om-rkp-sb-import" class="om-button secondary">${text('导入','Import')}</button></div>
+            <p class="note" id="om-rkp-sb-state">—</p>
+            <p class="note" id="om-rkp-keybox-message" role="status"></p>
+          </section>
+          <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">RKP ${text('续签','renewal')}</h2><p>${text('按服务器下发的 time_to_refresh_hours 判断临期','Renew when the server-provided time_to_refresh_hours says the chain is near expiry')}</p></div>
+            <dl class="b-summary-details"><div><dt>${text('链路类型','Chain kind')}</dt><dd id="om-rkp-kind">—</dd></div><div><dt>${text('到期（最早）','Expires (earliest)')}</dt><dd id="om-rkp-expiry">—</dd></div><div><dt>${text('续签策略','Policy')}</dt><dd id="om-rkp-policy">—</dd></div><div><dt>${text('临期时间','Refresh due')}</dt><dd id="om-rkp-due">—</dd></div></dl>
+            <p class="note" id="om-rkp-slots">—</p>
+            <button type="button" class="action-row" id="om-rkp-auto-row"><span class="row-icon">${icon('refresh')}</span><span class="row-text"><strong>${text('临期自动签发','Automatic renewal')}</strong><small>${text('到期前按策略重新签发并替换 keybox；仅在存在有效种子与本机 RKP 证书时生效','Re-issue and replace the keybox before expiry, only with a valid seed and an RKP chain')}</small></span><span class="switch"><input id="om-rkp-auto" type="checkbox" role="switch"><span></span></span></button>
+            <div class="om-automation-actions"><button type="button" id="om-rkp-issue-tee" class="om-button secondary">${text('签发并替换 TEE','Issue and replace TEE')}</button><button type="button" id="om-rkp-issue-sb" class="om-button secondary">${text('签发并替换 StrongBox','Issue and replace StrongBox')}</button></div>
+            <p class="note" id="om-rkp-issue-warning" hidden>${text('频繁签发有风险：同一台设备的注册身份被 Google 记录，短时间重复申请可能被标记或限流。确认要现在签发吗？','Frequent issuance is risky: the registration identity is tracked by Google, and repeated requests in a short window can be flagged or throttled. Issue now?')}</p>
+            <p class="note" id="om-rkp-issue-state" role="status"></p>
+          </section>
+        </div></div>
       </section>
       <section id="om-soter-page" class="om-view" hidden aria-label="${text('SOTER 身份','SOTER identities')}"></section>
       <section id="om-soter-identity" class="om-view" hidden aria-label="${text('身份详情','Identity detail')}"></section>
@@ -629,20 +869,25 @@ function install() {
     caption.addEventListener('click', () => { if (!button.disabled) button.click(); });
   }
   const denylist = document.getElementById('select-denylist'); if (denylist) denylist.hidden = true;
+
   function navigate(raw) {
     const parts = String(raw || '').split('/');
-    const known = ['overview','apps','settings','soter'];
+    const known = ['overview','apps','settings','soter','automation'];
     let view = known.includes(parts[0]) ? parts[0] : 'overview';
     if (view === 'soter' && parts[1]) view = 'soter-identity';
     document.body.dataset.omView = view;
-    for (const id of ['overview','settings','soter-page','soter-identity']) {
+    // SOTER and automation live behind "-page" ids, so the target id cannot be
+    // derived from the route name alone.
+    const activeId = view === 'soter' ? 'om-soter-page' : view === 'automation' ? 'om-automation-page' : 'om-' + view;
+    for (const id of ['overview','settings','soter-page','soter-identity','automation-page']) {
       const section = document.getElementById('om-' + id);
-      if (section) section.hidden = 'om-' + id !== ('om-' + (view === 'soter' ? 'soter-page' : view));
+      if (section) section.hidden = 'om-' + id !== activeId;
     }
     if (view === 'soter') soterShow('list');
     if (view === 'soter-identity') soterShow('detail', parts[1]);
+    if (view === 'automation') { bindAutomation(); void renderAutomation(); }
     document.getElementById('om-apps-heading').hidden = view !== 'apps';
-    const navView = (view === 'soter' || view === 'soter-identity') ? 'settings' : view;
+    const navView = (view === 'soter' || view === 'soter-identity' || view === 'automation') ? 'settings' : view;
     document.querySelectorAll('[data-om-view]').forEach(button => button.setAttribute('aria-current', button.dataset.omView === navView ? 'page' : 'false'));
     document.querySelector('.om-nav').dataset.active = String(['overview','apps','settings'].indexOf(navView));
     if (searchRegion) searchRegion.hidden = view !== 'apps';
@@ -656,6 +901,7 @@ function install() {
   navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview');
   for (const button of document.querySelectorAll('[data-om-action]')) button.onclick = () => {
     if (button.dataset.omAction === 'ommega-soterta') { location.hash = 'om-soter'; return; }
+    if (button.dataset.omAction === 'om-automation-open') { location.hash = 'om-automation'; return; }
     const target = document.getElementById(button.dataset.omAction);
     if (target) { target.click(); setText('om-action-message',''); }
     else setText('om-action-message',text('界面尚未就绪，请稍后重试。','The interface is still loading. Try again shortly.'));
@@ -710,6 +956,7 @@ function install() {
 export async function refreshAState(forced = false) {
   setText('om-updated',text('正在刷新…','Refreshing…'));
   const tasks = [readStatus(), readBConnection()];
+  if (document.body.dataset.omView === 'automation') tasks.push(renderAutomation());
   if (forced) {
     const detail = {view:document.body.dataset.omView, promise:null};
     document.dispatchEvent(new CustomEvent('ommega-refresh', {detail}));

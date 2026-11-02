@@ -194,6 +194,28 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .wide-card { grid-column: span 12; padding: 21px 23px; }
 .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
 .card-heading h2, .group-heading { margin: 0; font-size: 15px; letter-spacing: -.02em; }
+/* Automation page: a path field plus its import button, and the two-step
+   issuance warning state. */
+.om-automation-field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 17px 10px; }
+.om-automation-field label { flex: 1 1 100%; color: var(--subtle); font-size: 11px; }
+.om-automation-field input[type="text"] { flex: 1 1 0; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); color: var(--text); font: inherit; font-size: 12px; }
+.om-automation-field button { flex: none; }
+/* The seed row carries two buttons, so the path gets its own line there. */
+.om-automation-field.wide input[type="text"] { flex: 1 1 100%; }
+/* The automation page reuses the settings-group panel, which has no inner
+   padding of its own: the shared rows carry it, so plain blocks need it here. */
+#om-automation-page .b-summary-details,
+#om-automation-page .note { margin-left: 17px; margin-right: 17px; }
+#om-automation-page .b-summary-details { padding: 4px 0 8px; }
+#om-automation-page .note { margin-bottom: 12px; overflow-wrap: anywhere; }
+/* The body already reserves the dock clearance (--om-dock-h plus the gap), so
+   this page only needs a small trailing rhythm, not a second dock. */
+#om-automation-page { padding-bottom: 16px; }
+.om-automation-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 17px 12px; }
+/* Both issuance buttons are primary actions with long labels: give each a full
+   row instead of wrapping into unequal widths. */
+.om-automation-actions button { flex: 1 1 100%; }
+.om-automation-actions button[data-armed="true"] { color: var(--on-error); background: var(--error); border-color: var(--error); }
 .card-heading small, .section-caption { color: var(--subtle); font-size: 11px; }
 .route { display: flex; align-items: center; gap: 10px; }
 .route-node { flex: 1; min-width: 0; padding: 11px 12px; background: var(--surface-soft); border-radius: 13px; }

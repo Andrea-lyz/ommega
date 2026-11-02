@@ -1,0 +1,45 @@
+[package]
+name = "ommega-rkp-engine"
+description = "RKP issuance engine: DICE chain + signing material -> authenticated CSR v3 -> verified keybox"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+# Ported from Duck ToolBox (crates/duck-rkp, MIT, Copyright (c) 2026 Eltavine).
+# The two workspace crates of the original (duck-core, duck-platform) are
+# replaced by the paths/transport shims in this crate. Dependency versions follow
+# the original so the ported code compiles unchanged, except reqwest: the port
+# uses the 0.12 rustls(ring) stack the rest of this module already ships for
+# Android instead of reqwest 0.13's aws-lc backend.
+
+[dependencies]
+anyhow = "1.0"
+aes = "0.9"
+aes-gcm = "0.11"
+base64ct = { version = "1.8", features = ["alloc"] }
+ciborium = "0.2.2"
+cmac = "0.8"
+ed25519-dalek = "3"
+getrandom = "0.4"
+hex = "0.4"
+hkdf = "0.13"
+libc = "0.2"
+p256 = { version = "0.14", features = ["arithmetic", "ecdh", "ecdsa", "pkcs8", "pem"] }
+p384 = { version = "0.14", features = ["ecdsa"] }
+pkcs8 = { version = "0.11", features = ["pem"] }
+quick-xml = "0.42"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros"] }
+x509-cert = "0.3"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "crypto", "pem"] }
