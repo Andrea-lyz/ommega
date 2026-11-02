@@ -757,10 +757,10 @@ fn auto_run(args: &[String]) -> Result<Value> {
     let dry_run = args.iter().any(|value| value == "--dry-run");
     let policy = load_policy();
     if !policy.auto {
-        return Ok(json!({"skipped": "disabled"}));
+        return Ok(json!({"skipped": "disabled", "next_wake_ms": next_idle_wake_ms()}));
     }
     if load_meta().is_none() {
-        return Ok(json!({"skipped": "no-seed"}));
+        return Ok(json!({"skipped": "no-seed", "next_wake_ms": next_idle_wake_ms()}));
     }
     let now = now_ms();
     let mut due = Vec::new();
@@ -778,23 +778,35 @@ fn auto_run(args: &[String]) -> Result<Value> {
         }
     }
     if due.is_empty() {
-        return Ok(json!({"skipped": "not-due", "refresh_hours": policy.refresh_hours}));
+        return Ok(json!({
+            "skipped": "not-due",
+            "refresh_hours": policy.refresh_hours,
+            "next_wake_ms": next_renewal_ms(&policy),
+        }));
     }
     // A failed attempt must not burn a request every tick.
     if policy.last_attempt_ms > 0
         && now.saturating_sub(policy.last_attempt_ms) < BACKOFF_MS
         && !policy.last_error.is_empty()
     {
-        return Ok(json!({"skipped": "backoff", "due": due, "last_error": policy.last_error}));
+        return Ok(json!({
+            "skipped": "backoff",
+            "due": due,
+            "last_error": policy.last_error,
+            "next_wake_ms": policy.last_attempt_ms + BACKOFF_MS,
+        }));
     }
     if dry_run {
         // Answers "what would happen" without spending a request.
-        return Ok(
-            json!({"dry_run": true, "would_issue": due, "refresh_hours": policy.refresh_hours}),
-        );
+        return Ok(json!({
+            "dry_run": true,
+            "would_issue": due,
+            "refresh_hours": policy.refresh_hours,
+            "next_wake_ms": next_renewal_ms(&policy),
+        }));
     }
     let Some(_lock) = lock_issuance()? else {
-        return Ok(json!({"skipped": "busy", "due": due}));
+        return Ok(json!({"skipped": "busy", "due": due, "next_wake_ms": now + 120_000}));
     };
     let mut issued = Vec::new();
     let mut failures = Vec::new();
@@ -827,7 +839,37 @@ fn auto_run(args: &[String]) -> Result<Value> {
         )
     };
     let _ = write_feedback(&message, !failures.is_empty());
-    Ok(json!({"ran": true, "issued": issued, "failures": failures}))
+    Ok(json!({
+        "ran": true,
+        "issued": issued,
+        "failures": failures,
+        "next_wake_ms": if failures.is_empty() { next_renewal_ms(&load_policy()) } else { now + BACKOFF_MS },
+    }))
+}
+
+/// Wake-up instant the daemon should sleep to when there is nothing to renew.
+fn next_idle_wake_ms() -> u64 {
+    now_ms() + 24 * 3_600_000
+}
+
+/// Earliest moment a slot enters its renewal window. The daemon sleeps exactly
+/// to it instead of polling, so nothing runs while the chain is still fresh.
+fn next_renewal_ms(policy: &Policy) -> u64 {
+    let mut earliest: Option<i64> = None;
+    for (expected, path) in [("TEE", KEYBOX_TEE), ("StrongBox", KEYBOX_STRONGBOX)] {
+        let status = keybox_status(path, expected);
+        let Some(expiry) = status.get("not_after_ms").and_then(Value::as_i64) else {
+            continue;
+        };
+        let due_at = expiry - (policy.refresh_hours as i64) * 3_600_000;
+        earliest = Some(earliest.map_or(due_at, |current| current.min(due_at)));
+    }
+    match earliest {
+        Some(at) if at > now_ms() as i64 => at as u64,
+        // Already inside the window: retry shortly instead of spinning.
+        Some(_) => now_ms() + 60_000,
+        None => next_idle_wake_ms(),
+    }
 }
 
 fn main() {
