@@ -336,14 +336,19 @@ function applyOverviewMode(mode) {
   }
   if (route) route.setAttribute('aria-label', local ? 'A → ' + text('本机 TA','Local TA') + ' → Keybox' : 'A → Server → B');
 }
-function renderLocalSummary({tee, strongbox, activity, daemon, packages}) {
+function renderLocalSummary({tee, strongbox, activity, profile, packages}) {
   const now = Date.now();
   const teeBox = keyboxSummary(tee, 'TEE', now);
   const strongBox = keyboxSummary(strongbox, 'StrongBox', now);
   setText('om-local-tee', keyboxRow(teeBox));
   setText('om-local-strongbox', keyboxRow(strongBox));
   setText('om-local-last', activity > 0 ? formatTime(activity / 1000) : text('暂无记录','No record yet'));
-  setText('om-local-daemon', /^\d+$/.test(String(daemon || '')) ? 'PID ' + daemon : text('未确认运行','Not confirmed'));
+  // The status reader already reports the counter table that matches the active
+  // mode, so this total is the local one whenever local mode is active.
+  const counts = profile?.attestation_counts;
+  const total = counts && typeof counts === 'object'
+    ? Object.values(counts).reduce((sum, entry) => sum + (Number.isSafeInteger(entry?.count) ? entry.count : 0), 0) : null;
+  setText('om-local-attest', total === null ? '—' : total === 0 ? text('暂无','None') : text(total + ' 次', total + ' total'));
   setText('om-local-scope', packages ? String(packages.size) : '—');
   setText('om-local-mode', text('未启用','Disabled'));
   const loaded = [teeBox, strongBox].filter(box => Number.isFinite(box.days)).sort((left, right) => left.days - right.days);
@@ -529,7 +534,7 @@ function install() {
           </article>
           <article class="panel metric-card b-summary" id="om-local-summary" hidden>
             <div class="b-summary-header"><div class="b-summary-title"><div class="panel-label">${icon('shield')}<span>${text('本机证明材料','Local material')}</span></div><h2>${text('本地模式','Local mode')}</h2></div><div class="b-summary-statuses"><span class="badge neutral" id="om-local-relay">${text('中继未启用','Relay disabled')}</span><span class="badge unknown latency-badge" id="om-local-expiry">${text('最近到期','Next expiry')} · —</span></div></div>
-            <dl class="b-summary-details"><div><dt>TEE</dt><dd id="om-local-tee">—</dd></div><div><dt>StrongBox</dt><dd id="om-local-strongbox">—</dd></div><div><dt>${text('最近签发','Last issuance')}</dt><dd id="om-local-last">—</dd></div><div><dt>${text('守护进程','Daemon')}</dt><dd id="om-local-daemon">—</dd></div><div><dt>${text('应用作用域','App scope')}</dt><dd id="om-local-scope">—</dd></div><div><dt>${text('中继','Relay')}</dt><dd id="om-local-mode">—</dd></div></dl>
+            <dl class="b-summary-details"><div><dt>TEE</dt><dd id="om-local-tee">—</dd></div><div><dt>StrongBox</dt><dd id="om-local-strongbox">—</dd></div><div><dt>${text('最近签发','Last issuance')}</dt><dd id="om-local-last">—</dd></div><div><dt>${text('累计证明','Attestations')}</dt><dd id="om-local-attest">—</dd></div><div><dt>${text('应用作用域','App scope')}</dt><dd id="om-local-scope">—</dd></div><div><dt>${text('中继','Relay')}</dt><dd id="om-local-mode">—</dd></div></dl>
             <div class="metric-chips om-local-warnings" id="om-local-warnings" hidden></div>
             <p class="note">${text('本机软件 TA 用自己的 keybox 直接签发证明，材料不经过网络。','This device signs attestations with its own software TA and keybox; no material leaves the device.')}</p>
           </article>
@@ -797,7 +802,7 @@ printf '\\n[END]\\n'`);
   const lines = targets.split(/\r?\n/);
   const packages = lines.shift() === 'present' ? new Set(lines.map(line => line.trim().replace(/[!?]+$/, '')).filter(line => /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$/.test(line))) : null;
   setText('om-scope-count',packages ? String(packages.size) : '—');
-  renderLocalSummary({tee:section('KEYBOX_TEE'),strongbox:section('KEYBOX_STRONGBOX'),activity:parseLogTime(section('ACTIVITY')),daemon:section('DAEMON'),packages});
+  renderLocalSummary({tee:section('KEYBOX_TEE'),strongbox:section('KEYBOX_STRONGBOX'),activity:parseLogTime(section('ACTIVITY')),profile,packages});
   setText('om-keymint', /^\d+$/.test(section('DAEMON')) ? `PID ${section('DAEMON')}` : text('未确认运行','Not confirmed'));
   setText('om-version',section('VERSION').replace(/^version=/,'') || '—');
   const recent = freshness(soter?.updated) === 'recent';

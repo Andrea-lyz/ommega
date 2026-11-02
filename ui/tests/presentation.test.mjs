@@ -230,7 +230,7 @@ test('the local emblem keeps the shield the relay icon drops on an old result', 
 
 test('the local-mode overview targets exist and the status read collects them', () => {
   for (const id of ['om-b-summary','om-local-summary','om-local-tee','om-local-strongbox','om-local-last',
-    'om-local-daemon','om-local-scope','om-local-mode','om-local-relay','om-local-expiry','om-local-warnings',
+    'om-local-attest','om-local-scope','om-local-mode','om-local-relay','om-local-expiry','om-local-warnings',
     'om-request-kind','om-route-mid','om-route-mid-detail','om-route-end','om-route-end-detail',
     'om-verdict-label','om-verdict-title','om-health-time-label','om-health-kind-label']) {
     assert.ok(aSource.includes('id="' + id + '"'), 'Missing overview target ' + id);
