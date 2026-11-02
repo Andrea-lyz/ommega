@@ -42,6 +42,11 @@ python3 .github/scripts/bump_version.py --version X.Y.Z
 - 用户需要做什么，例如是否必须单独更新 Server、是否只更新某个模块、A 安装后要不要重启；
 - 验证到什么程度，以及哪些部分仍需实机验收。
 
+同时更新 `docs/KSU-CHANGELOG.txt`：这是 KernelSU / APatch / Magisk 管理器更新对话框直接拉取的
+地址（`update.json` 的 `changelog` 字段指向 `master/docs/KSU-CHANGELOG.txt`）。格式为每版一段
+`Ommega X.Y.Z` 加简短中文条目，最新版本放在最上面；`prepare` 会检查该文件是否已包含当前版本，
+漏写时 CI 直接失败。
+
 **不要再在 README 里新增 `### X.Y.Z 更新要点` 章节。** 那是 2.1.4 及更早版本的旧写法，
 从下一个版本起停止使用；README 的版本由脚本维护，发布说明只进 CHANGELOG。
 

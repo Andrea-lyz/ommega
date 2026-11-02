@@ -46,6 +46,12 @@ jobs:
             version=$(python3 .github/scripts/bump_version.py --check)
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check KSU update changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          head -n 3 docs/KSU-CHANGELOG.txt | grep -q "Ommega $VERSION" \
+            || { echo "::error::docs/KSU-CHANGELOG.txt has no entry for Ommega $VERSION"; exit 1; }
       - name: Test version synchronization
         run: python3 .github/scripts/test_bump_version.py
       - name: Test CI toolchain discovery
