@@ -475,6 +475,14 @@ Referenced open-source implementations:
 | OhMyKeymint | James Clef (qwq233) | [qwq233/OhMyKeymint](https://github.com/qwq233/OhMyKeymint) |
 | KeyAttestation | vvb2060 | [vvb2060/KeyAttestation](https://github.com/vvb2060/KeyAttestation) |
 | TEESimulator-RS | Enginex0 | [Enginex0/TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS) |
+| Duck ToolBox | Eltavine | [eltavine/Duck-ToolBox](https://github.com/eltavine/Duck-ToolBox) |
+
+Duck ToolBox is more than a reference: its RKP workbench (`crates/duck-rkp`, MIT) is
+ported into [`a-side/source/rkp-engine`](a-side/source/rkp-engine) and is the engine
+behind A-side local keybox issuance. The port keeps CBOR, COSE, CSR v3 construction,
+DICE/CSR verification and keybox export validation, replacing only the host CLI and
+the TLS layer; the original copyright and license text live in that directory's
+`LICENSE` and `README.md`. Thanks to the author for publishing it.
 
 Existing AGPL-3.0-or-later, MIT, Apache-2.0 and other source licenses still apply.
 This README does not change any third-party ownership or license.

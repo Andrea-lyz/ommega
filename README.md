@@ -406,6 +406,12 @@ CI 只忽略纯 `*.md` 修改，TXT 修改仍会触发构建；默认使用源�
 | OhMyKeymint | James Clef（qwq233） | [qwq233/OhMyKeymint](https://github.com/qwq233/OhMyKeymint) |
 | KeyAttestation | vvb2060 | [vvb2060/KeyAttestation](https://github.com/vvb2060/KeyAttestation) |
 | TEESimulator-RS | Enginex0 | [Enginex0/TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS) |
+| Duck ToolBox | Eltavine（尉迟栩澜） | [eltavine/Duck-ToolBox](https://github.com/eltavine/Duck-ToolBox) |
+
+其中 Duck ToolBox 不只是参考：它的 RKP 工作台（`crates/duck-rkp`，MIT）经移植内置于
+[`a-side/source/rkp-engine`](a-side/source/rkp-engine)，构成 A 端本机签发 keybox 的引擎。
+移植保留了 CBOR、COSE、CSR v3 构造、DICE/CSR 校验与 keybox 导出验证，只替换了宿主 CLI 与
+TLS 层；原版权与许可文本见该目录的 `LICENSE` 与 `README.md`。感谢作者公开这份实现。
 
 项目遵循仓库中现有的 AGPL-3.0-or-later、MIT、Apache-2.0 等对应源码许可证；本 README
 不改变任何第三方代码的原许可证或版权归属。
