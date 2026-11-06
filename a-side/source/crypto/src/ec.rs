@@ -20,7 +20,6 @@
 
 use der::Decode as _;
 use der::Encode as _;
-use ecdsa::signature::hazmat::PrehashSigner as _;
 use ecdsa::signature::hazmat::RandomizedPrehashSigner as _;
 use ecdsa::signature::SignatureEncoding as _;
 use ecdsa::SigningKey as EcdsaSigningKey;
@@ -400,14 +399,28 @@ impl crypto::AccumulatingOperation for OmmegaEcUndigestSignOperation {
 }
 
 /// Sign a prehash (raw digest material) with ECDSA, returning a DER signature.
+///
+/// The digest material is normalised once, before any curve-specific signing: a
+/// key may be restricted to a digest shorter than the order (SHA-1 on P-384 or
+/// P-521), and `Digest::None` lets a caller supply any length at all, while the
+/// peer verifies against the FIPS/SEC1 reading of that same input.
+///
+/// Every curve draws fresh nonce material from the platform CSPRNG, so signing
+/// the same input twice yields different signatures. AOSP signs through
+/// BoringSSL, which never reuses a nonce across calls; a reproducible signature
+/// is externally observable and identifies a software implementation. If the RNG
+/// is unavailable the operation fails rather than returning a signature made
+/// from the zero-filled fallback, which would be deterministic again.
 fn sign_ecdsa_prehash(key: &Key, curve: ec::NistCurve, prehash: &[u8]) -> Result<Vec<u8>, Error> {
     let priv_bytes = nist_priv_bytes(key)?;
+    let z = prehash_to_field_bytes(curve, prehash)?;
+    let mut rng = FallibleOsRng::default();
     let sig = match curve {
         ec::NistCurve::P224 => {
             let sk = EcdsaSigningKey::<p224::NistP224>::from_slice(&priv_bytes)
                 .map_err(|e| km_err!(UnknownError, "P-224 key: {e:?}"))?;
             let s: SigP224 = sk
-                .sign_prehash(prehash)
+                .sign_prehash_with_rng(&mut rng, &z)
                 .map_err(|e| km_err!(UnknownError, "P-224 ECDSA sign failed: {e:?}"))?;
             s.to_der().to_vec()
         }
@@ -415,7 +428,7 @@ fn sign_ecdsa_prehash(key: &Key, curve: ec::NistCurve, prehash: &[u8]) -> Result
             let sk = EcdsaSigningKey::<p256::NistP256>::from_slice(&priv_bytes)
                 .map_err(|e| km_err!(UnknownError, "P-256 key: {e:?}"))?;
             let s: SigP256 = sk
-                .sign_prehash(prehash)
+                .sign_prehash_with_rng(&mut rng, &z)
                 .map_err(|e| km_err!(UnknownError, "P-256 ECDSA sign failed: {e:?}"))?;
             s.to_der().to_vec()
         }
@@ -423,7 +436,7 @@ fn sign_ecdsa_prehash(key: &Key, curve: ec::NistCurve, prehash: &[u8]) -> Result
             let sk = EcdsaSigningKey::<p384::NistP384>::from_slice(&priv_bytes)
                 .map_err(|e| km_err!(UnknownError, "P-384 key: {e:?}"))?;
             let s: SigP384 = sk
-                .sign_prehash(prehash)
+                .sign_prehash_with_rng(&mut rng, &z)
                 .map_err(|e| km_err!(UnknownError, "P-384 ECDSA sign failed: {e:?}"))?;
             s.to_der().to_vec()
         }
@@ -431,36 +444,126 @@ fn sign_ecdsa_prehash(key: &Key, curve: ec::NistCurve, prehash: &[u8]) -> Result
             // The generic `ecdsa::SigningKey<NistP521>` has no `DigestPrimitive`,
             // so the shared `sign_prehash` path does not exist for this curve.
             // `p521::ecdsa::SigningKey` implements `RandomizedPrehashSigner`
-            // itself; feed it the platform RNG and the same `z` value the other
-            // curves derive through `bits2field`.
-            let z = prehash_to_field_bytes(ec::NistCurve::P521, prehash)?;
+            // itself; feed it the platform RNG and the same normalised `z` the
+            // other curves use.
             let sk = p521::ecdsa::SigningKey::from_slice(&priv_bytes)
                 .map_err(|e| km_err!(UnknownError, "P-521 key: {e:?}"))?;
             let s: SigP521 = sk
-                .sign_prehash_with_rng(&mut rand_core::OsRng, &z)
+                .sign_prehash_with_rng(&mut rng, &z)
                 .map_err(|e| km_err!(UnknownError, "P-521 ECDSA sign failed: {e:?}"))?;
             s.to_der().to_vec()
         }
     };
+    if rng.failed {
+        return Err(km_err!(UnknownError, "ECDSA nonce RNG unavailable"));
+    }
     Ok(sig)
 }
 
-/// Build the ECDSA `z` value for a prehash the way OpenSSL does.
+/// Fail-closed platform CSPRNG for ECDSA nonce material.
 ///
-/// A digest shorter than the curve order is used as a big-endian integer, which
-/// is the same as left-padding it with zeros; a longer one keeps its most
-/// significant bytes. RustCrypto's `bits2field` agrees for 33 bytes and up, but
-/// rejects anything shorter than half the field, which would leave a P-521 key
-/// created with a SHA-256 digest (KeyMint allows it) unsignable.
+/// `rand_core::OsRng` panics when the platform source fails, and a zero-filled
+/// buffer would silently turn a randomized signature back into a deterministic
+/// one. Record the failure instead, let the signing call finish, and refuse to
+/// return its result.
+#[derive(Default)]
+struct FallibleOsRng {
+    failed: bool,
+}
+
+impl rand_core::RngCore for FallibleOsRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        if !self.failed && getrandom::fill(dest).is_err() {
+            self.failed = true;
+        }
+        if self.failed {
+            // Keep the value defined for the caller; the result is discarded.
+            dest.fill(0);
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        match getrandom::fill(dest) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.failed = true;
+                dest.fill(0);
+                Err(rand_core::Error::new(format!(
+                    "platform RNG unavailable: {error}"
+                )))
+            }
+        }
+    }
+}
+
+impl rand_core::CryptoRng for FallibleOsRng {}
+
+/// Number of significant bits in the curve order.
+///
+/// FIPS 186-5 §6.4.1 and SEC1 §2.3.8 `bits2int` keep only the leftmost
+/// `min(outlen, order_bits)` bits of the digest. P-224, P-256 and P-384 have an
+/// order that fills whole bytes, so a byte truncation is exact for them; the
+/// P-521 order is 521 of the 528 bits carried by its 66 coordinate bytes, so a
+/// digest that reaches the full width has to lose seven *bits*.
+fn order_bits(curve: ec::NistCurve) -> usize {
+    match curve {
+        ec::NistCurve::P224 => 224,
+        ec::NistCurve::P256 => 256,
+        ec::NistCurve::P384 => 384,
+        ec::NistCurve::P521 => 521,
+    }
+}
+
+/// Build the ECDSA `z` value for a prehash the way OpenSSL and the FIPS/SEC1
+/// rules do.
+///
+/// The input is treated as a big-endian integer: shorter than the order means it
+/// is left-padded with zeros, wider than the order means only its most
+/// significant bits survive. RustCrypto's `bits2field` implements exactly that,
+/// but rejects anything below half the field width and only truncates whole
+/// bytes. AOSP accepts the missing cases: KeyMint permits a `Digest::None`
+/// prehash of any length (its own tests sign 10 bytes with P-256), and a key can
+/// be restricted to SHA-1, whose 20-byte digest is shorter than P-384's 48-byte
+/// field. Normalising here keeps every curve on the same interpretation.
 fn prehash_to_field_bytes(curve: ec::NistCurve, prehash: &[u8]) -> Result<Vec<u8>, Error> {
     let width = curve.coord_len();
     let mut z = vec_try![0; width]?;
-    if prehash.len() >= width {
-        z.copy_from_slice(&prehash[..width]);
-    } else {
-        z[width - prehash.len()..].copy_from_slice(prehash);
+    let copy = core::cmp::min(width, prehash.len());
+    let start = width - copy;
+    z[start..].copy_from_slice(&prehash[..copy]);
+    if prehash.len().saturating_mul(8) > order_bits(curve) {
+        shift_right_bits(&mut z, width * 8 - order_bits(curve));
     }
     Ok(z)
+}
+
+/// Shift a big-endian integer right by less than one byte.
+///
+/// The only call site is the seven-bit reduction above, so a single carry byte
+/// is enough; anything wider would need a general byte-offset shift.
+fn shift_right_bits(bytes: &mut [u8], bits: usize) {
+    if bits == 0 {
+        return;
+    }
+    debug_assert!(bits < 8, "use a byte-offset shift for {bits} bits");
+    let mut carry = 0u8;
+    for byte in bytes.iter_mut() {
+        let next = *byte << (8 - bits);
+        *byte = (*byte >> bits) | carry;
+        carry = next;
+    }
 }
 
 /// EdDSA signing operation for Ed25519.
