@@ -123,6 +123,11 @@ software TA switch is turned off.
    expires when the anchor exits or its last grant is revoked. See
    [Isolated grant scope](docs/GRANT-SCOPE.md) for routing and lifetime rules.
 
+Selected applications can also read the relay peer's device identity for
+device-property attestation. The view is per process and leaves host properties
+untouched. See [Device-property view](docs/DEVICE-PROPERTY-VIEW.md) for the
+identity rules, the tolerated vendor differences and the self-check output.
+
    In list mode, two lists feed routing and are merged when the injector config is read:
    `scoop` in `/data/misc/keystore/ommega/injector.toml` (the shipped defaults
    plus anything added by hand) and `target.txt` (what the WebUI writes). A
