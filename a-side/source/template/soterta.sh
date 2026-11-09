@@ -26,6 +26,8 @@ MODDIR=${0%/*}
 STATE_DIR=/data/adb/ommega
 TA_DIR=$STATE_DIR/soterta
 FLAG=$TA_DIR/enabled
+DEBUG_FILE=$TA_DIR/soterta.debug
+DEBUG_FLAG=$TA_DIR/debug
 STATUS=$TA_DIR/status.json
 PIDFILE=$TA_DIR/daemon.pid
 MARKER=$TA_DIR/hal-taken-over
@@ -59,7 +61,15 @@ log() {
 # SOTERTA_DEBUG=1 makes every converge pass narrate its snapshot, which is what
 # a stuck transition has to be diagnosed with.
 debug() {
-  [ -n "$SOTERTA_DEBUG" ] && log "debug: $*"
+  if [ -n "$SOTERTA_DEBUG" ] || [ -f "$TA_DIR/debug" ]; then
+    log "debug: $*"
+    # Keep a bounded tail the WebUI can show without pulling the whole journal.
+    printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >> "$TA_DIR/soterta.debug" 2>/dev/null || :
+    if [ "$(wc -c < "$TA_DIR/soterta.debug" 2>/dev/null || echo 0)" -gt 262144 ]; then
+      tail -c 65536 "$TA_DIR/soterta.debug" > "$TA_DIR/soterta.debug.next" 2>/dev/null &&
+        mv -f "$TA_DIR/soterta.debug.next" "$TA_DIR/soterta.debug"
+    fi
+  fi
   return 0
 }
 

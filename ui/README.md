@@ -14,7 +14,7 @@ A SOTER identity management opens full list/detail pages with one master switch;
 
 KeyMint and SOTER are separate paths from A through Server to B. A SOTER `ledger` value indicates that its ledger file exists; it is not a key count. The A relay health file is event driven, not a heartbeat. A running B process is not proof of a server connection. Missing data stays unknown, and expired SOTER snapshots are labeled stale.
 
-Language defaults to the system: Chinese locales use simplified Chinese; other locales use English. System / Chinese / English and system / light / dark overrides are available. Only appearance preferences are written to WebView storage. Tokens are masked, and configuration credentials stay in the existing device configuration files. Language changes ask before discarding unsaved form values.
+Language defaults to the system: Chinese locales use simplified Chinese; other locales use English. System / Chinese / English and system / light / dark overrides are available. Only appearance and app-list sort preferences are written to WebView storage. Tokens are masked, and configuration credentials stay in the existing device configuration files. Language changes ask before discarding unsaved form values.
 
 A places Global scope directly below the app search bar. Each application opens a policy page with individual scope, takeover mode, authentication signing and CPU/device-property controls. The authentication-signing, local-keygen-EWMA and CPU/device-property cards only matter with a relay in the path, so they are hidden while the daemon reports the local mode in `data/relay-mode`; scope and takeover mode stay available in both modes. Global scope pauses the individual scope switch while app policies remain available. Browser history, native WebView back events and the Back button return to the list. An inherited auth policy remains effective until a specific mode is selected.
 
@@ -27,7 +27,7 @@ theme, scroll and back handling, wraps feature names on narrow screens and shows
 when its system configuration is not mounted. See the
 [capability mask contract](../a-side/source/docs/SYSTEM-CAPABILITY-MASK.md).
 
-A's Apps overflow menu appears below global scope and contains refresh and add-system-app operations. Bulk select/deselect actions are not exposed: scope changes only through an application's own page. Each individual scope switch compares `target.txt` with the read snapshot before writing, changes only that package's entry, and verifies the result. The list is always the system's installed-app set, so an app that was never added to the scope is still visible with its switch off. Global scope ignores `target.txt` during interception and pauses individual scope switches. Adding or removing a system app only changes `system_app`; it never writes `target.txt`. If the CPU feature is disabled with other apps already saved, use the CPU settings available on that app page to avoid silently enabling the other apps. Global configuration, language, help and about are in Settings. The remote dialog masks the token by default and groups advanced options without changing their saved values. A packages only the English and simplified Chinese translation files.
+A's Apps overflow menu appears below global scope and contains refresh, add-system-app, Sort by SOTER requests and Sort by certificate requests. Counter sorts order whole app rows from most requests to least, preserve ties and search visibility, and a second click on the selected sort restores the default order. The selection is remembered in WebView storage. Actions use compact single-line labels and 48px touch targets; the active counter sort has a checkmark and supports Enter or Space. The opaque menu surface has a themed border and shadow with a dimmed backdrop; styling applies to the component's painted Shadow DOM surface, not its display-contents host. Bulk select/deselect actions are not exposed: scope changes only through an application's own page. Each individual scope switch compares `target.txt` with the read snapshot before writing, changes only that package's entry, and verifies the result. The list is always the system's installed-app set, so an app that was never added to the scope is still visible with its switch off. Global scope ignores `target.txt` during interception and pauses individual scope switches. Adding or removing a system app only changes `system_app`; it never writes `target.txt`. If the CPU feature is disabled with other apps already saved, use the CPU settings available on that app page to avoid silently enabling the other apps. Global configuration, language, help and about are in Settings. The remote dialog masks the token by default and groups advanced options without changing their saved values. A packages only the English and simplified Chinese translation files.
 
 App-list certificate badges count successful attestation requests after the chain is validated and the generated key is saved. Relay and local attestations are counted in separate tables of the existing A-side `keymaster.db`, and the status reader reports the table that matches the mode the daemon published in `data/relay-mode`, so both the badges and the overview follow the active mode. Failed calls and internal retries are not counted. The counters begin with this version; ordinary restarts preserve them, while resetting that database also resets them. Writes run asynchronously and never change the attestation result; a full queue, an interrupted pending write, or a persistently unavailable database can lose a sample. If the authenticated caller shares a UID, each package in that UID displays the same shared count with a shared-UID label; individual callers cannot be distinguished. Server-keybox responses count as relay requests.
 
@@ -107,3 +107,38 @@ Keep the existing module/APK as the rollback artifact. For A, replace only the m
 Restoring B UI assets does not lower an applied date. Preserve B's `spl-applied.conf` and its recorded floor when changing module versions.
 
 Design reference: [OpenUI standalone components](https://github.com/thesysdev/openui/tree/main/packages/react-ui), [Compose state](https://developer.android.com/develop/ui/compose/state), [Compose lifecycle](https://developer.android.com/develop/ui/compose/lifecycle).
+
+## Diagnostics
+
+The A-side WebUI ships a staged diagnostics area instead of scattered debug
+switches:
+
+- **Settings → Diagnostics and support** is the only entry point.
+- **Level 2** owns the single debug-logging master switch. Turning it on writes
+  `config.toml [main].log_level` (debug, or trace when already trace),
+  `[remote].debug_logging` and the flat `debug_logging` key, then touches
+  `restart.all` so KeyMint and the injector both reopen their logs. The old
+  switch inside the remote-connection dialog was removed.
+- After reproducing a problem the user unlocks the feature pages; the unlock is
+  persisted in `localStorage` and cleared when the master switch is turned off.
+- **Level 3** pages, each a problem/result/advice checklist:
+  request failures, native device probe, KeyMint, injector, relay, device
+  property view, SOTER.
+- The request-failure page aggregates one row per app and error code with the
+  occurrence count and last timestamp, hides system identities (uid < 10000 such
+  as keystore), and offers a copy-summary button.
+- The device probe runs read-only checks through the root bridge. The optional
+  AProbe app ships in `probe/a-probe.apk` (release signed) and is installed from
+  the page, which also registers the package for CPU/device properties and sets
+  its auth-signing policy to auto.
+- **Clear logs** deletes every module log and requests a full service reload so
+  files restart from zero.
+
+Strings are bilingual through `text(zh, en)` / `ommegaUiLocalize`. Unit tests
+for the pure parsers live in `a-side/source/scripts/webui-diagnostics.test.mjs`.
+
+Run them with:
+
+```sh
+node --test --experimental-test-isolation=none scripts/webui-diagnostics.test.mjs
+```

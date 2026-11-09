@@ -51,9 +51,12 @@ inline const char* identityPropertyOverride(const char* name) {
         if (strcmp(suffix, field.property) == 0) return field.value;
         char special[80];
         snprintf(special, sizeof(special), "%s_for_attestation", field.property);
-        // B's dedicated properties are empty. The guard refuses nonempty ones;
-        // empty/absent records stay untouched, and no properties are inserted.
-        if (strcmp(suffix, special) == 0) return "";
+        // AndroidKeyStore reads these dedicated properties first when they are
+        // non-empty. Vendors disagree: many leave them unset, but Xiaomi keeps
+        // the real device values here, which made the whole view refuse and sent
+        // the host identity into attestation. Publish the target identity instead
+        // of clearing, so the app requests exactly what the relay can attest.
+        if (strcmp(suffix, special) == 0) return field.value;
         for (const char* partition : partitions) {
             const size_t length = strlen(partition);
             if (strncmp(suffix, partition, length) == 0 && suffix[length] == '.' &&
@@ -178,7 +181,9 @@ inline const char* experimentHostError(const char* name, const char* value, bool
     }
     const char* replacement = identityPropertyOverride(name);
     if (replacement) {
-        if (replacement[0] == '\0') return value[0] ? "nonempty FOR_ATTESTATION" : nullptr;
+        // A dedicated attestation property always carries the target identity, so
+        // a host value is expected and must be replaced rather than refused.
+        if (replacement[0] == '\0') return nullptr;
         const IdentityField* field = identityFieldForProperty(name);
         char root[80];
         snprintf(root, sizeof(root), "ro.product.%s", field->property);

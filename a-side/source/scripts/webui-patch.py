@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sys
 from pathlib import Path
 
@@ -29,13 +30,14 @@ AUTH_GLUE = ROOT / "scripts" / "webui-auth-signing.js"
 CPU_GLUE = ROOT / "scripts" / "webui-cpu-mask.js"
 CAPABILITY_GLUE = ROOT / "scripts" / "webui-capability-mask.js"
 APP_DETAIL_GLUE = ROOT / "scripts" / "webui-app-detail.js"
+DIAG_GLUE = ROOT / "scripts" / "webui-diagnostics.js"
 MARKER = "OMMEGA_TARGET_COMPAT"
 GLUE_HEADER = "\n// ── Ommega detector compatibility policy"
 
 # sha256 of the unpatched bundle this glue was written against.
 # Includes the current app-list rendering and remote/profile patches. Preserve
 # this pre-glue source byte-for-byte when refreshing the appended glue.
-BASELINE = "0b184c7aa12be4e80e524b01701909a08e2dcfe30cbcc401d4bef329a26eaf0e"
+BASELINE = "a0c184d79ed0eab687ea57ce7ebf0433676821583a9a0caaf4f90d7f30572354"
 
 
 def sha256(path: Path) -> str:
@@ -64,6 +66,31 @@ def rebaseline(path: Path, digest: str) -> None:
     print("recorded new baseline " + digest + " for " + path.name)
 
 
+
+
+def refresh_asset_versions() -> None:
+    """Rewrite the `?v=` query of every local asset to its content hash.
+
+    The WebUI is served from a module directory whose file names never change,
+    so a WebView keeps a stale copy across module updates unless the URL does
+    too. Hashing the local file makes every build a distinct URL.
+    """
+    page = ROOT / "template" / "webroot" / "index.html"
+    if not page.exists():
+        return
+    html = page.read_text(encoding="utf-8")
+    pattern = re.compile(r'(?P<path>\./(?:assets/[^"?]+\.(?:js|css)|[^"?/]+\.(?:js|css)))(?:\?v=[^"]*)?')
+    def replace(match: re.Match) -> str:
+        relative = match.group("path")[2:]
+        target = ROOT / "template" / "webroot" / relative
+        if not target.exists():
+            return match.group(0)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()[:10]
+        return match.group("path") + "?v=" + digest
+    updated = pattern.sub(replace, html)
+    if updated != html:
+        page.write_text(updated, encoding="utf-8")
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="verify the patch without writing")
@@ -78,7 +105,7 @@ def main() -> int:
     text = path.read_bytes().decode("utf-8")
     glue = (GLUE.read_text(encoding="utf-8") + AUTH_GLUE.read_text(encoding="utf-8")
             + CPU_GLUE.read_text(encoding="utf-8") + CAPABILITY_GLUE.read_text(encoding="utf-8")
-            + APP_DETAIL_GLUE.read_text(encoding="utf-8"))
+            + APP_DETAIL_GLUE.read_text(encoding="utf-8") + DIAG_GLUE.read_text(encoding="utf-8"))
     digest = sha256(path)
     patched = MARKER in text
 
@@ -105,6 +132,7 @@ def main() -> int:
         return 1
 
     if patched and text.endswith(glue):
+        refresh_asset_versions()
         print(path.name + " is already patched")
         return 0
 
@@ -135,6 +163,7 @@ def main() -> int:
     path.write_bytes((text + glue).encode("utf-8"))
     if not path.read_bytes().decode("utf-8").endswith(glue):
         raise SystemExit("patch verification failed: the bundle does not end with the glue")
+    refresh_asset_versions()
     print("patched " + path.name + " -> " + sha256(path))
     return 0
 

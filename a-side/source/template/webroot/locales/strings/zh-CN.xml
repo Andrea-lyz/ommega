@@ -149,10 +149,8 @@
 
     <string name="remote_config_tls_insecure">禁用 TLS 验证</string>
 
-    <string name="remote_config_debug_logging">启用调试日志</string>
     <string name="remote_config_disable_native_strongbox">对全局默认应用禁用原生 StrongBox</string>
 
-    <string name="remote_config_debug_logging_description">启用详细调试日志，记录所有操作、调用链和数据。日志将写入配置目录。</string>
 
     <string name="remote_config_save_success">配置已应用</string>
 

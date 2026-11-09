@@ -321,6 +321,72 @@ function ommegaUpdateAppCount(card) {
   ommegaUpdateAppScope(card);
 }
 
+// Sorting by the two counters the list already shows. The vendor list is a flat
+// set of cards, so a stable reorder by count is enough; the original order is
+// remembered once so clearing the sort restores it exactly.
+let ommegaSortMode = null;
+let ommegaSortOrigin = null;
+let ommegaSortApplying = false;
+
+function ommegaSortScore(card) {
+  const pkg = card.getAttribute("data-package");
+  if (ommegaSortMode === "soter") {
+    const count = ommegaSoterEnabled ? Number(ommegaSoterCounts?.[pkg]) : 0;
+    return Number.isSafeInteger(count) && count > 0 ? count : 0;
+  }
+  return ommegaCertificateCount(ommegaCertificateCounts?.[pkg])?.count || 0;
+}
+
+function ommegaApplySort() {
+  const list = document.getElementById("apps-list");
+  if (!list || ommegaSortApplying) return null;
+  if (!ommegaSortMode && !ommegaSortOrigin) return null;
+  // Each vendor card lives in its own .card-box. Reorder the row wrappers, not
+  // the cards: otherwise their parents differ and search/row layout breaks.
+  const rows = Array.from(list.children || []).flatMap(node => {
+    const card = node.matches?.(".card[data-package]") ? node : node.querySelector?.(".card[data-package]");
+    return card ? [{node, card, pkg:card.getAttribute("data-package")}] : [];
+  });
+  if (rows.length < 2) return ommegaSortMode;
+  if (!ommegaSortOrigin) ommegaSortOrigin = new Map();
+  for (const row of rows) {
+    if (!ommegaSortOrigin.has(row.pkg)) ommegaSortOrigin.set(row.pkg, ommegaSortOrigin.size);
+  }
+  const ordered = [...rows].sort((a, b) => {
+    const difference = ommegaSortMode ? ommegaSortScore(b.card) - ommegaSortScore(a.card) : 0;
+    return difference || ommegaSortOrigin.get(a.pkg) - ommegaSortOrigin.get(b.pkg);
+  });
+  if (ordered.every((row, index) => row.node === rows[index].node)) return ommegaSortMode;
+  ommegaSortApplying = true;
+  try {
+    for (const row of ordered) list.appendChild(row.node);
+  } finally {
+    ommegaSortApplying = false;
+  }
+  return ommegaSortMode;
+}
+
+// "cert" or "soter" sorts by that counter; anything else restores the original order.
+function ommegaSetAppSort(mode) {
+  ommegaSortMode = mode === "cert" || mode === "soter" ? mode : null;
+  try { localStorage.setItem("ommega.app.sort", ommegaSortMode || ""); } catch (_) { /* private mode */ }
+  ommegaApplySort();
+  return ommegaSortMode;
+}
+// The modern shell owns the switches, so the hook has to be reachable from it.
+// The host VM that evaluates the glue for tests has no window object.
+if (typeof window !== "undefined") window.ommegaSetAppSort = ommegaSetAppSort;
+
+try {
+  const saved = localStorage.getItem("ommega.app.sort");
+  if (saved === "cert" || saved === "soter") ommegaSortMode = saved;
+} catch (_) { /* private mode */ }
+document.addEventListener("ommega-apps-rendered", () => {
+  // A fresh inventory supplies a new default order, including newly installed apps.
+  ommegaSortOrigin = null;
+  ommegaApplySort();
+});
+
 async function ommegaRefreshCertificateCounts() {
   if (ommegaCountsBusy || document.hidden || document.body.dataset.omView !== "apps") return;
   ommegaCountsBusy = true;
@@ -337,6 +403,7 @@ async function ommegaRefreshCertificateCounts() {
   finally {
     ommegaCountsBusy = false;
     document.querySelectorAll("#apps-list .card[data-package]").forEach(ommegaUpdateAppCount);
+    ommegaApplySort();
   }
 }
 
