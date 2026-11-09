@@ -31,6 +31,7 @@ const OMMEGA_DIAG_PAGES = [
       'C=/data/adb/ommega/ommegadata/config.toml',
       'L=/data/adb/ommega/ommegadata/logs/keymint.log',
       'echo "==mode"', 'grep -E "^(enabled|url|device_id) " "$C" 2>/dev/null',
+      'echo "==relaymode"', 'cat /data/misc/keystore/ommega/data/relay-mode 2>/dev/null',
       'T=/data/local/tmp/om-diag-tail',
       'tail -c 262144 "$L" > "$T" 2>/dev/null',
       'echo "==signals"',
@@ -127,7 +128,8 @@ function ommegaDiagPageItems(page, output) {
   const items = [];
   if (page.id === "diag-keymint") {
     const mode = pick("mode");
-    const relay = mode.some(line => /^enabled\s*=\s*true/.test(line));
+    const relayMode = (pick("relaymode")[0] || "").trim().toLowerCase();
+    const relay = relayMode ? relayMode !== "local" : mode.some(line => /^enabled\s*=\s*true/.test(line));
     const signals = pick("signals").map(Number);
     const recent = pick("recent");
     const failure = signals[1] || 0;
@@ -318,7 +320,7 @@ async function ommegaDiagSetMaster(on) {
     ommegaDiagStoreUnlock(false);
   } finally {
     ommegaDiagBusy = false;
-    await ommegaDiagRefreshMaster();
+    await ommegaDiagRefreshMaster(true);
   }
 }
 
@@ -846,7 +848,7 @@ async function ommegaDiagCollectErrors() {
   const response = await ommegaReadOnly(["set +e",
     'L=/data/adb/ommega/ommegadata/logs',
     'echo "==keymint"',
-    'for f in "$L"/keymint.log "$L"/keymint.log.*; do [ -f "$f" ] && tail -c 131072 "$f"; done | grep -a -E "Error::Km\\(ErrorCode\\(-[0-9]+\\)\\) for AppUid\\([0-9]+\\)" | tail -n 80',
+    'for f in "$L"/keymint.log "$L"/keymint.log.*; do [ -f "$f" ] && tail -c 262144 "$f"; done | grep -a -E "Finish failed for AppUid|Error::Km\\(ErrorCode\\(-[0-9]+\\)\\) for AppUid|failing .* request" | tail -n 120',
     'echo "==injector"',
     'for f in "$L"/injector.log "$L"/injector.log.*; do [ -f "$f" ] && tail -c 131072 "$f"; done | grep -a -E "failed for uid=[0-9]+" | tail -n 80'].join("\n"));
   const text = String((response && response.stdout) || "");
@@ -856,15 +858,23 @@ async function ommegaDiagCollectErrors() {
   ommegaDiagHiddenSystem = 0;
   let section = "";
   let stamp = "";
+  let attributedUid = "";
   for (const line of lines) {
     if (line.startsWith("==")) { section = line.slice(2); continue; }
     const time = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/.exec(line);
     if (time) stamp = time[1];
     if (section === "keymint") {
+      if (/failing .* request/.test(line)) attributedUid = "";
+      for (const found of line.matchAll(/for AppUid\((\d+)\)/g)) {
+        if (ommegaDiagIsAppUid(found[1])) attributedUid = found[1];
+      }
       const match = /Error::Km\(ErrorCode\((-?\d+)\)\) for AppUid\((\d+)\)/.exec(line);
       if (match) {
-        if (!ommegaDiagIsAppUid(match[2])) { ommegaDiagHiddenSystem++; continue; }
-        entries.push({code: match[1], uid: match[2], ts: stamp, source: "keymint"}); uids.add(match[2]);
+        // AID 1017 is the keystore proxy; the requesting app is named on the
+        // preceding "failed for AppUid(N)" line of the same failure block.
+        const owner = ommegaDiagIsAppUid(match[2]) ? match[2] : attributedUid;
+        if (!owner) { ommegaDiagHiddenSystem++; continue; }
+        entries.push({code: match[1], uid: owner, ts: stamp, source: "keymint"}); uids.add(owner);
       }
     } else if (section === "injector") {
       const code = /ServiceSpecific\((-?\d+)\)/.exec(line);
