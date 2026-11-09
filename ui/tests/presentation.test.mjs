@@ -228,6 +228,28 @@ test('the local emblem keeps the shield the relay icon drops on an old result', 
   assert.notEqual(localVerdictIcon('ok'), localVerdictIcon('muted'), 'the inner mark still follows the outcome');
 });
 
+test('app counter sorts live in the popup and style its painted Shadow DOM surface', () => {
+  assert.match(aSource, /'soter', '按 SOTER 排序'/);
+  assert.match(aSource, /'cert', '按证书排序'/);
+  assert.match(aSource, /popup.appendChild\(item\)/);
+  assert.match(aSource, /getElementById\('item'\)\?\.setAttribute\('role', 'menuitemradio'\)/);
+  assert.match(aSource, /item.toggleAttribute\('data-om-selected', selected\)/);
+  assert.match(aSource, /item.setAttribute\('aria-checked'/);
+  assert.doesNotMatch(aSource, /om-sort-chip|toolbar.insertBefore\(sort/);
+  assert.match(aSource, /style.dataset.omAppMenuSurface/);
+  assert.match(aSource, /root.appendChild\(style\)/);
+  assert.match(aSource, /:host\(#menu-options\) \.menu::backdrop/);
+  assert.match(aSource, /item.append\(leading, title, check\)/);
+  assert.doesNotMatch(aSource, /subtitle.slot = 'supporting-text'/);
+  const aCss = readFileSync(new URL('../../a-side/source/template/webroot/a-modern.css', import.meta.url), 'utf8');
+  assert.match(aCss, /body.om-modern\[data-om-menu=open\]/);
+  assert.match(aCss, /data-om-menu-layer=fixed/);
+  assert.match(aCss, /min-width: min\(224px/);
+  assert.match(aCss, /--md-menu-item-one-line-container-height: 48px/);
+  assert.match(aCss, /md-menu-item\[data-om-selected\] \.om-app-sort-check/);
+  assert.doesNotMatch(aCss, /\.om-modern body\[data-om-menu/);
+});
+
 test('automation is a page with seed, keybox and renewal controls, not a sheet', () => {
   for (const id of ['om-automation-page','om-rkp-seed-path','om-rkp-seed-import','om-rkp-seed-remove',
     'om-rkp-tee-path','om-rkp-tee-import','om-rkp-sb-path','om-rkp-sb-import','om-rkp-auto',

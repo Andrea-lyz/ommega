@@ -56,6 +56,46 @@
 .om-modern[data-om-view]:not([data-om-view=apps]) > #om-global-scope-slot { display:none; }
 .om-modern #om-app-operations { max-width:900px; margin:0 auto; display:flex; justify-content:flex-end; align-items:center; gap:4px; color:var(--om-accent); font-size:12px; font-weight:700; }
 .om-modern[data-om-view]:not([data-om-view=apps]) > #om-app-operations { display:none; }
+/* Menu dimensions and tokens are inherited by the actual Shadow DOM surface. */
+body.om-modern #menu-options {
+  min-width: min(224px, calc(100vw - 28px));
+  max-width: min(280px, calc(100vw - 28px));
+  --md-menu-container-color: var(--om-surface);
+  --md-menu-container-shape: 14px;
+  --md-menu-container-elevation: 0;
+  --md-menu-top-space: 4px;
+  --md-menu-bottom-space: 4px;
+  --om-app-menu-shadow: 0 10px 28px rgb(12 14 28 / 22%), 0 2px 8px rgb(12 14 28 / 12%);
+  --om-app-menu-scrim: rgb(12 14 28 / 24%);
+}
+body.om-modern[data-om-menu=open][data-om-menu-layer=fixed]::after {
+  content: ""; position: fixed; inset: 0; z-index: 120; pointer-events: none;
+  background: rgb(12 14 28 / 24%);
+}
+.om-modern #menu-options .menu-item-button-container { min-width: 0; padding: 0; gap: 0; }
+.om-modern #menu-options .om-app-menu-item { box-sizing: border-box; min-height: 48px; padding: 0 12px; }
+.om-modern #menu-options .om-app-sort-divider { margin: 4px 0; }
+.om-modern #menu-options .om-app-menu-item small { font-size: 14px; }
+.om-modern #menu-options md-menu-item {
+  --md-menu-item-one-line-container-height: 48px;
+  --md-menu-item-top-space: 10px;
+  --md-menu-item-bottom-space: 10px;
+  --md-menu-item-leading-space: 12px;
+  --md-menu-item-trailing-space: 12px;
+  --md-menu-item-label-text-size: 14px;
+  --md-menu-item-label-text-line-height: 20px;
+  --md-menu-item-label-text-color: var(--om-ink);
+  --md-menu-item-supporting-text-color: var(--om-muted);
+  --md-menu-item-leading-icon-color: var(--om-accent);
+  --md-menu-item-trailing-icon-color: var(--om-accent);
+}
+.om-modern #menu-options md-menu-item[data-om-sort][data-om-selected] {
+  background: var(--om-accent-bg);
+  --md-menu-item-label-text-color: var(--om-accent);
+}
+.om-app-sort-icon, .om-app-sort-check { display: inline-flex; color: var(--om-accent); }
+.om-app-sort-check { visibility: hidden; }
+md-menu-item[data-om-selected] .om-app-sort-check { visibility: visible; }
 .om-modern .om-compat-settings { display:block; }
 .om-modern .om-compat-settings label { display:flex; justify-content:space-between; align-items:center; gap:14px; min-height:48px; cursor:pointer; }
 .om-modern .om-compat-settings input[type=checkbox] { appearance:none; position:relative; flex:none; width:48px; height:28px; margin:0; border:2px solid var(--om-muted); border-radius:18px; background:transparent; color:var(--om-muted); cursor:pointer; }
@@ -254,3 +294,99 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 .om-modern md-dialog .current-system-app-list-content { color: var(--om-muted); font-size: 12px; line-height: 1.6; }
 
 .om-modern md-dialog .close-selector { background: var(--om-raised); color: var(--om-ink); border: 0; border-radius: 99px; min-height: 48px; padding: 0 18px; font-weight: 700; }
+
+/* Diagnostics: master switch, staged unlock and per-feature log pages. */
+.om-diag-switch { display:flex; align-items:center; gap:12px; padding:10px 0; font-size:14px; }
+.om-diag-summary { margin:0 0 10px; padding-inline-start:18px; color:var(--om-ink); font-size:13px; line-height:1.6; }
+.om-diag-summary:empty { display:none; }
+.om-diag-log { margin:10px 0 0; max-height:320px; overflow:auto; padding:10px; border-radius:10px;
+  background:var(--om-surface-alt,#f3f4fa); color:var(--om-ink); font-size:11px; line-height:1.5;
+  font-family:var(--om-mono,monospace); white-space:pre-wrap; user-select:text; }
+.om-modern[data-theme=dark] .om-diag-log { background:#1b1e27; }
+
+/* Diagnostics: native toggle, app rows and icon reuse from the app list. */
+.om-diag-switch { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:12px 0; }
+.om-diag-switch-copy { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.om-diag-switch-copy strong { font-size:14px; color:var(--om-ink); }
+.om-diag-switch-copy small { font-size:12px; color:var(--om-muted); }
+.om-diag-switch input[type=checkbox] { appearance:none; -webkit-appearance:none; flex:none; width:46px; height:26px;
+  border-radius:13px; background:#c9ccd8; position:relative; transition:background .18s ease; cursor:pointer; }
+.om-diag-switch input[type=checkbox]::after { content:""; position:absolute; top:3px; left:3px; width:20px; height:20px;
+  border-radius:50%; background:#fff; box-shadow:0 1px 2px rgb(0 0 0 / 20%); transition:transform .18s ease; }
+.om-diag-switch input[type=checkbox]:checked { background:#4a63d8; }
+.om-diag-switch input[type=checkbox]:checked::after { transform:translateX(20px); }
+.om-diag-list { list-style:none; margin:0; padding:0; }
+.om-diag-row { display:flex; gap:10px; align-items:flex-start; padding:9px 0; border-top:1px solid var(--om-line,#e6e7ef); }
+.om-diag-row:first-child { border-top:0; }
+.om-diag-icon { width:32px; height:32px; border-radius:9px; flex:none; object-fit:contain; background:#f0f1f7; }
+.om-diag-row-body { min-width:0; }
+.om-diag-row-body strong { display:block; font-size:13px; font-weight:600; color:var(--om-ink); }
+.om-diag-row-body span { font-size:12px; color:var(--om-muted); word-break:break-all; }
+
+/* Diagnostics cards: the shell draws no padding inside a panel, so the custom
+   rows carry their own insets and the panel keeps a bottom gap. */
+#om-diagnostics .settings-group,
+#om-diag-errors .settings-group,
+#om-diag-probe .settings-group,
+#om-diag-keymint .settings-group,
+#om-diag-injector .settings-group,
+#om-diag-relay .settings-group,
+#om-diag-cpu .settings-group,
+#om-diag-soter .settings-group { padding-bottom:14px; }
+#om-diagnostics .settings-group > .om-diag-switch,
+#om-diagnostics .settings-group > .note,
+#om-diag-errors .settings-group > .note,
+#om-diag-probe .settings-group > .note { padding-left:16px; padding-right:16px; }
+#om-diag-unlock { margin:6px 16px 2px; }
+#om-diagnostics .settings-group > .note,
+#om-diag-errors .settings-group > .note,
+#om-diag-probe .settings-group > .note { margin:8px 0 0; font-size:12px; line-height:1.5; color:var(--om-muted); }
+.om-diag-switch { border-top:1px solid var(--om-line,#e6e7ef); }
+
+#om-diag-errors .settings-group > .om-button,
+#om-diag-probe .settings-group > .om-button { margin:12px 16px 4px; }
+.om-diag-list { padding:0 16px; }
+.om-diag-row:first-child { border-top:0; }
+
+/* Level-3 diagnostics: one consistent inset for actions, lists and notes. */
+.om-diag-actions { display:flex; gap:10px; flex-wrap:wrap; padding:14px 16px 6px; }
+.om-diag-actions > button { margin:0; }
+#om-diag-probe .settings-group > #om-diag-probe-out { padding:0 16px 4px; }
+#om-diag-errors .settings-group > #om-diag-errors-out,
+#om-diag-probe .settings-group > #om-diag-probe-out { padding:0 16px 4px; }
+#om-diag-keymint .settings-group > .om-button,
+#om-diag-injector .settings-group > .om-button,
+#om-diag-relay .settings-group > .om-button,
+#om-diag-cpu .settings-group > .om-button,
+#om-diag-soter .settings-group > .om-button { margin:12px 16px 4px; }
+#om-diag-keymint .om-diag-summary,
+#om-diag-injector .om-diag-summary,
+#om-diag-relay .om-diag-summary,
+#om-diag-cpu .om-diag-summary,
+#om-diag-soter .om-diag-summary { padding-left:34px; padding-right:16px; }
+#om-diag-keymint .om-diag-log,
+#om-diag-injector .om-diag-log,
+#om-diag-relay .om-diag-log,
+#om-diag-cpu .om-diag-log,
+#om-diag-soter .om-diag-log { margin:10px 16px 0; }
+
+/* Level-3 checklist containers (one per feature page). */
+[id^="om-diag-"][id$="-summary"] { padding:12px 16px 0; }
+
+.om-diag-clear-row { align-items:center; }
+.om-diag-clear-row .secondary-button { flex:none; margin:0; }
+
+/* Overview failure card joins the dashboard grid and carries its own insets. */
+.om-diag-overview-card { grid-column: 1 / -1; padding: 12px 16px 14px; }
+.om-diag-overview-card > .group-header { padding: 0 0 6px; }
+#om-overview-errors-body .note { margin: 6px 0 0; font-size: 12px; color: var(--om-muted); }
+#om-overview-errors-body .om-diag-list { padding: 0; }
+
+.om-diag-row-body .om-diag-meta { display:block; margin-top:2px; font-size:11px; color:var(--om-muted); opacity:.85; }
+
+.om-diag-select { flex:none; padding:8px 10px; border-radius:10px; border:1px solid var(--om-line,#d9dbe6);
+  background:var(--om-surface,#fff); color:var(--om-ink); font-size:13px; }
+
+/* The app list renders 400+ cards; skip offscreen layout so revealing the page
+   and scrolling stay responsive. */
+#apps-list .card { content-visibility: auto; contain-intrinsic-size: 88px; }

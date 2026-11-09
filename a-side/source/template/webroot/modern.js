@@ -635,6 +635,39 @@ function action(id, zh, en, detailZh, detailEn, image = 'chevron') {
 function card(image, title, valueId, description, descriptionId = '') {
   return `<article class="panel compact-card"><div class="card-meta"><div class="panel-label">${icon(image)}<span>${title}</span></div><span class="tiny-icon">${icon(image)}</span></div><div><h2 id="${valueId}">—</h2><p${descriptionId ? ` id="${descriptionId}"` : ''}>${description}</p></div></article>`;
 }
+// md-menu hosts use display:contents; the painted popup is its internal .menu.
+// Keep the vendor component (positioning, keyboard focus and tap-outside close)
+// and adapt its actual surface, as we already do for the legacy dialogs.
+function adaptAppActionsMenu(popup) {
+  if (!popup) return;
+  const usePopover = typeof HTMLElement.prototype.showPopover === 'function';
+  popup.positioning = usePopover ? 'popover' : 'fixed';
+  const apply = () => {
+    const root = popup.shadowRoot;
+    if (!root || root.querySelector('[data-om-app-menu-surface]')) return;
+    const style = document.createElement('style');
+    style.dataset.omAppMenuSurface = 'true';
+    style.textContent = `
+      :host(#menu-options) .menu {
+        box-sizing: border-box; border: 1px solid var(--om-line, #dcdde8);
+        background: var(--om-surface, #fff); border-radius: 14px;
+        box-shadow: var(--om-app-menu-shadow); z-index: 121;
+      }
+      :host(#menu-options) .items { background: var(--om-surface, #fff); border-radius: inherit; }
+      :host(#menu-options) .menu::backdrop {
+        display: block; background: var(--om-app-menu-scrim);
+        pointer-events: none;
+      }
+    `;
+    root.appendChild(style);
+  };
+  customElements.whenDefined('md-menu').then(async () => {
+    await popup.updateComplete;
+    apply();
+  });
+  popup.addEventListener('opening', apply);
+}
+
 function adaptNativeDialogs() {
   for (const dialog of document.querySelectorAll('dialog')) {
     if (dialog.querySelector(':scope > .sheet-handle')) continue;
@@ -781,8 +814,35 @@ function install() {
         </section><section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('更多','More')}</h2></div>
         ${action('help','使用帮助','Help','配置说明','Configuration guide','help')}
         ${action('about','关于 Ommega','About Ommega','版本与项目说明','Version and project details','info')}
+        </section><section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('诊断与支持','Diagnostics and support')}</h2><p>${text('日志总开关、分级自检与设备体检','Logging switch, staged self-checks and a device probe')}</p></div>
+        ${action('om-diagnostics-open','诊断与支持','Diagnostics and support','日志开关、分级自检与体检','Logging switch, staged checks and probe','info')}
         </section></div></div>
         <p class="om-description" id="om-action-message" role="status"></p>
+      </section>
+      <section id="om-diagnostics" class="om-view" hidden aria-label="${text('诊断','Diagnostics')}">
+        <div class="page-heading"><div><span class="section-kicker">DIAGNOSTICS</span><h1>${text('诊断','Diagnostics')}</h1><p>${text('打开调试日志，复现问题后解锁分级诊断。','Turn on debug logging, reproduce the issue, then unlock staged diagnostics.')}</p></div></div>
+        <div class="content-columns"><div class="stack">
+          <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('调试日志总开关','Debug logging master switch')}</h2><p>${text('同时作用于本地与中继模式；保存后自动重载 KeyMint','Applies to local and relay mode; KeyMint reloads automatically')}</p></div>
+            <label class="om-diag-switch"><span class="om-diag-switch-copy"><strong>${text('启用调试日志','Enable debug logging')}</strong><small>${text('关闭后立即恢复常规日志','Turns verbose logging off immediately')}</small></span><input type="checkbox" id="om-diag-master" role="switch"></label>
+            <p class="note" id="om-diag-master-note" role="status"></p>
+            <button type="button" class="primary-button" id="om-diag-unlock" hidden>${text('已完成复现，解锁诊断','Reproduced — unlock diagnostics')}</button>
+            <p class="note" id="om-diag-unlock-note" role="status"></p>
+            <div class="om-diag-switch om-diag-clear-row"><span class="om-diag-switch-copy"><strong>${text('清除日志','Clear logs')}</strong><small>${text('删除模块全部日志，从新文件开始记录','Delete every module log so records start fresh')}</small></span><button type="button" class="secondary-button" id="om-diag-clear">${text('清除','Clear')}</button></div>
+            <p class="note" id="om-diag-clear-note" role="status"></p>
+            <div class="om-diag-switch"><span class="om-diag-switch-copy"><strong>${text('日志上限','Log size limit')}</strong><small>${text('单个日志文件达到上限后轮转，改后自动重载服务','Rotate a log file once it reaches the limit; services reload after a change')}</small></span><select id="om-diag-rotation" class="om-diag-select"><option value="2">2 MB</option><option value="4">4 MB</option><option value="10">10 MB</option><option value="20">20 MB</option></select></div>
+            <p class="note" id="om-diag-rotation-note" role="status"></p>
+          </section>
+        </div><div class="stack">
+          <section class="panel settings-group" id="om-diag-features" hidden><div class="group-header"><h2 class="group-heading">${text('功能诊断','Feature diagnostics')}</h2><p>${text('每一项进入独立的详细页面','Each entry opens its own detail page')}</p></div>
+            <button type="button" class="action-row" data-om-diag="diag-probe"><span class="row-text"><strong>${text('设备体检','Device probe')}</strong><small>${text('运行 AProbe 并给出建议','Run AProbe and read the advice')}</small></span></button>
+            <button type="button" class="action-row" data-om-diag="diag-errors"><span class="row-text"><strong>${text('请求异常','Request failures')}</strong><small>${text('按应用列出失败原因','Failures per app with the reason')}</small></span></button>
+            <button type="button" class="action-row" data-om-diag="diag-keymint"><span class="row-text"><strong>${text('KeyMint 密钥服务','KeyMint keystore')}</strong><small>${text('本地 / 中继模式的签名与证明','Signing and attestation in both modes')}</small></span></button>
+            <button type="button" class="action-row" data-om-diag="diag-injector"><span class="row-text"><strong>${text('注入器','Injector')}</strong><small>${text('按应用的路由决策','Per-app routing decisions')}</small></span></button>
+            <button type="button" class="action-row" data-om-diag="diag-relay"><span class="row-text"><strong>${text('中继连接','Relay connection')}</strong><small>${text('服务器、设备标识与往返结果','Server, device id and round trips')}</small></span></button>
+            <button type="button" class="action-row" data-om-diag="diag-cpu"><span class="row-text"><strong>${text('设备属性视图','Device property view')}</strong><small>${text('CPU 与设备属性是否注入','Whether the property mask reached the app')}</small></span></button>
+            <button type="button" class="action-row" data-om-diag="diag-soter"><span class="row-text"><strong>${text('SOTER 软件 TA','SOTER software TA')}</strong><small>${text('接管状态与最近错误','Takeover state and recent errors')}</small></span></button>
+          </section>
+        </div></div>
       </section>
       <section id="om-automation-page" class="om-view" hidden aria-label="${text('自动化','Automation')}">
         <div class="page-heading"><div><span class="section-kicker">AUTOMATION</span><h1>${text('自动化','Automation')}</h1><p>${text('CDI 种子、Keybox 与 RKP 续签。','CDI seed, keybox and RKP renewal.')}</p></div></div>
@@ -834,8 +894,78 @@ function install() {
     menuButton?.setAttribute('aria-label',text('应用操作','App actions'));
     scopeSlot.after(toolbar); toolbar.append(label, menu);
     const popup = document.getElementById('menu-options');
+    adaptAppActionsMenu(popup);
+    const sortItems = [];
+    let currentSort = null;
+    const paintSort = mode => {
+      currentSort = mode === 'cert' || mode === 'soter' ? mode : null;
+      for (const item of sortItems) {
+        const selected = item.dataset.omSort === currentSort;
+        item.toggleAttribute('data-om-selected', selected);
+        item.setAttribute('aria-checked', String(selected));
+        customElements.whenDefined('md-menu-item').then(async () => {
+          await item.updateComplete;
+          item.shadowRoot?.getElementById('item')?.setAttribute('role', 'menuitemradio');
+        });
+      }
+    };
+    if (popup) {
+      const divider = document.createElement('md-divider');
+      divider.className = 'om-app-sort-divider';
+      divider.setAttribute('role', 'separator');
+      popup.appendChild(divider);
+      for (const [mode, zh, en, glyph] of [
+        ['soter', '按 SOTER 排序', 'Sort by SOTER requests', 'key'],
+        ['cert', '按证书排序', 'Sort by certificate requests', 'shield'],
+      ]) {
+        const item = document.createElement('md-menu-item');
+        item.id = 'om-app-sort-' + mode;
+        item.dataset.omSort = mode;
+        item.setAttribute('aria-checked', 'false');
+        const leading = document.createElement('span');
+        leading.slot = 'start'; leading.className = 'om-app-sort-icon';
+        leading.innerHTML = icon(glyph);
+        const title = document.createElement('div');
+        title.slot = 'headline'; title.textContent = text(zh, en);
+        item.title = text('申请次数从多到少；再次点击恢复默认顺序', 'Most requests first; select again to restore default order');
+        item.setAttribute('aria-label', text(zh, en) + ': ' + item.title);
+        const check = document.createElement('span');
+        check.slot = 'end'; check.className = 'om-app-sort-check';
+        check.innerHTML = icon('check');
+        item.append(leading, title, check);
+        item.onclick = () => {
+          if (typeof window.ommegaSetAppSort !== 'function') {
+            setText('om-updated', text('应用列表尚未就绪，请稍后重试。', 'The app list is not ready. Try again shortly.'));
+          } else {
+            paintSort(window.ommegaSetAppSort(currentSort === mode ? null : mode));
+          }
+          popup.close();
+        };
+        item.addEventListener('keydown', event => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault(); event.stopPropagation(); item.click();
+        }, true);
+        sortItems.push(item); popup.appendChild(item);
+      }
+      let savedSort = null;
+      try { savedSort = localStorage.getItem('ommega.app.sort'); } catch { /* private mode */ }
+      paintSort(savedSort);
+      if (typeof window.ommegaSetAppSort === 'function') window.ommegaSetAppSort(savedSort);
+      popup.addEventListener('click', event => {
+        if (event.target.closest?.('#refresh, .om-app-menu-item, #add-system-app')) popup.close();
+      }, true);
+    }
     let menuClosing = false, openAfterClose = false;
     popup?.addEventListener('closing', () => { menuClosing = true; });
+    popup?.addEventListener('opening', () => {
+      document.body.dataset.omMenu = 'open';
+      document.body.dataset.omMenuLayer = popup.positioning;
+      menuButton?.setAttribute('aria-expanded', 'true');
+    });
+    popup?.addEventListener('closed', () => {
+      delete document.body.dataset.omMenu; delete document.body.dataset.omMenuLayer;
+      menuButton?.setAttribute('aria-expanded', 'false');
+    });
     popup?.addEventListener('closed', () => {
       requestAnimationFrame(() => {
         menuClosing = false;
@@ -872,25 +1002,31 @@ function install() {
 
   function navigate(raw) {
     const parts = String(raw || '').split('/');
-    const known = ['overview','apps','settings','soter','automation'];
-    let view = known.includes(parts[0]) ? parts[0] : 'overview';
+    const known = ['overview','apps','settings','soter','automation','diagnostics'];
+    let view = known.includes(parts[0]) ? parts[0]
+      : (parts[0].startsWith('diag-') ? parts[0] : 'overview');
     if (view === 'soter' && parts[1]) view = 'soter-identity';
     document.body.dataset.omView = view;
     // SOTER and automation live behind "-page" ids, so the target id cannot be
     // derived from the route name alone.
+    // The diagnostics glue creates its level-3 sections on demand; let it run
+    // before the visibility pass so a deep link can reveal the new page.
+    window.ommegaDiagRoute?.(view);
     const activeId = view === 'soter' ? 'om-soter-page' : view === 'automation' ? 'om-automation-page' : 'om-' + view;
-    for (const id of ['overview','settings','soter-page','soter-identity','automation-page']) {
-      const section = document.getElementById('om-' + id);
-      if (section) section.hidden = 'om-' + id !== activeId;
-    }
+    for (const section of document.querySelectorAll('.om-view')) section.hidden = section.id !== activeId;
     if (view === 'soter') soterShow('list');
     if (view === 'soter-identity') soterShow('detail', parts[1]);
     if (view === 'automation') { bindAutomation(); void renderAutomation(); }
     document.getElementById('om-apps-heading').hidden = view !== 'apps';
-    const navView = (view === 'soter' || view === 'soter-identity' || view === 'automation') ? 'settings' : view;
+    const navView = (view === 'soter' || view === 'soter-identity' || view === 'automation' ||
+      view === 'diagnostics' || view.startsWith('diag-')) ? 'settings' : view;
     document.querySelectorAll('[data-om-view]').forEach(button => button.setAttribute('aria-current', button.dataset.omView === navView ? 'page' : 'false'));
     document.querySelector('.om-nav').dataset.active = String(['overview','apps','settings'].indexOf(navView));
     if (searchRegion) searchRegion.hidden = view !== 'apps';
+    // The shell's "refreshing" line belongs to the app list; diagnostics pages
+    // show their own state instead.
+    const updatedLine = document.getElementById('om-updated');
+    if (updatedLine) updatedLine.hidden = view === 'diagnostics' || view.startsWith('diag-');
     // A parsed input never gets an Android text-editor connection; swap in a
     // fresh node before the user taps it, and leave focus to that tap.
     if (view === 'apps') prepareSearchEditor();
@@ -902,6 +1038,7 @@ function install() {
   for (const button of document.querySelectorAll('[data-om-action]')) button.onclick = () => {
     if (button.dataset.omAction === 'ommega-soterta') { location.hash = 'om-soter'; return; }
     if (button.dataset.omAction === 'om-automation-open') { location.hash = 'om-automation'; return; }
+    if (button.dataset.omAction === 'om-diagnostics-open') { location.hash = 'om-diagnostics'; return; }
     const target = document.getElementById(button.dataset.omAction);
     if (target) { target.click(); setText('om-action-message',''); }
     else setText('om-action-message',text('界面尚未就绪，请稍后重试。','The interface is still loading. Try again shortly.'));
