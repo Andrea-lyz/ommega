@@ -1,4 +1,16 @@
 MODDIR=${0%/*}
+
+# KeyMint runs as the keystore user; slots written by root (file manager, older
+# imports) must be readable before the TA starts.
+for _slot in /data/misc/keystore/ommega/keybox.xml /data/misc/keystore/ommega/keybox-strongbox.xml /data/misc/keystore/ommega/data/auth-signing-keybox.conf; do
+  [ -f "$_slot" ] || continue
+  _owner=$(stat -c %U "$_slot" 2>/dev/null)
+  if [ "$_owner" != "keystore" ]; then
+    chown keystore:keystore "$_slot" 2>/dev/null || true
+    chmod 600 "$_slot" 2>/dev/null || true
+  fi
+done
+unset _slot _owner
 STATE_DIR=/data/adb/ommega
 PROP_FILE="$MODDIR/module.prop"
 
