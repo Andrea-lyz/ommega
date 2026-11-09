@@ -802,6 +802,16 @@ function install() {
         <div id="om-compat-settings-slot"></div>
         <div id="om-capability-mask-slot"></div>
         ${action('ommega-soterta','SOTER','SOTER','软件 TA 与远程转发','Software TA and remote relay','key')}
+        <button type="button" class="action-row" id="om-keybox-source-open"><span class="row-icon">${icon('key')}</span><span class="row-text"><strong>${text('指纹签发 keybox','Fingerprint signing keybox')}</strong><small>${text('选择 TEE 或 StrongBox 槽位签发指纹证书','Choose the TEE or StrongBox slot for fingerprint certificates')}</small></span>${icon('chevron')}</button>
+        <dialog id="om-keybox-source-dialog" class="om-preference-dialog" aria-labelledby="om-keybox-source-title">
+          <div class="sheet-header"><div><span class="section-kicker">A ${text('端设置','SETTINGS')}</span><h2 id="om-keybox-source-title">${text('指纹签发 keybox','Fingerprint signing keybox')}</h2></div><button type="button" class="icon-button" id="om-keybox-source-close" aria-label="${text('关闭','Close')}">${icon('close')}</button></div>
+          <div class="sheet-body">
+            <p>${text('仅影响之后新建的指纹签名证书。','Only affects fingerprint certificates issued from now on.')}</p>
+            <label class="config-option sheet-switch-row"><span class="toggle-copy"><strong>TEE ${text('槽位','slot')}</strong><small>${text('使用 keybox.xml','Uses keybox.xml')}</small></span><span class="switch"><input type="radio" name="om-keybox-source" value="tee"></span></label>
+            <label class="config-option sheet-switch-row"><span class="toggle-copy"><strong>StrongBox ${text('槽位','slot')}</strong><small>${text('使用 keybox-strongbox.xml，缺失时回退 TEE','Uses keybox-strongbox.xml, falls back to TEE')}</small></span><span class="switch"><input type="radio" name="om-keybox-source" value="strongbox"></span></label>
+            <p class="note" id="om-keybox-source-status" role="status"></p>
+          </div>
+        </dialog>
         </section></div><div class="stack">
         <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('连接与配置','Connection and configuration')}</h2></div>
         ${action('remote-config','远程连接','Remote connection','服务器、设备 ID 与凭据','Server, device ID and credentials','server')}
