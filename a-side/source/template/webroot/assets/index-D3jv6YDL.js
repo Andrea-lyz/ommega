@@ -2772,6 +2772,53 @@ function ommegaInstallAuthSigning() {
 ommegaInstallAuthSigning();
 if (typeof window !== "undefined") window.addEventListener("ommega-settings-ready", ommegaInstallAuthSigning);
 
+
+// Fingerprint signing keybox choice: a persistent Settings entry, because the
+// application-policy launchers are hidden once per-app pages take over.
+function ommegaAuthInstallKeyboxDialog() {
+  const open = document.getElementById("om-keybox-source-open");
+  const dialog = document.getElementById("om-keybox-source-dialog");
+  const close = document.getElementById("om-keybox-source-close");
+  const status = document.getElementById("om-keybox-source-status");
+  if (!open || !dialog || open.dataset.bound) return;
+  open.dataset.bound = "1";
+  const read = async () => {
+    try {
+      const response = await ommegaReadOnly("cat '" + OMMEGA_AUTH_KEYBOX_CONF + "' 2>/dev/null");
+      return /source\s*=\s*strongbox/i.test(String((response && response.stdout) || "")) ? "strongbox" : "tee";
+    } catch {
+      return "tee";
+    }
+  };
+  const sync = () => {
+    const value = ommegaAuthKeyboxSource || "tee";
+    for (const radio of dialog.querySelectorAll('input[name="om-keybox-source"]')) radio.checked = radio.value === value;
+    if (status) status.textContent = value === "strongbox"
+      ? ommegaUiLocalize("当前：StrongBox 槽位 / Current: StrongBox slot")
+      : ommegaUiLocalize("当前：TEE 槽位 / Current: TEE slot");
+  };
+  open.addEventListener("click", async () => {
+    ommegaAuthKeyboxSource = await read();
+    sync();
+    if (typeof dialog.showModal === "function") dialog.showModal();
+  });
+  if (close) close.addEventListener("click", () => dialog.close());
+  for (const radio of dialog.querySelectorAll('input[name="om-keybox-source"]')) {
+    radio.addEventListener("change", async () => {
+      ommegaAuthKeyboxSource = radio.value;
+      try {
+        await _("mkdir -p /data/adb/ommega/ommegadata/data && printf 'source=" + radio.value + "\\n' > '" + OMMEGA_AUTH_KEYBOX_CONF + "'");
+        sync();
+      } catch (error) {
+        if (status) status.textContent = ommegaUiLocalize("保存失败 / Save failed") + ": " + String(error).slice(0, 80);
+      }
+    });
+  }
+}
+
+ommegaAuthInstallKeyboxDialog();
+if (typeof window !== "undefined") window.addEventListener("ommega-settings-ready", ommegaAuthInstallKeyboxDialog);
+
 // Independent application scope for the bundled exp6 property view.
 let ommegaCpuState = null, ommegaCpuDraft = null, ommegaCpuAppsDraft = null;
 let ommegaCpuBusy = false, ommegaCpuLoadingApps = false;
