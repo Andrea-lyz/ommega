@@ -166,6 +166,9 @@ pub struct KeyMintTa {
     /// Attestation chain information, retrieved on first use.
     attestation_chain_info: RefCell<BTreeMap<device::SigningKeyType, AttestationChainInfo>>,
 
+    /// Chain information for locally certified authentication-bound keys.
+    local_auth_chain_info: RefCell<BTreeMap<device::SigningKeyType, AttestationChainInfo>>,
+
     /// Attestation ID information, fixed forever for a device, but retrieved on first use.
     attestation_id_info: RefCell<Option<Arc<AttestationIdInfo>>>,
 
@@ -372,6 +375,7 @@ impl KeyMintTa {
             rot_data: None,
             hal_info: None,
             attestation_chain_info: RefCell::new(BTreeMap::new()),
+            local_auth_chain_info: RefCell::new(BTreeMap::new()),
             attestation_id_info: RefCell::new(None),
             dice_info: RefCell::new(None),
             additional_attestation_info: Vec::new(),
