@@ -78,6 +78,27 @@ test("level-3 routes require the persisted unlock", () => {
   assert.equal(diag.ommegaDiagRouteAllowed("diag-keymint", true), true);
 });
 
+test("keymint AID failures attribute to the requesting app", async () => {
+  const ctx = load();
+  const errors = [
+    "==keymint",
+    "2026-11-09 03:26:50 UTC [ERROR] keymint::keymaster::error - KeystoreOperation::finish",
+    "Caused by:",
+    "    0: src/keymaster/operation.rs:463 Finish failed for AppUid(10134)",
+    "    1: Error::Km(ErrorCode(-30)) for AppUid(1017)",
+    "==injector"
+  ].join("\n");
+  ctx.ommegaReadOnly = async command =>
+    String(command).includes("pm list packages")
+      ? {errno: 0, stdout: "package:com.microsoft.appmanager uid:10134\n"}
+      : {errno: 0, stdout: errors};
+  const rows = await ctx.ommegaDiagCollectErrors();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].uid, "10134");
+  assert.equal(rows[0].code, "-30");
+  assert.equal(rows[0].pkg, "com.microsoft.appmanager");
+});
+
 test("checklist renders ticks, warnings and advice only when failing", () => {
   const target = {innerHTML: ""};
   diag.ommegaDiagRenderItems(target, [
