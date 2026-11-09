@@ -175,6 +175,25 @@ pub(crate) struct SigningInfo<'a> {
     pub chain: Vec<keymint::Certificate>,
 }
 
+/// Chain selection for locally certified authentication-bound keys.
+const AUTH_SIGNING_CHAIN_PATH: &str = "/data/adb/ommega/ommegadata/data/auth-signing-keybox.conf";
+
+fn read_auth_signing_chain() -> device::AuthSigningChain {
+    let Ok(text) = std::fs::read_to_string(AUTH_SIGNING_CHAIN_PATH) else {
+        return device::AuthSigningChain::Tee;
+    };
+    for line in text.lines() {
+        if let Some(value) = line.trim().strip_prefix("source=") {
+            return if value.trim().eq_ignore_ascii_case("strongbox") {
+                device::AuthSigningChain::Strongbox
+            } else {
+                device::AuthSigningChain::Tee
+            };
+        }
+    }
+    device::AuthSigningChain::Tee
+}
+
 impl crate::KeyMintTa {
     pub fn clear_attestation_cache(&self) {
         self.attestation_chain_info.borrow_mut().clear();
@@ -200,6 +219,7 @@ impl crate::KeyMintTa {
     pub(crate) fn get_signing_info(
         &self,
         key_type: device::SigningKeyType,
+        auth_signing_chain: Option<device::AuthSigningChain>,
     ) -> Result<SigningInfo<'_>, Error> {
         let sign_info = self.dev.sign_info.as_ref().ok_or_else(|| {
             km_err!(
@@ -207,10 +227,21 @@ impl crate::KeyMintTa {
                 "batch attestation keys not available"
             )
         })?;
-        let snapshot = sign_info.signing_info(key_type)?;
+        let snapshot = match auth_signing_chain {
+            Some(chain) => sign_info.signing_info_for_local_auth(key_type, chain)?,
+            None => sign_info.signing_info(key_type)?,
+        };
         // The certificate chain is cached, but keybox rotation explicitly clears the cache and
         // the cache is also invalidated if the keybox identity digest changes.
-        let mut attestation_chain_info = self.attestation_chain_info.borrow_mut();
+        let cache = if matches!(
+            auth_signing_chain,
+            Some(device::AuthSigningChain::Strongbox)
+        ) {
+            &self.local_auth_chain_info
+        } else {
+            &self.attestation_chain_info
+        };
+        let mut attestation_chain_info = cache.borrow_mut();
         let chain_info = match attestation_chain_info.entry(key_type) {
             Entry::Occupied(mut entry) => {
                 if entry.get().identity_digest != snapshot.identity_digest {
@@ -547,6 +578,7 @@ impl crate::KeyMintTa {
             chars,
             key_material,
             keyblob::SlotPurpose::KeyGeneration,
+            a_authorized_signing.then(read_auth_signing_chain),
         )
     }
 
@@ -952,6 +984,7 @@ impl crate::KeyMintTa {
             chars,
             key_material,
             keyblob::SlotPurpose::KeyImport,
+            None,
         )
     }
 
@@ -963,6 +996,7 @@ impl crate::KeyMintTa {
         chars: Vec<KeyCharacteristics>,
         key_material: KeyMaterial,
         purpose: keyblob::SlotPurpose,
+        auth_signing_chain: Option<device::AuthSigningChain>,
     ) -> Result<KeyCreationResult, Error> {
         let keyblob = keyblob::PlaintextKeyBlob {
             // Don't include any `SecurityLevel::Keystore` characteristics in the set that is bound
@@ -1047,10 +1081,13 @@ impl crate::KeyMintTa {
                         _ => return Err(km_err!(InvalidArgument, "unexpected key type!")),
                     };
 
-                    let mut info = self.get_signing_info(device::SigningKeyType {
-                        which: which_key,
-                        algo_hint,
-                    })?;
+                    let mut info = self.get_signing_info(
+                        device::SigningKeyType {
+                            which: which_key,
+                            algo_hint,
+                        },
+                        auth_signing_chain,
+                    )?;
                     info.attestation_info = attestation_info;
                     Some(info)
                 }

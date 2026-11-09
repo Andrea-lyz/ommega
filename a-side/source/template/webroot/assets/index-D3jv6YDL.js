@@ -2371,6 +2371,8 @@ if (typeof window !== "undefined") window.addEventListener("ommega-settings-read
 // global mode. App names are display-only; only validated package IDs persist.
 const OMMEGA_AUTH_SIGNING = "/data/adb/ommega/ommegadata/data/auth-signing.toml";
 const OMMEGA_AUTH_MODES = ["auto", "compatibility", "preserve"];
+const OMMEGA_AUTH_KEYBOX_CONF = "/data/adb/ommega/ommegadata/data/auth-signing-keybox.conf";
+let ommegaAuthKeyboxSource = "tee";
 let ommegaAuthConfig = null;
 let ommegaAuthOriginal = null;
 let ommegaAuthBusy = false;
@@ -2476,6 +2478,7 @@ function ommegaAuthSync() {
       if (control.id === "ommega-auth-policy-back") control.disabled = false;
     }
     for (const radio of policy.querySelectorAll('input[name="ommega-auth-mode"]')) radio.checked = radio.value === ommegaAuthDraft;
+    for (const radio of policy.querySelectorAll('input[name="ommega-auth-keybox"]')) radio.checked = radio.value === ommegaAuthKeyboxSource;
   }
   const count = Object.keys(ommegaAuthConfig?.apps || {}).length;
   const button = document.getElementById("ommega-auth-apps");
@@ -2497,6 +2500,7 @@ function ommegaAuthSync() {
 }
 
 async function ommegaAuthRefresh() {
+  void ommegaAuthReadKeyboxSource();
   if (ommegaAuthBusy) return;
   ommegaAuthBusy = true; ommegaAuthSync();
   ommegaAuthStatus(ommegaUiLocalize("正在读取… / Loading…"));
@@ -2517,6 +2521,17 @@ async function ommegaAuthCommit(original, config) {
   const read = await ommegaAuthRead();
   if (ommegaAuthToml(read.config) !== ommegaAuthToml(config)) throw new Error("Policy readback did not match");
   ommegaAuthConfig = read.config; ommegaAuthOriginal = read.contents;
+}
+
+async function ommegaAuthReadKeyboxSource() {
+  try {
+    const response = await ommegaReadOnly("cat '" + OMMEGA_AUTH_KEYBOX_CONF + "' 2>/dev/null");
+    const text = String((response && response.stdout) || "");
+    ommegaAuthKeyboxSource = /source\s*=\s*strongbox/i.test(text) ? "strongbox" : "tee";
+  } catch {
+    ommegaAuthKeyboxSource = "tee";
+  }
+  ommegaAuthSync();
 }
 
 async function ommegaAuthOpenPolicy() {
@@ -2707,6 +2722,9 @@ function ommegaInstallAuthSigning() {
     '<label><input type="radio" name="ommega-auth-mode" value="auto"><span><strong>自动（推荐） / Auto (recommended)</strong><small>识别已知认证检测探针，其余请求优先支付兼容。 / Preserve known authentication probes; use payment compatibility for other eligible requests.</small></span></label>' +
     '<label><input type="radio" name="ommega-auth-mode" value="compatibility"><span><strong>支付兼容 / Payment compatibility</strong><small>在本机验证认证，由远端签名。 / Authenticate on this device and sign remotely.</small></span></label>' +
     '<label><input type="radio" name="ommega-auth-mode" value="preserve"><span><strong>保持认证要求 / Preserve authentication</strong><small>远端保留认证要求，部分应用的指纹签名可能失败。 / Keep authentication requirements on the remote key; fingerprint signing may fail in some apps.</small></span></label>' +
+    '</fieldset><fieldset aria-labelledby="ommega-auth-heading"><legend>指纹签名证书的签发 keybox / Issuer keybox for locally signed fingerprint keys</legend>' +
+    '<label><input type="radio" name="ommega-auth-keybox" value="tee"><span><strong>TEE 槽位 / TEE keybox</strong><small>使用 keybox.xml / Uses keybox.xml</small></span></label>' +
+    '<label><input type="radio" name="ommega-auth-keybox" value="strongbox"><span><strong>StrongBox 槽位 / StrongBox keybox</strong><small>使用 keybox-strongbox.xml，缺失时回退 TEE / Uses keybox-strongbox.xml, falls back to TEE</small></span></label>' +
     '</fieldset><p class="ommega-auth-note">仅影响之后新建的密钥，已有密钥不会自动转换。 / Only affects newly created keys. Existing keys are not converted.</p>' +
     '<button type="button" id="ommega-auth-apps" class="om-action">单应用例外 / App exceptions</button>' +
     '<div id="ommega-auth-status" role="status" aria-live="polite"></div>' +
@@ -2735,6 +2753,15 @@ function ommegaInstallAuthSigning() {
   byId("ommega-auth-search").addEventListener("input", () => { ommegaAuthLimit = 40; ommegaAuthRenderApps(); });
   byId("ommega-auth-system").addEventListener("change", ommegaAuthToggleSystem);
   byId("ommega-auth-more").addEventListener("click", () => { ommegaAuthLimit += 40; ommegaAuthRenderApps(); });
+  for (const radio of panel.querySelectorAll('input[name="ommega-auth-keybox"]')) radio.addEventListener("change", async () => {
+    ommegaAuthKeyboxSource = radio.value;
+    try {
+      await _("mkdir -p /data/adb/ommega/ommegadata/data && printf 'source=" + radio.value + "\\n' > '" + OMMEGA_AUTH_KEYBOX_CONF + "'");
+      ommegaAuthStatus(ommegaUiLocalize("签发 keybox 已切换 / Issuer keybox updated"));
+    } catch (error) {
+      ommegaAuthStatus(ommegaUiLocalize("保存失败 / Save failed") + ": " + String(error).slice(0, 80));
+    }
+  });
   for (const radio of panel.querySelectorAll('input[name="ommega-auth-mode"]')) radio.addEventListener("change", () => {
     ommegaAuthDraft = radio.value;
     ommegaAuthStatus(ommegaUiLocalize("策略尚未保存 / Policy not saved yet"));

@@ -231,6 +231,7 @@ impl KeyMintTa {
             chars,
             key_material,
             keyblob::SlotPurpose::KeyGeneration,
+            None,
         )?;
 
         Ok((

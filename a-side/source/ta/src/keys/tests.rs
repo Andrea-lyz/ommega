@@ -824,6 +824,7 @@ fn check_child_versions(auth_bound: bool) {
             chars,
             material,
             keyblob::SlotPurpose::KeyGeneration,
+            None,
         )
         .unwrap();
     let mut child_params = ordinary_params;
