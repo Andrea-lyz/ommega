@@ -16,8 +16,8 @@ android {
         applicationId = "org.ommega.deviceb"
         minSdk = 26
         targetSdk = 36
-        versionCode = 41
-        versionName = "2.3.1-ommega"
+        versionCode = 42
+        versionName = "2.4.0-ommega"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "UI_PREVIEW", (project.findProperty("uiPreview") == "true").toString())
         if (project.findProperty("uiPreview") == "true") applicationIdSuffix = ".preview"
