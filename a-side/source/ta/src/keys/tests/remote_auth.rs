@@ -6,6 +6,17 @@ use std::sync::{
     Arc,
 };
 
+struct TestSignInfo(device::SigningInfoSnapshot);
+
+impl device::RetrieveCertSigningInfo for TestSignInfo {
+    fn signing_info(
+        &self,
+        _key_type: device::SigningKeyType,
+    ) -> Result<device::SigningInfoSnapshot, Error> {
+        Ok(self.0.clone())
+    }
+}
+
 struct TestHmac;
 impl device::DeviceHmac for TestHmac {
     fn hmac(&self, imp: &dyn crypto::Hmac, data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -32,10 +43,28 @@ impl Fixture {
 
     fn with_policy(timeout: Option<u32>, mode: kmr_common::auth_signing::Mode) -> Self {
         let mut source = DelegationFixture::new();
+        // Software keybox stand-in: a locally generated attestation key signs the
+        // compatibility certificates, mirroring the device's keybox.xml path.
+        let attest = source
+            .ta
+            .generate_key_default(&key_params(KeyPurpose::AttestKey), None)
+            .unwrap();
+        let (attest_stored, _) = source
+            .ta
+            .keyblob_parse_decrypt(&attest.key_blob, &[])
+            .unwrap();
+        let snapshot = device::SigningInfoSnapshot {
+            signing_key: attest_stored.key_material,
+            cert_chain: attest.certificate_chain.clone(),
+            identity_digest: [0x11; 32],
+        };
+        source
+            .ta
+            .set_sign_info(Some(Box::new(TestSignInfo(snapshot))));
         let calls = Arc::new(AtomicUsize::new(0));
+        // Payment compatibility is certified locally with A's keybox; the relay
+        // must not be contacted and the certificate must describe the real policy.
         source.ta.dev.remote = Some(Arc::new(TestRemote {
-            cert_chain: Some(source.chain.clone()),
-            expected_user_auth: Some(vec![(503, 1)]),
             sign_calls: Some(calls.clone()),
             ..TestRemote::default()
         }));
@@ -55,13 +84,16 @@ impl Fixture {
             .ta
             .generate_key(&params, None, authorize_on_a)
             .unwrap();
-        // B's certificate remains unchanged; only A retains the auth policy.
         assert_eq!(
-            key.certificate_chain[0].encoded_certificate,
-            source.chain[0]
+            calls.load(Ordering::SeqCst),
+            0,
+            "compatibility keys must not reach the relay"
         );
         let (stored, _) = source.ta.keyblob_parse_decrypt(&key.key_blob, &[]).unwrap();
-        assert!(matches!(stored.key_material, KeyMaterial::Remote(_)));
+        assert!(
+            matches!(stored.key_material, KeyMaterial::Ec(..)),
+            "compatibility keys are held by A's local keybox"
+        );
         let chars = kmr_common::tag::characteristics_at(
             &stored.characteristics,
             SecurityLevel::TrustedEnvironment,
@@ -130,14 +162,14 @@ impl Fixture {
 }
 
 #[test]
-fn valid_per_operation_auth_allows_exactly_one_remote_finish() {
+fn valid_per_operation_auth_allows_exactly_one_local_finish() {
     let mut f = Fixture::new(None);
     let begin = f.begin(None).unwrap();
     let token = f.token(begin.challenge);
     let handle = begin.op_handle;
     assert_eq!(f.finish(handle, Some(token.clone())).error_code, 0);
     assert_ne!(f.finish(handle, Some(token)).error_code, 0);
-    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -157,7 +189,8 @@ fn auto_payment_key_signs_only_after_valid_per_operation_authentication() {
         );
         assert_eq!(
             fixture.calls.load(Ordering::SeqCst),
-            usize::from(authenticated)
+            0,
+            "the local compatibility path never contacts B"
         );
     }
 }
@@ -206,11 +239,11 @@ fn token_from_a_previous_operation_does_not_authorize_a_new_one() {
         f.finish(next.op_handle, Some(token)).error_code,
         ErrorCode::KeyUserNotAuthenticated as i32
     );
-    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn timeout_auth_is_checked_before_begin_and_remote_io() {
+fn timeout_auth_is_checked_before_begin_and_local_io() {
     let mut f = Fixture::new(Some(30));
     assert!(f.begin(None).is_err());
     let mut expired = f.token(0);
@@ -221,11 +254,11 @@ fn timeout_auth_is_checked_before_begin_and_remote_io() {
     let token = f.token(0);
     let begin = f.begin(Some(token)).unwrap();
     assert_eq!(f.finish(begin.op_handle, None).error_code, 0);
-    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn device_credential_fallback_can_authorize_the_same_remote_signing_path() {
+fn device_credential_fallback_can_authorize_the_same_local_signing_path() {
     let mut f = Fixture::new(None);
     f.params.retain(|p| !matches!(p, KeyParam::UserAuthType(_)));
     f.params.push(KeyParam::UserAuthType(3));
@@ -235,7 +268,7 @@ fn device_credential_fallback_can_authorize_the_same_remote_signing_path() {
     token.authenticator_type = HardwareAuthenticatorType::Password;
     f.resign(&mut token);
     assert_eq!(f.finish(begin.op_handle, Some(token)).error_code, 0);
-    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -263,14 +296,13 @@ fn experiment_is_not_used_for_other_purposes_or_presence_policies() {
 }
 
 #[test]
-fn remote_unavailability_never_changes_the_experiment_to_a_local_key() {
+fn preserved_request_never_falls_back_to_a_local_key() {
     let mut f = Fixture::new(None);
     f.ta.dev.remote = Some(Arc::new(TestRemote {
         unavailable: true,
-        expected_user_auth: Some(vec![(503, 1)]),
         ..TestRemote::default()
     }));
-    let err = f.ta.generate_key(&f.params, None, true).unwrap_err();
+    let err = f.ta.generate_key(&f.params, None, false).unwrap_err();
     assert!(matches!(
         err.kind(),
         ErrorKind::Hal(ErrorCode::UnknownError, _)
@@ -300,14 +332,13 @@ fn preserve_and_compatibility_decisions_remain_per_key() {
         .ta
         .keyblob_parse_decrypt(&preserved.key_blob, &[])
         .unwrap();
-    let (KeyMaterial::Remote(compatible), KeyMaterial::Remote(preserved_blob)) =
-        (compatible.key_material, preserved_blob.key_material)
-    else {
-        panic!("both keys must remain remote")
-    };
-    assert_ne!(
-        compatible.alias, preserved_blob.alias,
-        "different B policies cannot reuse a remote alias"
+    assert!(
+        matches!(compatible.key_material, KeyMaterial::Ec(..)),
+        "compatibility is certified locally with A's keybox"
+    );
+    assert!(
+        matches!(preserved_blob.key_material, KeyMaterial::Remote(_)),
+        "preserve keeps the physical B key"
     );
     assert_eq!(
         preserved.certificate_chain[0].encoded_certificate, preserved_chain[0],
@@ -380,30 +411,28 @@ fn auto_known_probe_keeps_the_signed_b_authentication_policy() {
 }
 
 #[test]
-fn correctly_signed_no_auth_certificate_cannot_satisfy_preserve_request() {
-    let mut fixture = Fixture::new(None);
-    let chain = fixture
-        .key
-        .certificate_chain
-        .iter()
-        .map(|c| c.encoded_certificate.clone())
-        .collect();
-    let observed = Arc::new(AtomicUsize::new(0));
-    fixture.ta.dev.remote = Some(Arc::new(TestRemote {
-        cert_chain: Some(chain),
-        expected_user_auth: Some(vec![(502, 42), (504, 2)]),
-        verified_calls: Some(observed.clone()),
-        ..TestRemote::default()
-    }));
-    let error = fixture
-        .ta
-        .generate_key(&fixture.params, None, false)
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        ErrorKind::Hal(ErrorCode::VerificationFailed, _)
-    ));
-    assert_eq!(observed.load(Ordering::SeqCst), 0);
+fn compatibility_certificate_keeps_the_requested_authentication_policy() {
+    let fixture = Fixture::new(None);
+    assert_eq!(
+        fixture.calls.load(Ordering::SeqCst),
+        0,
+        "compatibility must not contact B"
+    );
+    let blob = fixture.key.key_blob.clone();
+    let (stored, _) = fixture.ta.keyblob_parse_decrypt(&blob, &[]).unwrap();
+    let chars = kmr_common::tag::characteristics_at(
+        &stored.characteristics,
+        SecurityLevel::TrustedEnvironment,
+    )
+    .unwrap();
+    assert!(chars.contains(&KeyParam::UserSecureId(42)));
+    assert!(chars.contains(&KeyParam::UserAuthType(
+        HardwareAuthenticatorType::Fingerprint as u32
+    )));
+    assert!(
+        !chars.contains(&KeyParam::NoAuthRequired),
+        "an auth-bound key must never advertise NO_AUTH_REQUIRED"
+    );
 }
 
 #[test]
