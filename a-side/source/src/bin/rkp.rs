@@ -106,6 +106,28 @@ fn write_private(path: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// KeyMint runs as the `keystore` user and must be able to read the slot file.
+/// The importer runs as root, so ownership is transferred explicitly while the
+/// strict 0600 mode is kept.
+fn hand_to_keystore(path: &str) -> Result<()> {
+    let name = std::ffi::CString::new("keystore").expect("static name");
+    let entry = unsafe { libc::getpwnam(name.as_ptr()) };
+    let (uid, gid) = if entry.is_null() {
+        // AID_KEYSTORE is stable across Android releases.
+        (1017, 1017)
+    } else {
+        unsafe { ((*entry).pw_uid, (*entry).pw_gid) }
+    };
+    let target = std::ffi::CString::new(path).with_context(|| format!("path {path}"))?;
+    if unsafe { libc::chown(target.as_ptr(), uid, gid) } != 0 {
+        bail!(
+            "cannot hand {path} to the keystore user: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
 fn read_limited(path: &str, limit: u64) -> Result<Vec<u8>> {
     let meta = fs::metadata(path).with_context(|| format!("stat {path}"))?;
     if meta.len() > limit {
@@ -483,6 +505,7 @@ fn install_keybox(level: &str, bytes: &[u8]) -> Result<Value> {
     }
     ensure_dir()?;
     write_private(target, bytes)?;
+    hand_to_keystore(target)?;
     Ok(json!({
         "saved": true,
         "level": level,
