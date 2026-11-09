@@ -506,8 +506,21 @@ impl crate::KeyMintTa {
             && attestation_key.is_none()
             && authorize_on_a
             && kmr_common::auth_signing::eligible(params);
+        // Payment-compatibility requests keep A's authentication policy and are
+        // certified locally: A's own keybox signs the chain and A's KeyMint
+        // enforces the token the app just produced. Relaying them would make B's
+        // physical key authentication-bound, and B cannot accept A's token, so
+        // the signature would fail with KEY_USER_NOT_AUTHENTICATED.
+        if a_authorized_signing {
+            log::info!(
+                "event=auth_signing authorization=A signer=A certificate_policy=local auth_type={:?} auth_timeout={:?}",
+                get_opt_tag_value!(params, UserAuthType)?,
+                get_opt_tag_value!(params, AuthTimeout)?,
+            );
+        }
         let remote_attest = has_challenge
             && remote_enabled
+            && !a_authorized_signing
             && (attestation_key.is_none() || remote_issuer.is_some());
         if remote_attest {
             // `Ok(None)` from the remote backend means it was unavailable; fall
@@ -624,12 +637,14 @@ impl crate::KeyMintTa {
         let effective_serial = effective_remote_serial(serial.map(Vec::as_slice));
         let mut remote_params = extract_remote_attest_params(params);
         if a_authorized_signing {
-            // Preserve the original params below for A's encrypted keyblob and
-            // its existing HAT/challenge/timeout checks. Only B is no-auth.
-            remote_params.user_auth.retain(|(tag, _)| *tag == 509);
-            remote_params.user_auth.push((503, 1));
+            // The attestation record describes the key, not how A authorized its
+            // use, so the caller's authentication parameters are forwarded
+            // unchanged: an auth-bound key must show USER_AUTH_TYPE/AUTH_TIMEOUT
+            // and must not claim NO_AUTH_REQUIRED. Rewriting them here produced a
+            // certificate that disagreed with KeyInfo, which relying apps treat
+            // as a tampered keystore (Paytm's UPI key is exactly that shape).
             log::info!(
-                "event=auth_signing authorization=A signer=B certificate_policy=B_no_auth auth_type={:?} auth_timeout={:?}",
+                "event=auth_signing authorization=A signer=B certificate_policy=request auth_type={:?} auth_timeout={:?}",
                 get_opt_tag_value!(params, UserAuthType)?,
                 get_opt_tag_value!(params, AuthTimeout)?,
             );

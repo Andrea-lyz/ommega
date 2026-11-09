@@ -207,11 +207,45 @@ impl Drop for FileLockGuard {
     }
 }
 
+/// Reads `max_size_mb=<n>` from a small key/value file. Invalid or out-of-range
+/// values fall back to the bundled default so a bad edit can never disable logs.
+pub fn max_log_size_from_file(path: &Path) -> Option<u64> {
+    let text = fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        let value = line
+            .strip_prefix("max_size_mb=")
+            .or_else(|| line.strip_prefix("max_size_mb = "))?;
+        let megabytes: u64 = value.trim().parse().ok()?;
+        if (1..=64).contains(&megabytes) {
+            return Some(megabytes * 1024 * 1024);
+        }
+        return None;
+    }
+    None
+}
+
 pub fn build_console_file_config<P: AsRef<Path>>(
     file_path: P,
     pattern: &str,
     level: LevelFilter,
     error_prefix: &str,
+) -> anyhow::Result<(Config, bool)> {
+    build_console_file_config_with_size(
+        file_path,
+        pattern,
+        level,
+        error_prefix,
+        DEFAULT_MAX_LOG_SIZE_BYTES,
+    )
+}
+
+pub fn build_console_file_config_with_size<P: AsRef<Path>>(
+    file_path: P,
+    pattern: &str,
+    level: LevelFilter,
+    error_prefix: &str,
+    max_size_bytes: u64,
 ) -> anyhow::Result<(Config, bool)> {
     let mut builder = Config::builder();
     let mut root = Root::builder();
@@ -238,7 +272,7 @@ pub fn build_console_file_config<P: AsRef<Path>>(
     }
 
     let file_logging_ready =
-        match LockedRotatingFileAppender::new(path, Box::new(PatternEncoder::new(pattern))) {
+        match LockedRotatingFileAppender::with_max_size(path, Box::new(PatternEncoder::new(pattern)), max_size_bytes) {
             Ok(file) => {
                 builder = builder.appender(Appender::builder().build("file", Box::new(file)));
                 root = root.appender("file");

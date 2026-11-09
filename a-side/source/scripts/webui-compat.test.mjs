@@ -100,6 +100,59 @@ test("the glue evaluates without the WebUI globals", () => {
   loadGlue();
 });
 
+
+function appSortFixture(ctx, entries) {
+  const rows = entries.map(([pkg, hidden = false]) => {
+    const card = {getAttribute: name => name === "data-package" ? pkg : null};
+    return {pkg, hidden, matches: () => false, querySelector: () => card, card};
+  });
+  const list = {
+    children: [...rows],
+    appendChild(row) {
+      assert.ok(rows.includes(row), "sort must move card-box wrappers, never their cards");
+      const index = this.children.indexOf(row);
+      assert.notEqual(index, -1);
+      this.children.splice(index, 1);
+      this.children.push(row);
+    },
+  };
+  ctx.document.getElementById = id => id === "apps-list" ? list : null;
+  const order = () => list.children.map(row => row.pkg);
+  return {rows, list, order};
+}
+
+test("counter sorts move app row wrappers, preserve ties and restore default order", () => {
+  const ctx = loadGlue();
+  const fixture = appSortFixture(ctx, [["a"], ["b"], ["c", true], ["d"]]);
+  vm.runInContext('ommegaCertificateCounts = {a:{count:3,shared:false},b:{count:20,shared:false},c:{count:20,shared:false}}', ctx);
+  assert.equal(ctx.ommegaSetAppSort("cert"), "cert");
+  assert.deepEqual(fixture.order(), ["b", "c", "a", "d"]);
+  assert.equal(fixture.rows[2].hidden, true, "search visibility survives sorting");
+  ctx.ommegaSetAppSort(null);
+  assert.deepEqual(fixture.order(), ["a", "b", "c", "d"]);
+});
+
+test("SOTER sorting uses positive safe counts and matches the enabled badges", () => {
+  const ctx = loadGlue();
+  const fixture = appSortFixture(ctx, [["a"], ["b"], ["c"], ["d"]]);
+  vm.runInContext('ommegaSoterEnabled = true; ommegaSoterCounts = {a:5,b:-1,c:9007199254740992,d:12}', ctx);
+  ctx.ommegaSetAppSort("soter");
+  assert.deepEqual(fixture.order(), ["d", "a", "b", "c"]);
+  vm.runInContext('ommegaSoterEnabled = false', ctx);
+  ctx.ommegaApplySort();
+  assert.deepEqual(fixture.order(), ["a", "b", "c", "d"]);
+});
+
+test("counter sorting never detaches cards or repeatedly mutates an already sorted list", () => {
+  const ctx = loadGlue();
+  const fixture = appSortFixture(ctx, [["a"], ["b"]]);
+  vm.runInContext('ommegaCertificateCounts = {a:{count:1,shared:false},b:{count:2,shared:false}}', ctx);
+  ctx.ommegaSetAppSort("cert");
+  fixture.list.appendChild = () => assert.fail("already sorted rows must not be moved again");
+  ctx.ommegaApplySort();
+  assert.deepEqual(fixture.order(), ["b", "a"]);
+});
+
 test("certificate badges only use positive safe counts with explicit sharing metadata", () => {
   const ctx = loadGlue();
   assert.equal(ctx.ommegaCertificateCount(null), null);

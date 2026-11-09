@@ -5,18 +5,18 @@ authentication-signing keys. It has three modes:
 
 | Mode | New eligible key |
 | --- | --- |
-| Auto (default) | Preserve the requested B authentication policy for a recognized probe; use payment compatibility for other eligible requests. |
-| Payment compatibility | A authenticates the operation; a physical no-auth key on B signs it. |
-| Preserve authentication | Send the original authentication requirements to B. A's HAT cannot authenticate to B, so real authenticated operations can still fail with -26. |
+| Auto (default) | Preserve the requested authentication policy for a recognized probe (relayed to B); certify other eligible requests locally on A. |
+| Payment compatibility | A certifies the key locally with its own keybox and enforces the authentication token itself; the certificate describes A's real policy. |
+| Preserve authentication | Send the original authentication requirements to B. B's hardware key is authentication-bound, so a signature over the A-authorized transport can still fail with -26. |
 
-The compatibility path retains the caller's original authentication policy in
-A's encrypted keyblob. The existing A authorization path checks the HAT MAC,
-user/authenticator ID, allowed authentication type and operation challenge or
-timeout before contacting B. Password fallback is supported. B receives
-NO_AUTH_REQUIRED in place of A's user-authentication tags, while requested
-UNLOCKED_DEVICE_REQUIRED is retained. B holds the physical private key and
-produces the signature. B's certificate is returned byte-for-byte and describes
-B's actual policy; no authentication tags are synthesized in that certificate.
+The compatibility path keeps the caller's authentication policy and certifies
+the key locally: A's keybox signs the chain and A's KeyMint enforces the token the
+app produced, so USER_AUTH_TYPE, AUTH_TIMEOUT and the absence of
+NO_AUTH_REQUIRED describe the key exactly as the app requested. The existing A
+authorization path checks the HAT MAC, user/authenticator ID, allowed
+authentication type and operation challenge or timeout; password fallback is
+supported. No relay request is made for these keys, so B never holds an
+authentication-bound key it cannot use.
 
 This policy applies only with remote mode enabled, an attestation challenge,
 no caller-supplied attestation issuer, a user secure ID and nonzero auth type,
