@@ -412,8 +412,9 @@ function ommegaAuthInstallKeyboxDialog() {
   const dialog = document.getElementById("om-keybox-source-dialog");
   const close = document.getElementById("om-keybox-source-close");
   const status = document.getElementById("om-keybox-source-status");
-  if (!open || !dialog || open.dataset.bound) return;
-  open.dataset.bound = "1";
+  if (!open || !dialog) return;
+  if (open.dataset && open.dataset.bound) return;
+  if (open.dataset) open.dataset.bound = "1";
   const read = async () => {
     try {
       const response = await ommegaReadOnly("cat '" + OMMEGA_AUTH_KEYBOX_CONF + "' 2>/dev/null");
@@ -448,5 +449,9 @@ function ommegaAuthInstallKeyboxDialog() {
   }
 }
 
-ommegaAuthInstallKeyboxDialog();
+try {
+  ommegaAuthInstallKeyboxDialog();
+} catch {
+  // The shell may not be mounted yet; the event below retries.
+}
 if (typeof window !== "undefined") window.addEventListener("ommega-settings-ready", ommegaAuthInstallKeyboxDialog);
