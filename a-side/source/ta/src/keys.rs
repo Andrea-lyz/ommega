@@ -179,8 +179,18 @@ pub(crate) struct SigningInfo<'a> {
 const AUTH_SIGNING_CHAIN_PATH: &str = "/data/adb/ommega/ommegadata/data/auth-signing-keybox.conf";
 
 fn read_auth_signing_chain() -> device::AuthSigningChain {
-    let Ok(text) = std::fs::read_to_string(AUTH_SIGNING_CHAIN_PATH) else {
-        return device::AuthSigningChain::Tee;
+    let text = match std::fs::read_to_string(AUTH_SIGNING_CHAIN_PATH) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return device::AuthSigningChain::Tee;
+        }
+        Err(error) => {
+            log::warn!(
+                "auth-signing keybox selection unreadable at {}: {error}",
+                AUTH_SIGNING_CHAIN_PATH
+            );
+            return device::AuthSigningChain::Tee;
+        }
     };
     for line in text.lines() {
         if let Some(value) = line.trim().strip_prefix("source=") {
