@@ -176,29 +176,37 @@ pub(crate) struct SigningInfo<'a> {
 }
 
 /// Chain selection for locally certified authentication-bound keys.
-const AUTH_SIGNING_CHAIN_PATH: &str = "/data/adb/ommega/ommegadata/data/auth-signing-keybox.conf";
+///
+/// The canonical mount point is used first: the friendly /data/adb path is a
+/// symlink whose traversal is denied to the keystore user on some builds.
+const AUTH_SIGNING_CHAIN_PATHS: [&str; 2] = [
+    "/data/misc/keystore/ommega/data/auth-signing-keybox.conf",
+    "/data/adb/ommega/ommegadata/data/auth-signing-keybox.conf",
+];
 
 fn read_auth_signing_chain() -> device::AuthSigningChain {
-    let text = match std::fs::read_to_string(AUTH_SIGNING_CHAIN_PATH) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return device::AuthSigningChain::Tee;
-        }
-        Err(error) => {
-            log::warn!(
-                "auth-signing keybox selection unreadable at {}: {error}",
-                AUTH_SIGNING_CHAIN_PATH
-            );
-            return device::AuthSigningChain::Tee;
-        }
-    };
-    for line in text.lines() {
-        if let Some(value) = line.trim().strip_prefix("source=") {
-            return if value.trim().eq_ignore_ascii_case("strongbox") {
-                device::AuthSigningChain::Strongbox
-            } else {
-                device::AuthSigningChain::Tee
-            };
+    let mut warned = false;
+    for path in AUTH_SIGNING_CHAIN_PATHS {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                for line in text.lines() {
+                    if let Some(value) = line.trim().strip_prefix("source=") {
+                        return if value.trim().eq_ignore_ascii_case("strongbox") {
+                            device::AuthSigningChain::Strongbox
+                        } else {
+                            device::AuthSigningChain::Tee
+                        };
+                    }
+                }
+                return device::AuthSigningChain::Tee;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                if !warned {
+                    log::warn!("auth-signing keybox selection unreadable at {path}: {error}");
+                    warned = true;
+                }
+            }
         }
     }
     device::AuthSigningChain::Tee
