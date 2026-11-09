@@ -7,8 +7,9 @@ for _slot in /data/misc/keystore/ommega/keybox.xml /data/misc/keystore/ommega/ke
   _owner=$(stat -c %U "$_slot" 2>/dev/null)
   if [ "$_owner" != "keystore" ]; then
     chown keystore:keystore "$_slot" 2>/dev/null || true
-    chmod 600 "$_slot" 2>/dev/null || true
   fi
+  # These slots hold private keys; never leave them group/world accessible.
+  chmod 600 "$_slot" 2>/dev/null || true
 done
 unset _slot _owner
 STATE_DIR=/data/adb/ommega
