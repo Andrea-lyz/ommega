@@ -8,7 +8,9 @@ use kmr_common::{
     Error,
 };
 use kmr_crypto_ommega::{ec::OmmegaEc, mldsa::OmmegaMlDsa, rsa::OmmegaRsa, sha256::OmmegaSha256};
-use kmr_ta::device::{SigningAlgorithm, SigningInfoSnapshot, SigningKey, SigningKeyType};
+use kmr_ta::device::{
+    AuthSigningChain, SigningAlgorithm, SigningInfoSnapshot, SigningKey, SigningKeyType,
+};
 use kmr_wire::keymint;
 use regex::Regex;
 use x509_cert::der as x509_der;
@@ -260,6 +262,51 @@ impl KeyBox {
             }
         })?;
 
+        Ok(SigningInfoSnapshot {
+            signing_key: info.key.clone(),
+            cert_chain: info.chain.clone(),
+            identity_digest: self.identity_digest,
+        })
+    }
+
+    /// Material for a locally certified authentication-bound key.
+    ///
+    /// A dedicated StrongBox chain is preferred when one is installed: those
+    /// certificates are issued by a root that is independent of the batch
+    /// keybox, which is what payment-style verifiers look at. Without dedicated
+    /// StrongBox material the ordinary chain is used unchanged.
+    pub fn signing_info_for_local_auth(
+        &self,
+        key_type: SigningKeyType,
+        chain: AuthSigningChain,
+    ) -> Result<SigningInfoSnapshot, Error> {
+        let strongbox = match key_type.algo_hint {
+            SigningAlgorithm::Rsa => self
+                .strongbox_rsa_info
+                .as_ref()
+                .or(self.strongbox_ec_info.as_ref()),
+            SigningAlgorithm::Ec => self
+                .strongbox_ec_info
+                .as_ref()
+                .or(self.strongbox_rsa_info.as_ref()),
+        };
+        let ordinary = match key_type.algo_hint {
+            SigningAlgorithm::Rsa => self.rsa_info.as_ref().or(self.ec_info.as_ref()),
+            SigningAlgorithm::Ec => self.ec_info.as_ref().or(self.rsa_info.as_ref()),
+        };
+        let (preferred, label) = match chain {
+            AuthSigningChain::Tee => (None, "tee"),
+            AuthSigningChain::Strongbox if strongbox.is_some() => (strongbox, "strongbox"),
+            AuthSigningChain::Strongbox => (None, "strongbox-unavailable"),
+        };
+        let info = preferred.or(ordinary).ok_or_else(|| {
+            kmr_common::km_err!(
+                UnknownError,
+                "keybox has no {:?} signing key",
+                key_type.algo_hint
+            )
+        })?;
+        log::info!("event=auth_signing chain={label}");
         Ok(SigningInfoSnapshot {
             signing_key: info.key.clone(),
             cert_chain: info.chain.clone(),
@@ -713,6 +760,53 @@ mod tests {
                 algo_hint: SigningAlgorithm::Rsa,
             })
             .is_ok());
+    }
+
+    #[test]
+    fn local_auth_signing_prefers_the_dedicated_strongbox_chain() {
+        let mut keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
+        let ec_type = SigningKeyType {
+            which: SigningKey::Batch,
+            algo_hint: SigningAlgorithm::Ec,
+        };
+        let ordinary = keybox
+            .signing_info_for_local_auth(ec_type, AuthSigningChain::Tee)
+            .unwrap();
+        assert_eq!(ordinary.cert_chain, keybox.ec_info.as_ref().unwrap().chain);
+
+        // Install a dedicated StrongBox chain built from the RSA entry so the two
+        // chains cannot be confused, then confirm an EC leaf prefers it while
+        // ordinary attestation still uses the batch chain.
+        let rsa_block =
+            KeyBox::to_xml_block("rsa", "RSA PRIVATE KEY", keybox.rsa_info.as_ref().unwrap());
+        let strongbox_xml = format!(
+            r#"<?xml version="1.0"?>
+<AndroidAttestation>
+<NumberOfKeyboxes>1</NumberOfKeyboxes>
+<Keybox DeviceID="sb">
+{rsa_block}
+</Keybox>
+</AndroidAttestation>
+"#
+        );
+        keybox
+            .set_strongbox_material_from_xml(&strongbox_xml)
+            .unwrap();
+
+        let preferred = keybox
+            .signing_info_for_local_auth(ec_type, AuthSigningChain::Strongbox)
+            .unwrap();
+        assert_eq!(
+            preferred.cert_chain,
+            keybox.strongbox_rsa_info.as_ref().unwrap().chain
+        );
+        let ordinary_again = keybox
+            .signing_info_at(keymint::SecurityLevel::TrustedEnvironment, ec_type)
+            .unwrap();
+        assert_eq!(
+            ordinary_again.cert_chain,
+            keybox.ec_info.as_ref().unwrap().chain
+        );
     }
 
     #[test]

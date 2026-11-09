@@ -153,3 +153,28 @@ A detector's probe result does not establish the compatibility key's hardware
 authentication guarantees. Authenticated signing, detector acceptance and
 wallet/payment acceptance require separate device tests. This A-only policy
 needs no B-module or server update.
+
+## Locally certified keys and the StrongBox keybox
+
+Keys certified on A keep their authentication policy in the certificate. The
+chain that signs those certificates is selectable between the two keybox slots:
+
+- **TEE** (default) uses `keybox.xml`, the ordinary batch chain.
+- **StrongBox** uses `keybox-strongbox.xml`. Install the dedicated StrongBox
+  keybox first; without it the request falls back to the TEE chain and logs
+  `chain=strongbox-unavailable`.
+
+The selection lives in `/data/adb/ommega/ommegadata/data/auth-signing-keybox.conf`
+as `source=tee` or `source=strongbox`, and is changed from **Settings → App
+policies → Authentication signing**. It only affects certificates issued after
+the change; existing keys are not re-signed.
+
+The decision is logged per request:
+
+```
+event=auth_signing authorization=A signer=A certificate_policy=local ...
+event=auth_signing chain=tee
+```
+
+Only the chain changes: the key's own security level, the KeyDescription fields
+and A's token enforcement stay exactly as before.

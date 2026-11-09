@@ -218,6 +218,17 @@ impl RetrieveCertSigningInfo for KeyboxManager {
             .map_err(|_| kmr_common::km_err!(UnknownError, "failed to lock KEYBOX"))?;
         keybox.signing_info_at(self.security_level, key_type)
     }
+
+    fn signing_info_for_local_auth(
+        &self,
+        key_type: SigningKeyType,
+        chain: kmr_ta::device::AuthSigningChain,
+    ) -> Result<SigningInfoSnapshot, Error> {
+        let keybox = KEYBOX
+            .read()
+            .map_err(|_| kmr_common::km_err!(UnknownError, "failed to lock KEYBOX"))?;
+        keybox.signing_info_for_local_auth(key_type, chain)
+    }
 }
 
 #[cfg(test)]

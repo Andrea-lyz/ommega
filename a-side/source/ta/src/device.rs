@@ -230,6 +230,15 @@ pub struct RemoteAttestParams {
     pub device_properties: Vec<(u32, Vec<u8>)>,
 }
 
+/// Which keybox chain signs a locally certified authentication-bound key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthSigningChain {
+    /// Ordinary batch keybox (the TEE slot).
+    Tee,
+    /// Dedicated StrongBox keybox.
+    Strongbox,
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteAttestationKey {
     pub alias: String,
@@ -343,6 +352,20 @@ pub trait RetrieveCertSigningInfo: Send {
     /// - ...
     /// - the final certificate in the chain should be a self-signed cert holding a Google root.
     fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error>;
+
+    /// Signing material for a locally certified authentication-bound key.
+    ///
+    /// Those keys are certified on A while their authentication token stays on A,
+    /// so the chain may come from a different root than ordinary batch
+    /// attestation. The default keeps the ordinary material.
+    fn signing_info_for_local_auth(
+        &self,
+        key_type: SigningKeyType,
+        chain: AuthSigningChain,
+    ) -> Result<SigningInfoSnapshot, Error> {
+        let _ = chain;
+        self.signing_info(key_type)
+    }
 }
 
 /// Retrieval of attestation ID information.  This information will not change (so the caller can
