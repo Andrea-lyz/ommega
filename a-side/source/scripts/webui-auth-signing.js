@@ -388,7 +388,7 @@ function ommegaInstallAuthSigning() {
   for (const radio of panel.querySelectorAll('input[name="ommega-auth-keybox"]')) radio.addEventListener("change", async () => {
     ommegaAuthKeyboxSource = radio.value;
     try {
-      await _("mkdir -p /data/adb/ommega/ommegadata/data && printf 'source=" + radio.value + "\\n' > '" + OMMEGA_AUTH_KEYBOX_CONF + "'");
+      await _("set -e; d=$(dirname '" + OMMEGA_AUTH_KEYBOX_CONF + "'); mkdir -p \"$d\"; printf 'source=" + radio.value + "\\n' > '" + OMMEGA_AUTH_KEYBOX_CONF + ".tmp'; chown keystore:keystore '" + OMMEGA_AUTH_KEYBOX_CONF + ".tmp'; chmod 600 '" + OMMEGA_AUTH_KEYBOX_CONF + ".tmp'; mv -f '" + OMMEGA_AUTH_KEYBOX_CONF + ".tmp' '" + OMMEGA_AUTH_KEYBOX_CONF + "'");
       ommegaAuthStatus(ommegaUiLocalize("签发 keybox 已切换 / Issuer keybox updated"));
     } catch (error) {
       ommegaAuthStatus(ommegaUiLocalize("保存失败 / Save failed") + ": " + String(error).slice(0, 80));
@@ -440,7 +440,7 @@ function ommegaAuthInstallKeyboxDialog() {
     radio.addEventListener("change", async () => {
       ommegaAuthKeyboxSource = radio.value;
       try {
-        await _("mkdir -p /data/adb/ommega/ommegadata/data && printf 'source=" + radio.value + "\\n' > '" + OMMEGA_AUTH_KEYBOX_CONF + "'");
+        await _("set -e; d=$(dirname '" + OMMEGA_AUTH_KEYBOX_CONF + "'); mkdir -p \"$d\"; printf 'source=" + radio.value + "\\n' > '" + OMMEGA_AUTH_KEYBOX_CONF + ".tmp'; chown keystore:keystore '" + OMMEGA_AUTH_KEYBOX_CONF + ".tmp'; chmod 600 '" + OMMEGA_AUTH_KEYBOX_CONF + ".tmp'; mv -f '" + OMMEGA_AUTH_KEYBOX_CONF + ".tmp' '" + OMMEGA_AUTH_KEYBOX_CONF + "'");
         sync();
       } catch (error) {
         if (status) status.textContent = ommegaUiLocalize("保存失败 / Save failed") + ": " + String(error).slice(0, 80);
