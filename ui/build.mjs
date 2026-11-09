@@ -1,4 +1,5 @@
 // Keep the shared offline resources in each independently packaged module.
+import {createHash} from 'node:crypto';
 import {readFile, writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 const root = new URL('../', import.meta.url);
@@ -15,10 +16,26 @@ console.log(check ? 'Shared UI assets verified.' : 'Shared UI assets copied to A
 const indexPath = new URL('a-side/source/template/webroot/index.html', root);
 const original = await readFile(indexPath, 'utf8');
 // Set the legacy translation preference before its deferred bundle starts.
-const assetVersion = 'material-ui-36';
-const integration = `<!--ommega-modern--><script>try{var l=localStorage.getItem('ommega.ui.language')||'auto';localStorage.setItem('trickyAddonLanguage',l==='auto'?(/^zh\\b/i.test(navigator.language)?'zh-CN':'en'):l);document.documentElement.dataset.theme=localStorage.getItem('ommega.ui.theme')||'auto'}catch(e){}</script><link rel="stylesheet" href="./modern.css?v=${assetVersion}"><link rel="stylesheet" href="./material-you.css?v=${assetVersion}"><link rel="stylesheet" href="./a-modern.css?v=${assetVersion}"><script type="module" src="./modern.js?v=${assetVersion}"></script><!--/ommega-modern-->`;
+// Asset versions come from file content so a WebView cache refreshes on every
+// build, matching the values scripts/webui-patch.py writes into the bundle tag.
+const versionOf = async relative => {
+  try {
+    return createHash('sha256').update(await readFile(new URL(relative, root))).digest('hex').slice(0, 10);
+  } catch {
+    return 'missing';
+  }
+};
+const assetVersion = await versionOf('a-side/source/template/webroot/modern.js');
+const cssVersions = {
+  'modern.css': await versionOf('a-side/source/template/webroot/modern.css'),
+  'material-you.css': await versionOf('a-side/source/template/webroot/material-you.css'),
+  'a-modern.css': await versionOf('a-side/source/template/webroot/a-modern.css')
+};
+const integration = `<!--ommega-modern--><script>try{var l=localStorage.getItem('ommega.ui.language')||'auto';localStorage.setItem('trickyAddonLanguage',l==='auto'?(/^zh\\b/i.test(navigator.language)?'zh-CN':'en'):l);document.documentElement.dataset.theme=localStorage.getItem('ommega.ui.theme')||'auto'}catch(e){}</script><link rel="stylesheet" href="./modern.css?v=${cssVersions['modern.css']}"><link rel="stylesheet" href="./material-you.css?v=${cssVersions['material-you.css']}"><link rel="stylesheet" href="./a-modern.css?v=${cssVersions['a-modern.css']}"><script type="module" src="./modern.js?v=${assetVersion}"></script><!--/ommega-modern-->`;
+const bundleName = (original.match(/src="\.\/assets\/(index-[^"]+\.js)/) || [])[1];
+const bundleHash = bundleName ? await versionOf('a-side/source/template/webroot/assets/' + bundleName) : assetVersion;
 let clean = original.replace(/<!--ommega-modern-->[\s\S]*?<!--\/ommega-modern-->/g, '')
-  .replace(/(src="\.\/assets\/index-[^"]+\.js)(?:\?[^\"]*)?"/, `$1?v=${assetVersion}"`);
+  .replace(/(src="\.\/assets\/index-[^"]+\.js)(?:\?[^\"]*)?"/, `$1?v=${bundleHash}"`);
 // Keep the original dialog bindings available to the Settings view. The Apps
 // overflow menu contains only app-selection actions, including its refresh.
 const settingsActions = [];
