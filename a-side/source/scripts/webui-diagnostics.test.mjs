@@ -78,6 +78,17 @@ test("level-3 routes require the persisted unlock", () => {
   assert.equal(diag.ommegaDiagRouteAllowed("diag-keymint", true), true);
 });
 
+test("a shared-uid package maps every uid it owns", () => {
+  const map = diag.ommegaDiagParsePackageUids([
+    "package:com.google.android.gms uid:10120,99910120",
+    "package:com.microsoft.appmanager uid:10132"
+  ].join("\n"));
+  assert.equal(map.get("10120"), "com.google.android.gms");
+  assert.equal(map.get("99910120"), "com.google.android.gms");
+  assert.equal(map.get("10132"), "com.microsoft.appmanager");
+  assert.equal(map.get("99999"), undefined);
+});
+
 test("keymint AID failures attribute to the requesting app", async () => {
   const ctx = load();
   const errors = [

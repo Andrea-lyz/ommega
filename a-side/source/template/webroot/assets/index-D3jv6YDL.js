@@ -5158,26 +5158,54 @@ function ommegaDiagPersistUidMap() {
   } catch {}
 }
 
-async function ommegaDiagUidPackages(uids) {
-  const missing = uids.filter(uid => !ommegaDiagUidMap.map.has(uid));
-  if (Date.now() - ommegaDiagUidMap.at > 300000) {
-    ommegaDiagUidMap = {at: 0, map: new Map()};
-    missing.length = 0;
-    for (const uid of uids) missing.push(uid);
+// One package can own several uids (for example GMS uses 10120 and an isolated
+// 99910120). Parse the whole list so every uid maps back to its package.
+function ommegaDiagParsePackageUids(text) {
+  const map = new Map();
+  for (const line of String(text || "").split("\n")) {
+    const match = /^package:(\S+) uid:([0-9,]+)$/.exec(line.trim());
+    if (!match) continue;
+    for (const uid of match[2].split(",")) map.set(uid.trim(), match[1]);
   }
-  if (missing.length) {
-    const filter = missing.join("|");
-    const pattern = "uid:(" + filter + ")" + String.fromCharCode(36);
-    const response = await ommegaReadOnly("pm list packages -U 2>/dev/null | grep -E '" + pattern + "'");
-    for (const line of String((response && response.stdout) || "").split("\n")) {
-      const match = /package:(\S+)\s+uid:(\d+)/.exec(line);
-      if (match) ommegaDiagUidMap.map.set(match[2], match[1]);
-    }
+  return map;
+}
+
+async function ommegaDiagUidPackages(uids) {
+  const stale = Date.now() - ommegaDiagUidMap.at > 300000;
+  if (stale) ommegaDiagUidMap = {at: 0, map: new Map()};
+  if (stale || uids.some(uid => !ommegaDiagUidMap.map.get(uid))) {
+    const response = await ommegaReadOnly("pm list packages -U 2>/dev/null");
+    const parsed = ommegaDiagParsePackageUids((response && response.stdout) || "");
+    for (const [uid, pkg] of parsed) ommegaDiagUidMap.map.set(uid, pkg);
     ommegaDiagUidMap.at = Date.now();
-    for (const uid of missing) if (!ommegaDiagUidMap.map.has(uid)) ommegaDiagUidMap.map.set(uid, "");
+    for (const uid of uids) if (!ommegaDiagUidMap.map.has(uid)) ommegaDiagUidMap.map.set(uid, "");
     ommegaDiagPersistUidMap();
   }
   return ommegaDiagUidMap.map;
+}
+
+let ommegaDiagBridgeLabels = {at: 0, map: new Map()};
+
+// Packages outside the managed app list still have a real label; ask the
+// KernelSU bridge instead of showing a bare package name.
+async function ommegaDiagPackageLabels(packages) {
+  const wanted = packages.filter(pkg => pkg && !ommegaDiagBridgeLabels.map.get(pkg));
+  if (!wanted.length) return ommegaDiagBridgeLabels.map;
+  if (Date.now() - ommegaDiagBridgeLabels.at > 60000) {
+    ommegaDiagBridgeLabels = {at: 0, map: new Map()};
+  }
+  try {
+    if (typeof ksu !== "undefined" && ksu && typeof ksu.getPackagesInfo === "function") {
+      const raw = await ksu.getPackagesInfo(JSON.stringify(packages.filter(Boolean)));
+      for (const entry of JSON.parse(String(raw || "[]"))) {
+        if (entry && entry.packageName) {
+          ommegaDiagBridgeLabels.map.set(entry.packageName, entry.appLabel || "");
+        }
+      }
+      ommegaDiagBridgeLabels.at = Date.now();
+    }
+  } catch {}
+  return ommegaDiagBridgeLabels.map;
 }
 
 async function ommegaDiagCollectErrors() {
@@ -5224,13 +5252,14 @@ async function ommegaDiagCollectErrors() {
   if (!uids.size) return [];
   const byUid = await ommegaDiagUidPackages([...uids]);
   const appInfo = ommegaDiagAppInfo();
+  const bridgeLabels = await ommegaDiagPackageLabels([...new Set([...byUid.values()].filter(Boolean))]);
   return ommegaDiagAggregateErrors(entries).slice(0, 12).map(entry => {
     const pkg = byUid.get(entry.uid) || "";
     // A package outside the enumerated app list still has a resolvable icon.
     const meta = appInfo.get(pkg) || {label: "", icon: pkg ? "ksu://icon/" + pkg : ""};
     return {
       code: entry.code, uid: entry.uid, ts: entry.ts, count: entry.count,
-      pkg, label: meta.label, icon: meta.icon
+      pkg, label: meta.label || bridgeLabels.get(pkg) || "", icon: meta.icon
     };
   });
 }
