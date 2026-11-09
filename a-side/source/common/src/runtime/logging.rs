@@ -211,18 +211,17 @@ impl Drop for FileLockGuard {
 /// values fall back to the bundled default so a bad edit can never disable logs.
 pub fn max_log_size_from_file(path: &Path) -> Option<u64> {
     let text = fs::read_to_string(path).ok()?;
-    for line in text.lines() {
+    let value = text.lines().find_map(|line| {
         let line = line.trim();
-        let value = line
-            .strip_prefix("max_size_mb=")
-            .or_else(|| line.strip_prefix("max_size_mb = "))?;
-        let megabytes: u64 = value.trim().parse().ok()?;
-        if (1..=64).contains(&megabytes) {
-            return Some(megabytes * 1024 * 1024);
-        }
-        return None;
+        line.strip_prefix("max_size_mb=")
+            .or_else(|| line.strip_prefix("max_size_mb = "))
+    })?;
+    let megabytes: u64 = value.trim().parse().ok()?;
+    if (1..=64).contains(&megabytes) {
+        Some(megabytes * 1024 * 1024)
+    } else {
+        None
     }
-    None
 }
 
 pub fn build_console_file_config<P: AsRef<Path>>(
@@ -271,23 +270,26 @@ pub fn build_console_file_config_with_size<P: AsRef<Path>>(
         ),
     }
 
-    let file_logging_ready =
-        match LockedRotatingFileAppender::with_max_size(path, Box::new(PatternEncoder::new(pattern)), max_size_bytes) {
-            Ok(file) => {
-                builder = builder.appender(Appender::builder().build("file", Box::new(file)));
-                root = root.appender("file");
-                true
-            }
-            Err(error) => {
-                eprintln!(
-                    "{} file logging disabled for {}: {}",
-                    error_prefix,
-                    path.display(),
-                    error
-                );
-                false
-            }
-        };
+    let file_logging_ready = match LockedRotatingFileAppender::with_max_size(
+        path,
+        Box::new(PatternEncoder::new(pattern)),
+        max_size_bytes,
+    ) {
+        Ok(file) => {
+            builder = builder.appender(Appender::builder().build("file", Box::new(file)));
+            root = root.appender("file");
+            true
+        }
+        Err(error) => {
+            eprintln!(
+                "{} file logging disabled for {}: {}",
+                error_prefix,
+                path.display(),
+                error
+            );
+            false
+        }
+    };
 
     Ok((builder.build(root.build(level))?, file_logging_ready))
 }
