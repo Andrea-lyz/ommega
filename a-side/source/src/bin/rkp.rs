@@ -735,6 +735,7 @@ fn due_state(policy: &Policy) -> Value {
         "due_at_ms": due_at,
         "due": due,
         "last_issue_ms": policy.last_issue_ms,
+        "last_attempt_ms": policy.last_attempt_ms,
         "last_error": policy.last_error,
     })
 }
@@ -869,6 +870,21 @@ fn auto_run(args: &[String]) -> Result<Value> {
         )
     };
     let _ = write_feedback(&message, !failures.is_empty());
+    // Keep the reason next to the schedule: a failure that only lives in the
+    // feedback file disappears the next time the page reloads, and the 6h
+    // backoff below already keys off this field.
+    let mut policy = load_policy();
+    if failures.is_empty() {
+        policy.last_error.clear();
+    } else {
+        policy.last_error = failures
+            .first()
+            .and_then(|item| item.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+    }
+    let _ = save_policy(&policy);
     Ok(json!({
         "ran": true,
         "issued": issued,

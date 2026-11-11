@@ -453,6 +453,19 @@ async function renderAutomation() {
   setText('om-rkp-expiry', expiry
     ? (soonest[1].level || soonest[0]) + ' ' + formatDay(expiry) + ' · ' + formatKeyboxDays(Math.floor((expiry - Date.now()) / 86400000))
     : '—');
+  const lastError = document.getElementById('om-rkp-last-error');
+  if (lastError) {
+    if (policy.last_error) {
+      const when = Number.isSafeInteger(policy.last_attempt_ms) && policy.last_attempt_ms > 0
+        ? formatTime(policy.last_attempt_ms / 1000) + ' · ' : '';
+      lastError.textContent = text('上次自动签发失败：', 'Last automatic issuance failed: ') + when + policy.last_error;
+      lastError.hidden = false;
+      lastError.dataset.tone = 'error';
+    } else {
+      lastError.hidden = true;
+      lastError.textContent = '';
+    }
+  }
   setText('om-rkp-slots', slots.length
     ? text('两个槽位：','Slots: ') + slots.map(([label, box]) =>
         (box.level || label) + ' ' + formatKeyboxDays(Number.isSafeInteger(box.days) ? box.days : 0)).join(' · ')
@@ -873,6 +886,7 @@ function install() {
           <section class="panel settings-group"><div class="group-header"><h2 class="group-heading">RKP ${text('续签','renewal')}</h2><p>${text('按服务器下发的 time_to_refresh_hours 判断临期','Renew when the server-provided time_to_refresh_hours says the chain is near expiry')}</p></div>
             <dl class="b-summary-details"><div><dt>${text('链路类型','Chain kind')}</dt><dd id="om-rkp-kind">—</dd></div><div><dt>${text('到期（最早）','Expires (earliest)')}</dt><dd id="om-rkp-expiry">—</dd></div><div><dt>${text('续签策略','Policy')}</dt><dd id="om-rkp-policy">—</dd></div><div><dt>${text('临期时间','Refresh due')}</dt><dd id="om-rkp-due">—</dd></div></dl>
             <p class="note" id="om-rkp-slots">—</p>
+            <p class="note" id="om-rkp-last-error" hidden></p>
             <button type="button" class="action-row" id="om-rkp-auto-row"><span class="row-icon">${icon('refresh')}</span><span class="row-text"><strong>${text('临期自动签发','Automatic renewal')}</strong><small>${text('到期前按策略重新签发并替换 keybox；仅在存在有效种子与本机 RKP 证书时生效','Re-issue and replace the keybox before expiry, only with a valid seed and an RKP chain')}</small></span><span class="switch"><input id="om-rkp-auto" type="checkbox" role="switch"><span></span></span></button>
             <div class="om-automation-actions"><button type="button" id="om-rkp-issue-tee" class="om-button secondary">${text('签发并替换 TEE','Issue and replace TEE')}</button><button type="button" id="om-rkp-issue-sb" class="om-button secondary">${text('签发并替换 StrongBox','Issue and replace StrongBox')}</button></div>
             <p class="note" id="om-rkp-issue-warning" hidden>${text('频繁签发有风险：同一台设备的注册身份被 Google 记录，短时间重复申请可能被标记或限流。确认要现在签发吗？','Frequent issuance is risky: the registration identity is tracked by Google, and repeated requests in a short window can be flagged or throttled. Issue now?')}</p>
