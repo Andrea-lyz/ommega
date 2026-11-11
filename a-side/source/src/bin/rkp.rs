@@ -563,8 +563,15 @@ fn issue(args: &[String]) -> Result<Value> {
         .first()
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_else(|| "tee".to_string());
-    let (_, expected) = slot_for(&level)?;
     let _lock = lock_issuance()?.ok_or_else(|| anyhow!("已有签发在进行中，请稍后重试"))?;
+    issue_locked(&level)
+}
+
+/// The issuance itself. The caller owns the lock: flock is per open file
+/// description, so taking it twice in one process always fails, and auto-run has
+/// to hold it across several levels.
+fn issue_locked(level: &str) -> Result<Value> {
+    let (_, expected) = slot_for(level)?;
     let meta = load_meta().ok_or_else(|| anyhow!("尚未导入 CDI 种子包，请先导入"))?;
     let key = master_key(false)?.ok_or_else(|| anyhow!("种子主密钥丢失，请重新导入种子包"))?;
     let blob = fs::read(SEED_BLOB).context("读取已保存的种子包")?;
@@ -834,7 +841,7 @@ fn auto_run(args: &[String]) -> Result<Value> {
     let mut issued = Vec::new();
     let mut failures = Vec::new();
     for level in &due {
-        match issue(&[level.to_string()]) {
+        match issue_locked(level) {
             Ok(value) => {
                 issued.push(json!({"level": level, "chain": value.get("chain_summary").cloned()}))
             }
