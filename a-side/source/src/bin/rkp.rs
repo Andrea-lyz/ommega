@@ -629,7 +629,7 @@ fn issue_locked(level: &str) -> Result<Value> {
     if bytes.len() as u64 > KEYBOX_LIMIT {
         bail!("签发结果超过 {KEYBOX_LIMIT} 字节");
     }
-    let installed = install_keybox(&level, &bytes).map_err(|error| {
+    let installed = install_keybox(level, &bytes).map_err(|error| {
         let message = format!("{error:#}");
         let mut policy = load_policy();
         policy.last_error = message.clone();
