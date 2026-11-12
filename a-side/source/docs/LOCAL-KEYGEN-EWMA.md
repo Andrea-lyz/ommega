@@ -20,7 +20,9 @@ If the remote EWMA is below 85ms, no local padding is applied.
 
 The injector resolves the caller package for every GenerateKey and applies the
 delta gate to both local and remote-shaped requests; remote generation is
-normally already above the target. The TA no longer applies a local sleep.
+normally already above the target. The TA does not perform EWMA equalization.
+Its independent per-local-attestation certificate-issuance cost is applied
+before key publication, including when this optional policy is disabled.
 Samples above 500ms are discarded as queue-inflated.
 
 ## Device evidence

@@ -1142,6 +1142,16 @@ impl crate::KeyMintTa {
             let spki_der = cert::asn1_der_encode(&spki)
                 .map_err(|e| der_err!(e, "failed to encode SubjectPublicKeyInfo"))?;
             let leaf_cert = self.generate_cert(signing_info.clone(), &spki_der, params, &chars)?;
+            if signing_info
+                .as_ref()
+                .is_some_and(|info| info.attestation_info.is_some())
+            {
+                if let Some(provider) = &self.dev.sign_info {
+                    // Charge actual local issuance, including warm keybox caches and
+                    // explicit local issuers, before the key can be stored or observed.
+                    provider.local_attestation_issued();
+                }
+            }
             certificate_chain.try_push(leaf_cert)?;
 
             // Append the rest of the chain.

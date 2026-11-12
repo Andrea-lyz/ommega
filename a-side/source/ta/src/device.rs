@@ -353,6 +353,13 @@ pub trait RetrieveCertSigningInfo: Send {
     /// - the final certificate in the chain should be a self-signed cert holding a Google root.
     fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error>;
 
+    /// Account for a successfully issued local attestation leaf before key publication.
+    ///
+    /// This is local certificate work, including a caller-supplied local issuer,
+    /// not a signing-material lookup. Self-signed leaves and remotely issued
+    /// attestations do not call this hook. Device integrations may leave it empty.
+    fn local_attestation_issued(&self) {}
+
     /// Signing material for a locally certified authentication-bound key.
     ///
     /// Those keys are certified on A while their authentication token stays on A,
