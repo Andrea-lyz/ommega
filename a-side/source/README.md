@@ -298,10 +298,13 @@ file comes from the user.
   `policy --refresh-hours <n>` persist it in `data/rkp/policy.json`.
 - **Automatic renewal.** The keymint daemon starts an `ommega-rkp-auto` thread
   that runs `ommega-rkp auto-run` five minutes after start and then sleeps to the
-  instant the tool reports as the next renewal deadline, so there is no polling:
-  a fresh chain wakes the thread only when it enters its window, and every answer
-  is clamped to at most one day so a WebUI change is picked up without waiting for
-  a distant deadline. That subcommand owns the decision: it acts only when the page switch is
+  absolute wall-clock instant the tool reports as the next renewal deadline, so
+  there is no polling. The wait includes Android deep sleep and follows system
+  clock corrections: it does not wake a suspended device, but an elapsed deadline
+  is handled when the device resumes. A fresh chain wakes the thread only when it
+  enters its window, and every answer is clamped between two minutes and one day
+  so a WebUI change is picked up without waiting for a distant deadline. That
+  subcommand owns the decision: it acts only when the page switch is
   on, material is imported and a slot has entered its renewal window (expiry minus
   `time_to_refresh_hours`). It takes an `flock` so a manual issuance and the timer
   can never overlap, records every attempt in `policy.json`, and after a failure
