@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "ommega"
-version = "2.4.1"
+version = "2.4.2"
 dependencies = [
  "aes-gcm 0.10.3",
  "android_logger",
@@ -2324,7 +2324,7 @@ dependencies = [
 
 [[package]]
 name = "ommega-injector"
-version = "2.4.1"
+version = "2.4.2"
 dependencies = [
  "android_logger",
  "anyhow",

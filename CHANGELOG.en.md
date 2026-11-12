@@ -12,6 +12,56 @@ running Server and does not install the optional APKs.
 The README no longer embeds per-version notes: a release only bumps the version
 and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
 
+## 2.4.2 — 2026-11-12
+
+A-side automatic renewal and a dark-mode WebUI fix (A only; B and Server are
+unchanged, no Server update is required).
+
+- **Automatic renewal could silently skip issuance.** The renewal thread in the
+  keymint daemon waited with a relative `thread::sleep`, which on Android runs on
+  a clock that excludes deep sleep. A wait of "seven awake hours" therefore stayed
+  pending across a full night of suspension: a TEE chain could enter its renewal
+  window, pass its due time, and never be re-issued, while the page and logs still
+  looked healthy — because no attempt had started at all. That is the reported
+  case: policy enabled, seed decryptable, TEE already `due`, and the thread still
+  holding the wait it scheduled that morning.
+  The thread now waits on an **absolute wall-clock deadline**
+  (`clock_nanosleep` with `CLOCK_REALTIME` and `TIMER_ABSTIME`), so suspended
+  time and system clock corrections both count. An interrupted wait reuses the
+  same deadline instead of restarting a delay, and an unexpected kernel error logs
+  and backs off two minutes rather than busy-looping. The wait stays clamped
+  between two minutes and one day. **It does not wake a suspended device**; an
+  elapsed deadline is handled as soon as the device resumes.
+- **Diagnostics log boxes were unreadable in dark mode.** Two mistakes compounded:
+  the box background referenced `--om-surface-alt`, which no theme block ever
+  defined, so it always took a light literal fallback; and the only dark override
+  was scoped to `.om-modern[data-theme=dark]` while the theme is actually written
+  to `:root`, so that rule could never match. Dark mode therefore rendered
+  near-white text on a light surface — a measured contrast ratio of about 1.04.
+  The token is now defined for light and both dark theme paths, the box references
+  the token alone, and the measured dark result is `rgb(240,239,247)` on
+  `rgb(27,30,39)`, which meets WCAG AA.
+
+Upgrade notes: update the A-side module ZIP only; B and Server need no change.
+
+- The renewal fix lives inside the keymint daemon, so it **requires the module
+  deployment flow to reload the daemon — replacing the `ommega-rkp` tool alone has
+  no effect**. Existing policy, the imported seed and every issued keybox are kept.
+- The WebUI fix needs the module to be repackaged and the page refreshed; a forced
+  refresh avoids a stale WebView cache.
+- If your TEE chain is already near or past expiry, this update does not
+  retroactively renew it: check Settings → Automation after deploying and issue
+  manually if needed. A manual issuance spends one registration identity and is a
+  device-side operation.
+
+Validation: CI is green (A, B, Server, APKs, UI). Seven new renewal-timing
+regressions and three theme-contrast regressions pass locally, and reverting to the
+relative wait or restoring the literal fallback makes the matching regression
+fail. The dark log box was measured with computed colours in desktop Chromium
+using the same CSS. **It has not been verified inside a real-device WebView, and
+automatic renewal was not observed firing on a device**; both still need on-device
+acceptance.
+
 ## 2.3.1 — 2026-11-02
 
 Fixes the missing `ommega-rkp` in the 2.3.0 package.
