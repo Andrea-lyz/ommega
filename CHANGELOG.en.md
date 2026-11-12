@@ -14,39 +14,75 @@ and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
 
 ## 2.4.2 — 2026-11-12
 
-A-side automatic renewal and a dark-mode WebUI fix (A only; B and Server are
-unchanged, no Server update is required).
+A-side automatic renewal, local attestation timing and a dark-mode WebUI fix
+(A only; B and Server are unchanged, no Server update is required).
 
-- **Automatic renewal could silently skip issuance.** The renewal thread in the
-  keymint daemon waited with a relative `thread::sleep`, which on Android runs on
-  a clock that excludes deep sleep. A wait of "seven awake hours" therefore stayed
-  pending across a full night of suspension: a TEE chain could enter its renewal
-  window, pass its due time, and never be re-issued, while the page and logs still
-  looked healthy — because no attempt had started at all. That is the reported
-  case: policy enabled, seed decryptable, TEE already `due`, and the thread still
-  holding the wait it scheduled that morning.
-  The thread now waits on an **absolute wall-clock deadline**
-  (`clock_nanosleep` with `CLOCK_REALTIME` and `TIMER_ABSTIME`), so suspended
-  time and system clock corrections both count. An interrupted wait reuses the
+**Three independent defects in automatic renewal**
+
+- **It could silently skip issuance.** The renewal thread waited with a relative
+  `thread::sleep`, which on Android runs on a clock that excludes deep sleep. A
+  wait of "seven awake hours" therefore stayed pending across a full night of
+  suspension: a TEE chain could enter its renewal window, pass its due time, and
+  never be re-issued, while the page and logs still looked healthy — because no
+  attempt had started at all. That is the reported case: policy enabled, seed
+  decryptable, TEE already `due`, and the thread still holding the wait it
+  scheduled that morning. The thread now waits on an **absolute wall-clock
+  deadline** (`clock_nanosleep` with `CLOCK_REALTIME` and `TIMER_ABSTIME`), so
+  suspended time and clock corrections both count. An interrupted wait reuses the
   same deadline instead of restarting a delay, and an unexpected kernel error logs
   and backs off two minutes rather than busy-looping. The wait stays clamped
   between two minutes and one day. **It does not wake a suspended device**; an
   elapsed deadline is handled as soon as the device resumes.
-- **Diagnostics log boxes were unreadable in dark mode.** Two mistakes compounded:
-  the box background referenced `--om-surface-alt`, which no theme block ever
-  defined, so it always took a light literal fallback; and the only dark override
-  was scoped to `.om-modern[data-theme=dark]` while the theme is actually written
-  to `:root`, so that rule could never match. Dark mode therefore rendered
-  near-white text on a light surface — a measured contrast ratio of about 1.04.
-  The token is now defined for light and both dark theme paths, the box references
-  the token alone, and the measured dark result is `rgb(240,239,247)` on
-  `rgb(27,30,39)`, which meets WCAG AA.
+- **It deadlocked on its own lock.** `auto-run` took the issuance lock and then
+  called `issue()`, which took the same file lock again. `flock` is held per open
+  file description, so the second acquisition inside one process always failed:
+  every unattended renewal reported "an issuance is already in progress" and never
+  issued, while the six-hour backoff pushed the retry even further out. It is now
+  split into caller-locked `issue_locked()` and self-locking `issue()`.
+- **It hid its failures.** An unattended failure was only written to
+  `feedback.json`, which the next status read replaces, and `policy.json` kept an
+  empty `last_error`, so the page showed a healthy card for days. The reason is
+  now persisted next to the attempt time, exposed in `status` and rendered on the
+  RKP card.
+
+**Local attestation timing**
+
+- A local attested `generateKey` spent the same secure-world band as an
+  unchallenged one, so a validator pairing the two generations measured a
+  near-zero increment: 4–6 of 10 paired deltas were non-positive and
+  `dAtt/initSign` stayed near 0.1. Ordinary Operation latency cannot close that,
+  because both paths pay it.
+- A `RetrieveCertSigningInfo` hook now accounts one sampled 24–40 ms of
+  certificate work after a local leaf is encoded and before the key can be sealed
+  or observed. It covers a warm keybox cache, a caller-selected local issuer,
+  locally certified authentication-compatible keys and permitted remote fallback;
+  self-signed leaves, failed generation and remotely returned chains do not pay it.
+- Measured on the A device: `dAtt` 2.0/−2.2/−2.9 ms became 32.9/39.2/35.0 ms, and
+  non-positive pairs 4/6/5 became 0/0/0.
+
+**WebUI dark mode**
+
+- Diagnostics log boxes were unreadable in dark mode. Two mistakes compounded: the
+  background referenced `--om-surface-alt`, which no theme block ever defined, so
+  it always took a light literal fallback; and the only dark override was scoped to
+  `.om-modern[data-theme=dark]` while the theme is written to `:root`, so it could
+  never match. The measured dark contrast was about 1.04. The token is now defined
+  for light and both dark paths, the box references the token alone, and the
+  measured dark result is `rgb(240,239,247)` on `rgb(27,30,39)`, meeting WCAG AA.
+
+**Bundled component**
+
+- The bundled AProbe moves from 1.6 (versionCode 7) to 1.8.8-paytm
+  (versionCode 19), carrying the focused timing diagnostics. The signing identity
+  is unchanged (`CN=Ommega AProbe`), so it upgrades in place.
 
 Upgrade notes: update the A-side module ZIP only; B and Server need no change.
 
-- The renewal fix lives inside the keymint daemon, so it **requires the module
+- The renewal fixes live inside the keymint daemon, so they **require the module
   deployment flow to reload the daemon — replacing the `ommega-rkp` tool alone has
   no effect**. Existing policy, the imported seed and every issued keybox are kept.
+- The attestation-timing change spans KeyMint and the TA and likewise needs the
+  daemon reloaded.
 - The WebUI fix needs the module to be repackaged and the page refreshed; a forced
   refresh avoids a stale WebView cache.
 - If your TEE chain is already near or past expiry, this update does not
@@ -54,13 +90,63 @@ Upgrade notes: update the A-side module ZIP only; B and Server need no change.
   manually if needed. A manual issuance spends one registration identity and is a
   device-side operation.
 
-Validation: CI is green (A, B, Server, APKs, UI). Seven new renewal-timing
-regressions and three theme-contrast regressions pass locally, and reverting to the
-relative wait or restoring the literal fallback makes the matching regression
-fail. The dark log box was measured with computed colours in desktop Chromium
-using the same CSS. **It has not been verified inside a real-device WebView, and
-automatic renewal was not observed firing on a device**; both still need on-device
-acceptance.
+Validation: CI is green (A, B, Server, APKs, UI). Seven renewal-timing
+regressions, three theme-contrast regressions and the paired timing assertions
+pass locally; reverting to the relative wait, restoring the literal fallback or
+dropping the timing charge makes the matching regression fail. The dark log box
+was measured with computed colours in desktop Chromium using the same CSS, and the
+attestation timing was measured on the A device. **It has not been verified inside
+a real-device WebView, and automatic renewal was not observed firing on a
+device**; both still need on-device acceptance.
+
+## 2.4.1 — 2026-11-09
+
+Diagnostics accuracy in local mode (A only; B and Server are unchanged).
+
+- The KeyMint page no longer reports relay mode while the daemon runs locally;
+  the mode now comes from `data/relay-mode`.
+- Toggling the debug-logging switch updates the unlock button immediately instead
+  of waiting for the throttled refresh.
+- Failures reported against the keystore proxy (uid 1017) are attributed to the
+  requesting app instead of being hidden as a system identity.
+- Shared-uid packages such as Google Play services (10120 / 99910120) resolve to
+  their package name.
+- Packages outside the managed list get their real label through the KernelSU
+  bridge.
+- Diagnostics tests grew to 10 cases covering failure attribution and shared-uid
+  parsing.
+
+Upgrade notes: update the A-side module ZIP only; installing over an older
+version keeps data and every issued keybox.
+
+## 2.4.0 — 2026-11-09
+
+Tiered diagnostics pages and the in-app device physical on the A side (A only;
+B and Server are unchanged).
+
+- Settings → Diagnostics becomes a tiered page: one debug-logging master switch,
+  a reproduce-then-unlock gate, and seven feature subpages (request failures,
+  device check, KeyMint, injector, relay, property view, SOTER). Failures
+  aggregate per app with label, package and reason, and the overview mirrors them.
+- The device check is native inside the WebUI; AProbe ships as an optional
+  signed component that installs in one tap and joins the property view and the
+  automatic authorization policy.
+- Fingerprint signing certificate issuance gains a keybox choice: either the TEE
+  or the StrongBox slot, including a directly imported Samsung StrongBox keybox,
+  with an explicit fallback notice when a slot is missing.
+- Authentication-bound fingerprint signing is now attested locally on the A side,
+  so relay mode no longer surfaces `KEY_USER_NOT_AUTHENTICATED`.
+- Property view fixes: publish the target identity to `*_for_attestation`, skip
+  long properties that cannot be rewritten, and no longer abort the view when the
+  host lacks a property (resolves -66 for some apps).
+- Log control: the master switch also drives local and relay KeyMint / injector
+  levels, with log clearing, a rotation cap and a detailed SOTER narrative.
+- Keybox slots and the issuance keybox selection file are owned by
+  `keystore:keystore` at 0600 and normalized on import and at startup.
+- The WebUI switches faster: diagnostics caching and throttling, bounded log
+  reads and off-screen app-list rendering.
+
+Upgrade notes: update the A-side module ZIP only.
 
 ## 2.3.1 — 2026-11-02
 
