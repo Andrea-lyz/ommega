@@ -36,8 +36,16 @@ not wait for a remote latency sample; there is no EWMA-based sleep unless an
 application is explicitly listed in the optional per-app local-keygen policy.
 See LOCAL-KEYGEN-EWMA.md. Remote attested creation still pays real network,
 queue and hardware execution costs.
-Timing probes may continue to observe this difference; a compile result or the
-absence of a local sleep is not a claim that a remote RTT falls below a threshold.
+This EWMA policy is independent of software-TA certificate-work accounting.
+Every successfully encoded local attestation leaf pays one sampled 24-40ms
+issuance cost in addition to the ordinary key-creation cost, before key sealing
+and keystore publication. This includes a warm keybox, a caller-selected local
+issuer, local authentication-compatible signing and permitted remote fallback.
+Self-signed certificates, failed certificate generation and remotely returned
+attestation chains do not pay this additional cost. No caller name, alias or
+remote latency sample selects the cost; no attestation fields or key policies
+are changed. This is a bounded software timing model, not hardware execution
+or a guarantee about application-level scheduling or remote RTT.
 
 A keeps pooled HTTP clients per TLS verification policy. At debug level,
 `event=relay_roundtrip` reports the endpoint, request ID, returned task ID,

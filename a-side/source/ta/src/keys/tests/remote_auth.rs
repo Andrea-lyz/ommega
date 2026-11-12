@@ -6,15 +6,152 @@ use std::sync::{
     Arc,
 };
 
-struct TestSignInfo(device::SigningInfoSnapshot);
+struct TestSignInfo {
+    snapshot: device::SigningInfoSnapshot,
+    local_issued: Option<Arc<AtomicUsize>>,
+}
 
 impl device::RetrieveCertSigningInfo for TestSignInfo {
     fn signing_info(
         &self,
         _key_type: device::SigningKeyType,
     ) -> Result<device::SigningInfoSnapshot, Error> {
-        Ok(self.0.clone())
+        Ok(self.snapshot.clone())
     }
+
+    fn local_attestation_issued(&self) {
+        if let Some(calls) = &self.local_issued {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+fn local_signing_material(ta: &mut KeyMintTa) -> (device::SigningInfoSnapshot, AttestationKey) {
+    let attest = ta
+        .generate_key_default(&key_params(KeyPurpose::AttestKey), None)
+        .unwrap();
+    let (stored, _) = ta.keyblob_parse_decrypt(&attest.key_blob, &[]).unwrap();
+    let issuer = AttestationKey {
+        key_blob: attest.key_blob,
+        attest_key_params: vec![],
+        issuer_subject_name: cert::extract_subject(&attest.certificate_chain[0]).unwrap(),
+    };
+    (
+        device::SigningInfoSnapshot {
+            signing_key: stored.key_material,
+            cert_chain: attest.certificate_chain,
+            identity_digest: [0x11; 32],
+        },
+        issuer,
+    )
+}
+
+fn local_timing_fixture() -> (KeyMintTa, Arc<AtomicUsize>, AttestationKey) {
+    let mut ta = test_ta();
+    ta.dev.remote = None;
+    let (snapshot, issuer) = local_signing_material(&mut ta);
+    let calls = Arc::new(AtomicUsize::new(0));
+    ta.set_sign_info(Some(Box::new(TestSignInfo {
+        snapshot,
+        local_issued: Some(calls.clone()),
+    })));
+    (ta, calls, issuer)
+}
+
+fn local_timing_params() -> Vec<KeyParam> {
+    let mut params = key_params(KeyPurpose::Sign);
+    params.extend([
+        KeyParam::AttestationChallenge(b"local-timing".to_vec()),
+        KeyParam::AttestationApplicationId(b"test-app".to_vec()),
+    ]);
+    params
+}
+
+#[test]
+fn local_attestation_accounting_excludes_self_signed_keys() {
+    let (mut ta, calls, _) = local_timing_fixture();
+    ta.generate_key_default(&key_params(KeyPurpose::Sign), None)
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn local_attestation_accounting_runs_once_per_leaf_with_a_warm_cache() {
+    let (mut ta, calls, _) = local_timing_fixture();
+    for expected in 1..=3 {
+        let result = ta
+            .generate_key_default(&local_timing_params(), None)
+            .unwrap();
+        assert_eq!(result.certificate_chain.len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), expected);
+    }
+}
+
+#[test]
+fn local_attestation_accounting_includes_caller_selected_local_issuers() {
+    let (mut ta, calls, issuer) = local_timing_fixture();
+    // An enabled remote backend must not hide work performed by a local issuer.
+    // This stub would panic if contacted, so the test cannot send a real request.
+    ta.dev.remote = Some(Arc::new(TestRemote::default()));
+    let result = ta
+        .generate_key_default(&local_timing_params(), Some(issuer))
+        .unwrap();
+    assert_eq!(result.certificate_chain.len(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn local_attestation_accounting_excludes_remote_success_and_protocol_errors() {
+    let mut fixture = DelegationFixture::new();
+    let (snapshot, _) = local_signing_material(&mut fixture.ta);
+    let calls = Arc::new(AtomicUsize::new(0));
+    fixture.ta.set_sign_info(Some(Box::new(TestSignInfo {
+        snapshot,
+        local_issued: Some(calls.clone()),
+    })));
+    fixture.generate().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    fixture.response(vec![vec![0x30, 0]], false);
+    assert!(fixture.generate().is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn local_attestation_accounting_includes_permitted_remote_fallback() {
+    let (mut ta, calls, _) = local_timing_fixture();
+    ta.dev.remote = Some(Arc::new(TestRemote {
+        unavailable: true,
+        ..TestRemote::default()
+    }));
+    ta.generate_key_default(&local_timing_params(), None)
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn local_attestation_accounting_excludes_invalid_challenges_and_failed_signatures() {
+    let (mut ta, calls, _) = local_timing_fixture();
+    let mut missing_app_id = key_params(KeyPurpose::Sign);
+    missing_app_id.push(KeyParam::AttestationChallenge(b"challenge".to_vec()));
+    assert!(ta.generate_key_default(&missing_app_id, None).is_err());
+    let mut oversized = local_timing_params();
+    oversized.retain(|p| !matches!(p, KeyParam::AttestationChallenge(_)));
+    oversized.push(KeyParam::AttestationChallenge(vec![
+        1;
+        MAX_ATTESTATION_CHALLENGE_LEN
+            + 1
+    ]));
+    assert!(ta.generate_key_default(&oversized, None).is_err());
+    let (mut snapshot, _) = local_signing_material(&mut ta);
+    snapshot.signing_key = KeyMaterial::Aes(aes::Key::Aes256([0x33; 32]).into());
+    ta.dev.sign_info = Some(Box::new(TestSignInfo {
+        snapshot,
+        local_issued: Some(calls.clone()),
+    }));
+    assert!(ta
+        .generate_key_default(&local_timing_params(), None)
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 struct TestHmac;
@@ -45,22 +182,12 @@ impl Fixture {
         let mut source = DelegationFixture::new();
         // Software keybox stand-in: a locally generated attestation key signs the
         // compatibility certificates, mirroring the device's keybox.xml path.
-        let attest = source
-            .ta
-            .generate_key_default(&key_params(KeyPurpose::AttestKey), None)
-            .unwrap();
-        let (attest_stored, _) = source
-            .ta
-            .keyblob_parse_decrypt(&attest.key_blob, &[])
-            .unwrap();
-        let snapshot = device::SigningInfoSnapshot {
-            signing_key: attest_stored.key_material,
-            cert_chain: attest.certificate_chain.clone(),
-            identity_digest: [0x11; 32],
-        };
-        source
-            .ta
-            .set_sign_info(Some(Box::new(TestSignInfo(snapshot))));
+        let (snapshot, _) = local_signing_material(&mut source.ta);
+        let local_issued = Arc::new(AtomicUsize::new(0));
+        source.ta.set_sign_info(Some(Box::new(TestSignInfo {
+            snapshot,
+            local_issued: Some(local_issued.clone()),
+        })));
         let calls = Arc::new(AtomicUsize::new(0));
         // Payment compatibility is certified locally with A's keybox; the relay
         // must not be contacted and the certificate must describe the real policy.
@@ -84,6 +211,7 @@ impl Fixture {
             .ta
             .generate_key(&params, None, authorize_on_a)
             .unwrap();
+        assert_eq!(local_issued.load(Ordering::SeqCst), 1);
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,

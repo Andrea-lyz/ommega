@@ -212,6 +212,10 @@ pub struct KeyboxManager {
 }
 
 impl RetrieveCertSigningInfo for KeyboxManager {
+    fn local_attestation_issued(&self) {
+        crate::keymaster::tee_latency::charge(crate::keymaster::tee_latency::TaOp::Attestation);
+    }
+
     fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
         let keybox = KEYBOX
             .read()

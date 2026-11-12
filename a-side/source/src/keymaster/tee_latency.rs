@@ -28,8 +28,10 @@
 //! for. Costs are sampled per call rather than fixed: a constant offset can be
 //! calibrated away by a caller that compares repeated samples, while a spread
 //! behaves like the real thing. Entries of the same class are charged the same
-//! band, which keeps the ratios validators compute (operation against
-//! operation, generation against generation) inside the hardware range.
+//! band. Local attestation issuance has additional work beyond ordinary key
+//! generation: identity/root-of-trust authorization, extension encoding and an
+//! issuer-key signature. It pays a separate sampled cost before publication;
+//! otherwise paired challenged/unchallenged generations cancel the common cost.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,6 +46,9 @@ pub enum TaOp {
     /// `generateKey()`, `importKey()`, `importWrappedKey()`, `upgradeKey()`
     /// and `convertStorageKeyToEphemeral()`: RNG, key generation and sealing.
     KeyGen,
+    /// Successful local attestation leaf issuance, in addition to key creation.
+    /// Self-signing and remotely issued leaves do not pay this cost.
+    Attestation,
     /// Entries that still cross into the TA but do no key work, such as
     /// `deleteKey()`, `earlyBootEnded()` and the root-of-trust queries.
     Control,
@@ -57,8 +62,9 @@ pub enum TaOp {
 /// validators stop treating an operation as served without a secure world.
 fn band(op: TaOp) -> (u64, u64) {
     match op {
-        TaOp::Operation => (9, 21),
+        TaOp::Operation => (12, 21),
         TaOp::KeyGen => (6, 16),
+        TaOp::Attestation => (24, 40),
         TaOp::Control => (1, 4),
     }
 }
@@ -111,7 +117,12 @@ fn next_u64() -> u64 {
 mod tests {
     use super::*;
 
-    const OPS: [TaOp; 3] = [TaOp::Operation, TaOp::KeyGen, TaOp::Control];
+    const OPS: [TaOp; 4] = [
+        TaOp::Operation,
+        TaOp::KeyGen,
+        TaOp::Attestation,
+        TaOp::Control,
+    ];
 
     #[test]
     fn samples_stay_inside_the_configured_band() {
@@ -133,6 +144,18 @@ mod tests {
         // 9.5 ms as an operation that never reached a secure world.
         let (min, _) = band(TaOp::Operation);
         assert!(min + 3 > 9, "operation band {min} ms is too small");
+    }
+
+    #[test]
+    fn local_attestation_has_a_separate_bounded_increment() {
+        let (generation_min, generation_max) = band(TaOp::KeyGen);
+        let (attestation_min, attestation_max) = band(TaOp::Attestation);
+        // Independent base samples must not cancel all modeled certificate work.
+        assert!(generation_min + attestation_min > generation_max);
+        assert!(
+            attestation_max < 100,
+            "certificate work is not a remote RTT"
+        );
     }
 
     #[test]

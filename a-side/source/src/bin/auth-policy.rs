@@ -187,11 +187,12 @@ mod tests {
         )
         .is_err());
         assert_eq!(
-            policy_destination("write-system-apps", "").unwrap().0,
-            policy_destination("write-local-keygen", "com.example.app\n")
-                .unwrap()
-                .0,
-            "/data/misc/keystore/ommega/system_app"
+            policy_destination("write-system-apps", "").unwrap(),
+            ("/data/misc/keystore/ommega/system_app", 0o644)
+        );
+        assert_eq!(
+            policy_destination("write-local-keygen", "com.example.app\n").unwrap(),
+            ("/data/misc/keystore/ommega/data/local-keygen.txt", 0o600)
         );
         assert!(policy_destination("/tmp/unrelated", "").is_err());
         assert!(policy_destination("write", "[invalid").is_err());
