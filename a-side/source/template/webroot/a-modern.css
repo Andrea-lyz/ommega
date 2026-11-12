@@ -300,9 +300,10 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 .om-diag-summary { margin:0 0 10px; padding-inline-start:18px; color:var(--om-ink); font-size:13px; line-height:1.6; }
 .om-diag-summary:empty { display:none; }
 .om-diag-log { margin:10px 0 0; max-height:320px; overflow:auto; padding:10px; border-radius:10px;
-  background:var(--om-surface-alt,#f3f4fa); color:var(--om-ink); font-size:11px; line-height:1.5;
+  /* The theme lives on :root, so the log surface must come from a token that
+     both dark paths define; a literal fallback here pinned it to light. */
+  background:var(--om-surface-alt); color:var(--om-ink); font-size:11px; line-height:1.5;
   font-family:var(--om-mono,monospace); white-space:pre-wrap; user-select:text; }
-.om-modern[data-theme=dark] .om-diag-log { background:#1b1e27; }
 
 /* Diagnostics: native toggle, app rows and icon reuse from the app list. */
 .om-diag-switch { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:12px 0; }
