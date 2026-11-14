@@ -30,30 +30,26 @@ pub fn android_major_version_with(read_property: impl Fn(&str) -> Option<String>
 
 /// Raw properties changed by the established B SPL flow. These values only
 /// invalidate a HAL-sampled version cache; they are never version evidence.
-pub fn version_property_snapshot() -> Result<[Option<String>; 5], &'static str> {
+///
+/// Absence is a legitimate observation, not an error: Boot SPL lives in the
+/// vbmeta AVB property on many devices and has no `ro.*` property at all. A
+/// missing value is recorded as `None`, so it still invalidates the cache when
+/// it later appears or changes.
+pub fn version_property_snapshot() -> [Option<String>; 5] {
     version_property_snapshot_with(|name| rsproperties::get::<String>(name).ok())
 }
 
 fn version_property_snapshot_with(
     read_property: impl Fn(&str) -> Option<String>,
-) -> Result<[Option<String>; 5], &'static str> {
-    let values = [
+) -> [Option<String>; 5] {
+    [
         "ro.build.version.release",
         "ro.build.version.security_patch",
         "ro.vendor.build.security_patch",
         "ro.vendor.boot_security_patch",
         "ro.boot.image.build.security_patch",
     ]
-    .map(read_property);
-    let present = |index: usize| {
-        values[index]
-            .as_ref()
-            .is_some_and(|value| !value.is_empty())
-    };
-    if !(present(0) && present(1) && present(2) && (present(3) || present(4))) {
-        return Err("cannot observe B version properties for cache invalidation");
-    }
-    Ok(values)
+    .map(|name| read_property(name).filter(|value| !value.trim().is_empty()))
 }
 
 fn read_string_property(name: &str) -> Option<String> {
@@ -68,7 +64,7 @@ mod version_property_tests {
 
     #[test]
     fn invalidation_snapshot_retains_raw_values_and_both_boot_aliases() {
-        let values = version_property_snapshot_with(|name| Some(format!("raw:{name}"))).unwrap();
+        let values = version_property_snapshot_with(|name| Some(format!("raw:{name}")));
         assert_eq!(values[0].as_deref(), Some("raw:ro.build.version.release"));
         assert_eq!(
             values[3].as_deref(),
@@ -81,27 +77,30 @@ mod version_property_tests {
     }
 
     #[test]
-    fn missing_invalidation_evidence_fails_closed_but_one_boot_alias_is_enough() {
-        for missing in [
-            "ro.build.version.release",
-            "ro.build.version.security_patch",
-            "ro.vendor.build.security_patch",
-        ] {
-            assert!(version_property_snapshot_with(
-                |name| (name != missing).then(|| "value".to_string())
-            )
-            .is_err());
-        }
-        assert!(version_property_snapshot_with(|_| None).is_err());
-        assert!(version_property_snapshot_with(|_| Some(String::new())).is_err());
-        for absent_boot in [
-            "ro.vendor.boot_security_patch",
-            "ro.boot.image.build.security_patch",
-        ] {
-            assert!(version_property_snapshot_with(
-                |name| (name != absent_boot).then(|| "raw".to_string())
-            )
-            .is_ok());
-        }
+    fn absent_or_empty_properties_are_recorded_rather_than_failing_the_snapshot() {
+        // A device may publish no Boot SPL property at all (the value then only
+        // exists in the vbmeta AVB property), and an empty value is an
+        // observation too. Neither may block the relay profile.
+        let nothing = version_property_snapshot_with(|_| None);
+        assert_eq!(nothing, [None, None, None, None, None]);
+        let empty = version_property_snapshot_with(|_| Some(String::new()));
+        assert_eq!(empty, [None, None, None, None, None]);
+
+        let no_boot = version_property_snapshot_with(|name| {
+            (name != "ro.vendor.boot_security_patch"
+                && name != "ro.boot.image.build.security_patch")
+                .then(|| "raw".to_string())
+        });
+        assert_eq!(no_boot[0].as_deref(), Some("raw"));
+        assert_eq!(no_boot[1].as_deref(), Some("raw"));
+        assert_eq!(no_boot[2].as_deref(), Some("raw"));
+        assert_eq!(no_boot[3], None);
+        assert_eq!(no_boot[4], None);
+
+        // A later appearance still changes the snapshot, so the cache expires.
+        let later = version_property_snapshot_with(|name| {
+            (name == "ro.boot.image.build.security_patch").then(|| "2026-09-01".to_string())
+        });
+        assert_ne!(later, no_boot);
     }
 }

@@ -286,6 +286,12 @@ pub const VERSION_TAG_FIELDS: [&str; 4] = [
     "vendor_patchlevel",
     "boot_patchlevel",
 ];
+/// Fields that must match between A and B. Boot SPL describes each device's own
+/// boot image and is legitimately older than system/vendor in the integrity
+/// scheme, so two different devices never agree on it; it is compared for
+/// diagnostics only.
+pub const ALIGNED_VERSION_TAG_FIELDS: [&str; 3] =
+    ["os_version", "os_patchlevel", "vendor_patchlevel"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionSnapshot {
@@ -302,15 +308,28 @@ impl VersionSnapshot {
                 "a-native-v1 version revision does not match the established B profile",
             ));
         }
-        for (field, expected) in VERSION_TAG_FIELDS.iter().zip(expected) {
+        for (index, field) in ALIGNED_VERSION_TAG_FIELDS.iter().enumerate() {
             if self.tags.get(*field).and_then(serde_json::Value::as_u64)
-                != Some(u64::from(*expected))
+                != Some(u64::from(expected[index]))
             {
                 return Err(keymint_error(
                     KmErrorCode::VersionMismatch,
                     format!("a-native-v1 {field} does not match the HAL-sampled B profile"),
                 ));
             }
+        }
+        // Boot SPL is device-specific: in the integrity scheme an older boot
+        // date than system/vendor is the normal, accepted case. Report a
+        // difference, never reject on it.
+        if self
+            .tags
+            .get("boot_patchlevel")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(expected[3]))
+        {
+            log::info!(
+                "a-native-v1 boot_patchlevel differs from A (informational; boot SPL is per-device and may be older)"
+            );
         }
         Ok(())
     }
@@ -327,8 +346,7 @@ struct VersionEnvironment {
 impl VersionEnvironment {
     fn read() -> Result<Self> {
         let hal_generation = keymint_cache_generation();
-        let properties = kmr_common::android_version::version_property_snapshot()
-            .map_err(version_cache_error)?;
+        let properties = kmr_common::android_version::version_property_snapshot();
         if keymint_cache_generation() != hal_generation {
             return Err(version_cache_error(
                 "KeyMint generation changed while reading properties",

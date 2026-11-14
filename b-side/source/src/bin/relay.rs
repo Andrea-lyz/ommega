@@ -1751,6 +1751,7 @@ fn main() {
 mod attestation_version_gate_tests {
     use super::*;
     use ommegaclient_b::keymaster::relay_tee::relay_error_result;
+    use ommegaclient_b::keymaster::tee_ops::ALIGNED_VERSION_TAG_FIELDS;
     use std::cell::Cell;
 
     fn snapshot() -> VersionSnapshot {
@@ -1911,11 +1912,27 @@ mod attestation_version_gate_tests {
         let mut revision = payload();
         revision["device_attest_context"]["expected_version_revision"] = json!("older-revision");
         assert_rejected_before_operation(&revision, KmErrorCode::VersionMismatch, 1);
-        for field in VERSION_TAG_FIELDS {
+        for field in ALIGNED_VERSION_TAG_FIELDS {
             let mut changed = payload();
             changed["device_attest_context"]["expected_version_tags"][field] = json!(1);
             assert_rejected_before_operation(&changed, KmErrorCode::VersionMismatch, 1);
         }
+        // Boot SPL is per-device; in the integrity scheme an older boot date is
+        // normal, so a differing boot value must still reach the operation.
+        let operations = Cell::new(0);
+        let mut boot_differs = payload();
+        boot_differs["device_attest_context"]["expected_version_tags"]["boot_patchlevel"] =
+            json!(20260901);
+        with_attestation_version_gate(
+            &boot_differs,
+            || Ok(snapshot()),
+            |_| {
+                operations.set(operations.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(operations.get(), 1);
         let mut unsupported = payload();
         unsupported["device_attest_context"]["attestation_security_level"] = json!(2);
         assert_rejected_before_operation(&unsupported, KmErrorCode::HardwareTypeUnavailable, 0);
@@ -1934,19 +1951,22 @@ mod attestation_version_gate_tests {
                 -64
             );
         }
+        // A missing boot tag is not a mismatch: boot SPL is informational and may
+        // not be published by every HAL. It must not be invented from properties,
+        // but it also must not block the relay.
         let mut incomplete = snapshot();
         incomplete.tags["boot_patchlevel"] = Value::Null;
-        let result = with_attestation_version_gate(
+        let operations = Cell::new(0);
+        with_attestation_version_gate(
             &payload(),
             || Ok(incomplete),
-            |_| -> Result<()> {
-                panic!("missing HAL partition tag must not be replaced from properties")
+            |_| {
+                operations.set(operations.get() + 1);
+                Ok(())
             },
-        );
-        assert_eq!(
-            relay_error_result(&result.unwrap_err())["keymint_error_code"],
-            -101
-        );
+        )
+        .unwrap();
+        assert_eq!(operations.get(), 1);
     }
 }
 

@@ -44,10 +44,34 @@ pub(super) fn match_profile(
     let observed = profile
         .version_tags
         .ok_or_else(|| "B has not published hardware version authorizations".to_string())?;
-    if observed != expected {
+    // Boot SPL describes each device's own boot image. In the integrity scheme a
+    // boot date older than system/vendor is the normal, accepted case, so two
+    // different devices never agree on it and it must not gate the relay.
+    if (
+        observed.os_version,
+        observed.os_patchlevel,
+        observed.vendor_patchlevel,
+    ) != (
+        expected.os_version,
+        expected.os_patchlevel,
+        expected.vendor_patchlevel,
+    ) {
         return Err(format!(
-            "B version snapshot does not match A native target: expected={expected:?} observed={observed:?}; A SPL is never changed"
+            "B version snapshot does not match A native target: expected os_version={} os_patchlevel={} vendor={:?}, observed os_version={} os_patchlevel={} vendor={:?}; A SPL is never changed",
+            expected.os_version,
+            expected.os_patchlevel,
+            expected.vendor_patchlevel,
+            observed.os_version,
+            observed.os_patchlevel,
+            observed.vendor_patchlevel
         ));
+    }
+    if observed.boot_patchlevel != expected.boot_patchlevel {
+        log::info!(
+            "native SPL admission: boot_patchlevel differs (A={:?} B={:?}); informational only",
+            expected.boot_patchlevel,
+            observed.boot_patchlevel
+        );
     }
     Ok(())
 }
@@ -67,7 +91,11 @@ pub(super) fn admitted_target(profile: &RemoteIdentityProfile) -> Result<KeyMint
         .and_then(|config| crate::plat::vbmeta::native_version_target(&config.trust));
     let result = expected.and_then(|expected| {
         match_profile(expected, profile).map_err(anyhow::Error::msg)?;
-        Ok(expected)
+        // Seal with the B-sampled tags: the certificate is minted by B and
+        // carries these exact values, so stored characteristics must agree.
+        profile
+            .version_tags
+            .ok_or_else(|| anyhow!("B profile lost its version tags after admission"))
     });
     result.map_err(|error| {
         anyhow::Error::new(RelayKeyMintError {
@@ -231,18 +259,25 @@ mod tests {
         }
     }
     #[test]
-    fn only_equal_complete_native_snapshot_is_admitted() {
+    fn aligned_fields_must_match_but_a_lower_boot_date_is_accepted() {
         assert!(match_profile(target(), &profile()).is_ok());
-        for which in 0..4 {
+        // os_version, system and vendor are the fields an operator can align.
+        for which in 0..3 {
             let mut p = profile();
             let tags = p.version_tags.as_mut().unwrap();
             match which {
                 0 => tags.os_version = 160000,
                 1 => tags.os_patchlevel = 202608,
-                2 => tags.vendor_patchlevel = Some(20260905),
-                _ => tags.boot_patchlevel = Some(20260901),
+                _ => tags.vendor_patchlevel = Some(20260905),
             }
             assert!(match_profile(target(), &p).is_err());
+        }
+        // Boot SPL is per-device: in the integrity scheme an older boot date
+        // than system/vendor is normal, and the relay must still be admitted.
+        for boot in [Some(20251201), Some(0), None] {
+            let mut p = profile();
+            p.version_tags.as_mut().unwrap().boot_patchlevel = boot;
+            assert!(match_profile(target(), &p).is_ok(), "boot={boot:?}");
         }
     }
     #[test]
