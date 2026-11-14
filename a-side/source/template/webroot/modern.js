@@ -831,7 +831,6 @@ function install() {
         ${action('om-automation-open','自动化','Automation','CDI 种子、Keybox 与 RKP 续签','CDI seed, keybox and RKP renewal','sliders')}
         ${action('boot-hash','启动哈希','Verified boot hash','配置证明参数','Configure attestation parameters','shield')}
         ${action('boot-key','启动公钥','Verified boot key','配置证明公钥','Configure the attestation public key','key')}
-        ${action('om-spl-status-open','SPL 来源与差异','SPL sources and differences','仅查看已发布的本机来源与 B 端缓存；未知不推断','Read published local sources and cached B snapshots; unknown stays unknown','info')}
         </section><section class="panel settings-group om-hidden-policy-launchers"><div class="group-header"><h2 class="group-heading">${text('应用策略','App policies')}</h2></div>
         <div id="om-auth-signing-slot"></div>
         <div id="om-cpu-mask-slot"></div>
@@ -840,6 +839,7 @@ function install() {
         ${action('about','关于 Ommega','About Ommega','版本与项目说明','Version and project details','info')}
         </section><section class="panel settings-group"><div class="group-header"><h2 class="group-heading">${text('诊断与支持','Diagnostics and support')}</h2><p>${text('日志总开关、分级自检与设备体检','Logging switch, staged self-checks and a device probe')}</p></div>
         ${action('om-diagnostics-open','诊断与支持','Diagnostics and support','日志开关、分级自检与体检','Logging switch, staged checks and probe','info')}
+        ${action('om-spl-status-open','SPL 来源与差异','SPL sources and differences','仅查看已发布的本机来源与 B 端缓存；未知不推断','Read published local sources and cached B snapshots; unknown stays unknown','info')}
         </section></div></div>
         <p class="om-description" id="om-action-message" role="status"></p>
       </section>
