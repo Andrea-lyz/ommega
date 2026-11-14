@@ -161,7 +161,11 @@ jobs:
       - name: Test exp6 scope and readonly property records
         if: matrix.component == 'a'
         working-directory: a-side/source
-        run: sh cpu-mask/tests/run-pure-tests.sh
+        run: |
+          ndk_root="${ANDROID_NDK_ROOT:-$ANDROID_NDK_HOME}"
+          JNI_INCLUDE_DIR="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+          export JNI_INCLUDE_DIR
+          sh cpu-mask/tests/run-pure-tests.sh
       - name: Build Android module
         working-directory: ${{ matrix.component }}-side/source
         run: |
