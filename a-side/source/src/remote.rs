@@ -46,9 +46,11 @@ use crate::config;
 pub(crate) mod attestation_metrics;
 mod backend;
 mod health;
+mod spl;
 pub use backend::RemoteRelayBackend;
 use health::{record_remote_failure, record_remote_ok};
 pub use health::{remote_health, RemoteHealth, REMOTE_HEALTH_PATH};
+pub(crate) use spl::publish as publish_spl_status;
 
 const CONNECT_TIMEOUT_MS: u64 = 3000;
 const READ_TIMEOUT_MS: u64 = 30_000;
@@ -68,7 +70,40 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// write-once, saving the WebUI config could not refresh it, so the
 /// "uncheck enable remote, save, re-check, save" ritual users fall back on
 /// genuinely did nothing to the running daemon.
-static REMOTE_IDENTITY_PROFILE: RwLock<Option<RemoteIdentityProfile>> = RwLock::new(None);
+static REMOTE_IDENTITY_PROFILE: RwLock<Option<CachedIdentityProfile>> = RwLock::new(None);
+static REMOTE_PROFILE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+// Never format or publish this key: it contains the relay credential.
+#[derive(Clone, PartialEq, Eq)]
+struct RemoteRoute {
+    url: String,
+    device_id: String,
+    token: String,
+    tls_insecure: bool,
+}
+
+impl RemoteRoute {
+    fn from_config(config: &config::RemoteConfig) -> Self {
+        Self {
+            url: config.url.clone(),
+            device_id: config.device_id.clone(),
+            token: config.token.clone(),
+            tls_insecure: config.tls_insecure,
+        }
+    }
+
+    fn current() -> Result<Self> {
+        config::config()
+            .read()
+            .map(|config| Self::from_config(&config.remote))
+            .map_err(|_| anyhow!("config lock poisoned while reading relay route"))
+    }
+}
+
+struct CachedIdentityProfile {
+    route: RemoteRoute,
+    profile: RemoteIdentityProfile,
+}
 /// Why the relay last refused us, if it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteRejection {
@@ -107,6 +142,7 @@ impl RemoteRejection {
 /// Drop the cached identity profile so the next attestation re-reads it from
 /// the relay. Called when the runtime config is applied.
 pub fn invalidate_identity_profile() {
+    REMOTE_PROFILE_EPOCH.fetch_add(1, Ordering::AcqRel);
     // A different relay route must never leave the previous B's application view active.
     if let Err(error) = std::fs::remove_file(kmr_common::cpu_mask::PROFILE_PATH) {
         if error.kind() != std::io::ErrorKind::NotFound {
@@ -134,6 +170,8 @@ pub(crate) struct RemoteIdentityProfile {
     pub max_operations: Option<usize>,
     /// Hardware version authorizations, independent of A's property policy.
     pub version_tags: Option<kmr_ta::device::KeyMintVersionTags>,
+    pub version_policy: Option<String>,
+    pub version_revision: Option<String>,
 }
 
 fn new_request_id(kind: &str) -> String {
@@ -670,61 +708,17 @@ impl RemoteRelay {
             "keymint_record_version".to_string(),
             Value::from(profile.profile_version),
         );
-        // Forward the device's OS version + security patch level so the relay
-        // can emit KM_TAG_OS_VERSION (705) / KM_TAG_OS_PATCH_LEVEL (706) in the
-        // teeEnforced authorization list. Software attestations that omit these
-        // two tags are flagged as tampered by self-check apps (e.g. 密钥认证
-        // 1.7's `checkTagOrderMisordered` requires 704/705/706 all present).
-        let os_version = match config::config().read() {
-            Ok(g) => (g.trust.os_version.max(0) as u32) * 10000,
-            Err(_) => {
-                (kmr_common::android_version::android_major_version().unwrap_or(16) as u32) * 10000
-            }
-        };
-        if os_version > 0 {
-            ctx.insert("os_version".to_string(), Value::from(os_version));
-        }
-        let os_patch_level = match config::config().read() {
-            Ok(g) => patch_level_to_yyyymm(&g.trust.os_patchlevel),
-            Err(_) => None,
-        }
-        .or_else(|| {
-            crate::plat::resetprop::read_string_property("ro.build.version.security_patch")
+        // The immutable native A target is never rewritten to match B. The B
+        // admission revision is checked again before its normal HAL path.
+        let expected = spl::admitted_target(&profile)?;
+        spl::add_context(
+            &mut ctx,
+            expected,
+            profile
+                .version_revision
                 .as_deref()
-                .and_then(patch_level_to_yyyymm)
-        });
-        if let Some(patch) = os_patch_level {
-            ctx.insert("os_patch_level".to_string(), Value::from(patch));
-        }
-        // KeyMint 3.0+ also carries per-partition patch levels
-        // (KM_TAG_VENDOR_PATCH_LEVEL 707 / KM_TAG_BOOT_PATCH_LEVEL 708).
-        // Real TEE attestations include them; omitting them makes the server
-        // keybox layer fail STRONG integrity checks that expect them.
-        // Prefer the device's real partition patch props; the resolved config
-        // `[trust]` values can be stale/malformed (e.g. a bogus "2026-30").
-        let vendor_patch_level =
-            crate::plat::resetprop::read_string_property("ro.vendor.build.security_patch")
-                .as_deref()
-                .and_then(patch_level_to_yyyymm)
-                .or_else(|| match config::config().read() {
-                    Ok(g) => patch_level_to_yyyymm(&g.trust.vendor_patchlevel),
-                    Err(_) => None,
-                })
-                .or(os_patch_level);
-        if let Some(patch) = vendor_patch_level {
-            ctx.insert("vendor_patch_level".to_string(), Value::from(patch));
-        }
-        let boot_patch_level = crate::plat::vbmeta::boot_patch_property()
-            .as_deref()
-            .and_then(patch_level_to_yyyymm)
-            .or_else(|| match config::config().read() {
-                Ok(g) => patch_level_to_yyyymm(&g.trust.boot_patchlevel),
-                Err(_) => None,
-            })
-            .or(os_patch_level);
-        if let Some(patch) = boot_patch_level {
-            ctx.insert("boot_patch_level".to_string(), Value::from(patch));
-        }
+                .expect("admission checked revision"),
+        );
         // The B-side reads `device_attest_context` (nested form) for the
         // appid and optional serial; the full key params are passed through.
         let body = json!({
@@ -807,24 +801,6 @@ fn encode_device_properties(properties: &[(u32, Vec<u8>)]) -> Option<Value> {
 
 fn base64_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-/// Convert a "YYYY-MM-DD" patch level string to the YYYYMM integer the relay
-/// expects for KM_TAG_OS_PATCH_LEVEL (706).
-fn patch_level_to_yyyymm(value: &str) -> Option<u32> {
-    let s = value.trim();
-    // Accept both "YYYY-MM-DD" (or "YYYY-MM") and bare "YYYYMM".
-    if s.len() >= 6 {
-        let (year, month) = if s.as_bytes().get(4) == Some(&b'-') {
-            (s[0..4].parse::<u32>().ok()?, s[5..7].parse::<u32>().ok()?)
-        } else {
-            (s[0..4].parse::<u32>().ok()?, s[4..6].parse::<u32>().ok()?)
-        };
-        if (1..=12).contains(&month) {
-            return Some(year * 100 + month);
-        }
-    }
-    None
 }
 
 /// Reject the relay's StrongBox-to-TEE "robustness" marker.
@@ -961,6 +937,14 @@ fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
     }
 
     Ok(RemoteIdentityProfile {
+        version_policy: value
+            .get("version_policy")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        version_revision: value
+            .get("version_revision")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         version_tags: value
             .get("version_tags")
             .filter(|value| !value.is_null())
@@ -986,15 +970,31 @@ fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
 }
 
 pub(crate) fn remote_identity_profile() -> Result<RemoteIdentityProfile> {
+    let epoch = REMOTE_PROFILE_EPOCH.load(Ordering::Acquire);
+    let route = RemoteRoute::current()?;
     if let Ok(guard) = REMOTE_IDENTITY_PROFILE.read() {
-        if let Some(profile) = guard.as_ref() {
-            return Ok(profile.clone());
+        if let Some(entry) = guard.as_ref().filter(|entry| entry.route == route) {
+            return Ok(entry.profile.clone());
         }
     }
     let profile = RemoteRelay::fetch_identity_profile()?;
-    if let Ok(mut guard) = REMOTE_IDENTITY_PROFILE.write() {
-        *guard = Some(profile.clone());
+    if REMOTE_PROFILE_EPOCH.load(Ordering::Acquire) != epoch || RemoteRoute::current()? != route {
+        return Err(anyhow!(
+            "relay route changed while acquiring hardware profile; discard the snapshot"
+        ));
     }
+    if let Ok(mut guard) = REMOTE_IDENTITY_PROFILE.write() {
+        if REMOTE_PROFILE_EPOCH.load(Ordering::Acquire) != epoch {
+            return Err(anyhow!(
+                "relay profile invalidated while acquiring the snapshot"
+            ));
+        }
+        *guard = Some(CachedIdentityProfile {
+            route,
+            profile: profile.clone(),
+        });
+    }
+    publish_spl_status();
     Ok(profile)
 }
 
@@ -1199,8 +1199,16 @@ mod tests {
             has_strongbox: false,
             max_operations: None,
             version_tags: None,
+            version_policy: None,
+            version_revision: None,
         };
-        *REMOTE_IDENTITY_PROFILE.write().unwrap() = Some(profile);
+        let route = RemoteRoute {
+            url: "test".into(),
+            device_id: "test".into(),
+            token: String::new(),
+            tls_insecure: false,
+        };
+        *REMOTE_IDENTITY_PROFILE.write().unwrap() = Some(CachedIdentityProfile { route, profile });
         assert!(REMOTE_IDENTITY_PROFILE.read().unwrap().is_some());
         // Saving the config has to actually drop this, otherwise a corrected
         // token or server URL keeps serving the stale profile.

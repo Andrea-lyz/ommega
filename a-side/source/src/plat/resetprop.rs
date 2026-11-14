@@ -1,7 +1,7 @@
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{Mutex, OnceLock},
 };
@@ -93,6 +93,49 @@ fn require_binder_service<T>(name: &str, lookup: rsbinder::Result<Option<T>>) ->
 
 static HELPER: OnceLock<Mutex<ResetpropHelperClient>> = OnceLock::new();
 
+/// Largest image prefix the helper will return. A vbmeta image is at most 64 KiB;
+/// the Boot header only needs its first bytes.
+const NATIVE_READ_LIMIT: usize = 256 * 1024;
+const NATIVE_PARTITION_NAMES: &[&str] =
+    &["vbmeta", "vbmeta_a", "vbmeta_b", "boot", "boot_a", "boot_b"];
+
+fn is_allowed_partition_name(name: &str) -> bool {
+    NATIVE_PARTITION_NAMES.contains(&name)
+}
+
+/// Read at most `max_bytes` from an allowlisted `/dev/block/by-name` entry.
+fn execute_read_native_partition(name: &str, max_bytes: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    if !is_allowed_partition_name(name) {
+        bail!("refusing privileged read of unexpected partition '{name}'");
+    }
+    let max_bytes = max_bytes.min(NATIVE_READ_LIMIT);
+    if max_bytes == 0 {
+        bail!("privileged read requires a positive length");
+    }
+    let mut last_error = None;
+    for base in ["/dev/block/by-name", "/dev/block/bootdevice/by-name"] {
+        let path = PathBuf::from(base).join(name);
+        match std::fs::File::open(&path) {
+            Ok(file) => {
+                let mut bytes = Vec::with_capacity(max_bytes);
+                file.take(max_bytes as u64)
+                    .read_to_end(&mut bytes)
+                    .with_context(|| format!("failed to read {}", path.display()))?;
+                return Ok(bytes);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(anyhow!(
+        "no readable native partition '{name}': {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "not found".to_string())
+    ))
+}
+
 pub fn bootstrap_privileged_helper() -> Result<()> {
     if HELPER.get().is_some() {
         return Ok(());
@@ -135,6 +178,7 @@ pub fn bootstrap_privileged_helper() -> Result<()> {
 }
 
 pub fn runtime_write_and_verify_property(property: &str, value: &str) -> Result<()> {
+    reject_spl_property_write(property)?;
     with_helper(|helper| helper.write_and_verify_property(property, value))
 }
 
@@ -184,8 +228,16 @@ fn with_helper<T>(call: impl FnOnce(&mut ResetpropHelperClient) -> Result<T>) ->
 }
 
 pub fn direct_write_and_verify_property(property: &str, value: &str) -> Result<()> {
+    reject_spl_property_write(property)?;
     let command = find_resetprop_command()?;
     execute_write_and_verify(&command, property, value)
+}
+
+/// Bounded read of one native partition image through the existing privileged
+/// helper. The keystore uid cannot open `/dev/block/by-name/*`, but Boot SPL is
+/// only published there; parsing stays in Rust, this only returns raw bytes.
+pub(crate) fn read_native_partition(name: &str, max_bytes: usize) -> Result<Vec<u8>> {
+    with_helper(|helper| helper.read_native_partition(name, max_bytes))
 }
 
 pub fn read_string_property(name: &str) -> Option<String> {
@@ -220,7 +272,20 @@ pub fn find_resetprop_command() -> Result<ResetpropCommand> {
     Err(anyhow!("no usable resetprop binary found"))
 }
 
+fn reject_spl_property_write(property: &str) -> Result<()> {
+    let property = property.to_ascii_lowercase();
+    if property.contains("security_patch")
+        || property.contains("patchlevel")
+        || property.contains("patch_level")
+    {
+        bail!("native-only SPL policy refuses property write: {property}");
+    }
+    Ok(())
+}
+
 fn execute_write_and_verify(command: &ResetpropCommand, property: &str, value: &str) -> Result<()> {
+    // Defense in depth: this also protects the privileged helper's SET path.
+    reject_spl_property_write(property)?;
     let mut process = Command::new(&command.program);
     if let Some(prepend_arg) = &command.prepend_arg {
         process.arg(prepend_arg);
@@ -252,12 +317,31 @@ struct ResetpropHelperClient {
 
 impl ResetpropHelperClient {
     fn write_and_verify_property(&mut self, property: &str, value: &str) -> Result<()> {
+        reject_spl_property_write(property)?;
         let response = self.request(&format!("SET\t{property}\t{value}\n"))?;
         if response == "OK" {
             Ok(())
         } else {
             bail!("unexpected resetprop helper response")
         }
+    }
+
+    fn read_native_partition(&mut self, name: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        if !is_allowed_partition_name(name) {
+            bail!("refusing privileged read of unexpected partition '{name}'");
+        }
+        let max_bytes = max_bytes.min(NATIVE_READ_LIMIT);
+        let response = self.request(&format!("READ\t{name}\t{max_bytes}\n"))?;
+        let encoded = response
+            .strip_prefix("OK\t")
+            .ok_or_else(|| anyhow!("unexpected privileged read helper response"))?;
+        if encoded.len() % 2 != 0 || encoded.len() / 2 > max_bytes {
+            bail!("privileged read helper returned an invalid payload length");
+        }
+        if !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("privileged read helper returned a non-hex payload");
+        }
+        hex::decode(encoded).context("failed to decode privileged read payload")
     }
 
     fn get_phone_identifier(
@@ -471,6 +555,19 @@ fn parse_phone_identifier_request(line: &str) -> Option<(PhoneIdentifierKind, &s
     PhoneIdentifierKind::from_command(command).map(|kind| (kind, slot))
 }
 
+fn parse_read_request(line: &str) -> Option<(&str, usize)> {
+    let mut parts = line.split('\t');
+    if parts.next()? != "READ" {
+        return None;
+    }
+    let name = parts.next()?;
+    let max_bytes = parts.next()?.parse::<usize>().ok()?;
+    if parts.next().is_some() || !is_allowed_partition_name(name) {
+        return None;
+    }
+    Some((name, max_bytes))
+}
+
 fn parse_feature_request(line: &str) -> Option<&str> {
     let feature = line.strip_prefix("HAS_FEATURE\t")?;
     matches!(
@@ -509,7 +606,12 @@ fn helper_loop(stream: UnixStream, command: Option<ResetpropCommand>) -> Result<
         }
 
         let trimmed = line.trim_end_matches(['\r', '\n']);
-        let response = if let Some(feature) = parse_feature_request(trimmed) {
+        let response = if let Some((name, max_bytes)) = parse_read_request(trimmed) {
+            match execute_read_native_partition(name, max_bytes) {
+                Ok(bytes) => format!("OK\t{}\n", hex::encode(bytes)),
+                Err(error) => helper_error_response(&error),
+            }
+        } else if let Some(feature) = parse_feature_request(trimmed) {
             match execute_has_system_feature(feature) {
                 Ok(true) => "TRUE\n".to_string(),
                 Ok(false) => "FALSE\n".to_string(),
@@ -552,6 +654,7 @@ fn parse_request(line: &str) -> Result<(String, String)> {
         (Some("SET"), Some(property), Some(value))
             if !property.trim().is_empty() && !value.trim().is_empty() =>
         {
+            reject_spl_property_write(property)?;
             Ok((property.to_string(), value.to_string()))
         }
         _ => Err(anyhow!("invalid resetprop helper request: {trimmed:?}")),
@@ -561,6 +664,56 @@ fn parse_request(line: &str) -> Result<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privileged_read_is_limited_to_known_partition_names_and_lengths() {
+        assert_eq!(
+            parse_read_request("READ\tvbmeta_b\t64"),
+            Some(("vbmeta_b", 64))
+        );
+        assert_eq!(
+            parse_read_request("READ\tboot_a\t4096"),
+            Some(("boot_a", 4096))
+        );
+        for rejected in [
+            "READ\t../../data/misc/keystore/ommega/config.toml\t64",
+            "READ\tvbmeta_b",
+            "READ\tvbmeta_b\tabc",
+            "READ\tvbmeta_b\t64\textra",
+            "READ\tuserdata\t64",
+            "READ\tvbmeta_b\t-1",
+            "SET\tvbmeta_b\t64",
+            "READ\t\t64",
+        ] {
+            assert!(parse_read_request(rejected).is_none(), "{rejected}");
+        }
+        assert!(is_allowed_partition_name("vbmeta"));
+        assert!(!is_allowed_partition_name("vbmeta_c"));
+        assert!(!is_allowed_partition_name("/dev/block/by-name/vbmeta_b"));
+        assert_eq!(NATIVE_READ_LIMIT, 256 * 1024);
+    }
+
+    #[test]
+    fn spl_writes_are_rejected_before_helper_lookup_or_command_execution() {
+        for property in [
+            "ro.build.version.security_patch",
+            "ro.system.build.version.security_patch",
+            "ro.vendor.build.security_patch",
+            "ro.boot.image.build.security_patch",
+            "ro.bootimage.build.version.security_patch",
+            "ro.vendor.boot_security_patch",
+            "ro.odm.build.security_patch",
+            "ro.boot.patchlevel",
+        ] {
+            assert!(direct_write_and_verify_property(property, "2026-04-05").is_err());
+            assert!(runtime_write_and_verify_property(property, "2026-04-05").is_err());
+            assert!(parse_request(&format!("SET\t{property}\t2026-04-05\n")).is_err());
+        }
+        for property in ["ro.boot.vbmeta.digest", "ro.boot.vbmeta.public_key_digest"] {
+            reject_spl_property_write(property).unwrap();
+            assert!(parse_request(&format!("SET\t{property}\t001122\n")).is_ok());
+        }
+    }
 
     #[test]
     fn telephony_transactions_match_android_12_through_17() {

@@ -2,14 +2,16 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{mpsc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use kmr_common::crypto::{Rng, Sha256};
 use kmr_crypto_ommega::{rng::OmmegaRng, sha256::OmmegaSha256};
+use kmr_ta::device::KeyMintVersionTags;
 use rsbinder::Strong;
+use serde::Serialize;
 
 use crate::{
     android::{
@@ -23,24 +25,21 @@ use crate::{
             KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
         },
     },
-    config::{
-        ConfigFile, OsVersionSpec, RawTrustConfig, ResolvedTrust, TrustValueSource, TrustValueSpec,
-    },
+    config::{validate_trust_config, ConfigFile, ResolvedTrust, TrustValueSource, TrustValueSpec},
     plat::{attestation, resetprop, utils::get_keystore_service},
 };
 
-const SECURITY_PATCH_PROP: &str = "ro.build.version.security_patch";
-const SECURITY_PATCH_FALLBACK: &str = "2025-06-05";
-const VENDOR_PATCH_PROP: &str = "ro.vendor.build.security_patch";
-/// Boot image security-patch properties, most standard name first.
-///
-/// The boot image's AVB property (`com.android.build.boot.security_patch`) is
-/// what a bootloader hands to the kernel, and init exports that command-line
-/// entry as `ro.boot.image.build.security_patch`; vendor trees that only carry
-/// the value in a build.prop use the vendor-flavoured name.
-const BOOT_PATCH_PROPS: [&str; 2] = [
-    "ro.boot.image.build.security_patch",
-    "ro.vendor.boot_security_patch",
+const OS_VERSION_PROPS: &[&str] = &[
+    "ro.build.version.release",
+    "ro.system.build.version.release",
+];
+const SECURITY_PATCH_PROPS: &[&str] = &[
+    "ro.build.version.security_patch",
+    "ro.system.build.version.security_patch",
+];
+const VENDOR_PATCH_PROPS: &[&str] = &[
+    "ro.vendor.build.security_patch",
+    "ro.vendor.build.version.security_patch",
 ];
 const VBMETA_KEY_PROP: &str = "ro.boot.vbmeta.public_key_digest";
 const VBMETA_HASH_PROP: &str = "ro.boot.vbmeta.digest";
@@ -58,16 +57,11 @@ const BOOT_HEADER_PREFIX_SIZE: usize = 48;
 const BOOT_HEADER_VERSION_OFFSET: usize = 40;
 const BOOT_HEADER_V3_OS_VERSION_OFFSET: usize = 16;
 const BOOT_HEADER_LEGACY_OS_VERSION_OFFSET: usize = 44;
-const BUILD_PROP_PATHS: &[&str] = &[
-    "/system/build.prop",
-    "/system/system/build.prop",
-    "/product/build.prop",
-    "/system_ext/build.prop",
-    "/vendor/build.prop",
-    "/odm/build.prop",
-    "/vendor/default.prop",
-    "/default.prop",
-];
+// Never read a System version from Vendor/Product, or a Vendor SPL from System.
+const SYSTEM_BUILD_PROP_PATHS: &[&str] = &["/system/build.prop", "/system/system/build.prop"];
+const VENDOR_BUILD_PROP_PATHS: &[&str] = &["/vendor/build.prop", "/vendor/default.prop"];
+
+static NATIVE_VERSION_SNAPSHOT: OnceLock<NativeVersionSnapshot> = OnceLock::new();
 
 #[derive(Clone)]
 struct ResolvedField {
@@ -75,23 +69,129 @@ struct ResolvedField {
     source: TrustValueSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedPatchLevels {
-    pub security_patch: String,
-    pub os_patchlevel: String,
-    pub vendor_patchlevel: String,
-    pub boot_patchlevel: String,
-    pub observed_security_patch: Option<String>,
-    pub write_security_patch: bool,
+/// Firmware observations, not claims that a hardware TA accepted these versions.
+/// Raw Boot values decoded from a real header retain their native precision.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct NativeVersionField {
+    value: Option<u32>,
+    raw: Option<String>,
+    source: Option<String>,
+    state: &'static str,
+    reason: Option<String>,
+}
+
+impl NativeVersionField {
+    fn known(value: u32, raw: String, source: String) -> Self {
+        Self {
+            value: Some(value),
+            raw: Some(raw),
+            source: Some(source),
+            state: "known",
+            reason: None,
+        }
+    }
+
+    fn unknown(reason: String) -> Self {
+        Self {
+            value: None,
+            raw: None,
+            source: None,
+            state: "unknown",
+            reason: Some(reason),
+        }
+    }
+
+    fn required(&self, field: &str) -> Result<u32> {
+        self.value
+            .filter(|_| self.source.is_some() && self.raw.is_some() && self.state == "known")
+            .ok_or_else(|| {
+                anyhow!(
+                    "native {field} is unknown: {}; no property/default substitute is permitted",
+                    self.reason
+                        .as_deref()
+                        .unwrap_or("no authoritative firmware source")
+                )
+            })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NativeVersionSnapshot {
+    system: NativeVersionField,
+    boot: NativeVersionField,
+    vendor: NativeVersionField,
+    os_version: NativeVersionField,
+}
+
+impl NativeVersionSnapshot {
+    fn target(&self) -> Result<KeyMintVersionTags> {
+        Ok(KeyMintVersionTags {
+            os_version: self.os_version.required("OS version")?,
+            os_patchlevel: self.system.required("System SPL")?,
+            vendor_patchlevel: Some(self.vendor.required("Vendor SPL")?),
+            boot_patchlevel: Some(self.boot.required("Boot SPL")?),
+        })
+    }
+
+    fn validate_trust(&self, trust: &ResolvedTrust) -> Result<KeyMintVersionTags> {
+        let target = self.target()?;
+        let boot =
+            crate::keymaster::keymint_device::extract_boot_patchlevel(&trust.boot_patchlevel)
+                .map_err(anyhow::Error::msg)
+                .context("invalid internal native Boot value")?;
+        if target.boot_patchlevel != Some(boot)
+            || trust.os_version != (target.os_version / 10000) as i32
+            || Some(trust.security_patch.as_str()) != self.system.raw.as_deref()
+            || Some(trust.os_patchlevel.as_str()) != self.system.raw.as_deref()
+            || Some(trust.vendor_patchlevel.as_str()) != self.vendor.raw.as_deref()
+            || Some(trust.boot_patchlevel.as_str()) != self.boot.raw.as_deref()
+        {
+            bail!("resolved trust differs from the frozen native version snapshot; refusing a version override");
+        }
+        Ok(target)
+    }
+}
+
+/// Read the already-frozen startup target. This never probes the device or
+/// asserts that getprop equals TA-enforced authorization values.
+pub(crate) fn native_version_target(trust: &ResolvedTrust) -> Result<KeyMintVersionTags> {
+    native_version_snapshot()?.validate_trust(trust)
+}
+
+/// JSON firmware block for spl-status.json. Each partition/OS record contains
+/// value (wire u32 or null), raw, source, state and reason. No disk write occurs.
+/// A "known" record establishes only its named firmware source, not TA acceptance.
+pub(crate) fn native_spl_snapshot_json() -> Result<serde_json::Value> {
+    serde_json::to_value(native_version_snapshot()?)
+        .context("failed to serialize native SPL snapshot")
+}
+
+fn native_version_snapshot() -> Result<&'static NativeVersionSnapshot> {
+    NATIVE_VERSION_SNAPSHOT
+        .get()
+        .ok_or_else(|| anyhow!("native version snapshot has not been captured at startup"))
 }
 
 pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
+    validate_trust_config(&config_file.trust)?;
+    let native = NATIVE_VERSION_SNAPSHOT.get_or_init(capture_native_versions);
+    // Startup needs only the firmware values that always exist in the system
+    // partition. A partition-level Boot value that even the privileged helper
+    // cannot read must not brick the local keystore: it is recorded as unknown,
+    // keeps the previous local behaviour, and remote admission stays fail-closed
+    // because native_version_target still requires every field.
+    let os_version = native
+        .os_version
+        .required("OS version")
+        .context("native-only startup requires the firmware OS version")?;
+    if native.boot.value.is_none() {
+        log::warn!(
+            "native Boot SPL unavailable ({}); local tags keep the System level and remote native admission will be refused",
+            native.boot.reason.as_deref().unwrap_or("no source")
+        );
+    }
+    let os_version = (os_version / 10000) as i32;
     let slot_suffix = resetprop::read_string_property("ro.boot.slot_suffix").unwrap_or_default();
-    let patches = resolve_patch_levels(&config_file.trust)?;
-    let os_version = match config_file.trust.os_version {
-        OsVersionSpec::Auto => kmr_common::android_version::android_major_version().unwrap_or(16),
-        OsVersionSpec::Fixed(value) => value,
-    };
 
     let vb_key = resolve_vb_key(
         &config_file.trust.vb_key,
@@ -118,14 +218,6 @@ pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
     }
 
     sync_sysprops_if_needed(&vb_key, &vb_hash)?;
-    if patches.write_security_patch {
-        write_security_patch_with_rollback(
-            resetprop::direct_write_and_verify_property,
-            resetprop::read_string_property,
-            &patches.security_patch,
-            patches.observed_security_patch.as_deref(),
-        )?;
-    }
 
     let vb_key_hex = hex::encode(vb_key.value);
     let vb_hash_hex = hex::encode(vb_hash.value);
@@ -141,10 +233,26 @@ pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
 
     Ok(ResolvedTrust {
         os_version,
-        security_patch: patches.security_patch,
-        os_patchlevel: patches.os_patchlevel,
-        vendor_patchlevel: patches.vendor_patchlevel,
-        boot_patchlevel: patches.boot_patchlevel,
+        security_patch: native
+            .system
+            .raw
+            .clone()
+            .context("native System SPL is unknown")?,
+        os_patchlevel: native
+            .system
+            .raw
+            .clone()
+            .context("native System SPL is unknown")?,
+        vendor_patchlevel: native
+            .vendor
+            .raw
+            .clone()
+            .context("native Vendor SPL is unknown")?,
+        boot_patchlevel: native
+            .boot
+            .raw
+            .clone()
+            .unwrap_or_else(|| native.system.raw.clone().unwrap_or_default()),
         vb_key: vb_key.value,
         vb_hash: vb_hash.value,
         vb_key_source: vb_key.source,
@@ -152,15 +260,6 @@ pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
         verified_boot_state,
         device_locked,
     })
-}
-
-pub(crate) fn write_runtime_security_patch(desired: &str, previous: Option<&str>) -> Result<()> {
-    write_security_patch_with_rollback(
-        resetprop::runtime_write_and_verify_property,
-        resetprop::read_string_property,
-        desired,
-        previous,
-    )
 }
 
 fn resolve_vb_key(spec: &TrustValueSpec, device_locked: bool, slot_suffix: &str) -> ResolvedField {
@@ -267,143 +366,62 @@ fn honest_boot_state(
     (configured_state && configured_locked, configured_locked)
 }
 
-pub(crate) fn resolve_patch_levels(trust: &RawTrustConfig) -> Result<ResolvedPatchLevels> {
-    let observed_security_patch = resetprop::read_string_property(SECURITY_PATCH_PROP);
-    let security_patch = observed_security_patch
-        .clone()
-        .or_else(|| read_build_prop_value(SECURITY_PATCH_PROP));
-    if security_patch.is_none() {
-        log::warn!(
-            "failed to read {SECURITY_PATCH_PROP} from properties or build.prop; using {SECURITY_PATCH_FALLBACK}"
-        );
+fn capture_native_versions() -> NativeVersionSnapshot {
+    use crate::keymaster::keymint_device::{
+        extract_os_version, extract_patchlevel, extract_truncated_patchlevel,
+    };
+    NativeVersionSnapshot {
+        os_version: read_native_build_field(
+            SYSTEM_BUILD_PROP_PATHS,
+            OS_VERSION_PROPS,
+            extract_os_version,
+        ),
+        system: read_native_build_field(
+            SYSTEM_BUILD_PROP_PATHS,
+            SECURITY_PATCH_PROPS,
+            extract_truncated_patchlevel,
+        ),
+        vendor: read_native_build_field(
+            VENDOR_BUILD_PROP_PATHS,
+            VENDOR_PATCH_PROPS,
+            extract_patchlevel,
+        ),
+        boot: read_abl_boot_patchlevel().unwrap_or_else(|error| {
+            NativeVersionField::unknown(format!("Boot AVB/header unavailable: {error:#}"))
+        }),
     }
-    let vendor_patch = resetprop::read_string_property(VENDOR_PATCH_PROP)
-        .or_else(|| read_build_prop_value(VENDOR_PATCH_PROP));
-    let property_boot_patch = boot_patch_property();
-    let boot_patch = if trust.boot_patchlevel.trim() == "auto" {
-        match read_abl_boot_patchlevel() {
-            Ok(value) => Some(value),
-            Err(error) => {
-                log::warn!(
-                    "failed to resolve boot patch level from boot metadata: {error:#}; using property fallback"
-                );
-                property_boot_patch
+}
+
+fn read_native_build_field(
+    paths: &[&str],
+    keys: &[&str],
+    parse: fn(&str) -> std::result::Result<u32, String>,
+) -> NativeVersionField {
+    for path in paths {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for key in keys {
+            if let Some(raw) = parse_build_prop_value(&contents, key) {
+                let source = format!("firmware:{path}#{key}");
+                return match parse(&raw) {
+                    Ok(value) => NativeVersionField::known(value, raw, source),
+                    Err(error) => NativeVersionField {
+                        value: None,
+                        raw: Some(raw),
+                        source: Some(source),
+                        state: "unknown",
+                        reason: Some(error),
+                    },
+                };
             }
         }
-    } else {
-        property_boot_patch
-    };
-    let latest = [
-        trust.security_patch.as_str(),
-        trust.os_patchlevel.as_str(),
-        trust.vendor_patchlevel.as_str(),
-        trust.boot_patchlevel.as_str(),
-    ]
-    .iter()
-    .any(|value| value.trim() == "latest")
-    .then(current_patchlevel)
-    .transpose()?;
-    resolve_patch_levels_from(
-        trust,
-        security_patch.as_deref(),
-        vendor_patch.as_deref(),
-        boot_patch.as_deref(),
-        observed_security_patch.as_deref(),
-        latest.as_deref(),
-    )
-}
-
-fn resolve_patch_levels_from(
-    trust: &RawTrustConfig,
-    security_property: Option<&str>,
-    vendor_property: Option<&str>,
-    boot_property: Option<&str>,
-    observed_security_property: Option<&str>,
-    latest: Option<&str>,
-) -> Result<ResolvedPatchLevels> {
-    let security_auto = security_property.unwrap_or(SECURITY_PATCH_FALLBACK);
-    let security_patch =
-        resolve_security_patch_value(&trust.security_patch, security_auto, latest)?;
-    let os_patchlevel = resolve_patchlevel_mode(
-        "os_patchlevel",
-        &trust.os_patchlevel,
-        &security_patch,
-        latest,
-    )?;
-    let vendor_auto = vendor_property.unwrap_or(&os_patchlevel);
-    let vendor_patchlevel = resolve_patchlevel_mode(
-        "vendor_patchlevel",
-        &trust.vendor_patchlevel,
-        vendor_auto,
-        latest,
-    )?;
-    let boot_auto = boot_property.unwrap_or(&os_patchlevel);
-    let boot_patchlevel =
-        resolve_patchlevel_mode("boot_patchlevel", &trust.boot_patchlevel, boot_auto, latest)?;
-    let write_security_patch = observed_security_property.is_some()
-        && trust.security_patch.trim() != "auto"
-        && observed_security_property != Some(security_patch.as_str());
-
-    Ok(ResolvedPatchLevels {
-        security_patch,
-        os_patchlevel,
-        vendor_patchlevel,
-        boot_patchlevel,
-        observed_security_patch: observed_security_property.map(str::to_string),
-        write_security_patch,
-    })
-}
-
-fn resolve_security_patch_value(mode: &str, auto: &str, latest: Option<&str>) -> Result<String> {
-    match mode.trim() {
-        "auto" => Ok(auto.to_string()),
-        "latest" => latest
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("latest value was not resolved for security_patch")),
-        value if crate::config::is_security_patch_date(value) => Ok(value.to_string()),
-        value => Err(anyhow!("invalid security_patch value: {value}")),
     }
-}
-
-fn resolve_patchlevel_mode(
-    field: &str,
-    mode: &str,
-    auto: &str,
-    latest: Option<&str>,
-) -> Result<String> {
-    match mode.trim() {
-        "auto" => Ok(auto.to_string()),
-        "latest" => latest
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("latest value was not resolved for {field}")),
-        value if !value.is_empty() => Ok(value.to_string()),
-        value => Err(anyhow!("invalid {field} value: {value}")),
-    }
-}
-
-fn current_patchlevel() -> Result<String> {
-    let (year, month) = current_year_month()?;
-    Ok(format!("{year:04}-{month:02}-05"))
-}
-
-fn read_build_prop_value(key: &str) -> Option<String> {
-    BUILD_PROP_PATHS.iter().find_map(|path| {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|contents| parse_build_prop_value(&contents, key))
-    })
-}
-
-/// First nonempty boot patch-level property, runtime value before build.prop.
-///
-/// Only used when the boot image metadata cannot be read: that metadata is what
-/// the bootloader itself consumes, and it is the source a physical device uses.
-pub(crate) fn boot_patch_property() -> Option<String> {
-    BOOT_PATCH_PROPS.iter().find_map(|prop| {
-        resetprop::read_string_property(prop)
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| read_build_prop_value(prop))
-    })
+    NativeVersionField::unknown(format!(
+        "no readable native firmware value for {} in {}",
+        keys.join(" or "),
+        paths.join(", ")
+    ))
 }
 
 fn parse_build_prop_value(contents: &str, key: &str) -> Option<String> {
@@ -416,85 +434,6 @@ fn parse_build_prop_value(contents: &str, key: &str) -> Option<String> {
             (candidate_key.trim() == key).then(|| candidate_value.trim().to_string())
         })
         .filter(|value| !value.is_empty())
-}
-
-fn write_security_patch_with_rollback<W, R>(
-    mut writer: W,
-    reader: R,
-    desired: &str,
-    previous: Option<&str>,
-) -> Result<()>
-where
-    W: FnMut(&str, &str) -> Result<()>,
-    R: Fn(&str) -> Option<String>,
-{
-    let previous = previous
-        .ok_or_else(|| anyhow!("{SECURITY_PATCH_PROP} is missing; refusing to create it"))?;
-    let current = reader(SECURITY_PATCH_PROP)
-        .ok_or_else(|| anyhow!("{SECURITY_PATCH_PROP} disappeared; refusing to create it"))?;
-    if current != previous {
-        bail!(
-            "{SECURITY_PATCH_PROP} changed while the update was prepared; refusing to overwrite it"
-        );
-    }
-
-    let write_error = match writer(SECURITY_PATCH_PROP, desired) {
-        Ok(()) => return Ok(()),
-        Err(error) => error,
-    };
-    let actual = reader(SECURITY_PATCH_PROP);
-    if actual.as_deref() == Some(desired) {
-        log::warn!("security patch writer returned an error, but the desired value was verified");
-        return Ok(());
-    }
-    if actual.as_deref() == Some(previous) {
-        return Err(write_error).context("security patch write failed without changing property");
-    }
-    if actual.is_none() {
-        return Err(write_error)
-            .context("security patch write failed and property disappeared; rollback skipped");
-    }
-
-    let rollback_error = writer(SECURITY_PATCH_PROP, previous).err();
-    let actual = reader(SECURITY_PATCH_PROP);
-    if actual.as_deref() == Some(previous) {
-        return Err(write_error).context("security patch write failed; previous state restored");
-    }
-    if actual.as_deref() == Some(desired) {
-        log::warn!(
-            "security patch rollback could not be confirmed, but the desired value was verified"
-        );
-        return Ok(());
-    }
-    Err(anyhow!(
-        "security patch write failed: {write_error:#}; rollback failed: {}; current property state: {}",
-        rollback_error
-            .map(|error| format!("{error:#}"))
-            .unwrap_or_else(|| "property verification did not restore the previous state".into()),
-        actual.as_deref().unwrap_or("<missing>")
-    ))
-}
-
-fn current_year_month() -> Result<(i32, u32)> {
-    #[cfg(unix)]
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        if now < 0 {
-            bail!("libc::time returned a negative timestamp");
-        }
-        let mut local = std::mem::zeroed::<libc::tm>();
-        if libc::localtime_r(&now, &mut local).is_null() {
-            bail!("libc::localtime_r failed");
-        }
-        Ok((local.tm_year + 1900, (local.tm_mon + 1) as u32))
-    }
-
-    #[cfg(not(unix))]
-    {
-        Err(anyhow!(
-            "current_year_month is unsupported on this platform"
-        ))
-    }
 }
 
 fn sync_sysprops_if_needed(vb_key: &ResolvedField, vb_hash: &ResolvedField) -> Result<()> {
@@ -538,62 +477,78 @@ impl TrustValueSource {
     }
 }
 
-fn read_abl_boot_patchlevel() -> Result<String> {
+fn read_abl_boot_patchlevel() -> Result<NativeVersionField> {
     let slot_suffix = resetprop::read_string_property("ro.boot.slot_suffix").unwrap_or_default();
     let boot_path = find_avb_partition_path(&slot_suffix, "boot")
         .context("failed to locate active boot partition")?;
     read_abl_boot_patchlevel_from_paths(find_top_level_vbmeta_path(&slot_suffix), &boot_path)
-        .map(|value| value.to_string())
 }
 
 fn read_abl_boot_patchlevel_from_paths(
     top_level_path: Result<PathBuf>,
     boot_path: &Path,
-) -> Result<u32> {
-    let top_level_error = match top_level_path {
-        Ok(path) => {
-            let top_level = load_vbmeta_blob(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            if let Some(value) = vbmeta_boot_patchlevel(&top_level)? {
-                return Ok(value);
+) -> Result<NativeVersionField> {
+    match top_level_path {
+        Ok(path) => match load_vbmeta_blob(&path) {
+            Ok(top_level) => {
+                if let Some(value) = vbmeta_boot_patchlevel(
+                    &top_level,
+                    format!(
+                        "avb:{}#com.android.build.boot.security_patch",
+                        path.display()
+                    ),
+                )? {
+                    return Ok(value);
+                }
             }
-            None
-        }
-        Err(error) => {
-            log::debug!("failed to locate top-level vbmeta; checking boot image: {error:#}");
-            Some(error)
-        }
-    };
+            Err(error) => {
+                log::debug!("top-level vbmeta unavailable; checking Boot image: {error:#}")
+            }
+        },
+        Err(error) => log::debug!("top-level vbmeta unavailable; checking Boot image: {error:#}"),
+    }
 
     match load_embedded_vbmeta_blob(boot_path) {
         Ok(embedded) => {
-            if let Some(value) = vbmeta_boot_patchlevel(&embedded)? {
+            if let Some(value) = vbmeta_boot_patchlevel(
+                &embedded,
+                format!(
+                    "avb:{}:embedded#com.android.build.boot.security_patch",
+                    boot_path.display()
+                ),
+            )? {
                 return Ok(value);
             }
         }
-        Err(error) => {
-            if let Some(top_level_error) = top_level_error {
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to read top-level vbmeta from {} after {top_level_error:#}",
-                        boot_path.display()
-                    )
-                });
-            }
-            log::debug!(
-                "failed to read embedded boot vbmeta from {}; using boot header: {error:#}",
-                boot_path.display()
-            );
-        }
+        Err(error) => log::debug!(
+            "embedded Boot AVB unavailable; checking native header {}: {error:#}",
+            boot_path.display()
+        ),
     }
-    read_boot_header_patchlevel(boot_path)
+    let value = read_boot_header_patchlevel(boot_path)?;
+    Ok(NativeVersionField::known(
+        value,
+        value.to_string(),
+        format!("boot-header:{}#os_version", boot_path.display()),
+    ))
 }
 
-fn vbmeta_boot_patchlevel(vbmeta: &[u8]) -> Result<Option<u32>> {
-    if let Some(value) = avb_property_value(vbmeta, BOOT_AVB_PROPERTY)? {
-        return parse_boot_patchlevel_property(value)
-            .map(Some)
-            .ok_or_else(|| anyhow!("invalid com.android.build.boot.security_patch AVB property"));
+fn vbmeta_boot_patchlevel(vbmeta: &[u8], source: String) -> Result<Option<NativeVersionField>> {
+    if let Some(raw) = avb_property_value(vbmeta, BOOT_AVB_PROPERTY)? {
+        return Ok(Some(match parse_boot_patchlevel_property(raw) {
+            Some(value) => {
+                NativeVersionField::known(value, std::str::from_utf8(raw)?.to_string(), source)
+            }
+            None => NativeVersionField {
+                value: None,
+                raw: std::str::from_utf8(raw).ok().map(str::to_string),
+                source: Some(source),
+                state: "unknown",
+                reason: Some(
+                    "invalid com.android.build.boot.security_patch AVB property".to_string(),
+                ),
+            },
+        }));
     }
     Ok(None)
 }
@@ -687,11 +642,29 @@ fn parse_boot_patchlevel_property(value: &[u8]) -> Option<u32> {
 }
 
 fn read_boot_header_patchlevel(path: &Path) -> Result<u32> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open boot image {}", path.display()))?;
     let mut header = [0u8; BOOT_HEADER_PREFIX_SIZE];
-    file.read_exact(&mut header)
-        .with_context(|| format!("failed to read boot image header from {}", path.display()))?;
+    match File::open(path) {
+        Ok(mut file) => {
+            file.read_exact(&mut header).with_context(|| {
+                format!("failed to read boot image header from {}", path.display())
+            })?;
+        }
+        Err(direct_error) => {
+            let bytes = read_native_image(path, BOOT_HEADER_PREFIX_SIZE).with_context(|| {
+                format!(
+                    "failed to read boot image header from {} directly ({direct_error}) or through the privileged helper",
+                    path.display()
+                )
+            })?;
+            if bytes.len() < BOOT_HEADER_PREFIX_SIZE {
+                bail!(
+                    "privileged helper returned only {} bytes of the Boot header",
+                    bytes.len()
+                );
+            }
+            header.copy_from_slice(&bytes[..BOOT_HEADER_PREFIX_SIZE]);
+        }
+    }
     boot_header_patchlevel(&header)
 }
 
@@ -781,10 +754,36 @@ fn find_avb_partition_path(slot_suffix: &str, partition_name: &str) -> Result<Pa
     ))
 }
 
+/// Read a native image the keystore uid cannot open by itself.
+///
+/// The daemon runs as uid 1017, which is denied on `/dev/block/by-name/*`. Boot
+/// SPL is only published in the vbmeta AVB property, so ask the existing
+/// privileged helper for a bounded prefix and keep AVB parsing here.
+fn read_native_image(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(direct_error) => {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("native image path has no file name"))?;
+            resetprop::read_native_partition(name, max_bytes).with_context(|| {
+                format!(
+                    "failed to read {} directly ({direct_error}) or through the privileged helper",
+                    path.display()
+                )
+            })
+        }
+    }
+}
+
 fn load_vbmeta_blob(path: &Path) -> Result<Vec<u8>> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open vbmeta image {}", path.display()))?;
-    load_vbmeta_blob_at(&mut file, 0, None)
+    if let Ok(mut file) = File::open(path) {
+        return load_vbmeta_blob_at(&mut file, 0, None)
+            .with_context(|| format!("failed to load vbmeta image {}", path.display()));
+    }
+    let bytes = read_native_image(path, AVB_MAX_VBMETA_SIZE + AVB_HEADER_SIZE)?;
+    load_vbmeta_blob_at(&mut std::io::Cursor::new(bytes), 0, None)
         .with_context(|| format!("failed to load vbmeta image {}", path.display()))
 }
 
@@ -837,8 +836,8 @@ fn load_embedded_vbmeta_blob(path: &Path) -> Result<Vec<u8>> {
         .with_context(|| format!("failed to load embedded vbmeta from {}", path.display()))
 }
 
-fn load_vbmeta_blob_at(
-    file: &mut File,
+fn load_vbmeta_blob_at<R: Read + std::io::Seek>(
+    file: &mut R,
     offset: u64,
     maximum_size: Option<usize>,
 ) -> Result<Vec<u8>> {
@@ -1041,7 +1040,12 @@ mod tests {
             0,
             &build_test_property_descriptor(BOOT_AVB_PROPERTY, b"2026-02-01"),
         );
-        assert_eq!(vbmeta_boot_patchlevel(&direct).unwrap(), Some(20260201));
+        let field = vbmeta_boot_patchlevel(&direct, "avb:test#boot".to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(field.value, Some(20260201));
+        assert_eq!(field.raw.as_deref(), Some("2026-02-01"));
+        assert_eq!(field.source.as_deref(), Some("avb:test#boot"));
 
         let mut duplicate = build_test_property_descriptor(BOOT_AVB_PROPERTY, b"2026-13-01");
         duplicate.extend(build_test_property_descriptor(
@@ -1049,10 +1053,19 @@ mod tests {
             b"2026-02-01",
         ));
         let first_invalid = build_test_vbmeta_with_descriptors(0, &duplicate);
-        assert!(vbmeta_boot_patchlevel(&first_invalid).is_err());
+        let invalid = vbmeta_boot_patchlevel(&first_invalid, "avb:test".to_string())
+            .unwrap()
+            .unwrap();
+        assert!(invalid.value.is_none());
+        assert_eq!(invalid.raw.as_deref(), Some("2026-13-01"));
+        assert_eq!(invalid.source.as_deref(), Some("avb:test"));
+        assert_eq!(invalid.state, "unknown");
 
         let no_property = build_test_vbmeta_with_descriptors(0, &[]);
-        assert_eq!(vbmeta_boot_patchlevel(&no_property).unwrap(), None);
+        assert_eq!(
+            vbmeta_boot_patchlevel(&no_property, "avb:test".to_string()).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1068,24 +1081,29 @@ mod tests {
         );
         std::fs::write(&boot_path, build_test_boot_image(Some(&embedded))).unwrap();
         assert_eq!(
-            read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path).unwrap(),
-            20260201
+            read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path)
+                .unwrap()
+                .value,
+            Some(20260201)
         );
 
         let mut zero_header = build_test_boot_image(Some(&embedded));
         zero_header[BOOT_HEADER_V3_OS_VERSION_OFFSET..BOOT_HEADER_V3_OS_VERSION_OFFSET + 4].fill(0);
         std::fs::write(&boot_path, zero_header).unwrap();
         assert_eq!(
-            read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path).unwrap(),
-            20260201
+            read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path)
+                .unwrap()
+                .value,
+            Some(20260201)
         );
         assert_eq!(
             read_abl_boot_patchlevel_from_paths(
                 Err(anyhow!("missing top-level vbmeta")),
                 &boot_path,
             )
-            .unwrap(),
-            20260201
+            .unwrap()
+            .value,
+            Some(20260201)
         );
 
         let embedded_without_property = build_test_vbmeta_with_descriptors(0, &[]);
@@ -1095,14 +1113,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path).unwrap(),
-            20250900
+            read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path)
+                .unwrap()
+                .value,
+            Some(20250900)
         );
 
         std::fs::write(&boot_path, build_test_boot_image(None)).unwrap();
         assert_eq!(
-            read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path).unwrap(),
-            20250900
+            read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path)
+                .unwrap()
+                .value,
+            Some(20250900)
         );
 
         std::fs::write(
@@ -1117,8 +1139,10 @@ mod tests {
         zero_header[BOOT_HEADER_V3_OS_VERSION_OFFSET..BOOT_HEADER_V3_OS_VERSION_OFFSET + 4].fill(0);
         std::fs::write(&boot_path, zero_header).unwrap();
         assert_eq!(
-            read_abl_boot_patchlevel_from_paths(Ok(top_level_path), &boot_path).unwrap(),
-            20270101
+            read_abl_boot_patchlevel_from_paths(Ok(top_level_path), &boot_path)
+                .unwrap()
+                .value,
+            Some(20270101)
         );
     }
 
@@ -1166,131 +1190,163 @@ mod tests {
         assert_eq!(validated_vbmeta_size(&avb_1_4).unwrap(), AVB_HEADER_SIZE);
     }
 
-    #[test]
-    fn patchlevel_auto_uses_each_aosp_property() {
-        let resolved = resolve_patch_levels_from(
-            &RawTrustConfig::default(),
-            Some("2025-12-01"),
-            Some("2025-11-05"),
-            Some("2025-10-05"),
-            Some("2025-12-01"),
-            None,
-        )
-        .unwrap();
-        assert_eq!(resolved.security_patch, "2025-12-01");
-        assert_eq!(resolved.os_patchlevel, "2025-12-01");
-        assert_eq!(resolved.vendor_patchlevel, "2025-11-05");
-        assert_eq!(resolved.boot_patchlevel, "2025-10-05");
-        assert!(!resolved.write_security_patch);
+    fn test_native_snapshot() -> NativeVersionSnapshot {
+        NativeVersionSnapshot {
+            os_version: NativeVersionField::known(
+                120103,
+                "12.1.3".to_string(),
+                "firmware:system#release".to_string(),
+            ),
+            system: NativeVersionField::known(
+                202609,
+                "2026-09-01".to_string(),
+                "firmware:system#spl".to_string(),
+            ),
+            vendor: NativeVersionField::known(
+                20260805,
+                "2026-08-05".to_string(),
+                "firmware:vendor#spl".to_string(),
+            ),
+            boot: NativeVersionField::known(
+                20250900,
+                "20250900".to_string(),
+                "boot-header:boot#os_version".to_string(),
+            ),
+        }
+    }
+
+    fn test_native_trust(snapshot: &NativeVersionSnapshot) -> ResolvedTrust {
+        ResolvedTrust {
+            os_version: 12,
+            security_patch: snapshot.system.raw.clone().unwrap(),
+            os_patchlevel: snapshot.system.raw.clone().unwrap(),
+            vendor_patchlevel: snapshot.vendor.raw.clone().unwrap(),
+            boot_patchlevel: snapshot.boot.raw.clone().unwrap(),
+            vb_key: [1; 32],
+            vb_hash: [2; 32],
+            vb_key_source: TrustValueSource::Computed,
+            vb_hash_source: TrustValueSource::Original,
+            verified_boot_state: true,
+            device_locked: true,
+        }
     }
 
     #[test]
-    fn patchlevel_sources_are_not_date_filtered_before_wire_conversion() {
-        let resolved = resolve_patch_levels_from(
-            &RawTrustConfig::default(),
-            Some("raw-security"),
-            Some("raw-vendor"),
-            Some("raw-boot"),
-            Some("raw-security"),
-            None,
-        )
-        .unwrap();
-        assert_eq!(resolved.security_patch, "raw-security");
-        assert_eq!(resolved.os_patchlevel, "raw-security");
-        assert_eq!(resolved.vendor_patchlevel, "raw-vendor");
-        assert_eq!(resolved.boot_patchlevel, "raw-boot");
+    fn native_target_keeps_full_os_version_and_raw_boot_precision() {
+        let snapshot = test_native_snapshot();
+        let trust = test_native_trust(&snapshot);
+        let target = snapshot.validate_trust(&trust).unwrap();
+        assert_eq!(target.os_version, 120103);
+        assert_eq!(target.os_patchlevel, 202609);
+        assert_eq!(target.vendor_patchlevel, Some(20260805));
+        assert_eq!(target.boot_patchlevel, Some(20250900));
+        let mut changed = trust;
+        changed.vendor_patchlevel = "2026-09-01".to_string();
+        assert!(snapshot.validate_trust(&changed).is_err());
     }
 
     #[test]
-    fn patchlevel_fallbacks_and_overrides_are_independent() {
-        let trust = RawTrustConfig {
-            security_patch: "2026-04-05".to_string(),
-            os_patchlevel: "2026-03-05".to_string(),
-            vendor_patchlevel: "auto".to_string(),
-            boot_patchlevel: "latest".to_string(),
-            ..Default::default()
-        };
-        let resolved = resolve_patch_levels_from(
-            &trust,
-            Some("2025-12-01"),
-            None,
-            None,
-            Some("2025-12-01"),
-            Some("2026-07-05"),
-        )
-        .unwrap();
-        assert_eq!(resolved.security_patch, "2026-04-05");
-        assert_eq!(resolved.os_patchlevel, "2026-03-05");
-        assert_eq!(resolved.vendor_patchlevel, "2026-03-05");
-        assert_eq!(resolved.boot_patchlevel, "2026-07-05");
+    fn observed_zero_boot_is_distinct_from_an_unknown_source() {
+        let mut snapshot = test_native_snapshot();
+        snapshot.boot = NativeVersionField::known(
+            0,
+            "0".to_string(),
+            "boot-header:test#native-raw".to_string(),
+        );
+        let trust = test_native_trust(&snapshot);
         assert_eq!(
-            resolved.observed_security_patch.as_deref(),
-            Some("2025-12-01")
+            snapshot.validate_trust(&trust).unwrap().boot_patchlevel,
+            Some(0)
         );
-        assert!(resolved.write_security_patch);
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["boot"]["value"], 0);
+        assert_eq!(json["boot"]["raw"], "0");
+        assert_eq!(json["boot"]["state"], "known");
     }
 
     #[test]
-    fn build_prop_security_value_is_not_treated_as_a_runtime_property() {
-        let trust = RawTrustConfig {
-            security_patch: "2026-04-05".to_string(),
-            ..Default::default()
-        };
-        let resolved =
-            resolve_patch_levels_from(&trust, Some("2025-12-01"), None, None, None, None).unwrap();
-        assert_eq!(resolved.security_patch, "2026-04-05");
-        assert!(resolved.observed_security_patch.is_none());
-        assert!(!resolved.write_security_patch);
+    fn missing_native_sources_are_unknown_not_system_or_default_substitutes() {
+        for field in ["system", "vendor", "boot", "os_version"] {
+            let mut snapshot = test_native_snapshot();
+            let unknown = NativeVersionField::unknown("missing native source".to_string());
+            match field {
+                "system" => snapshot.system = unknown,
+                "vendor" => snapshot.vendor = unknown,
+                "boot" => snapshot.boot = unknown,
+                _ => snapshot.os_version = unknown,
+            }
+            assert!(snapshot.target().is_err());
+            let json = serde_json::to_value(&snapshot).unwrap();
+            assert!(json[field]["value"].is_null());
+            assert!(json[field]["raw"].is_null());
+            assert!(json[field]["source"].is_null());
+            assert_eq!(json[field]["state"], "unknown");
+            assert_eq!(json[field]["reason"], "missing native source");
+        }
     }
 
     #[test]
-    fn build_prop_parser_uses_an_exact_nonempty_key() {
-        let contents = r#"
-# comment
-ro.vendor.boot_security_patch = 2025-10-05
-ro.vendor.boot_security_patch.extra = ignored
-ro.boot.image.build.security_patch = 2025-11-05
-"#;
+    fn firmware_fields_use_exact_partition_sources_and_report_invalid_raw() {
+        use crate::keymaster::keymint_device::{extract_patchlevel, extract_truncated_patchlevel};
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system-build.prop");
+        let vendor = dir.path().join("vendor-build.prop");
+        std::fs::write(&system, "ro.build.version.security_patch=2026-09-01\n").unwrap();
+        std::fs::write(&vendor, "ro.vendor.build.security_patch=invalid\n").unwrap();
+        let system_paths = [system.to_str().unwrap()];
+        let vendor_paths = [vendor.to_str().unwrap()];
+        let system_field = read_native_build_field(
+            &system_paths,
+            SECURITY_PATCH_PROPS,
+            extract_truncated_patchlevel,
+        );
+        assert_eq!(system_field.value, Some(202609));
+        assert!(system_field
+            .source
+            .as_deref()
+            .unwrap()
+            .contains("system-build.prop#ro.build.version.security_patch"));
+        let invalid =
+            read_native_build_field(&vendor_paths, VENDOR_PATCH_PROPS, extract_patchlevel);
+        assert!(invalid.value.is_none());
+        assert_eq!(invalid.raw.as_deref(), Some("invalid"));
+        assert_eq!(invalid.state, "unknown");
+        std::fs::write(&vendor, "# no Vendor SPL\n").unwrap();
+        let missing =
+            read_native_build_field(&vendor_paths, VENDOR_PATCH_PROPS, extract_patchlevel);
+        assert!(missing.value.is_none());
+        assert!(missing.raw.is_none());
+    }
+
+    #[test]
+    fn startup_snapshot_is_not_recaptured_after_firmware_changes() {
+        use crate::keymaster::keymint_device::extract_truncated_patchlevel;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.prop");
+        std::fs::write(&path, "ro.build.version.security_patch=2026-09-01\n").unwrap();
+        let paths = [path.to_str().unwrap()];
+        let snapshot = OnceLock::new();
+        let first = snapshot
+            .get_or_init(|| {
+                read_native_build_field(&paths, SECURITY_PATCH_PROPS, extract_truncated_patchlevel)
+            })
+            .clone();
+        std::fs::write(&path, "ro.build.version.security_patch=2099-01-01\n").unwrap();
         assert_eq!(
-            parse_build_prop_value(contents, BOOT_PATCH_PROPS[0]).as_deref(),
-            Some("2025-11-05")
+            snapshot.get_or_init(|| panic!("native snapshot must never be recaptured")),
+            &first
         );
+        assert_eq!(first.value, Some(202609));
+    }
+
+    #[test]
+    fn build_prop_parser_uses_exact_keys_without_property_fallback() {
+        let contents = "# comment\nro.vendor.build.security_patch.extra=ignored\nro.vendor.build.security_patch=2026-08-05\n";
         assert_eq!(
-            parse_build_prop_value(contents, BOOT_PATCH_PROPS[1]).as_deref(),
-            Some("2025-10-05")
+            parse_build_prop_value(contents, VENDOR_PATCH_PROPS[0]).as_deref(),
+            Some("2026-08-05")
         );
-    }
-
-    #[test]
-    fn security_patch_write_accepts_a_verified_lost_ack() {
-        let state = std::cell::RefCell::new(Some("2025-12-01".to_string()));
-        let result = write_security_patch_with_rollback(
-            |_, desired| {
-                *state.borrow_mut() = Some(desired.to_string());
-                Err(anyhow!("lost acknowledgment"))
-            },
-            |_| state.borrow().clone(),
-            "2026-07-05",
-            Some("2025-12-01"),
-        );
-        assert!(result.is_ok());
-        assert_eq!(state.borrow().as_deref(), Some("2026-07-05"));
-    }
-
-    #[test]
-    fn security_patch_write_refuses_to_create_a_missing_property() {
-        let writes = std::cell::Cell::new(0);
-        let result = write_security_patch_with_rollback(
-            |_, _| {
-                writes.set(writes.get() + 1);
-                Ok(())
-            },
-            |_| None,
-            "2026-07-05",
-            Some("2025-12-01"),
-        );
-        assert!(result.is_err());
-        assert_eq!(writes.get(), 0);
+        assert!(parse_build_prop_value(contents, SECURITY_PATCH_PROPS[0]).is_none());
     }
 
     #[test]

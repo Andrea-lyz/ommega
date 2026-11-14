@@ -88,22 +88,29 @@ daemons_alive() {
   return 0
 }
 
+service_status=0
 if daemons_alive; then
   update_status "Ommega ✅ 运行中"
 else
   kill_all
   update_status "Ommega ⏳ 启动中"
-  start_daemon "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid"
-  start_daemon "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid"
+  start_daemon "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid" || service_status=1
+  start_daemon "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid" || service_status=1
 fi
 # The Soter watchdog runs whether or not the software TA is enabled: the enable
 # flag is a file the WebUI writes, so something has to notice it, and the same
 # loop is what restores the stock HAL after a daemon crash instead of leaving
 # Soter stopped with nobody to fix it.
-start_daemon "$MODDIR/soterta.sh" "$STATE_DIR/soterta-watchdog.pid"
+start_daemon "$MODDIR/soterta.sh" "$STATE_DIR/soterta-watchdog.pid" || service_status=1
 
-# config.toml is created on first keymint start. Sync WebUI overlay trust
-# after that so boot_patchlevel / vb_key / vb_hash are not left as auto.
-if [ -x "$MODDIR/webui-trust.sh" ]; then
-  sh "$MODDIR/webui-trust.sh" sync
+# BEGIN VB_SYNC
+# The first keymint start creates config.toml. Mirror only VB overrides; never
+# change or reset existing SPL fields, and report a failed reload to the caller.
+if [ -f "$MODDIR/webui-trust.sh" ]; then
+  if ! sh "$MODDIR/webui-trust.sh" sync; then
+    echo "ommega: Verified Boot config sync failed" >&2
+    service_status=1
+  fi
 fi
+# END VB_SYNC
+exit "$service_status"

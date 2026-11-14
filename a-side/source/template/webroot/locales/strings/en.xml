@@ -36,9 +36,9 @@
 
     <string name="help_set_custom_keybox_description">Import keybox from your device storage. Only support xml file.</string>
 
-    <string name="help_set_security_patch">Set Security Patch</string>
+    <string name="help_set_security_patch">SPL sources and differences (read-only)</string>
 
-    <string name="help_set_security_patch_description">Set custom security patch spoof. Auto config will use security patch from PIF module. Leave blank and save to disable auto config.</string>
+    <string name="help_set_security_patch_description">Read published sources and differences only. Android properties and HAL configuration are not TA or firmware proof; B/profile and certificates are cached snapshots. Missing data stays unknown. A provides no date editor, automatic update or online fetch.</string>
 
     <string name="help_set_verified_boot_hash">Set Verified Boot Hash</string>
 
@@ -102,7 +102,7 @@
 
     <string name="menu_set_verified_boot_hash">Set Verified Boot Hash</string>
 
-    <string name="menu_set_security_patch">Set Security Patch</string>
+
 
     <string name="menu_set_remote_config">Remote Config</string>
 
@@ -131,7 +131,7 @@
 
     <string name="about_disclaimer">Ommega attestation relay module</string>
 
-    <string name="about_description">Performs KeyMint attestation via a remote relay server with local keybox fallback. Manage target app list, configure keybox, set security patch, and connect to a remote relay server.</string>
+    <string name="about_description">Performs KeyMint attestation via a remote relay server with local keybox fallback. Manage target app list, configure keybox, view read-only SPL sources, and connect to a remote relay server.</string>
 
     <!-- Remote Config -->
 
@@ -227,39 +227,39 @@
 
     <!-- Security Patch -->
 
-    <string name="security_patch_title">Security Patch</string>
 
-    <string name="security_patch_advanced_mode">Advanced</string>
 
-    <string name="security_patch_get_date">Get Security Patch Date</string>
 
-    <string name="security_patch_auto">Auto</string>
 
-    <string name="security_patch_fetching">Fetching...</string>
 
-    <string name="security_patch_fetched">Done</string>
 
-    <string name="security_patch_get_failed">Failed to fetch security patch date</string>
 
-    <string name="security_patch_unable_to_connect">Unable to connect to source.android.com</string>
 
-    <string name="security_patch_auto_success">Auto config enabled successfully</string>
 
-    <string name="security_patch_auto_failed">Failed to enable auto config</string>
 
-    <string name="security_patch_save_success">Security patch applied</string>
 
-    <string name="security_patch_save_failed">Failed to save security patch</string>
 
-    <string name="security_patch_value_empty">Security patch configuration is disabled</string>
 
-    <string name="security_patch_invalid_all">Invalid format</string>
 
-    <string name="security_patch_invalid_boot">Invalid boot format</string>
 
-    <string name="security_patch_invalid_system">Invalid system format</string>
 
-    <string name="security_patch_invalid_vendor">Invalid vendor format</string>
+
+
+
+
+
+
+    <string name="trust_save_failed">Failed to save verified boot parameters</string>
+
+
+
+    <string name="trust_value_invalid">Invalid format</string>
+
+
+
+
+
+
 
     <!-- Add System App -->
 
@@ -309,7 +309,7 @@
 
     <string name="automation_src_stock">Stock keybox</string>
 
-    <string name="automation_patch_auto">Security Patch Auto Fetch</string>
+
 
     <string name="automation_source">Source</string>
 
@@ -329,15 +329,15 @@
 
     <string name="automation_fetch_key">Fetch Key</string>
 
-    <string name="automation_set_patch_now">Set Patch Now</string>
 
-    <string name="automation_set_patch">Set Patch</string>
 
-    <string name="automation_patch_header">Security Patch Auto-Update</string>
+
+
+
 
     <string name="prompt_keybox_auto_enabled">Keybox auto-fetch enabled</string>
 
-    <string name="prompt_patch_auto_enabled">Security patch auto-fetch enabled</string>
+
 
     <string name="prompt_source_selected">Source selected</string>
 
@@ -347,7 +347,7 @@
 
     <string name="prompt_fetching_key">Fetching keybox...</string>
 
-    <string name="prompt_setting_patch">Setting security patch...</string>
 
-    <string name="prompt_security_patch_saved_restart">Security patch applied</string>
+
+
 </resources>

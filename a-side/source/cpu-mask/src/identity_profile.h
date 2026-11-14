@@ -79,6 +79,7 @@ inline const IdentityField* identityFieldForProperty(const char* name) {
 
 struct PropertyField { const char* property; const char* hostValue; const char* value; };
 // Exact B values, including empty optional fields; no synthetic defaults here.
+// A hostValue target preserves that host field while retaining its wire/direct slot.
 inline const PropertyField kDirectProperties[] = {
     {"ro.soc.model", kHostValues[5], kRuntimeProfile.values[10]},
     {"ro.product.oplus.cpuinfo", kHostValues[6], kRuntimeProfile.values[11]},
@@ -103,7 +104,7 @@ inline const PropertyField kDirectProperties[] = {
     {"ro.build.version.release", kHostValues[25], kRuntimeProfile.values[30]},
     {"ro.build.version.release_or_codename", kHostValues[26], kRuntimeProfile.values[31]},
     {"ro.build.version.sdk", kHostValues[27], kRuntimeProfile.values[32]},
-    {"ro.build.version.security_patch", kHostValues[28], kRuntimeProfile.values[33]},
+    {"ro.build.version.security_patch", kHostValues[28], kHostValues[28]},
     {"ro.build.version.base_os", kHostValues[29], kRuntimeProfile.values[34]},
     {"ro.build.version.codename", kHostValues[30], kRuntimeProfile.values[35]},
     {"ro.build.version.preview_sdk", kHostValues[31], kRuntimeProfile.values[36]},

@@ -65,7 +65,10 @@ use serde_json::{json, Value};
 use ommegaclient_b::battery::BatteryTelemetry;
 use ommegaclient_b::keymaster::attest_proxy::{check_app_id_der, SYSTEM_KEYMINT_STRONGBOX};
 use ommegaclient_b::keymaster::relay_tee::keymint_error;
-use ommegaclient_b::keymaster::tee_ops::{self, AttestationKeyRef, KeyAlgorithm, KeySpec};
+use ommegaclient_b::keymaster::tee_ops::{
+    self, AttestationKeyRef, KeyAlgorithm, KeySpec, VersionSnapshot, NATIVE_VERSION_POLICY,
+    VERSION_TAG_FIELDS,
+};
 use ommegaclient_b::wakelock;
 
 /// Hold an idle poll open so task arrival wakes B immediately. Stay below the
@@ -1081,8 +1084,111 @@ fn alias_of(payload: &Value, default: &str) -> String {
         .to_string()
 }
 
+/// Native version expectations are opt-in and must remain distinct from the
+/// legacy path. Parse all four u32 values before consulting any local state.
+fn parse_attestation_version_request(payload: &Value) -> Result<Option<([u32; 4], String)>> {
+    for field in [
+        "version_policy",
+        "expected_version_tags",
+        "expected_version_revision",
+    ] {
+        if payload.get(field).is_some() {
+            return Err(keymint_error(
+                KmErrorCode::InvalidArgument,
+                format!("{field} must be inside device_attest_context"),
+            ));
+        }
+    }
+    let context = payload.get("device_attest_context");
+    let get = |field: &str| context.and_then(|context| context.get(field));
+    let Some(policy) = get("version_policy") else {
+        if get("expected_version_tags").is_some() || get("expected_version_revision").is_some() {
+            return Err(keymint_error(
+                KmErrorCode::InvalidArgument,
+                "expected version fields require a-native-v1 version_policy",
+            ));
+        }
+        return Ok(None);
+    };
+    if policy.as_str() != Some(NATIVE_VERSION_POLICY) {
+        return Err(keymint_error(
+            KmErrorCode::InvalidArgument,
+            "unsupported version_policy",
+        ));
+    }
+    let expected = get("expected_version_tags")
+        .and_then(Value::as_object)
+        .filter(|tags| tags.len() == VERSION_TAG_FIELDS.len())
+        .ok_or_else(|| {
+            keymint_error(
+                KmErrorCode::InvalidArgument,
+                "a-native-v1 requires all four expected_version_tags as u32 values",
+            )
+        })?;
+    let mut tags = [0; 4];
+    for (index, field) in VERSION_TAG_FIELDS.iter().enumerate() {
+        tags[index] = expected
+            .get(*field)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                keymint_error(
+                    KmErrorCode::InvalidArgument,
+                    format!("a-native-v1 requires expected_version_tags.{field} as u32"),
+                )
+            })?;
+    }
+    let revision = get("expected_version_revision")
+        .and_then(Value::as_str)
+        .filter(|revision| !revision.is_empty() && revision.len() <= 256)
+        .ok_or_else(|| {
+            keymint_error(
+                KmErrorCode::InvalidArgument,
+                "a-native-v1 requires a nonempty expected_version_revision string",
+            )
+        })?;
+    // The established sample is from /default, not /strongbox. A TEE cache
+    // must never be used to claim a native guarantee for another HAL service.
+    if get("attestation_security_level").is_some_and(|level| level.as_i64() != Some(1)) {
+        return Err(keymint_error(
+            KmErrorCode::HardwareTypeUnavailable,
+            "a-native-v1 version profile only covers the default TEE security level",
+        ));
+    }
+    Ok(Some((tags, revision.to_string())))
+}
+
+/// The operation closure contains all task execution, including tee_start and
+/// the first HAL call. Tests inject both closures and prove rejection runs none
+/// of it. Missing/stale/mismatched native state never invokes a refresh probe.
+fn with_attestation_version_gate<T>(
+    payload: &Value,
+    read_cache: impl FnOnce() -> Result<VersionSnapshot>,
+    operation: impl FnOnce(Option<VersionSnapshot>) -> Result<T>,
+) -> Result<T> {
+    let snapshot = match parse_attestation_version_request(payload)? {
+        Some((expected, revision)) => {
+            let snapshot = read_cache()?;
+            snapshot.validate_expected(&revision, &expected)?;
+            Some(snapshot)
+        }
+        None => None,
+    };
+    operation(snapshot)
+}
+
 fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
     let phase_start = Instant::now();
+    with_attestation_version_gate(payload, tee_ops::cached_version_tags, |snapshot| {
+        handle_generate_attest_validated(payload, phase_start, snapshot)
+    })
+}
+
+fn handle_generate_attest_validated(
+    payload: &Value,
+    phase_start: Instant,
+    version_snapshot: Option<VersionSnapshot>,
+) -> Result<Value> {
     let (app_id_der, challenge) = extract_attestation_context(payload)?;
     check_app_id_der(&app_id_der).with_context(|| {
         "attestation_application_id is not a valid AttestationApplicationId DER"
@@ -1160,6 +1266,27 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
         );
     }
 
+    // No profile initialization here, including for legacy clients. For native
+    // requests, do not label a result native if invalidation occurred in flight.
+    let (version_policy, version_revision, version_tags) = match version_snapshot {
+        Some(before) => {
+            let after = tee_ops::cached_version_tags()?;
+            if before.revision != after.revision {
+                return Err(keymint_error(
+                    KmErrorCode::VersionMismatch,
+                    "B version revision changed while minting",
+                ));
+            }
+            (NATIVE_VERSION_POLICY, Some(after.revision), after.tags)
+        }
+        None => (
+            "legacy",
+            None,
+            tee_ops::cached_version_tags()
+                .map(|snapshot| snapshot.tags)
+                .unwrap_or(Value::Null),
+        ),
+    };
     let profile_us = profile_start.elapsed().as_micros();
     let encode_start = Instant::now();
     log_cert_chain("attest", &session.cert_chain);
@@ -1168,7 +1295,9 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
         "cert_chain": cert_chain_json(&session.cert_chain),
         "public_key": b64(&tee_ops::get_public_key(&alias)?),
         "remote_profile": {
-            "version_tags": tee_ops::version_tags()?,
+            "version_tags": version_tags,
+            "version_policy": version_policy,
+            "version_revision": version_revision,
             "interface_version": profile.interface_version,
             "interface_hash": profile.interface_hash,
             "profile_version": profile.profile_version,
@@ -1189,8 +1318,11 @@ fn handle_generate_attest(_task_type: &str, payload: &Value) -> Result<Value> {
 
 fn handle_profile(_task_type: &str, _payload: &Value) -> Result<Value> {
     let profile = tee_ops::identity_profile()?;
+    let version = tee_ops::version_tags()?;
     Ok(json!({
-        "version_tags": tee_ops::version_tags()?,
+        "version_tags": version.tags,
+        "version_policy": NATIVE_VERSION_POLICY,
+        "version_revision": version.revision,
         "interface_version": profile.interface_version,
         "interface_hash": profile.interface_hash,
         "profile_version": profile.profile_version,
@@ -1613,6 +1745,209 @@ fn main() {
     // behind a single HTTP round-trip after each TEE op.
     let tx = spawn_tee_workers();
     run_poll_loop(shared, tx);
+}
+
+#[cfg(test)]
+mod attestation_version_gate_tests {
+    use super::*;
+    use ommegaclient_b::keymaster::relay_tee::relay_error_result;
+    use std::cell::Cell;
+
+    fn snapshot() -> VersionSnapshot {
+        VersionSnapshot {
+            tags: json!({
+                "os_version": 170000, "os_patchlevel": 202609,
+                "vendor_patchlevel": 20260901, "boot_patchlevel": 20251201,
+            }),
+            revision: "test-profile-revision-1".to_string(),
+        }
+    }
+
+    fn payload() -> Value {
+        let snapshot = snapshot();
+        json!({ "device_attest_context": {
+            "version_policy": NATIVE_VERSION_POLICY,
+            "expected_version_tags": snapshot.tags,
+            "expected_version_revision": snapshot.revision,
+            "attestation_security_level": 1,
+        } })
+    }
+
+    fn assert_rejected_before_operation(payload: &Value, code: KmErrorCode, cache_reads: usize) {
+        let reads = Cell::new(0);
+        let operations = Cell::new(0);
+        let result = with_attestation_version_gate(
+            payload,
+            || {
+                reads.set(reads.get() + 1);
+                Ok(snapshot())
+            },
+            |_| {
+                operations.set(operations.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(
+            relay_error_result(&result.unwrap_err())["keymint_error_code"],
+            code as i32
+        );
+        assert_eq!(reads.get(), cache_reads);
+        assert_eq!(operations.get(), 0);
+    }
+
+    #[test]
+    fn valid_native_request_checks_cache_before_task_execution() {
+        let reads = Cell::new(0);
+        let operations = Cell::new(0);
+        with_attestation_version_gate(
+            &payload(),
+            || {
+                assert_eq!(operations.get(), 0);
+                reads.set(reads.get() + 1);
+                Ok(snapshot())
+            },
+            |checked| {
+                assert_eq!(reads.get(), 1);
+                assert_eq!(checked.unwrap(), snapshot());
+                operations.set(operations.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(operations.get(), 1);
+    }
+
+    #[test]
+    fn legacy_never_consults_native_cache_or_claims_a_native_snapshot() {
+        for payload in [
+            json!({}),
+            json!({"device_attest_context": {"attestation_security_level": 2}}),
+        ] {
+            with_attestation_version_gate(
+                &payload,
+                || panic!("legacy cache gate"),
+                |checked| {
+                    assert!(checked.is_none());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn all_expected_tags_are_required_exact_u32_values_including_partition_tags() {
+        for field in VERSION_TAG_FIELDS {
+            let mut missing = payload();
+            missing["device_attest_context"]["expected_version_tags"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert_rejected_before_operation(&missing, KmErrorCode::InvalidArgument, 0);
+            for value in [
+                Value::Null,
+                json!(-1),
+                json!(4294967296_u64),
+                json!(1.0),
+                json!("20260901"),
+                json!(true),
+            ] {
+                let mut malformed = payload();
+                malformed["device_attest_context"]["expected_version_tags"][field] = value;
+                assert_rejected_before_operation(&malformed, KmErrorCode::InvalidArgument, 0);
+            }
+        }
+        let mut boundary = payload();
+        boundary["device_attest_context"]["expected_version_tags"] = json!({
+            "os_version": 0, "os_patchlevel": u32::MAX,
+            "vendor_patchlevel": 0, "boot_patchlevel": u32::MAX,
+        });
+        assert_eq!(
+            parse_attestation_version_request(&boundary)
+                .unwrap()
+                .unwrap()
+                .0,
+            [0, u32::MAX, 0, u32::MAX]
+        );
+    }
+
+    #[test]
+    fn missing_or_unknown_policy_and_invalid_revision_cannot_downgrade() {
+        for field in [
+            "version_policy",
+            "expected_version_tags",
+            "expected_version_revision",
+        ] {
+            let mut request = payload();
+            request["device_attest_context"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert_rejected_before_operation(&request, KmErrorCode::InvalidArgument, 0);
+        }
+        for value in [
+            Value::Null,
+            json!(""),
+            json!("legacy"),
+            json!("a-native-v2"),
+            json!(1),
+        ] {
+            let mut request = payload();
+            request["device_attest_context"]["version_policy"] = value;
+            assert_rejected_before_operation(&request, KmErrorCode::InvalidArgument, 0);
+        }
+        for value in [Value::Null, json!(""), json!(1), json!("x".repeat(257))] {
+            let mut request = payload();
+            request["device_attest_context"]["expected_version_revision"] = value;
+            assert_rejected_before_operation(&request, KmErrorCode::InvalidArgument, 0);
+        }
+        let mut misplaced = payload();
+        misplaced["version_policy"] = json!(NATIVE_VERSION_POLICY);
+        assert_rejected_before_operation(&misplaced, KmErrorCode::InvalidArgument, 0);
+    }
+
+    #[test]
+    fn revision_and_each_tag_mismatch_are_business_errors_before_execution() {
+        let mut revision = payload();
+        revision["device_attest_context"]["expected_version_revision"] = json!("older-revision");
+        assert_rejected_before_operation(&revision, KmErrorCode::VersionMismatch, 1);
+        for field in VERSION_TAG_FIELDS {
+            let mut changed = payload();
+            changed["device_attest_context"]["expected_version_tags"][field] = json!(1);
+            assert_rejected_before_operation(&changed, KmErrorCode::VersionMismatch, 1);
+        }
+        let mut unsupported = payload();
+        unsupported["device_attest_context"]["attestation_security_level"] = json!(2);
+        assert_rejected_before_operation(&unsupported, KmErrorCode::HardwareTypeUnavailable, 0);
+    }
+
+    #[test]
+    fn absent_or_stale_cache_cannot_execute_or_trigger_any_probe() {
+        for message in ["cache not established", "cache stale"] {
+            let result = with_attestation_version_gate(
+                &payload(),
+                || Err(keymint_error(KmErrorCode::KeymintNotConfigured, message)),
+                |_| -> Result<()> { panic!("no task execution on cache miss/stale") },
+            );
+            assert_eq!(
+                relay_error_result(&result.unwrap_err())["keymint_error_code"],
+                -64
+            );
+        }
+        let mut incomplete = snapshot();
+        incomplete.tags["boot_patchlevel"] = Value::Null;
+        let result = with_attestation_version_gate(
+            &payload(),
+            || Ok(incomplete),
+            |_| -> Result<()> {
+                panic!("missing HAL partition tag must not be replaced from properties")
+            },
+        );
+        assert_eq!(
+            relay_error_result(&result.unwrap_err())["keymint_error_code"],
+            -101
+        );
+    }
 }
 
 #[cfg(test)]

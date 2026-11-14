@@ -37,6 +37,22 @@ int main() {
     assert(!strcmp(parsed.values[4], "B-value"));
     assert(!strcmp(parsed.values[32], "36"));
     assert(!strcmp(parsed.values[maskcpu::kProfileCount - 1], "B-value"));
+    // The complete B wire snapshot stays parseable, including its unused SPL.
+    assert(maskcpu::kProfileCount == 95 && maskcpu::kDirectCount == 85);
+    assert(parse(profileText("ro.build.version.security_patch", "2026-10-05"), &parsed));
+    maskcpu::kRuntimeProfile = parsed;
+    strcpy(maskcpu::kHostValues[28], "2024-02-05");
+    for (size_t i = 0; i < maskcpu::kDirectCount; ++i) {
+        const auto& field = maskcpu::kDirectProperties[i];
+        assert(!strcmp(field.property, maskcpu::kProfileKeys[i + 10]));
+        assert(field.hostValue == maskcpu::kHostValues[i + 5]);
+        assert(field.value == (i == 23 ? field.hostValue : maskcpu::kRuntimeProfile.values[i + 10]));
+    }
+    const auto* hostPatch = maskcpu::directProperty("ro.build.version.security_patch");
+    assert(hostPatch && !strcmp(hostPatch->value, "2024-02-05"));
+    assert(!strcmp(maskcpu::kRuntimeProfile.values[33], "2026-10-05"));
+    assert(maskcpu::directProperty("ro.build.version.base_os")->value == maskcpu::kRuntimeProfile.values[34]);
+    assert(maskcpu::directProperty("ro.build.version.sdk")->value == maskcpu::kRuntimeProfile.values[32]);
     int sdkFull = 0;
     assert(maskcpu::parseSdkFull("36.1", 36, &sdkFull) && sdkFull == 3600001);
     assert(maskcpu::parseSdkFull("", 31, &sdkFull) && sdkFull == 3100000);

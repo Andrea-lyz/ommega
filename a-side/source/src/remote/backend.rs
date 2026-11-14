@@ -54,7 +54,26 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
             return Ok(None);
         }
         match remote_identity_profile() {
-            Ok(profile) => Ok(profile.version_tags),
+            Ok(profile) => {
+                // A matching snapshot is authoritative for every software-envelope
+                // version operation. When the peer cannot prove the A-native contract
+                // (older B, or a differing SPL) the local native snapshot still rules
+                // local keys: returning `None` keeps the keystore usable instead of
+                // failing every operation. Remote chains stay refused in `attest`.
+                match super::spl::admitted_target(&profile) {
+                    Ok(target) => {
+                        super::publish_spl_status();
+                        Ok(Some(target))
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "remote version admission unavailable; local keys keep the native A snapshot: {error:#}"
+                        );
+                        super::publish_spl_status();
+                        Ok(None)
+                    }
+                }
+            }
             Err(_) if self.fallback_local() => Ok(None),
             Err(error) => Err(kmr_common::km_err!(
                 HardwareNotYetAvailable,
@@ -94,16 +113,42 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
                 ));
             }
         };
-        if params.security_level == Some(kmr_wire::keymint::SecurityLevel::Strongbox as i32)
-            && !profile.has_strongbox
-        {
+        // The current native admission protocol has a default-TEE snapshot only.
+        // Never substitute that snapshot as proof of a StrongBox implementation.
+        if params.security_level == Some(kmr_wire::keymint::SecurityLevel::Strongbox as i32) {
             return Err(kmr_common::km_err!(
                 HardwareTypeUnavailable,
-                "remote identity does not provide StrongBox"
+                "native SPL admission requires a security-level-specific StrongBox snapshot"
             ));
         }
-        let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial)
-            .map_err(|e| remote_operation_error(e, "attest"))?;
+        super::spl::admitted_target(&profile)
+            .map_err(|error| remote_operation_error(error, "attest admission"))?;
+        super::publish_spl_status();
+        let route = super::RemoteRoute::current()
+            .map_err(|error| remote_operation_error(error, "attest route"))?;
+        let resp = RemoteRelay::attest(challenge, alias, app_id_der, params, cert_serial).map_err(
+            |error| {
+                if error
+                    .downcast_ref::<super::RelayKeyMintError>()
+                    .is_some_and(|failure| matches!(failure.code as i32, -64 | -101))
+                {
+                    // B refused an absent/stale generation. Do not retry HAL work
+                    // or keep presenting the old profile as an admitted snapshot.
+                    super::invalidate_identity_profile();
+                    super::publish_spl_status();
+                }
+                remote_operation_error(error, "attest")
+            },
+        )?;
+        if super::RemoteRoute::current()
+            .map_err(|error| remote_operation_error(error, "returned attest route"))?
+            != route
+        {
+            return Err(kmr_common::km_err!(
+                VerificationFailed,
+                "relay route changed while minting; discard the response"
+            ));
+        }
         let Some((resp, elapsed)) = resp else {
             log::warn!("remote relay unavailable after transport retry");
             return Ok(None);
@@ -116,6 +161,18 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         // results lack it, and must never be labelled as B-device latency.
         let relay_latency_ms = b_task_latency_ms(result, &resp, elapsed);
         reject_strongbox_demotion(result, params.security_level)?;
+        if result.get("source").and_then(Value::as_str) == Some("server_keybox") {
+            return Err(kmr_common::km_err!(
+                VerificationFailed,
+                "server-keybox cannot establish physical B native SPL admission"
+            ));
+        }
+        if result.get("remote_profile").is_none() {
+            return Err(kmr_common::km_err!(
+                VerificationFailed,
+                "native SPL result is missing its guarded B snapshot revision"
+            ));
+        }
         if let Some(result_profile) = result.get("remote_profile") {
             let observed = parse_identity_profile(result_profile).map_err(|error| {
                 kmr_common::km_err!(
@@ -123,6 +180,8 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
                     "remote attest response has an invalid identity profile: {error:#}"
                 )
             })?;
+            super::spl::admitted_target(&observed)
+                .map_err(|error| remote_operation_error(error, "returned version admission"))?;
             if observed != profile {
                 return Err(kmr_common::km_err!(
                     VerificationFailed,
@@ -130,6 +189,7 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
                 ));
             }
         }
+        super::publish_spl_status();
         let certs = result
             .get("cert_chain")
             .and_then(Value::as_array)

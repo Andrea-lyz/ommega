@@ -209,6 +209,14 @@ private:
         if (clearException("find Build") || !build) return false;
         jclass version = env_->FindClass("android/os/Build$VERSION");
         if (clearException("find VERSION") || !version) return false;
+        // Validate the existing A cache without ever queueing it for a write.
+        // Native properties use the same captured host target, not B's wire SPL.
+        const auto* hostPatch = maskcpu::directProperty("ro.build.version.security_patch");
+        PendingField securityPatch{};
+        size_t hostCount = 0;
+        if (!hostPatch ||
+            !queueField(&securityPatch, &hostCount, version, "SECURITY_PATCH", 'S', hostPatch->value) ||
+            !fieldMatches(securityPatch) || clearException("verify host SECURITY_PATCH")) return false;
         PendingField fields[80]{};
         size_t count = 0;
         auto property = [](size_t index) { return maskcpu::kRuntimeProfile.values[index]; };
@@ -232,7 +240,6 @@ private:
         for (const auto& field : versionStrings)
             if (!queueField(fields, &count, version, field.name, 'S', stringValue(field.index))) return false;
         if (!queueField(fields, &count, version, "BASE_OS", 'S', property(34)) ||
-            !queueField(fields, &count, version, "SECURITY_PATCH", 'S', property(33)) ||
             !queueField(fields, &count, version, "RELEASE_OR_CODENAME", 'S', stringValue(31), true) ||
             !queueField(fields, &count, version, "RELEASE_OR_PREVIEW_DISPLAY", 'S', stringValue(48), true)) return false;
         constexpr StringField abiFields[] = {
@@ -289,8 +296,14 @@ private:
                 return false;
             }
         }
+        if (!fieldMatches(securityPatch) || clearException("verify retained SECURITY_PATCH")) {
+            for (size_t j = count; j > 0; --j) {
+                writeField(fields[j - 1], true); clearException("restore Build");
+            }
+            return false;
+        }
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                            "B Java view verified fields=%zu fingerprint=%s sdk=%s (framework unchanged)",
+                            "B Java view verified fields=%zu fingerprint=%s sdk=%s (framework and host SPL unchanged)",
                             count, property(13), property(32));
         return true;
     }

@@ -70,8 +70,8 @@ use crate::android::hardware::security::keymint::{
 use crate::err as ks_err;
 use crate::keymaster::relay_tee::{
     clear_system_keymint, extract_km_error_code, get_system_keymint, key_params_to_aidl,
-    keymint_error, keymint_status_error, normalize_keymint_version, probe_keymint_version,
-    KEY_MINT_V5,
+    keymint_cache_generation, keymint_error, keymint_status_error, normalize_keymint_version,
+    probe_keymint_version, KEY_MINT_V5,
 };
 
 use super::attest_proxy::{SYSTEM_KEYMINT_DEFAULT, SYSTEM_KEYMINT_STRONGBOX};
@@ -277,17 +277,192 @@ pub fn identity_profile() -> Result<KeyMintIdentityProfile> {
     Ok(PROFILE.get().cloned().unwrap_or(profile))
 }
 
-/// Current TEE version authorizations. The profile needs these before A can
-/// generate its first ordinary key. A short-lived AES key reads the HAL's
-/// actual state without requesting attestation, changing SPL, or saving a session.
-pub fn version_tags() -> Result<serde_json::Value> {
-    static TAGS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
-    let mut cached = TAGS
-        .lock()
-        .map_err(|_| anyhow!("version tag cache poisoned"))?;
-    if let Some(tags) = cached.as_ref() {
-        return Ok(tags.clone());
+/// The native policy compares against a previously established HAL sample,
+/// never against properties and never by probing the HAL during an attest task.
+pub const NATIVE_VERSION_POLICY: &str = "a-native-v1";
+pub const VERSION_TAG_FIELDS: [&str; 4] = [
+    "os_version",
+    "os_patchlevel",
+    "vendor_patchlevel",
+    "boot_patchlevel",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionSnapshot {
+    pub tags: serde_json::Value,
+    pub revision: String,
+}
+
+impl VersionSnapshot {
+    /// Expected fields have already been parsed as four exact u32 values.
+    pub fn validate_expected(&self, revision: &str, expected: &[u32; 4]) -> Result<()> {
+        if revision != self.revision {
+            return Err(keymint_error(
+                KmErrorCode::VersionMismatch,
+                "a-native-v1 version revision does not match the established B profile",
+            ));
+        }
+        for (field, expected) in VERSION_TAG_FIELDS.iter().zip(expected) {
+            if self.tags.get(*field).and_then(serde_json::Value::as_u64)
+                != Some(u64::from(*expected))
+            {
+                return Err(keymint_error(
+                    KmErrorCode::VersionMismatch,
+                    format!("a-native-v1 {field} does not match the HAL-sampled B profile"),
+                ));
+            }
+        }
+        Ok(())
     }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct VersionEnvironment {
+    hal_generation: u64,
+    // Raw values are used ONLY to invalidate a HAL sample. They do not become
+    // tags, establish hardware acceptance, or authorize a property write.
+    properties: [Option<String>; 5],
+}
+
+impl VersionEnvironment {
+    fn read() -> Result<Self> {
+        let hal_generation = keymint_cache_generation();
+        let properties = kmr_common::android_version::version_property_snapshot()
+            .map_err(version_cache_error)?;
+        if keymint_cache_generation() != hal_generation {
+            return Err(version_cache_error(
+                "KeyMint generation changed while reading properties",
+            ));
+        }
+        Ok(Self {
+            hal_generation,
+            properties,
+        })
+    }
+}
+
+struct CachedVersionSnapshot {
+    snapshot: VersionSnapshot,
+    environment: VersionEnvironment,
+}
+
+#[derive(Default)]
+struct VersionTagCache {
+    established: Option<CachedVersionSnapshot>,
+    stale: bool,
+}
+
+static VERSION_TAG_CACHE: Mutex<VersionTagCache> = Mutex::new(VersionTagCache {
+    established: None,
+    stale: false,
+});
+
+fn version_cache_error(message: impl Into<String>) -> anyhow::Error {
+    keymint_error(KmErrorCode::KeymintNotConfigured, message)
+}
+
+impl VersionTagCache {
+    fn observe(&mut self, environment: Result<VersionEnvironment>) -> Result<VersionEnvironment> {
+        environment.inspect_err(|_| self.stale = true)
+    }
+
+    fn read(&mut self, environment: &VersionEnvironment) -> Result<VersionSnapshot> {
+        let Some(cached) = &self.established else {
+            return Err(version_cache_error(
+                "a-native-v1 requires an established B profile",
+            ));
+        };
+        if cached.environment != *environment {
+            self.stale = true;
+        }
+        if self.stale {
+            return Err(version_cache_error(
+                "B version cache is stale; establish a new profile through the normal profile path",
+            ));
+        }
+        Ok(cached.snapshot.clone())
+    }
+
+    /// Only the normal profile handler calls this. A stale or absent cache
+    /// never causes sampling from the attest gate or its response builder.
+    fn establish(
+        &mut self,
+        before: VersionEnvironment,
+        sample: impl FnOnce() -> Result<serde_json::Value>,
+        read_after: impl FnOnce() -> Result<VersionEnvironment>,
+        revision: impl FnOnce(&VersionEnvironment, &serde_json::Value) -> String,
+    ) -> Result<VersionSnapshot> {
+        if let Ok(snapshot) = self.read(&before) {
+            return Ok(snapshot);
+        }
+        // Sampling failure must not make a previously invalidated cache usable.
+        self.stale = true;
+        let tags = sample()?;
+        let after = self.observe(read_after())?;
+        if before != after {
+            return Err(version_cache_error(
+                "B version state changed during profile sampling",
+            ));
+        }
+        let snapshot = VersionSnapshot {
+            revision: revision(&after, &tags),
+            tags,
+        };
+        self.established = Some(CachedVersionSnapshot {
+            snapshot: snapshot.clone(),
+            environment: after,
+        });
+        self.stale = false;
+        Ok(snapshot)
+    }
+}
+
+/// Read-only cache lookup. It does not connect, reconnect, generate a key or
+/// refresh any HAL data, including on cache miss, property change or HAL death.
+pub fn cached_version_tags() -> Result<VersionSnapshot> {
+    let mut cache = VERSION_TAG_CACHE
+        .lock()
+        .map_err(|_| version_cache_error("version tag cache poisoned"))?;
+    let environment = cache.observe(VersionEnvironment::read())?;
+    cache.read(&environment)
+}
+
+/// Establish version authorizations ONLY through the normal profile task.
+/// A short-lived AES key reads the HAL's state without requesting attestation,
+/// changing SPL, or saving a session. Existing valid samples are reused.
+pub fn version_tags() -> Result<VersionSnapshot> {
+    let mut cache = VERSION_TAG_CACHE
+        .lock()
+        .map_err(|_| version_cache_error("version tag cache poisoned"))?;
+    let before = cache.observe(VersionEnvironment::read())?;
+    cache.establish(
+        before,
+        sample_version_tags,
+        VersionEnvironment::read,
+        version_revision,
+    )
+}
+
+fn version_revision(environment: &VersionEnvironment, tags: &serde_json::Value) -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let sampled_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut digest = DefaultHasher::new();
+    environment.hash(&mut digest);
+    tags.to_string().hash(&mut digest);
+    // This is an opaque identity for one immutable in-memory HAL sample, not
+    // a cryptographic proof or a hardware-attestation claim.
+    format!(
+        "b-v1-{sampled_at:x}-{:x}-{sequence:x}-{:016x}",
+        std::process::id(),
+        digest.finish()
+    )
+}
+
+fn sample_version_tags() -> Result<serde_json::Value> {
     let keymint = get_system_keymint(SYSTEM_KEYMINT_DEFAULT)
         .context("connect default KeyMint for version authorizations")?;
     let params = key_params_to_aidl(&version_sample_params(), probe_keymint_version(&keymint))?;
@@ -302,7 +477,6 @@ pub fn version_tags() -> Result<serde_json::Value> {
         .map_err(|status| keymint_status_error(&status, "delete version snapshot key"))?;
     let tags = tags?;
     log::info!("event=keymint_version_tags source=hal tags={tags}");
-    *cached = Some(tags.clone());
     Ok(tags)
 }
 
@@ -1401,6 +1575,198 @@ fn spki_from_cert_der(der: &[u8]) -> Result<Vec<u8>> {
 fn is_dead_object_status(status: &rsbinder::Status) -> bool {
     status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
         && status.transaction_error() == rsbinder::StatusCode::DeadObject
+}
+
+#[cfg(test)]
+mod version_cache_tests {
+    use super::*;
+    use crate::keymaster::relay_tee::relay_error_result;
+    use std::cell::Cell;
+
+    fn environment() -> VersionEnvironment {
+        VersionEnvironment {
+            hal_generation: 7,
+            properties: ["17", "2026-09-01", "2026-09-01", "2025-12-01", "2025-12-01"]
+                .map(|value| Some(value.to_string())),
+        }
+    }
+
+    fn tags() -> serde_json::Value {
+        serde_json::json!({
+            "os_version": 170000, "os_patchlevel": 202609,
+            "vendor_patchlevel": 20260901, "boot_patchlevel": 20251201,
+        })
+    }
+
+    fn establish(
+        cache: &mut VersionTagCache,
+        state: &VersionEnvironment,
+        revision: &str,
+    ) -> VersionSnapshot {
+        cache
+            .establish(
+                state.clone(),
+                || Ok(tags()),
+                || Ok(state.clone()),
+                |_, _| revision.to_string(),
+            )
+            .unwrap()
+    }
+
+    fn assert_not_configured(result: Result<VersionSnapshot>) {
+        assert_eq!(
+            relay_error_result(&result.unwrap_err())["keymint_error_code"],
+            -64
+        );
+    }
+
+    #[test]
+    fn cache_reads_and_repeated_profiles_reuse_one_established_sample() {
+        let mut cache = VersionTagCache::default();
+        let state = environment();
+        assert_not_configured(cache.read(&state));
+        let samples = Cell::new(0);
+        for _ in 0..3 {
+            let snapshot = cache
+                .establish(
+                    state.clone(),
+                    || {
+                        samples.set(samples.get() + 1);
+                        Ok(tags())
+                    },
+                    || Ok(state.clone()),
+                    |_, _| "one-real-sample".to_string(),
+                )
+                .unwrap();
+            assert_eq!(snapshot.revision, "one-real-sample");
+            assert_eq!(cache.read(&state).unwrap(), snapshot);
+        }
+        assert_eq!(samples.get(), 1);
+    }
+
+    #[test]
+    fn every_spl_property_change_latches_stale_until_normal_profile_sampling() {
+        let original = environment();
+        for index in 0..original.properties.len() {
+            let mut cache = VersionTagCache::default();
+            let old = establish(&mut cache, &original, "old-profile");
+            let mut changed = original.clone();
+            changed.properties[index] = Some("new-raw-value".to_string());
+            assert_not_configured(cache.read(&changed));
+            // Restoring the old raw values cannot revive stale HAL evidence.
+            assert_not_configured(cache.read(&original));
+            let new = establish(&mut cache, &changed, "new-profile");
+            assert_eq!(new.tags, old.tags);
+            assert_ne!(new.revision, old.revision);
+            assert_eq!(cache.read(&changed).unwrap(), new);
+            assert_eq!(
+                relay_error_result(
+                    &new.validate_expected(&old.revision, &[170000, 202609, 20260901, 20251201])
+                        .unwrap_err()
+                )["keymint_error_code"],
+                -101
+            );
+        }
+    }
+
+    #[test]
+    fn hal_generation_change_invalidates_even_with_identical_properties_and_tags() {
+        let mut cache = VersionTagCache::default();
+        let before = environment();
+        establish(&mut cache, &before, "before-hal-restart");
+        let mut after = before.clone();
+        after.hal_generation += 1;
+        assert_not_configured(cache.read(&after));
+        assert_not_configured(cache.read(&before));
+        let fresh = establish(&mut cache, &after, "after-hal-restart");
+        assert_eq!(cache.read(&after).unwrap(), fresh);
+    }
+
+    #[test]
+    fn unknown_properties_or_failed_profile_sampling_cannot_revive_old_evidence() {
+        let mut cache = VersionTagCache::default();
+        let state = environment();
+        establish(&mut cache, &state, "first");
+        assert!(cache
+            .observe(Err(version_cache_error("property read unavailable")))
+            .is_err());
+        assert_not_configured(cache.read(&state));
+        assert_not_configured(cache.establish(
+            state.clone(),
+            || Err(version_cache_error("sample failed")),
+            || Ok(state.clone()),
+            |_, _| panic!("failed samples have no revision"),
+        ));
+        assert_not_configured(cache.read(&state));
+        establish(&mut cache, &state, "recovered-through-profile");
+        assert!(cache.read(&state).is_ok());
+    }
+
+    #[test]
+    fn state_changes_during_sampling_are_rejected_without_retry_or_publication() {
+        let state = environment();
+        for change_generation in [false, true] {
+            let mut cache = VersionTagCache::default();
+            let mut after = state.clone();
+            if change_generation {
+                after.hal_generation += 1;
+            } else {
+                after.properties[1] = Some("2026-10-01".to_string());
+            }
+            let samples = Cell::new(0);
+            assert_not_configured(cache.establish(
+                state.clone(),
+                || {
+                    samples.set(samples.get() + 1);
+                    Ok(tags())
+                },
+                || Ok(after),
+                |_, _| panic!("unstable samples have no revision"),
+            ));
+            assert_eq!(samples.get(), 1);
+            assert_not_configured(cache.read(&state));
+        }
+    }
+
+    #[test]
+    fn raw_properties_are_not_converted_to_expected_tags_or_hardware_acceptance() {
+        let mut cache = VersionTagCache::default();
+        let mut state = environment();
+        state.properties[4] = Some("2026-09-01".to_string());
+        let snapshot = establish(&mut cache, &state, "hal-values-only");
+        snapshot
+            .validate_expected("hal-values-only", &[170000, 202609, 20260901, 20251201])
+            .unwrap();
+        assert!(snapshot
+            .validate_expected("hal-values-only", &[170000, 202609, 20260901, 20260901])
+            .is_err());
+    }
+
+    #[test]
+    fn revision_is_stable_for_one_sample_and_new_for_each_explicit_reestablishment() {
+        let mut cache = VersionTagCache::default();
+        let first_state = environment();
+        let first = cache
+            .establish(
+                first_state.clone(),
+                || Ok(tags()),
+                || Ok(first_state.clone()),
+                version_revision,
+            )
+            .unwrap();
+        assert_eq!(cache.read(&first_state).unwrap().revision, first.revision);
+        let mut second_state = first_state;
+        second_state.hal_generation += 1;
+        let second = cache
+            .establish(
+                second_state.clone(),
+                || Ok(tags()),
+                || Ok(second_state.clone()),
+                version_revision,
+            )
+            .unwrap();
+        assert_ne!(first.revision, second.revision);
+    }
 }
 
 #[cfg(test)]

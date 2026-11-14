@@ -5,6 +5,7 @@
 // asks the KeyMint daemon to reload.
 const OMMEGA_DIAG_FLAT = "/data/adb/ommega/ommegadata/config";
 const OMMEGA_DIAG_TOML = "/data/adb/ommega/ommegadata/config.toml";
+const OMMEGA_DIAG_SPL_FILE = "/data/misc/keystore/ommega/data/spl-status.json";
 const OMMEGA_DIAG_RESTART = "/data/adb/ommega/restart.keymint";
 const OMMEGA_DIAG_PROBE_PKG = "aprobes.agap";
 const OMMEGA_DIAG_PROBE_FILE = "/storage/emulated/0/Android/data/aprobes.agap/files/a-gap-probe.txt";
@@ -25,6 +26,10 @@ function ommegaDiagT(zh, en) { return ommegaUiLocalize(zh + " / " + en); }
 
 // One read-only command per page; the shell keeps every probe bounded.
 const OMMEGA_DIAG_PAGES = [
+  { id: "diag-spl", zh: "SPL 来源与差异（只读）", en: "SPL sources and differences (read-only)",
+    zhNote: "仅显示已发布的本机来源与 B 端缓存；属性、HAL 配置和缓存都不等于 TA 或固件证明。缺失即未知，不拉取 profile、不调用 HAL、不修改 A 端日期。",
+    enNote: "Published local sources and cached B snapshots only. Properties, HAL configuration and caches are not TA or firmware proof. Missing means unknown: no profile fetch, HAL call or A-side date change.",
+    command: "cat '" + OMMEGA_DIAG_SPL_FILE + "' 2>/dev/null" },
   { id: "diag-keymint", zh: "KeyMint 密钥服务", en: "KeyMint keystore",
     zhNote: "本地 / 中继两种模式下的签名、证明与认证", enNote: "Signing, attestation and authentication in both modes",
     command: ["set +e",
@@ -104,19 +109,75 @@ function ommegaDiagItem(ok, zh, en, adviceZh, adviceEn) {
   return { ok, zh, en, adviceZh, adviceEn };
 }
 
+function ommegaDiagItemMark(item) {
+  return item.informational ? "· " : item.ok === true ? "\u2713 " : item.ok === false ? "\u26a0 " : "? ";
+}
 function ommegaDiagRenderItems(target, items) {
   target.innerHTML = "<ul class=\"om-diag-list\">" + items.map(item => {
-    const hint = item.ok ? "" : "<span>" + ommegaDiagEsc(ommegaDiagT("建议：", "Advice: ") +
+    const hint = item.ok === true || item.informational || (!item.adviceZh && !item.adviceEn) ? "" : "<span>" + ommegaDiagEsc(ommegaDiagT("建议：", "Advice: ") +
       ommegaDiagT(item.adviceZh, item.adviceEn)) + "</span>";
     return "<li class=\"om-diag-row\"><div class=\"om-diag-row-body\"><strong>" +
-      (item.ok ? "\u2713 " : "\u26a0 ") + ommegaDiagEsc(ommegaDiagT(item.zh, item.en)) +
+      ommegaDiagItemMark(item) + ommegaDiagEsc(ommegaDiagT(item.zh, item.en)) +
       "</strong>" + hint + "</div></li>";
   }).join("") + "</ul>";
+}
+
+// Status schema v1 is published by the daemon; never infer one source from another.
+// B/profile and certificate records are snapshots, not fresh HAL observations.
+function ommegaDiagParseSpl(raw) {
+  let status;
+  try { status = JSON.parse(String(raw || "")); } catch { return null; }
+  if (!status || status.version !== 1 || status.policy !== "a-native-read-only" ||
+      !status.sources || typeof status.sources !== "object" || Array.isArray(status.sources)) return null;
+  return status;
+}
+function ommegaDiagSplValue(source, field) {
+  const item = source && typeof source === "object" ? source[field] : null;
+  const value = item && typeof item === "object" ? item.value : null;
+  if ((typeof value === "number" && Number.isSafeInteger(value) && value >= 0) ||
+      (typeof value === "string" && value.trim() && value.length <= 120)) return String(value);
+  return null;
+}
+function ommegaDiagSplItems(raw) {
+  const status = ommegaDiagParseSpl(raw);
+  const match = status && status.match;
+  const verdict = match && ["unknown", "matched", "mismatch"].includes(match.status) ? match.status : "unknown";
+  const reason = match && typeof match.reason === "string" ? match.reason.slice(0, 300) : "";
+  const summary = {...ommegaDiagItem(verdict === "mismatch" ? false : null,
+    "SPL 发布快照对比：" + ({unknown:"未知", matched:"快照相符（非证书验收）", mismatch:"有差异"})[verdict] + (reason ? " · " + reason : ""),
+    "Published SPL snapshot comparison: " + verdict + " (not certificate validation)" + (reason ? " · " + reason : ""),
+    "仅核对已发布来源；不要在 A 端设置补丁日期。", "Review the published sources only; do not set A-side patch dates."), informational:verdict === "matched"};
+  const rows = [summary];
+  for (const [key, zh, en] of [
+    ["firmware", "固件来源（仅原始值）", "Firmware source (original values only)"],
+    ["android_properties", "Android 属性（仅观察）", "Android properties (observations only)"],
+    ["hal_configured", "HAL 配置（非 TA 证明）", "HAL configuration (not TA proof)"],
+    ["ta_observed", "TA 已观测值", "Observed TA values"],
+    ["remote_profile", "B/profile 缓存（快照，非实时 HAL）", "B/profile cache (snapshot, not live HAL)"],
+    ["certificate", "证书记录（快照，非实时 HAL）", "Certificate record (snapshot, not live HAL)"]
+  ]) {
+    const source = status && status.sources[key];
+    const values = [];
+    for (const field of ["system", "boot", "vendor", "os_version"]) {
+      const value = ommegaDiagSplValue(source, field);
+      const entry = source && source[field];
+      const origin = entry && typeof entry.source === "string" ? entry.source.slice(0, 160) : "";
+      const rawValue = entry && (typeof entry.raw === "string" || typeof entry.raw === "number") ? String(entry.raw).slice(0, 120) : "";
+      const reason = entry && typeof entry.reason === "string" ? entry.reason.slice(0, 160) : "";
+      const state = entry && typeof entry.state === "string" ? entry.state.slice(0, 60) : "";
+      values.push(field + "=" + (value === null ? "unknown" : value) + (origin ? " [" + origin + "]" : "") +
+        (rawValue && rawValue !== value ? " (raw=" + rawValue + ")" : "") +
+        (state || reason ? " (" + [state, reason].filter(Boolean).join(": ") + ")" : ""));
+    }
+    rows.push({...ommegaDiagItem(null, zh + "：" + values.join(" · "), en + ": " + values.join(" · "), "", ""), informational:true});
+  }
+  return rows;
 }
 
 // Each feature page answers the same three questions: what is wrong, what the
 // device actually shows, and what to do next.
 function ommegaDiagPageItems(page, output) {
+  if (page.id === "diag-spl") return ommegaDiagSplItems(output);
   const lines = String(output || "").split("\n");
   const pick = prefix => {
     const index = lines.indexOf("==" + prefix);
@@ -474,8 +535,6 @@ async function ommegaDiagNativeProbe() {
     'grep -c "<Certificate" /data/misc/keystore/ommega/keybox.xml 2>/dev/null',
     'echo "==remote"', 'grep -E "^(url|device_id|remote|tls_insecure):" "$D/config" 2>/dev/null',
     'echo "==health"', 'cat "$D/remote-health.json" 2>/dev/null; echo',
-    'echo "==spl"', 'getprop ro.build.version.security_patch', 'getprop ro.vendor.build.security_patch',
-    'grep -E "^security_patch|^os_patchlevel|^vendor_patchlevel" /data/adb/ommega/ommegadata/config.toml 2>/dev/null',
     'echo "==mask"', 'cat /data/misc/keystore/ommega/data/cpu-mask.conf 2>/dev/null; echo',
     'echo "==zygisk"', 'ls "$M/zygisk" 2>/dev/null | head -n 3',
     'echo "==soter"', '[ -f /data/adb/ommega/soterta/enabled ] && echo on || echo off',
@@ -519,16 +578,7 @@ async function ommegaDiagNativeProbe() {
   push(verdict !== "error", "中继最近往返：" + verdict, "Relay last verdict: " + verdict,
     "检查服务器地址、设备 ID 与 token，再确认 B 端在线", "Check the server URL, device id and token, then confirm B is online");
 
-  const spl = pick("spl");
-  const splProp = spl.find(line => /^\d{4}-\d{2}-\d{2}$/.test(line)) || "";
-  const toml = await ommegaDiagRead(OMMEGA_DIAG_TOML);
-  const splConfigured = /^\s*(security_patch|os_patchlevel|vendor_patchlevel)\s*=/m.test(toml);
-  // "auto" is a valid trust setting: the module derives the value per request.
-  const splKnown = !!splProp || splConfigured;
-  push(splKnown, "系统补丁级别：" + (splProp || (splConfigured ? "使用信任参数" : "-")),
-    "System patch level: " + (splProp || (splConfigured ? "trust parameters" : "-")),
-    "属性为空时，请在「信任参数」中设置补丁级别，否则证明会被拒",
-    "When the property is empty, set the patch level under trust parameters or attestation is rejected");
+  items.push(...ommegaDiagSplItems(await ommegaDiagRead(OMMEGA_DIAG_SPL_FILE)));
 
   const mask = pick("mask").join(" ");
   const maskOn = /enabled=true/.test(mask);
@@ -559,16 +609,18 @@ async function ommegaDiagNativeProbe() {
 }
 
 function ommegaDiagRenderNativeProbe(target, items) {
-  const bad = items.filter(item => !item.ok);
+  const bad = items.filter(item => item.ok === false);
+  const passed = items.filter(item => item.ok === true).length;
+  const unknown = items.filter(item => item.ok == null && !item.informational).length;
   const head = "<p class=\"note\">" + ommegaDiagEsc(ommegaDiagT(
-    "通过 " + (items.length - bad.length) + " 项，需要关注 " + bad.length + " 项",
-    "Passed " + (items.length - bad.length) + ", " + bad.length + " need attention")) + "</p>";
+    "通过 " + passed + " 项，需要关注 " + bad.length + " 项，未知 " + unknown + " 项",
+    "Passed " + passed + ", " + bad.length + " need attention, " + unknown + " unknown")) + "</p>";
   const rows = items.map(item => {
     const title = ommegaDiagT(item.zh, item.en);
     const advice = ommegaDiagT(item.adviceZh, item.adviceEn);
-    const hint = item.ok ? "" : "<span>" + ommegaDiagEsc(ommegaDiagT("建议：", "Advice: ") + advice) + "</span>";
+    const hint = item.ok === true || item.informational || (!item.adviceZh && !item.adviceEn) ? "" : "<span>" + ommegaDiagEsc(ommegaDiagT("建议：", "Advice: ") + advice) + "</span>";
     return "<li class=\"om-diag-row\"><div class=\"om-diag-row-body\"><strong>" +
-      (item.ok ? "\u2713 " : "\u26a0 ") + ommegaDiagEsc(title) + "</strong>" + hint + "</div></li>";
+      ommegaDiagItemMark(item) + ommegaDiagEsc(title) + "</strong>" + hint + "</div></li>";
   }).join("");
   target.innerHTML = head + "<ul class=\"om-diag-list\">" + rows + "</ul>";
 }
@@ -698,12 +750,18 @@ function ommegaDiagEnsureProbePage() {
 }
 
 function ommegaDiagRouteAllowed(view, unlocked) {
-  return !String(view).startsWith("diag-") || !!unlocked;
+  return view === "diag-spl" || !String(view).startsWith("diag-") || !!unlocked;
 }
 
 function ommegaDiagRoute(view) {
   if (view === "overview") { void ommegaDiagRenderOverview(); return; }
   if (view === "diagnostics") { ommegaDiagInit(); return; }
+  if (view === "diag-spl") {
+    // This page only reads a published file; it does not need debug logging.
+    ommegaDiagEnsurePages();
+    void ommegaDiagLoad(OMMEGA_DIAG_PAGES.find(page => page.id === "diag-spl"));
+    return;
+  }
   if (view === "diag-probe") {
     ommegaDiagInit();
     ommegaDiagEnsureProbePage();

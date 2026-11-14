@@ -1,8 +1,9 @@
 # Device-property view
 
 Some applications attest *device properties* (brand, device, product,
-manufacturer, model, SoC) together with their key. The kernel asks the
-application for those identifiers before key generation. When an application
+manufacturer, model, SoC) together with their key. Android's keystore client
+collects those identifiers from the application-visible properties before key
+generation. When an application
 runs on A but its attestation is signed by the relay peer B, the identifiers A
 supplies do not belong to B, and B answers `CANNOT_ATTEST_IDS` (-66). The
 device-property view closes that gap: for selected applications only, the
@@ -41,6 +42,10 @@ to processes started after it is enabled; restart the target application.
   leave them unset, while some (Xiaomi, for example) keep the real values. The
   application reads these properties first, so publishing the target identity
   makes it request exactly what the relay can attest.
+- `ro.build.version.security_patch` and `Build.VERSION.SECURITY_PATCH` retain
+  A's original values, even when B's 95-field identity snapshot contains a
+  different SPL. The wire slot is retained but is not a target for a B SPL write.
+  Other supported B identity, SoC and build fields keep their existing projection.
 - Values longer than the 92-byte short-property form (build fingerprints,
   `ro.build.version.known_codenames`) are left untouched. The readonly property
   area cannot carry them, and the host snapshot cannot represent them either, so
@@ -54,20 +59,37 @@ to processes started after it is enabled; restart the target application.
 After the mount the companion compares the native and child tuples with the
 expected values. The check mirrors the injection policy: long values, values
 absent on the host, and dedicated properties without a target are not treated
-as errors. Partition aliases that remain uncovered are counted and logged as
-informational. A successful view logs:
+as errors for B-projected fields. The retained A SPL is stricter: native
+get/find/read/callback and child-listing checks must agree with the captured A
+value; a missing nonempty A value or a substituted B value fails the check. Java
+SECURITY_PATCH is read before and after the other Java writes, never written.
+A Java failure rolls back those Java writes and reports an incomplete view; a
+successful native phase alone is not complete. Partition aliases that remain
+uncovered are counted and logged as informational. A successful view logs:
 
 ```
 MaskCPU : private property view: ... error=none
 MaskCPU : child getprop tuple=<brand>/<device>/<name>/<manufacturer>/<model>
 ```
 
-Refusals are explicit. `experiment refused: ...` names the property and the
-reason, and `B view requires absent property` no longer aborts the view; it is
-reported as `host lacks property, keeping it absent`.
+Refusals are explicit. `experiment refused: ...` names the property and reason.
+An optional B property absent on the host is reported as
+`host lacks property, keeping it absent`. No property record is inserted.
 
 ## Limits
 
 The view does not change A's global properties, does not affect unselected
-applications, and does not add properties the host does not define. An
-application that reads the real build fingerprint still sees the host value.
+applications, and does not add properties the host does not define. Build-property
+files, kernel and hardware behavior remain A's; a long unpatchable fingerprint
+stays a host value. This view neither changes native firmware version sources
+nor bypasses the remote `a-native-v1` admission contract. B must independently
+match A's native four-tag target and revision; a product-identity view is not
+proof of hardware acceptance, Wallet compatibility or payment/card support.
+
+The SPL status page reads only
+`/data/misc/keystore/ommega/data/spl-status.json`; opening or refreshing it does
+not acquire a B profile or invoke a HAL. Firmware, Android properties, frozen
+software-TA configuration, cached B profile and certificate observations are
+distinct sources. Unknown TA/certificate observations stay unknown. See
+[Software keyblob version checks](KEYBLOB-VERSIONS.md) and
+[Relay integrity](RELAY-INTEGRITY.md).

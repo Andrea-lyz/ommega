@@ -1,7 +1,7 @@
 //! Runtime configuration watching and application.
 //
 // File loading and schema handling live in the parent module. Watch callbacks
-// release the configuration read guard before resolving platform state.
+// release the read guard before applying non-boot fields; firmware stays frozen.
 
 use std::{path::PathBuf, sync::OnceLock};
 
@@ -9,8 +9,8 @@ use anyhow::Result;
 use kmr_common::runtime::file_watch::{self, WatchTrigger};
 
 use super::{
-    boot_patchlevel_changed, config, load_config_file_with_retry, trust_changed_beyond_patchlevels,
-    Config, ConfigLoadError, CLIENTA_CONFIG_PATH, CLIENTA_CONFIG_UI_PATH, CONFIG_PATH,
+    config, load_config_file_with_retry, Config, ConfigLoadError, CLIENTA_CONFIG_PATH,
+    CLIENTA_CONFIG_UI_PATH, CONFIG_PATH,
 };
 
 static CONFIG_WATCHER_STARTED: OnceLock<()> = OnceLock::new();
@@ -88,43 +88,8 @@ fn reload_runtime_config(trigger: WatchTrigger) {
         }
     };
 
-    let previous_trust = &runtime_snapshot.trust;
-    let mut applied_trust = runtime_snapshot.trust.clone();
-    let mut applied_trust_intent = runtime_snapshot.trust_intent.clone();
-    let mut update_patchlevels = false;
-    let mut security_patch_update = None;
-
-    if trust_changed_beyond_patchlevels(&runtime_snapshot.trust_intent, &new_config_file.trust) {
-        log::warn!(
-            "Trust config changed on disk beyond patch levels; restart keymint to apply it."
-        );
-    } else {
-        match crate::plat::vbmeta::resolve_patch_levels(&new_config_file.trust) {
-            Ok(patches) => {
-                update_patchlevels = previous_trust.os_patchlevel != patches.os_patchlevel
-                    || previous_trust.vendor_patchlevel != patches.vendor_patchlevel
-                    || boot_patchlevel_changed(
-                        &previous_trust.boot_patchlevel,
-                        &patches.boot_patchlevel,
-                    );
-                if patches.write_security_patch {
-                    security_patch_update = Some((
-                        patches.security_patch.clone(),
-                        patches.observed_security_patch,
-                    ));
-                }
-                applied_trust.security_patch = patches.security_patch;
-                applied_trust.os_patchlevel = patches.os_patchlevel;
-                applied_trust.vendor_patchlevel = patches.vendor_patchlevel;
-                applied_trust.boot_patchlevel = patches.boot_patchlevel;
-                applied_trust_intent = new_config_file.trust.clone();
-            }
-            Err(error) => {
-                log::error!(
-                    "failed to resolve changed patch levels; keeping previous values: {error:#}"
-                );
-            }
-        }
+    if runtime_snapshot.trust_intent != new_config_file.trust {
+        log::warn!("trust config changed on disk; restart keymint to apply it; native SPL snapshot remains frozen");
     }
 
     let keep_crypto = runtime_snapshot.crypto != new_config_file.crypto;
@@ -137,17 +102,11 @@ fn reload_runtime_config(trigger: WatchTrigger) {
         );
     }
 
-    let mut updated = Config::from_file(&new_config_file, applied_trust);
-    updated.main.use_native_strongbox = runtime_snapshot.main.use_native_strongbox;
-    updated.trust_intent = applied_trust_intent;
-    if keep_crypto {
-        updated.crypto = runtime_snapshot.crypto;
-    }
-    match crate::keymaster::keymint_device::apply_runtime_config_update(
-        updated,
-        update_patchlevels,
-        security_patch_update,
-    ) {
+    // Ordinary configuration reloads cannot resample firmware, rewrite SPL,
+    // mutate TA versions or recreate the TA/its outstanding operations.
+    let mut updated = Config::from_file(&new_config_file, runtime_snapshot.trust.clone());
+    updated.preserve_startup_fields(&runtime_snapshot);
+    match crate::keymaster::keymint_device::apply_runtime_config_update(updated) {
         Ok(()) => {
             // Drop the cached B-side identity profile. It is fetched once and
             // reused, so without this a saved config change (a corrected token,
@@ -155,6 +114,7 @@ fn reload_runtime_config(trigger: WatchTrigger) {
             // why toggling "enable remote" off and on in the WebUI appeared to
             // fix nothing.
             crate::remote::invalidate_identity_profile();
+            crate::remote::publish_spl_status();
             log::info!("config updated via {}", trigger.label());
         }
         Err(error) => log::error!(
