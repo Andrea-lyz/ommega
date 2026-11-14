@@ -263,21 +263,17 @@ if [ -f "$TARGET_INJECTOR_CONFIG" ]; then
   chown 1017:1017 "$TARGET_INJECTOR_CONFIG"
 fi
 
-# WebUI overlay props (security patch, vbmeta digest, vbmeta public key).
-# Stored in the data dir so Magisk/KSU overlay installs do not wipe them.
-WEBUI_PROPS=$TARGET_DIR/webui-props.sh
-if [ -f "$WEBUI_PROPS" ]; then
-  chmod 0644 "$WEBUI_PROPS" 2>/dev/null || true
-  chown 1017:1017 "$WEBUI_PROPS" 2>/dev/null || true
-  . "$WEBUI_PROPS"
+# BEGIN VB_BOOT
+boot_status=0
+# Replay only the helper's validated VB whitelist, never a historical shell file.
+# Missing config.toml is expected on first install; service.sh syncs it later.
+if [ -f "$MODDIR/webui-trust.sh" ]; then
+  if ! sh "$MODDIR/webui-trust.sh" boot; then
+    echo "ommega: Verified Boot overlay restore failed" >&2
+    boot_status=1
+  fi
 fi
-
-# Mirror overlay props into config.toml [trust] so attestation tags match
-# the system properties the WebUI set. Skip when keymint has not created
-# the file yet (service.sh retries after the daemon starts).
-if [ -f "$MODDIR/webui-trust.sh" ] && [ -f "$TARGET_DIR/config.toml" ]; then
-  sh "$MODDIR/webui-trust.sh" sync
-fi
+# END VB_BOOT
 
 # Start the existing daemons before first unlock; service.sh reuses them.
 pid_matches_script() {
@@ -317,15 +313,18 @@ start_daemon_early() {
 
 if [ -f "$MODDIR/daemon" ]; then
   if start_daemon_early "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid"; then
-    log_line "ommega: keymint daemon started early in post-fs-data"
+    log -t ommega "keymint daemon started early in post-fs-data"
   else
-    log_line "ommega: keymint daemon early start failed; service.sh will retry"
+    log -t ommega "keymint daemon early start failed; service.sh will retry"
+    boot_status=1
   fi
 fi
 if [ -f "$MODDIR/daemon-injector" ]; then
   if start_daemon_early "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid"; then
-    log_line "ommega: injector daemon started early in post-fs-data"
+    log -t ommega "injector daemon started early in post-fs-data"
   else
-    log_line "ommega: injector daemon early start failed; service.sh will retry"
+    log -t ommega "injector daemon early start failed; service.sh will retry"
+    boot_status=1
   fi
 fi
+exit "$boot_status"

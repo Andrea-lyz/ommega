@@ -41,8 +41,7 @@ const CLIENTA_CONFIG_PATHS: [&str; 2] = [CLIENTA_CONFIG_PATH, CLIENTA_CONFIG_UI_
 /// Effective relay mode, published so tools that cannot load this config (the
 /// WebUI status reader) can pick the counter table that matches the mode.
 pub const RELAY_MODE_PATH: &str = "/data/misc/keystore/ommega/data/relay-mode";
-const CONFIG_VERSION_V1: u32 = 1;
-const CURRENT_CONFIG_VERSION: u32 = 2;
+const CURRENT_CONFIG_VERSION: u32 = 3;
 
 const REPLACE_SAVE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const REPLACE_SAVE_RETRY_LIMIT: usize = 10;
@@ -124,17 +123,13 @@ fn bootstrap_config_file_to_path(path: &Path) -> Result<ConfigFile> {
         .lock()
         .map_err(|_| anyhow!("config file write lock poisoned"))?;
     let (contents, parsed) = match fs::read_to_string(path) {
-        Ok(contents) => match parse_config_file(&contents, true) {
-            Ok(parsed) => (Some(contents), parsed),
-            Err(error) => {
-                // A broken config must not make the daemon crash-loop every five
-                // seconds. Restore the previous revision; if that is broken too,
-                // surface the error instead of silently seeding defaults.
-                let restored = recover_from_broken_config(path, &error)?;
-                let parsed = parse_config_file(&restored, true)?;
-                (Some(restored), parsed)
-            }
-        },
+        Ok(contents) => {
+            // Invalid or legacy override-bearing files are evidence, not defaults.
+            // Never restore a backup or reset key material behind the user's back.
+            let parsed = parse_config_file(&contents, true)
+                .context("startup config rejected; original config and keys were left unchanged")?;
+            (Some(contents), parsed)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             log::warn!("config file missing during startup: {error}; seeding defaults");
             let config_file = ConfigFile::default();
@@ -183,50 +178,6 @@ fn bootstrap_config_file_to_path(path: &Path) -> Result<ConfigFile> {
         log::info!("migrated config.toml to version {CURRENT_CONFIG_VERSION}");
     }
     Ok(config_file)
-}
-
-/// Restore `config.toml` from `config.toml.bak` when the live file cannot be
-/// parsed. The broken copy is kept beside it as `.broken` for diagnosis.
-fn recover_from_broken_config(path: &Path, error: &anyhow::Error) -> Result<String> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config.toml")
-        .to_string();
-    let backup = path.with_file_name(format!("{file_name}.bak"));
-    let contents = fs::read_to_string(&backup).unwrap_or_default();
-    if contents.trim().is_empty() {
-        return Err(anyhow!(
-            "config file is broken and {} is missing or empty: {error:#}",
-            backup.display()
-        ));
-    }
-    parse_config_file(&contents, true).with_context(|| {
-        format!(
-            "config file is broken and {} is broken too",
-            backup.display()
-        )
-    })?;
-    let broken = path.with_file_name(format!("{file_name}.broken"));
-    if let Err(rename_error) = fs::rename(path, &broken) {
-        log::warn!(
-            "failed to keep the broken config at {}: {rename_error}",
-            broken.display()
-        );
-    }
-    fs::copy(&backup, path).with_context(|| {
-        format!(
-            "failed to restore {} from {}",
-            path.display(),
-            backup.display()
-        )
-    })?;
-    log::warn!(
-        "config file was unparsable ({error}); restored it from {} (broken copy kept at {})",
-        backup.display(),
-        broken.display()
-    );
-    Ok(contents)
 }
 
 fn persist_config_file_to_path(path: &Path, config_file: &ConfigFile) -> Result<()> {
@@ -306,6 +257,7 @@ pub fn install_runtime_config(
         *guard = runtime;
     }
     start_config_watcher()?;
+    crate::remote::publish_spl_status();
     Ok(())
 }
 
@@ -366,20 +318,18 @@ fn parse_config_file(contents: &str, allow_migration: bool) -> Result<ParsedConf
     let mut table: toml::Table =
         toml::from_str(contents).context("failed to deserialize config.toml")?;
     let version = config_version(&table)?;
+    // Inspect the original table before any schema conversion. Overrides must
+    // not disappear during an upgrade, even if they equal today's native value.
+    validate_native_trust_table(&table)?;
     let migrated = match version {
-        0 if allow_migration => {
-            upgrade_v0_to_v1(&mut table)?;
-            upgrade_v1_to_v2(&mut table)?;
+        0..=2 if allow_migration => {
+            upgrade_native_schema(&mut table)?;
             true
         }
-        CONFIG_VERSION_V1 if allow_migration => {
-            upgrade_v1_to_v2(&mut table)?;
-            true
-        }
-        0 | CONFIG_VERSION_V1 => {
+        0..=2 => {
             return Err(anyhow!(
-                "config version {version} requires a keymint restart to migrate"
-            ))
+            "config version {version} requires a keymint restart for a native-only schema upgrade"
+        ))
         }
         CURRENT_CONFIG_VERSION => false,
         version => {
@@ -412,37 +362,57 @@ fn config_version(table: &toml::Table) -> Result<u32> {
     }
 }
 
-fn upgrade_v0_to_v1(table: &mut toml::Table) -> Result<()> {
-    table.remove("trust_record");
-    table.insert(
-        "version".to_string(),
-        toml::Value::Integer(i64::from(CONFIG_VERSION_V1)),
-    );
-    let trust = table
-        .get_mut("trust")
-        .and_then(toml::Value::as_table_mut)
-        .ok_or_else(|| anyhow!("config is missing a valid [trust] table"))?;
-    let inherited_patchlevel = trust
-        .get("security_patch")
-        .cloned()
-        .unwrap_or_else(|| toml::Value::String("auto".to_string()));
-    for field in ["os_patchlevel", "vendor_patchlevel", "boot_patchlevel"] {
-        trust
-            .entry(field.to_string())
-            .or_insert_with(|| inherited_patchlevel.clone());
+#[derive(Debug, thiserror::Error)]
+#[error("migration-required: trust.{field} is an override; native-only mode accepts only auto. Original config and keys must be retained; review any previously ratcheted keyblobs before an explicit migration")]
+struct NativeOnlyMigrationRequired {
+    field: String,
+}
+
+fn native_only_error(field: &str) -> anyhow::Error {
+    NativeOnlyMigrationRequired {
+        field: field.to_string(),
+    }
+    .into()
+}
+
+fn validate_native_trust_table(table: &toml::Table) -> Result<()> {
+    if let Some(trust) = table.get("trust").and_then(toml::Value::as_table) {
+        for field in [
+            "os_version",
+            "security_patch",
+            "os_patchlevel",
+            "vendor_patchlevel",
+            "boot_patchlevel",
+        ] {
+            if let Some(value) = trust.get(field) {
+                if value.as_str().map(str::trim) != Some("auto") {
+                    return Err(native_only_error(field));
+                }
+            }
+        }
     }
     Ok(())
 }
 
-fn upgrade_v1_to_v2(table: &mut toml::Table) -> Result<()> {
+fn upgrade_native_schema(table: &mut toml::Table) -> Result<()> {
     let trust = table
         .get_mut("trust")
         .and_then(toml::Value::as_table_mut)
         .ok_or_else(|| anyhow!("config is missing a valid [trust] table"))?;
-    trust.insert(
-        "os_version".to_string(),
-        toml::Value::String("auto".to_string()),
-    );
+    // Only absent auto fields are materialized. Existing values, RoT and crypto
+    // material are never converted or replaced by the schema-version upgrade.
+    for field in [
+        "os_version",
+        "security_patch",
+        "os_patchlevel",
+        "vendor_patchlevel",
+        "boot_patchlevel",
+    ] {
+        trust
+            .entry(field.to_string())
+            .or_insert_with(|| toml::Value::String("auto".to_string()));
+    }
+    table.remove("trust_record");
     table.insert(
         "version".to_string(),
         toml::Value::Integer(i64::from(CURRENT_CONFIG_VERSION)),
@@ -450,13 +420,9 @@ fn upgrade_v1_to_v2(table: &mut toml::Table) -> Result<()> {
     Ok(())
 }
 
-fn validate_trust_config(trust: &RawTrustConfig) -> Result<()> {
-    if let OsVersionSpec::Fixed(value) = trust.os_version {
-        if !(0..=99).contains(&value) {
-            return Err(anyhow!(
-                "trust.os_version must be \"auto\" or a one- or two-digit Android major version"
-            ));
-        }
+pub(crate) fn validate_trust_config(trust: &RawTrustConfig) -> Result<()> {
+    if trust.os_version != OsVersionSpec::Auto {
+        return Err(native_only_error("os_version"));
     }
     for (field, value) in [
         ("security_patch", trust.security_patch.as_str()),
@@ -470,41 +436,10 @@ fn validate_trust_config(trust: &RawTrustConfig) -> Result<()> {
 }
 
 fn validate_patchlevel(field: &str, value: &str) -> Result<()> {
-    let normalized = value.trim();
-    if matches!(normalized, "auto" | "latest")
-        || is_security_patch_date(normalized)
-        || (field == "boot_patchlevel" && normalized.parse::<u32>().is_ok())
-    {
+    if value.trim() == "auto" {
         Ok(())
     } else {
-        let formats = if field == "boot_patchlevel" {
-            "auto, latest, YYYY-MM-DD, or a decimal u32"
-        } else {
-            "auto, latest, or YYYY-MM-DD"
-        };
-        Err(anyhow!("trust.{field} must be {formats}"))
-    }
-}
-
-pub fn is_security_patch_date(value: &str) -> bool {
-    regex::Regex::new(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
-        .expect("security patch regex must compile")
-        .is_match(value)
-}
-
-fn trust_changed_beyond_patchlevels(old: &RawTrustConfig, new: &RawTrustConfig) -> bool {
-    old.os_version != new.os_version
-        || old.vb_key != new.vb_key
-        || old.vb_hash != new.vb_hash
-        || old.verified_boot_state != new.verified_boot_state
-        || old.device_locked != new.device_locked
-}
-
-fn boot_patchlevel_changed(previous: &str, next: &str) -> bool {
-    let extract = crate::keymaster::keymint_device::extract_boot_patchlevel;
-    match (extract(previous), extract(next)) {
-        (Ok(previous), Ok(next)) => previous != next,
-        _ => true,
+        Err(native_only_error(field))
     }
 }
 
@@ -519,6 +454,13 @@ pub struct Config {
 }
 
 impl Config {
+    fn preserve_startup_fields(&mut self, current: &Self) {
+        self.trust = current.trust.clone();
+        self.trust_intent = current.trust_intent.clone();
+        self.crypto = current.crypto.clone();
+        self.main.use_native_strongbox = current.main.use_native_strongbox;
+    }
+
     fn from_file(config_file: &ConfigFile, resolved_trust: ResolvedTrust) -> Self {
         let clienta = load_clienta_remote_override();
         let from_clienta = clienta.is_some();
@@ -1155,6 +1097,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_reload_preserves_startup_trust_and_key_material() {
+        let file = ConfigFile::default();
+        let current = Config {
+            main: file.main,
+            crypto: file.crypto,
+            device: file.device,
+            remote: file.remote,
+            trust_intent: file.trust,
+            trust: ResolvedTrust {
+                os_version: 17,
+                security_patch: "2026-09-01".to_string(),
+                os_patchlevel: "2026-09-01".to_string(),
+                vendor_patchlevel: "2026-08-05".to_string(),
+                boot_patchlevel: "20250900".to_string(),
+                vb_key: [1; 32],
+                vb_hash: [2; 32],
+                vb_key_source: TrustValueSource::Computed,
+                vb_hash_source: TrustValueSource::Original,
+                verified_boot_state: true,
+                device_locked: true,
+            },
+        };
+        let mut candidate = current.clone();
+        candidate.main.log_level = "trace".to_string();
+        candidate.main.use_native_strongbox = !current.main.use_native_strongbox;
+        candidate.trust.vendor_patchlevel = "2099-01-01".to_string();
+        candidate.trust.vb_key = [3; 32];
+        candidate.crypto.root_kek_seed = [4; 32];
+        candidate.trust_intent.security_patch = "latest".to_string();
+        candidate.preserve_startup_fields(&current);
+        assert_eq!(candidate.trust, current.trust);
+        assert_eq!(candidate.trust_intent, current.trust_intent);
+        assert_eq!(candidate.crypto, current.crypto);
+        assert_eq!(
+            candidate.main.use_native_strongbox,
+            current.main.use_native_strongbox
+        );
+        assert_eq!(candidate.main.log_level, "trace");
+    }
+
+    #[test]
     fn relay_mode_is_published_only_for_an_enabled_relay_with_a_url() {
         assert_eq!(
             relay_mode_contents(&webui_remote(true, "https://relay.test")),
@@ -1263,50 +1246,23 @@ mod tests {
     }
 
     #[test]
-    fn os_version_spec_accepts_auto_or_fixed_integer() {
+    fn raw_os_version_is_decodable_but_fixed_config_is_rejected() {
         let auto: OsVersionToml = toml::from_str("value = \"auto\"").unwrap();
         assert_eq!(auto.value, OsVersionSpec::Auto);
-        assert!(toml::to_string(&auto).unwrap().contains("value = \"auto\""));
-
         let fixed: OsVersionToml = toml::from_str("value = 17").unwrap();
         assert_eq!(fixed.value, OsVersionSpec::Fixed(17));
-        assert!(toml::to_string(&fixed).unwrap().contains("value = 17"));
-
-        for invalid in ["value = \"latest\"", "value = 16.0", "value = 2147483648"] {
-            assert!(toml::from_str::<OsVersionToml>(invalid).is_err());
+        // Keeping the raw enum does not make fixed values a supported schema.
+        for value in [-1, 0, 16, 17, 99, 100] {
+            let mut file = ConfigFile::default();
+            file.trust.os_version = OsVersionSpec::Fixed(value);
+            let error = parse_config_file(&toml::to_string(&file).unwrap(), true)
+                .err()
+                .unwrap();
+            assert!(error
+                .downcast_ref::<NativeOnlyMigrationRequired>()
+                .is_some());
+            assert!(validate_trust_config(&file.trust).is_err());
         }
-
-        let mut trust = RawTrustConfig::default();
-        for value in [0, 99] {
-            trust.os_version = OsVersionSpec::Fixed(value);
-            validate_trust_config(&trust).unwrap();
-        }
-        for value in [-1, 100] {
-            trust.os_version = OsVersionSpec::Fixed(value);
-            assert!(validate_trust_config(&trust).is_err());
-        }
-
-        let mut config_file = ConfigFile::default();
-        config_file.trust.os_version = OsVersionSpec::Fixed(17);
-        let parsed = parse_config_file(&toml::to_string(&config_file).unwrap(), false).unwrap();
-        assert!(!parsed.migrated);
-        assert_eq!(
-            parsed.config_file.trust.os_version,
-            OsVersionSpec::Fixed(17)
-        );
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("config.toml");
-        persist_config_file_to_path(&path, &config_file).unwrap();
-        let persisted: toml::Table = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(
-            persisted
-                .get("trust")
-                .and_then(toml::Value::as_table)
-                .and_then(|trust| trust.get("os_version"))
-                .and_then(toml::Value::as_integer),
-            Some(17)
-        );
     }
 
     #[test]
@@ -1326,34 +1282,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_security_patch_accepts_auto_latest_and_dates() {
-        validate_patchlevel("security_patch", "auto").expect("auto should validate");
-        validate_patchlevel("security_patch", "latest").expect("latest should validate");
-        validate_patchlevel("security_patch", "2026-04-05")
-            .expect("explicit patch level should validate");
-    }
-
-    #[test]
-    fn validate_security_patch_rejects_invalid_values() {
-        assert!(validate_patchlevel("security_patch", "2026-4-5").is_err());
-        assert!(validate_patchlevel("security_patch", "yesterday").is_err());
-        assert!(validate_patchlevel("security_patch", "").is_err());
-        assert!(validate_patchlevel("security_patch", "20000000").is_err());
-    }
-
-    #[test]
-    fn validate_boot_patchlevel_accepts_raw_wire_value() {
-        validate_patchlevel("boot_patchlevel", "20000000")
-            .expect("raw boot patch level should validate");
-        assert!(validate_patchlevel("boot_patchlevel", "4294967296").is_err());
-    }
-
-    #[test]
-    fn boot_patchlevel_change_compares_wire_values() {
-        assert!(!boot_patchlevel_changed("2025-06-05", "20250605"));
-        assert!(!boot_patchlevel_changed("20250605", "2025-06-05"));
-        assert!(boot_patchlevel_changed("2025-06-05", "20250606"));
-        assert!(boot_patchlevel_changed("2025-06-05", "unavailable"));
+    fn native_only_schema_rejects_every_patch_override() {
+        for field in [
+            "security_patch",
+            "os_patchlevel",
+            "vendor_patchlevel",
+            "boot_patchlevel",
+        ] {
+            validate_patchlevel(field, "auto").unwrap();
+            for value in ["latest", "2026-04-05", "20000000", "0", "fixed", ""] {
+                let error = validate_patchlevel(field, value).unwrap_err();
+                assert!(error.to_string().contains("migration-required"));
+                assert!(error.to_string().contains(field));
+            }
+        }
     }
 
     #[test]
@@ -1409,8 +1351,8 @@ shared_secret_seed = "2222222222222222222222222222222222222222222222222222222222
 shared_secret_nonce = "3333333333333333333333333333333333333333333333333333333333333333"
 
 [trust]
-os_version = 16
-security_patch = "2026-04-05"
+os_version = "auto"
+security_patch = "auto"
 vb_key = "2222222222222222222222222222222222222222222222222222222222222222"
 vb_hash = "3333333333333333333333333333333333333333333333333333333333333333"
 verified_boot_state = true
@@ -1436,9 +1378,9 @@ imei2 = ""
         assert!(matches!(config.trust.vb_key, TrustValueSpec::Hex(_)));
         assert!(matches!(config.trust.vb_hash, TrustValueSpec::Hex(_)));
         assert_eq!(config.trust.os_version, OsVersionSpec::Auto);
-        assert_eq!(config.trust.os_patchlevel, "2026-04-05");
-        assert_eq!(config.trust.vendor_patchlevel, "2026-04-05");
-        assert_eq!(config.trust.boot_patchlevel, "2026-04-05");
+        assert_eq!(config.trust.os_patchlevel, "auto");
+        assert_eq!(config.trust.vendor_patchlevel, "auto");
+        assert_eq!(config.trust.boot_patchlevel, "auto");
     }
 
     #[test]
@@ -1462,19 +1404,16 @@ imei2 = ""
             "future_trust_key".to_string(),
             toml::Value::String("preserve-me-too".to_string()),
         );
-        trust.insert("os_version".to_string(), toml::Value::Integer(17));
         trust.remove("os_patchlevel");
         trust.insert(
             "vendor_patchlevel".to_string(),
-            toml::Value::String("2026-03-05".to_string()),
+            toml::Value::String("auto".to_string()),
         );
         trust.remove("boot_patchlevel");
         let crypto = table
             .get_mut("crypto")
             .and_then(toml::Value::as_table_mut)
             .unwrap();
-        crypto.remove("shared_secret_seed");
-        crypto.remove("shared_secret_nonce");
         crypto.insert(
             "auth_token_hmac_key".to_string(),
             toml::Value::String("44".repeat(32)),
@@ -1486,7 +1425,7 @@ imei2 = ""
         assert!(parsed.migrated);
         assert_eq!(parsed.config_file.trust.os_version, OsVersionSpec::Auto);
         assert_eq!(parsed.config_file.trust.os_patchlevel, "auto");
-        assert_eq!(parsed.config_file.trust.vendor_patchlevel, "2026-03-05");
+        assert_eq!(parsed.config_file.trust.vendor_patchlevel, "auto");
         assert_eq!(parsed.config_file.trust.boot_patchlevel, "auto");
         assert!(!parsed.table.contains_key("trust_record"));
         assert_eq!(
@@ -1596,69 +1535,85 @@ imei2 = ""
     }
 
     #[test]
-    fn config_v1_migration_forces_os_version_auto() {
-        let mut table: toml::Table =
-            toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
-        table.insert(
-            "version".to_string(),
-            toml::Value::Integer(i64::from(CONFIG_VERSION_V1)),
-        );
-        table
-            .get_mut("trust")
-            .and_then(toml::Value::as_table_mut)
-            .unwrap()
-            .insert("os_version".to_string(), toml::Value::Integer(17));
-        table
-            .get_mut("main")
-            .and_then(toml::Value::as_table_mut)
-            .unwrap()
-            .insert(
-                "log_level".to_string(),
-                toml::Value::String("trace".to_string()),
-            );
-
-        let parsed = parse_config_file(&toml::to_string_pretty(&table).unwrap(), true).unwrap();
-        assert!(parsed.migrated);
-        assert_eq!(parsed.config_file.version, CURRENT_CONFIG_VERSION);
-        assert_eq!(parsed.config_file.trust.os_version, OsVersionSpec::Auto);
-        assert_eq!(parsed.config_file.main.log_level, "trace");
+    fn legacy_overrides_require_explicit_migration_and_preserve_all_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backup = dir.path().join("config.toml.bak");
+        let keys = dir.path().join("existing-keyblob");
+        let backup_contents = toml::to_string_pretty(&ConfigFile::default()).unwrap();
+        fs::write(&backup, &backup_contents).unwrap();
+        fs::write(&keys, b"ratcheted-keyblob-must-stay").unwrap();
+        for version in 0..=CURRENT_CONFIG_VERSION {
+            for (field, value) in [
+                ("os_version", toml::Value::Integer(17)),
+                ("security_patch", toml::Value::String("latest".to_string())),
+                (
+                    "os_patchlevel",
+                    toml::Value::String("2026-04-05".to_string()),
+                ),
+                (
+                    "vendor_patchlevel",
+                    toml::Value::String("2026-04-05".to_string()),
+                ),
+                (
+                    "boot_patchlevel",
+                    toml::Value::String("20000000".to_string()),
+                ),
+            ] {
+                let mut table: toml::Table = toml::from_str(&backup_contents).unwrap();
+                table.insert(
+                    "version".to_string(),
+                    toml::Value::Integer(i64::from(version)),
+                );
+                table
+                    .get_mut("trust")
+                    .unwrap()
+                    .as_table_mut()
+                    .unwrap()
+                    .insert(field.to_string(), value);
+                let original = toml::to_string_pretty(&table).unwrap();
+                fs::write(&path, &original).unwrap();
+                let error = bootstrap_config_file_to_path(&path).unwrap_err();
+                assert!(format!("{error:#}").contains("migration-required"));
+                assert_eq!(fs::read_to_string(&path).unwrap(), original);
+                assert_eq!(fs::read_to_string(&backup).unwrap(), backup_contents);
+                assert_eq!(fs::read(&keys).unwrap(), b"ratcheted-keyblob-must-stay");
+                assert!(!dir.path().join("config.toml.broken").exists());
+                assert!(persist_config_file_to_path(&path, &ConfigFile::default()).is_err());
+                assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            }
+        }
     }
 
     #[test]
-    fn bootstrap_uses_latest_v2_instead_of_stale_migration_snapshot() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("config.toml");
+    fn all_auto_old_schemas_only_advance_version_and_preserve_keys_and_rot() {
+        let original = ConfigFile::default();
+        for version in 0..CURRENT_CONFIG_VERSION {
+            let mut table: toml::Table =
+                toml::from_str(&toml::to_string_pretty(&original).unwrap()).unwrap();
+            table.insert(
+                "version".to_string(),
+                toml::Value::Integer(i64::from(version)),
+            );
+            let parsed = parse_config_file(&toml::to_string_pretty(&table).unwrap(), true).unwrap();
+            assert!(parsed.migrated);
+            assert_eq!(parsed.config_file.version, CURRENT_CONFIG_VERSION);
+            assert_eq!(parsed.config_file.trust, original.trust);
+            assert_eq!(parsed.config_file.crypto, original.crypto);
+        }
+    }
 
-        let legacy = ConfigFile {
-            version: CONFIG_VERSION_V1,
-            trust: RawTrustConfig {
-                os_version: OsVersionSpec::Fixed(16),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let stale = parse_config_file(&toml::to_string_pretty(&legacy).unwrap(), true).unwrap();
-        assert!(stale.migrated);
-        assert_eq!(stale.config_file.trust.os_version, OsVersionSpec::Auto);
-
-        let current = ConfigFile {
-            main: MainConfig {
-                log_level: "trace".to_string(),
-                ..Default::default()
-            },
-            trust: RawTrustConfig {
-                os_version: OsVersionSpec::Fixed(17),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let current_contents = toml::to_string_pretty(&current).unwrap();
-        fs::write(&path, &current_contents).unwrap();
-
-        let loaded = bootstrap_config_file_to_path(&path).unwrap();
-        assert_eq!(loaded.trust.os_version, OsVersionSpec::Fixed(17));
-        assert_eq!(loaded.main.log_level, "trace");
-        assert_eq!(fs::read_to_string(path).unwrap(), current_contents);
+    #[test]
+    fn invalid_config_never_restores_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backup = dir.path().join("config.toml.bak");
+        fs::write(&path, "[trust\ninvalid").unwrap();
+        let valid = toml::to_string_pretty(&ConfigFile::default()).unwrap();
+        fs::write(&backup, &valid).unwrap();
+        assert!(bootstrap_config_file_to_path(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "[trust\ninvalid");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), valid);
     }
 
     #[test]
@@ -1674,7 +1629,7 @@ imei2 = ""
             assert!(config_version(&table).is_err());
         }
 
-        for version in [0, CONFIG_VERSION_V1] {
+        for version in 0..CURRENT_CONFIG_VERSION {
             let mut table: toml::Table =
                 toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
             table.insert(

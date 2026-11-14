@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -71,9 +73,30 @@ with zipfile.ZipFile(archive) as package:
     if args.side == 'a':
         modern = package.read('webroot/modern.js').decode('utf-8')
         assert all(token in modern for token in ['battery_updated_at_ms','server_time_ms','om-b-battery','refreshAState'])
-        bundle = next(name for name in actual if name.startswith('webroot/assets/index-') and name.endswith('.js'))
-        assert 'ommegaRefreshApps' in package.read(bundle).decode('utf-8')
-        assert 'refreshScope = false' in package.read(bundle).decode('utf-8')
+        bundles = [name for name in actual if name.startswith('webroot/assets/index-') and name.endswith('.js')]
+        assert len(bundles) == 1, 'expected exactly one shipped A vendor bundle'
+        bundle = bundles[0]
+        shipped = package.read(bundle).decode('utf-8')
+        assert 'ommegaRefreshApps' in shipped
+        assert 'refreshScope = false' in shipped
+        # Equality to the current checkout is not sufficient: reject an unsafe
+        # freshly-built artifact too, using the same pinned-base contract as CI.
+        spec = importlib.util.spec_from_file_location('ommega_webui_patch', source / 'scripts/webui-patch.py')
+        patcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(patcher)
+        for name in actual:
+            if name.endswith(('.js', '.html')):
+                patcher.verify_readonly_spl(package.read(name).decode('utf-8'))
+        base, glue = patcher.split_bundle(shipped)
+        assert hashlib.sha256(base.encode('utf-8')).hexdigest() == patcher.BASELINE, 'unreviewed shipped vendor base'
+        expected_glue = ''.join(path.read_text(encoding='utf-8') for path in (
+            patcher.GLUE, patcher.AUTH_GLUE, patcher.CPU_GLUE, patcher.CAPABILITY_GLUE,
+            patcher.APP_DETAIL_GLUE, patcher.DIAG_GLUE))
+        assert glue == expected_glue, 'stale shipped WebUI glue'
+        shell = package.read('webroot/index.html').decode('utf-8')
+        for match in re.finditer(r'''\b(?:src|href)=["'](\./[^"'?]+\.(?:js|css))(?:\?v=([^"']+))?["']''', shell):
+            digest = hashlib.sha256(package.read('webroot/' + match[1][2:])).hexdigest()[:10]
+            assert match[2] == digest, 'stale shipped shell resource hash: ' + match[1]
         assert package.read('libs/arm64-v8a/soterta-svc') == (source / 'target/soterta-svc/arm64-v8a/release/soterta-svc').read_bytes()
     else:
         app = package.read('webroot/app.js').decode('utf-8')

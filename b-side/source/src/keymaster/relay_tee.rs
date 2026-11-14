@@ -204,6 +204,12 @@ pub fn keymint_diagnosis(service: &str) -> String {
 /// is invalidated on the next `get_system_keymint` call.
 static KEYMINT_CACHE_GEN: AtomicU64 = AtomicU64::new(0);
 
+/// Read-only invalidation epoch for data sampled from the cached HAL. This does
+/// not connect to a service or prove that any version property was accepted.
+pub fn keymint_cache_generation() -> u64 {
+    KEYMINT_CACHE_GEN.load(Ordering::Acquire)
+}
+
 thread_local! {
     static SYSTEM_KEYMINT_CACHE: RefCell<Option<HashMap<&'static str, Strong<dyn IKeyMintDevice>>>> =
         const { RefCell::new(None) };

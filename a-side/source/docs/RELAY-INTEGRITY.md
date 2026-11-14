@@ -7,6 +7,47 @@ name and signature is checked, including the final root's self-signature. Native
 caller-selected ATTEST_KEY delegation additionally requires the expected public
 key, issuer name and exclusive hardware ATTEST_KEY authorization.
 
+## Native-version admission
+
+A's immutable target comes from read-only native System/Vendor firmware and
+Boot AVB/header sources, not mutable properties or B's advertised dates. Required
+unknown native fields fail closed. A remote profile is eligible only with
+`version_policy = a-native-v1`, a valid `version_revision` and an exact complete
+match for OS_VERSION (705), OS_PATCHLEVEL (706), VENDOR_PATCHLEVEL (718) and
+BOOT_PATCHLEVEL (719). Vendor keeps its full day, and Boot keeps native raw
+precision, including a header's YYYYMM00.
+
+The request carries A's four-tag target and `expected_version_revision`. A
+compatible B must reject stale or mismatched state before its normal HAL call
+using that same revision; accepting a new snapshot after admission is not
+permitted. A also checks the returned signed certificate and authorizations
+against the admitted target. B must adapt to A through separately authorized
+B-side work; this contract never lowers or rewrites A's SPL. An old B or a relay
+without the capability is rejected until separately upgraded. Remote StrongBox
+is not admitted using a TEE profile, and `server_keybox` cannot establish this
+physical-B version guarantee.
+
+A's encrypted software envelope and B's real hardware keyblob are different
+objects. Matching the profile or a certificate does not relax software-blob
+monotonic version checks, downgrade B's ratchet or guarantee hardware rollback
+resistance. Routing remains all-or-nothing for the current allowed caller, not
+selected by descriptor, key origin or version tags.
+
+The UI reads `/data/misc/keystore/ommega/data/spl-status.json` only. It does not
+fetch a profile or invoke a HAL. Firmware, observed Android properties, frozen
+A TA configuration, cached B profile and signed-certificate evidence are separate
+sources; absent TA/certificate observations remain unknown. A matched cached
+profile, process status or `getprop` is not fresh physical TA acceptance.
+
+Only A local-mode deployment is currently planned; no B deployment, reload or
+device execution is authorized. All A SPL/OS configuration is `auto`/native-only;
+explicit overrides require human migration review with original config and keys
+preserved, not database clearing. Non-SPL verified-boot controls remain separate.
+This contract is not a Wallet, payment, compatibility or hardware guarantee. See
+[Software keyblob version checks](KEYBLOB-VERSIONS.md).
+
+## Request and certificate checks
+
 Generation parameters are validated locally before a request reaches the relay.
 After chain and record verification, the leaf's public-key family and the signed
 algorithm, key size, EC curve and RSA exponent are checked against the effective

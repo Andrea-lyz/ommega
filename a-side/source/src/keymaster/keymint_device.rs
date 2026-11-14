@@ -94,7 +94,9 @@ fn extract_u32(value: Option<regex::Match>) -> std::result::Result<u32, HalInfoE
 }
 
 /// Extract a patchlevel in form YYYYMM from a "YYYY-MM-DD" property value.
-fn extract_truncated_patchlevel(prop_value: &str) -> std::result::Result<u32, HalInfoError> {
+pub(crate) fn extract_truncated_patchlevel(
+    prop_value: &str,
+) -> std::result::Result<u32, HalInfoError> {
     let patchlevel_regex = Regex::new(PATCHLEVEL_REGEX)
         .map_err(|e| format!("failed to compile patchlevel regexp: {e:?}"))?;
 
@@ -137,26 +139,29 @@ pub(crate) fn extract_boot_patchlevel(prop_value: &str) -> std::result::Result<u
         .or_else(|_| extract_patchlevel(prop_value))
 }
 
-/// Generate HAL information from property values.
-fn populate_hal_info_from(
-    os_version_prop: &str,
-    os_patchlevel_prop: &str,
-    vendor_patchlevel_prop: &str,
-) -> std::result::Result<SetHalInfoRequest, HalInfoError> {
+/// Convert a firmware Android release to its KeyMint MMmmss wire value.
+pub(crate) fn extract_os_version(os_version: &str) -> std::result::Result<u32, HalInfoError> {
     let os_version_regex = Regex::new(OS_VERSION_REGEX)
         .map_err(|e| format!("failed to compile version regexp: {e:?}"))?;
     let captures = os_version_regex
-        .captures(os_version_prop)
+        .captures(os_version)
         .ok_or_else(|| "failed to match OS version regex".to_string())?;
     let major = extract_u32(captures.name("major"))?;
     let minor = extract_u32(captures.name("minor")).unwrap_or(0u32);
     let sub = extract_u32(captures.name("sub")).unwrap_or(0u32);
-    let os_version = (major * 10000) + (minor * 100) + sub;
+    Ok((major * 10000) + (minor * 100) + sub)
+}
 
+#[cfg(test)]
+fn populate_hal_info_from(
+    os_version: &str,
+    os_patchlevel: &str,
+    vendor_patchlevel: &str,
+) -> std::result::Result<SetHalInfoRequest, HalInfoError> {
     Ok(SetHalInfoRequest {
-        os_version,
-        os_patchlevel: extract_truncated_patchlevel(os_patchlevel_prop)?,
-        vendor_patchlevel: extract_patchlevel(vendor_patchlevel_prop)?,
+        os_version: extract_os_version(os_version)?,
+        os_patchlevel: extract_truncated_patchlevel(os_patchlevel)?,
+        vendor_patchlevel: extract_patchlevel(vendor_patchlevel)?,
     })
 }
 
@@ -1375,16 +1380,18 @@ fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<Key
     }
     bootstrap_auth_token_hmac(&mut ta, &config.crypto)?;
 
-    let hal_info = populate_hal_info_from(
-        &config.trust.os_version.to_string(),
-        &config.trust.os_patchlevel,
-        &config.trust.vendor_patchlevel,
-    )
-    .map_err(anyhow::Error::msg)
-    .context(err!("Failed to populate HAL patch levels"))?;
-    let boot_patchlevel = extract_boot_patchlevel(&config.trust.boot_patchlevel)
-        .map_err(anyhow::Error::msg)
-        .context(err!("Failed to parse boot patch level"))?;
+    let native = crate::plat::vbmeta::native_version_target(&config.trust)
+        .context(err!("Failed to establish the frozen native version target"))?;
+    let hal_info = SetHalInfoRequest {
+        os_version: native.os_version,
+        os_patchlevel: native.os_patchlevel,
+        vendor_patchlevel: native
+            .vendor_patchlevel
+            .context("native Vendor SPL is unknown")?,
+    };
+    let boot_patchlevel = native
+        .boot_patchlevel
+        .context("native Boot SPL is unknown")?;
 
     let resp = ta.process_req(PerformOpReq::SetBootInfo(kmr_wire::SetBootInfoRequest {
         verified_boot_state: if config.trust.verified_boot_state {
@@ -1455,75 +1462,26 @@ pub fn localize_auth_token_for_ommega(auth_token: &HardwareAuthToken) -> Result<
     get_keymint_wrapper(SecurityLevel::TRUSTED_ENVIRONMENT)?.localize_auth_token(auth_token)
 }
 
-pub fn apply_runtime_config_update(
-    candidate: Config,
-    update_patchlevels: bool,
-    security_patch_update: Option<(String, Option<String>)>,
-) -> Result<()> {
-    let patchlevels = if update_patchlevels {
-        let hal_info = populate_hal_info_from(
-            &candidate.trust.os_version.to_string(),
-            &candidate.trust.os_patchlevel,
-            &candidate.trust.vendor_patchlevel,
-        )
-        .map_err(anyhow::Error::msg)
-        .context(err!("Failed to populate HAL patch levels"))?;
-        let boot_patchlevel = extract_boot_patchlevel(&candidate.trust.boot_patchlevel)
-            .map_err(anyhow::Error::msg)
-            .context(err!("Failed to parse boot patch level"))?;
-        Some((
-            hal_info.os_patchlevel,
-            hal_info.vendor_patchlevel,
-            boot_patchlevel,
-        ))
-    } else {
-        None
-    };
+pub fn apply_runtime_config_update(candidate: Config) -> Result<()> {
+    // Keep the lifecycle/config lock order while leaving every existing TA and
+    // outstanding operation untouched. Version authorizations are startup-only.
     let _lifecycle = KM_WRAPPER_LIFECYCLE
         .lock()
         .map_err(|_| anyhow!("keymint wrapper lifecycle lock poisoned"))?;
-    let mut tee = if patchlevels.is_some() {
-        KM_WRAPPER_TEE
-            .get()
-            .map(|wrapper| wrapper.keymint.lock().unwrap())
-    } else {
-        None
-    };
-    let mut strongbox = if patchlevels.is_some() {
-        KM_WRAPPER_STRONGBOX
-            .get()
-            .map(|wrapper| wrapper.keymint.lock().unwrap())
-    } else {
-        None
-    };
-    if tee.as_ref().is_some_and(|live| !live.patchlevels_are_set()) {
-        return Err(anyhow!("TEE patch levels are not initialized"));
-    }
-    if strongbox
-        .as_ref()
-        .is_some_and(|live| !live.patchlevels_are_set())
-    {
-        return Err(anyhow!("StrongBox patch levels are not initialized"));
-    }
     let mut runtime = config()
         .write()
         .map_err(|_| anyhow!("config lock poisoned while applying config change"))?;
-    if let Some((desired, previous)) = security_patch_update {
-        crate::plat::vbmeta::write_runtime_security_patch(&desired, previous.as_deref())?;
-    }
-    if let Some((os_patchlevel, vendor_patchlevel, boot_patchlevel)) = patchlevels {
-        if let Some(live) = tee.as_mut() {
-            live.update_patchlevels(os_patchlevel, vendor_patchlevel, boot_patchlevel)
-                .map_err(|error| anyhow!("{error:?}"))
-                .context(err!("Failed to update TEE patch levels"))?;
-        }
-        if let Some(live) = strongbox.as_mut() {
-            live.update_patchlevels(os_patchlevel, vendor_patchlevel, boot_patchlevel)
-                .map_err(|error| anyhow!("{error:?}"))
-                .context(err!("Failed to update StrongBox patch levels"))?;
-        }
-    }
+    validate_runtime_config_update(&runtime, &candidate)?;
     *runtime = candidate;
+    Ok(())
+}
+
+fn validate_runtime_config_update(current: &Config, candidate: &Config) -> Result<()> {
+    if candidate.trust != current.trust || candidate.crypto != current.crypto {
+        return Err(anyhow!(
+            "trust, native versions and key material are frozen until process restart"
+        ));
+    }
     Ok(())
 }
 
@@ -1812,7 +1770,7 @@ mod tests {
     }
 
     #[test]
-    fn patchlevel_update_preserves_operations_and_use_counts() {
+    fn unchanged_versions_preserve_operations_and_use_counts() {
         let mut ta = test_ta();
         assert_eq!(set_boot_info(&mut ta), 0);
         assert_eq!(
@@ -1859,7 +1817,7 @@ mod tests {
             response => panic!("unexpected begin response: {response:?}"),
         };
 
-        ta.update_patchlevels(202507, 20250705, 20250705).unwrap();
+        // Config reloads no longer mutate TA patchlevels or replace this TA.
         assert_eq!(
             ta.process_req(PerformOpReq::OperationFinish(FinishRequest {
                 op_handle,
@@ -1872,7 +1830,6 @@ mod tests {
             .error_code,
             0
         );
-        ta.update_patchlevels(202506, 20250605, 20250605).unwrap();
 
         let second_begin = ta.process_req(PerformOpReq::DeviceBegin(BeginRequest {
             purpose: kmr_wire::keymint::KeyPurpose::Sign,

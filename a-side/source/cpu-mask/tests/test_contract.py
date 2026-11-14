@@ -22,6 +22,38 @@ class ProfileContract(unittest.TestCase):
         self.assertEqual(len(rust_keys), 95)
         self.assertIn("PROFILE_VERSION: u32 = 2", a)
 
+    def test_only_spl_projects_the_captured_host_with_stable_indexes(self):
+        header = (ROOT / "a-side/source/cpu-mask/src/profile_fields.h").read_text(encoding="utf-8")
+        keys = re.findall(r'"(ro\.[^"]+)"', header)
+        mappings = (ROOT / "a-side/source/cpu-mask/src/identity_profile.h").read_text(encoding="utf-8")
+        fields = re.findall(
+            r'\{"(ro\.[^"]+)", kHostValues\[(\d+)\], (kHostValues|kRuntimeProfile\.values)\[(\d+)\]\}',
+            mappings,
+        )
+        self.assertEqual(len(fields), 85)
+        for index, (key, host, source, target) in enumerate(fields):
+            self.assertEqual(key, keys[index + 10])
+            self.assertEqual(int(host), index + 5)
+            if key == "ro.build.version.security_patch":
+                self.assertEqual((index, int(host), source, int(target)), (23, 28, "kHostValues", 28))
+            else:
+                self.assertEqual((source, int(target)), ("kRuntimeProfile.values", index + 10))
+        self.assertEqual(keys[33], "ro.build.version.security_patch")
+        view = (ROOT / "a-side/source/cpu-mask/src/property_view.cpp").read_text(encoding="utf-8")
+        self.assertIn("bool directFound[kDirectCount]", view)
+        self.assertIn("kDirectProperties[i].property, kHostValues[5 + i]", view)
+        self.assertIn("direct ? direct->value : identityPropertyOverride(name)", view)
+        self.assertIn("verifyPolicy(field.value, actual, preserveHost)", view)
+        self.assertIn("if (preserveHost) nativeOk &= verifyNativeKey(field.property, field.value)", view)
+        self.assertIn("verifyPolicy(alias.value, value, alias.value == alias.hostValue)", view)
+        self.assertIn("strcmp(value, direct->value)", view)
+        java = (ROOT / "a-side/source/cpu-mask/src/main.cpp").read_text(encoding="utf-8")
+        self.assertNotIn("property(33)", java)
+        self.assertNotRegex(java, r'queueField\(fields, &count, version, "SECURITY_PATCH"')
+        self.assertIn("""queueField(&securityPatch, &hostCount, version, "SECURITY_PATCH", 'S', hostPatch->value)""", java)
+        self.assertEqual(java.count("fieldMatches(securityPatch)"), 2)
+        self.assertNotRegex(java, r"writeField\(securityPatch")
+
     def test_java_cache_indexes_match_wire_properties(self):
         header = (ROOT / "a-side/source/cpu-mask/src/profile_fields.h").read_text(encoding="utf-8")
         keys = re.findall(r'"(ro\.[^"]+)"', header)

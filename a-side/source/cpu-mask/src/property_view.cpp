@@ -917,7 +917,10 @@ static bool policySkipped(const char* expected, const char* actual) {
     return !actual || actual[0] == '\0';
 }
 
-static bool verifyPolicy(const char* expected, const char* actual) {
+static bool verifyPolicy(const char* expected, const char* actual, bool preserveHost = false) {
+    // A preserved host field must match even when empty or absent. The B-view
+    // exceptions must not silently accept a changed or missing host SPL.
+    if (preserveHost) return expected && actual && strcmp(actual, expected) == 0;
     if (policySkipped(expected, actual)) return true;
     return strcmp(actual, expected) == 0;
 }
@@ -946,7 +949,9 @@ bool verifyPropertyView() {
     for (const auto& field : kDirectProperties) {
         char actual[PROP_VALUE_MAX]{};
         if (__system_property_get(field.property, actual) == 0) actual[0] = '\0';
-        nativeOk &= verifyPolicy(field.value, actual);
+        const bool preserveHost = field.value == field.hostValue;
+        nativeOk &= verifyPolicy(field.value, actual, preserveHost);
+        if (preserveHost) nativeOk &= verifyNativeKey(field.property, field.value);
     }
     AliasCheck aliases{};
     if (__system_property_foreach(enumerateForAliases, &aliases) != 0) ++aliases.mismatches;
@@ -981,7 +986,7 @@ bool verifyPropertyView() {
         for (const auto& alias : kDirectProperties) {
             char value[PROP_VALUE_MAX]{};
             listingValue(listing, alias.property, value, sizeof(value), true);
-            childOk &= verifyPolicy(alias.value, value);
+            childOk &= verifyPolicy(alias.value, value, alias.value == alias.hostValue);
         }
     }
     free(listing);

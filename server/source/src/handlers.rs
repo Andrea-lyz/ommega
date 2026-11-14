@@ -99,6 +99,25 @@ fn task_error_response(message: &str, code: Option<i32>) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(result)).into_response()
 }
 
+/// Presence is enough to forbid software fulfilment: malformed/partial native
+/// expectations must not silently downgrade to the legacy keybox path. The
+/// physical relay owns validation of these fields and its cached HAL revision.
+fn has_native_version_request(body: &Value) -> bool {
+    [
+        "version_policy",
+        "expected_version_tags",
+        "expected_version_revision",
+    ]
+    .iter()
+    .any(|field| {
+        body.get(*field).is_some()
+            || body
+                .get("device_attest_context")
+                .and_then(|context| context.get(*field))
+                .is_some()
+    })
+}
+
 fn auth_fail() -> Response {
     json_err(
         StatusCode::UNAUTHORIZED,
@@ -415,6 +434,17 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
     } else {
         &["b"]
     };
+
+    // Refuse before spawn_blocking, signing or queue dispatch. A software
+    // identity cannot enforce the native relay's pre-HAL snapshot/revision
+    // guard, even when its certificate could echo the requested version tags.
+    // Profile still selects the physical B path above; no HAL query is added.
+    if order.iter().any(|layer| *layer != "b") && has_native_version_request(body) {
+        return task_error_response(
+            "native version policy requires the physical B-side relay; server_keybox cannot enforce the pre-HAL version guard",
+            Some(-100), // KeyMint UNIMPLEMENTED, not fabricated physical evidence.
+        );
+    }
 
     let mut last_error: Option<String> = None;
     let mut last_keymint_error_code = None;
@@ -1249,6 +1279,161 @@ mod tests {
                 assert_eq!(response["data"], result["data"]);
             }
             assert_eq!(state.store.counts().await.pending, 0);
+        }
+    }
+
+    fn native_version_request() -> Value {
+        json!({
+            "device_id": "synthetic-b",
+            "alias": "native-policy-contract",
+            "request_id": "native-policy-contract",
+            "device_attest_context": {
+                "version_policy": "a-native-v1",
+                "expected_version_tags": {
+                    "os_version": 160000,
+                    "os_patchlevel": 202611,
+                    "vendor_patchlevel": 20261105,
+                    "boot_patchlevel": 20261105,
+                },
+                "expected_version_revision": "synthetic-snapshot:1",
+            },
+        })
+    }
+
+    #[test]
+    fn native_policy_presence_cannot_downgrade_partial_or_malformed_requests() {
+        assert!(has_native_version_request(&native_version_request()));
+        for field in [
+            "version_policy",
+            "expected_version_tags",
+            "expected_version_revision",
+        ] {
+            for value in [Value::Null, json!(""), json!(42)] {
+                let mut nested = json!({"device_attest_context": {}});
+                nested["device_attest_context"][field] = value.clone();
+                assert!(has_native_version_request(&nested));
+                let mut misplaced = json!({});
+                misplaced[field] = value;
+                assert!(has_native_version_request(&misplaced));
+            }
+        }
+        for legacy in [
+            json!({}),
+            json!({"device_attest_context": null}),
+            json!({"device_attest_context": {"os_patch_level": 202611}}),
+        ] {
+            assert!(!has_native_version_request(&legacy));
+        }
+    }
+
+    #[tokio::test]
+    async fn server_keybox_rejects_native_policy_before_fulfilment_or_enqueue() {
+        let state = agreement_state(true);
+        let original = native_version_request();
+        for task_type in ["attest", "sign", "decrypt", "agree"] {
+            let response = run_a_side_task(&state, task_type, &original).await;
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let result: Value = serde_json::from_slice(&bytes).unwrap();
+            // This is the early gate's verdict, not a missing identity/session
+            // or a software certificate rejected only after generation.
+            assert_eq!(
+                result,
+                json!({
+                    "error": "native version policy requires the physical B-side relay; server_keybox cannot enforce the pre-HAL version guard",
+                    "keymint_error_code": -100,
+                })
+            );
+            assert!(state.store.list_tasks(10).await.is_empty());
+            assert_eq!(original, native_version_request());
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_keybox_request_keeps_its_original_missing_identity_verdict() {
+        let state = agreement_state(true);
+        let response = run_a_side_task(
+            &state,
+            "attest",
+            &json!({
+                "device_id": "synthetic-b",
+                "device_attest_context": {"os_patch_level": 202611},
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            result["error"],
+            "all fulfilment layers failed for device synthetic-b: server_keybox: no stored server identity for device synthetic-b (algorithm ec)"
+        );
+        assert!(result.get("keymint_error_code").is_none());
+        assert!(state.store.list_tasks(10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn physical_native_request_is_queued_unchanged_without_added_evidence() {
+        // Neither version expectations nor the profile endpoint add a Server
+        // probe. Only the mock B worker supplies a result for the exact task.
+        for (task_type, server_keybox, b_result) in [
+            (
+                "attest",
+                false,
+                json!({"cert_chain": ["synthetic-certificate"]}),
+            ),
+            (
+                "profile",
+                true,
+                json!({
+                    "interface_version": 4,
+                    "interface_hash": "synthetic-interface",
+                    "profile_version": 400,
+                    "hardware_version": 400,
+                    "security_level": 1,
+                    "has_strongbox": false,
+                    "keymint_name": "synthetic-keymint",
+                    "keymint_author": "synthetic-author",
+                }),
+            ),
+        ] {
+            let state = agreement_state(server_keybox);
+            state
+                .store
+                .pop_for_b("synthetic-b", "mock", Duration::ZERO)
+                .await;
+            let body = native_version_request();
+            let worker = async {
+                let task = state
+                    .store
+                    .pop_for_b("synthetic-b", "mock", Duration::from_secs(1))
+                    .await
+                    .unwrap();
+                assert_eq!(task.task_type, task_type);
+                assert_eq!(task.payload, body);
+                assert_eq!(task.target_device_id, "synthetic-b");
+                state
+                    .store
+                    .complete_task(&task.task_id, b_result.clone(), "synthetic-b")
+                    .await
+                    .unwrap();
+            };
+            let (response, ()) =
+                tokio::join!(run_a_side_task(&state, task_type, &body), worker);
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let mut result: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(result["task_id"].is_string());
+            result.as_object_mut().unwrap().remove("task_id");
+            assert_eq!(result, b_result, "Server must not invent native evidence");
+            assert_eq!(state.store.counts().await.pending, 0);
+            assert_eq!(state.store.counts().await.completed, 1);
         }
     }
 

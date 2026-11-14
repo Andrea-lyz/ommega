@@ -36,9 +36,9 @@
 
     <string name="help_set_custom_keybox_description">从设备存储导入密钥箱。仅支持 xml 文件。</string>
 
-    <string name="help_set_security_patch">设置安全补丁</string>
+    <string name="help_set_security_patch">SPL 来源与差异（只读）</string>
 
-    <string name="help_set_security_patch_description">设置自定义安全补丁伪装。自动配置将使用 PIF 模块的安全补丁。留空并保存以禁用自动配置。</string>
+    <string name="help_set_security_patch_description">仅查看已发布的来源和差异。Android 属性与 HAL 配置不是 TA 或固件证明；B/profile 和证书是缓存快照。缺少数据即未知，A 端不提供日期设置、自动更新或外网获取。</string>
 
     <string name="help_set_verified_boot_hash">设置已验证启动哈希</string>
 
@@ -102,7 +102,7 @@
 
     <string name="menu_set_verified_boot_hash">设置哈希值</string>
 
-    <string name="menu_set_security_patch">设置安全补丁</string>
+
 
     <string name="menu_set_remote_config">远程配置</string>
 
@@ -131,7 +131,7 @@
 
     <string name="about_disclaimer">Ommega 认证中继模块</string>
 
-    <string name="about_description">通过远程中继服务器执行 KeyMint 认证，并具备本地密钥箱回退。管理目标应用列表、配置密钥箱、设置安全补丁并连接到远程中继服务器。</string>
+    <string name="about_description">通过远程中继服务器执行 KeyMint 认证，并具备本地密钥箱回退。管理目标应用列表、配置密钥箱、只读查看 SPL 来源并连接到远程中继服务器。</string>
 
     <!-- Remote Config -->
 
@@ -227,39 +227,39 @@
 
     <!-- Security Patch -->
 
-    <string name="security_patch_title">安全补丁</string>
 
-    <string name="security_patch_advanced_mode">高级</string>
 
-    <string name="security_patch_get_date">获取安全补丁日期</string>
 
-    <string name="security_patch_auto">自动</string>
 
-    <string name="security_patch_fetching">获取中...</string>
 
-    <string name="security_patch_fetched">完成</string>
 
-    <string name="security_patch_get_failed">获取安全补丁日期失败</string>
 
-    <string name="security_patch_unable_to_connect">无法连接到 source.android.com</string>
 
-    <string name="security_patch_auto_success">自动配置启用成功</string>
 
-    <string name="security_patch_auto_failed">启用自动配置失败</string>
 
-    <string name="security_patch_save_success">安全补丁已应用</string>
 
-    <string name="security_patch_save_failed">保存安全补丁失败</string>
 
-    <string name="security_patch_value_empty">安全补丁配置已禁用</string>
 
-    <string name="security_patch_invalid_all">格式无效</string>
 
-    <string name="security_patch_invalid_boot">启动格式无效</string>
 
-    <string name="security_patch_invalid_system">系统格式无效</string>
 
-    <string name="security_patch_invalid_vendor">供应商格式无效</string>
+
+
+
+
+
+
+    <string name="trust_save_failed">保存验证启动参数失败</string>
+
+
+
+    <string name="trust_value_invalid">格式无效</string>
+
+
+
+
+
+
 
     <!-- Add System App -->
 
@@ -309,7 +309,7 @@
 
     <string name="automation_src_stock">库存密钥箱</string>
 
-    <string name="automation_patch_auto">安全补丁自动获取</string>
+
 
     <string name="automation_source">来源</string>
 
@@ -329,15 +329,15 @@
 
     <string name="automation_fetch_key">获取密钥</string>
 
-    <string name="automation_set_patch_now">立即设置补丁</string>
 
-    <string name="automation_set_patch">设置补丁</string>
 
-    <string name="automation_patch_header">安全补丁自动更新</string>
+
+
+
 
     <string name="prompt_keybox_auto_enabled">密钥箱自动获取已启用</string>
 
-    <string name="prompt_patch_auto_enabled">安全补丁自动获取已启用</string>
+
 
     <string name="prompt_source_selected">已选择来源</string>
 
@@ -347,7 +347,7 @@
 
     <string name="prompt_fetching_key">正在获取密钥箱...</string>
 
-    <string name="prompt_setting_patch">正在设置安全补丁...</string>
 
-    <string name="prompt_security_patch_saved_restart">安全补丁已应用</string>
+
+
 </resources>

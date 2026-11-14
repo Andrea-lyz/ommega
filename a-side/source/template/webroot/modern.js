@@ -831,6 +831,7 @@ function install() {
         ${action('om-automation-open','自动化','Automation','CDI 种子、Keybox 与 RKP 续签','CDI seed, keybox and RKP renewal','sliders')}
         ${action('boot-hash','启动哈希','Verified boot hash','配置证明参数','Configure attestation parameters','shield')}
         ${action('boot-key','启动公钥','Verified boot key','配置证明公钥','Configure the attestation public key','key')}
+        ${action('om-spl-status-open','SPL 来源与差异','SPL sources and differences','仅查看已发布的本机来源与 B 端缓存；未知不推断','Read published local sources and cached B snapshots; unknown stays unknown','info')}
         </section><section class="panel settings-group om-hidden-policy-launchers"><div class="group-header"><h2 class="group-heading">${text('应用策略','App policies')}</h2></div>
         <div id="om-auth-signing-slot"></div>
         <div id="om-cpu-mask-slot"></div>
@@ -906,7 +907,6 @@ function install() {
   const closeAppearance = () => document.getElementById('om-appearance-dialog').close();
   document.getElementById('om-appearance-close').onclick = closeAppearance;
   document.getElementById('om-appearance-done').onclick = closeAppearance;
-  document.getElementById('security-patch-auto-toggle')?.closest('.setting-section')?.setAttribute('hidden', '');
   const scopeSlot = document.createElement('div');
   scopeSlot.id = 'om-global-scope-slot';
   document.querySelector('.header')?.after(scopeSlot);
@@ -1063,6 +1063,7 @@ function install() {
     if (button.dataset.omAction === 'ommega-soterta') { location.hash = 'om-soter'; return; }
     if (button.dataset.omAction === 'om-automation-open') { location.hash = 'om-automation'; return; }
     if (button.dataset.omAction === 'om-diagnostics-open') { location.hash = 'om-diagnostics'; return; }
+    if (button.dataset.omAction === 'om-spl-status-open') { location.hash = 'om-diag-spl'; return; }
     const target = document.getElementById(button.dataset.omAction);
     if (target) { target.click(); setText('om-action-message',''); }
     else setText('om-action-message',text('界面尚未就绪，请稍后重试。','The interface is still loading. Try again shortly.'));
