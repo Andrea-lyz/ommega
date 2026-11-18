@@ -579,13 +579,21 @@ impl crate::KeyMintTa {
             {
                 return Ok(result);
             }
-            if kmr_common::auth_signing::eligible(params)
-                || remote_issuer.is_some()
-                || !self.dev.remote.as_ref().is_some_and(|r| r.fallback_local())
-            {
+            let fallback_local = self.dev.remote.as_ref().is_some_and(|r| r.fallback_local());
+            if kmr_common::auth_signing::eligible(params) || remote_issuer.is_some() {
+                // An authentication-bound or caller-issued attestation requirement must
+                // never be satisfied by A's own keybox; only a hardware chain counts.
                 return Err(km_err!(
                     UnknownError,
-                    "remote attest unavailable and fallback disabled"
+                    "remote attest unavailable for a key that requires a hardware chain"
+                ));
+            }
+            if !fallback_local {
+                return Err(km_err!(
+                    UnknownError,
+                    "remote attest unavailable and local fallback is disabled; \
+                     set [local_hw] fallback_local = true to mint plain challenged keys \
+                     with A's keybox while the relay is unreachable"
                 ));
             }
         }

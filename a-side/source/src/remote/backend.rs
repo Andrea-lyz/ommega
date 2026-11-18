@@ -107,10 +107,11 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
                 return Ok(None);
             }
             Err(error) => {
-                return Err(kmr_common::km_err!(
-                    UnknownError,
-                    "remote identity profile unavailable: {error:#}"
-                ));
+                // A transient relay outage is an availability condition, not a
+                // protocol verdict: report it as "unavailable" so the TA applies
+                // one policy instead of a second, divergent error path.
+                log::warn!("remote identity profile unavailable: {error:#}");
+                return Ok(None);
             }
         };
         // The current native admission protocol has a default-TEE snapshot only.
