@@ -142,4 +142,31 @@ pub fn cert_count(pem_chain: &str) -> usize {
     pem::parse_many(pem_chain).map(|v| v.len()).unwrap_or(0)
 }
 
+/// Device IDs key stored identities and are rendered in the admin UI, so only
+/// a conservative charset (`[A-Za-z0-9._-]`, 1..=128 bytes) is accepted.
+pub fn is_safe_device_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_device_id;
+
+    #[test]
+    fn safe_device_id_charset() {
+        assert!(is_safe_device_id("server_keybox"));
+        assert!(is_safe_device_id("Pixel-8.Pro_1"));
+        assert!(!is_safe_device_id(""));
+        assert!(!is_safe_device_id("x');alert(1);//"));
+        assert!(!is_safe_device_id("a b"));
+        assert!(!is_safe_device_id("a\"b"));
+        assert!(!is_safe_device_id("a<b>"));
+        assert!(!is_safe_device_id(&"a".repeat(129)));
+    }
+}
+
 
