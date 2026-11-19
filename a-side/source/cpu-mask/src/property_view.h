@@ -6,17 +6,13 @@
 
 #include "zygisk.hpp"
 
-// Module-side code runs in the target app's process, and logd lets an app read
-// its own entries. Those lines exist only in debug builds; release builds
-// compile them out. The root companion logs normally.
-#ifdef MASKCPU_DEBUG_LOG
-#define MASKCPU_APP_LOG(...) __android_log_print(__VA_ARGS__)
-#else
-#define MASKCPU_APP_LOG(...) do { if (false) __android_log_print(__VA_ARGS__); } while (false)
-#endif
+// In-app details follow the runtime diagnostics switch; companion logs are
+// written independently by the root process.
+#define MASKCPU_APP_LOG(...) do { if (maskcpu::appDebugLogEnabled()) __android_log_print(__VA_ARGS__); } while (false)
 
 namespace maskcpu {
 
+bool appDebugLogEnabled();
 bool preparePropertyView(zygisk::Api* api, int targetUid, const char* package, void** pendingState);
 bool finalizePropertyView(void* state);
 bool verifyPropertyView();

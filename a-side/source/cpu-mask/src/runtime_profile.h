@@ -7,4 +7,6 @@ namespace maskcpu {
 bool parseConfiguredScope(char* contents, const char* package);
 bool parseRuntimeProfile(char* contents, RuntimeProfile* profile);
 int loadConfiguredProfile(const char* package, RuntimeProfile* profile);
+bool debugLoggingEnabled(const char* tomlContents);
+bool readDebugLoggingSwitch();
 }  // namespace maskcpu

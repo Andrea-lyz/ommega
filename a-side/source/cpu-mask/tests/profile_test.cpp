@@ -24,6 +24,15 @@ static bool parse(std::string text, maskcpu::RuntimeProfile* result) {
     return maskcpu::parseRuntimeProfile(text.data(), result);
 }
 int main() {
+    assert(maskcpu::debugLoggingEnabled("log_level = \"debug\"\n"));
+    assert(maskcpu::debugLoggingEnabled("log_level = \"trace\"\n"));
+    assert(!maskcpu::debugLoggingEnabled("log_level = \"info\"\n"));
+    assert(maskcpu::debugLoggingEnabled("[main]\n  log_level = \"debug\"\n"));
+    assert(!maskcpu::debugLoggingEnabled("# log_level = \"debug\"\n"));
+    assert(!maskcpu::debugLoggingEnabled("other = \"value\"\n"));
+    assert(!maskcpu::debugLoggingEnabled(""));
+    assert(!maskcpu::debugLoggingEnabled(nullptr));
+    assert(!maskcpu::debugLoggingEnabled("log_level = \"info\"\nlog_level = \"debug\"\n"));
     char scope[] = "version=1\nenabled=true\npackage=com.first.app\npackage=com.second.app\n";
     assert(maskcpu::parseConfiguredScope(scope, "com.second.app"));
     char disabled[] = "version=1\nenabled=false\npackage=com.second.app\n";

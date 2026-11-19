@@ -35,10 +35,11 @@ namespace maskcpu {
 namespace {
 
 constexpr char kTag[] = "MaskCPU";
-constexpr uint32_t kProtocol = 0x4d435037;  // MCP6: pre IPC, post shared-memory coordination
+constexpr uint32_t kProtocol = 0x4d435038;  // MCP7: pre IPC, post shared-memory coordination
 
 struct ScopeRequest { uint32_t protocol; int32_t pid; uint32_t uid; char package[256]; };
-struct ScopeReply { uint32_t protocol; int32_t error; RuntimeProfile profile; };
+struct ScopeReply { uint32_t protocol; int32_t error; uint32_t debugLog; RuntimeProfile profile; };
+bool gAppDebugLogEnabled = false;
 
 void captureHostIdentity() {
     for (size_t i = 0; i < kIdentityCount; ++i) {
@@ -473,6 +474,7 @@ void companionWork(int socket) {
         strcpy(kTargetPackage, scope.package);
         scopeReply.error = loadConfiguredProfile(scope.package, &scopeReply.profile);
         if (!scopeReply.error && !targetUidInstalled(scope.uid)) scopeReply.error = EPERM;
+        if (!scopeReply.error) scopeReply.debugLog = readDebugLoggingSwitch() ? 1u : 0u;
     }
     if (!sendPacket(socket, &scopeReply, sizeof(scopeReply), nullptr, 0) || scopeReply.error) return;
     kRuntimeProfile = scopeReply.profile;
@@ -778,6 +780,10 @@ void enumerateForAliases(const prop_info* property, void* cookie) {
 
 }  // namespace
 
+bool appDebugLogEnabled() {
+    return gAppDebugLogEnabled;
+}
+
 void propertyCompanion(int socket) {
     // Never change the persistent root companion's own mount namespace.
     const pid_t worker = fork();
@@ -793,6 +799,7 @@ void propertyCompanion(int socket) {
 }
 
 bool preparePropertyView(zygisk::Api* api, int targetUid, const char* package, void** pendingState) {
+    gAppDebugLogEnabled = false;
     if (!pendingState) { errno = EINVAL; return false; }
     *pendingState = nullptr;
     Fd socket(api->connectCompanion());
@@ -810,8 +817,10 @@ bool preparePropertyView(zygisk::Api* api, int targetUid, const char* package, v
     size_t unusedCount = 0;
     const bool scopeReceived = receivePacket(socket.get(), &scopeReply, sizeof(scopeReply), unused, &unusedCount);
     for (size_t i = 0; i < unusedCount; ++i) close(unused[i]);
-    if (!scopeReceived || unusedCount || scopeReply.protocol != kProtocol || scopeReply.error) return false;
+    if (!scopeReceived || unusedCount || scopeReply.protocol != kProtocol || scopeReply.error ||
+        scopeReply.debugLog > 1) return false;
     kRuntimeProfile = scopeReply.profile;
+    gAppDebugLogEnabled = scopeReply.debugLog == 1;
     // One diagnostic line per specialized process: which app requested the view
     // and the identity it will observe. Without it a report can only show that
     // the feature is enabled, not whether it reached a particular package.

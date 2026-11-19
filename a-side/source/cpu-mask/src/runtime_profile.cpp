@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <ctype.h>
 #include <initializer_list>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -25,13 +26,13 @@ bool validPackage(const char* package) {
     return !first;
 }
 
-int readFile(const char* path, char* contents, size_t capacity) {
+int readFile(const char* path, char* contents, size_t capacity, mode_t forbiddenMode = 0022) {
     const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return errno;
     struct stat info{};
     if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0 ||
         static_cast<uint64_t>(info.st_size) >= capacity ||
-        (info.st_uid != 0 && info.st_uid != 1017) || (info.st_mode & 0022)) {
+        (info.st_uid != 0 && info.st_uid != 1017) || (info.st_mode & forbiddenMode)) {
         close(fd); return EINVAL;
     }
     size_t used = 0;
@@ -121,6 +122,45 @@ bool parseRuntimeProfile(char* contents, RuntimeProfile* profile) {
     }
     *profile = result;
     return true;
+}
+
+bool debugLoggingEnabled(const char* tomlContents) {
+    if (!tomlContents) return false;
+    const char* line = tomlContents;
+    while (*line) {
+        const char* end = strchr(line, '\n');
+        if (!end) end = line + strlen(line);
+        const char* cursor = line;
+        while (cursor < end && isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+        constexpr char key[] = "log_level";
+        if (static_cast<size_t>(end - cursor) >= sizeof(key) - 1 &&
+            memcmp(cursor, key, sizeof(key) - 1) == 0) {
+            cursor += sizeof(key) - 1;
+            while (cursor < end && isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+            if (cursor < end && *cursor++ == '=') {
+                while (cursor < end && isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+                if (cursor < end && *cursor++ == '"') {
+                    const char* value = cursor;
+                    while (cursor < end && *cursor != '"') ++cursor;
+                    if (cursor > value && cursor < end) {
+                        const size_t length = static_cast<size_t>(cursor - value);
+                        return (length == 5 && memcmp(value, "debug", 5) == 0) ||
+                            (length == 5 && memcmp(value, "trace", 5) == 0);
+                    }
+                }
+            }
+        }
+        if (*end == '\0') break;
+        line = end + 1;
+    }
+    return false;
+}
+
+bool readDebugLoggingSwitch() {
+    char contents[64 * 1024 + 1];
+    // KeyMint owns this file and keeps it group-writable, so reject only world-write here.
+    return readFile("/data/misc/keystore/ommega/config.toml", contents, sizeof(contents), 0002) == 0 &&
+        debugLoggingEnabled(contents);
 }
 
 int loadConfiguredProfile(const char* package, RuntimeProfile* profile) {

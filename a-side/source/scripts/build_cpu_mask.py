@@ -27,7 +27,6 @@ def build_cpu_mask(abi: str, release: bool = True) -> Path:
         "-O2" if release else "-O0", "-Wall", "-Wextra", "-Werror", "-fno-exceptions",
         "-fno-rtti", "-fno-threadsafe-statics", "-fvisibility=hidden", "-fvisibility-inlines-hidden",
         "-ffunction-sections", "-fdata-sections", "-static-libstdc++",
-        *([] if release else ["-DMASKCPU_DEBUG_LOG"]),
         "-Wl,--no-undefined,--gc-sections,--exclude-libs,ALL,-z,max-page-size=16384",
         "-I", str(source / "third_party"),
         *(str(source / "src" / name) for name in
