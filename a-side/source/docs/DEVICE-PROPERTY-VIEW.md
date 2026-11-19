@@ -65,12 +65,25 @@ value; a missing nonempty A value or a substituted B value fails the check. Java
 SECURITY_PATCH is read before and after the other Java writes, never written.
 A Java failure rolls back those Java writes and reports an incomplete view; a
 successful native phase alone is not complete. Partition aliases that remain
-uncovered are counted and logged as informational. A successful view logs:
+uncovered are counted as informational.
+
+## Logs
+
+Only the root companion writes the `MaskCPU` logcat tag in release builds. The
+Zygisk module code that runs inside the selected application's process (scope,
+private view, post-specialize status, Java and native/child self-checks) does
+not log there, because an application can read its own process's log entries.
+Debug builds of the module (`scripts/build_cpu_mask.py --debug`) also emit
+those in-app lines. A successful view logs, from the companion:
 
 ```
-MaskCPU : private property view: ... error=none
-MaskCPU : child getprop tuple=<brand>/<device>/<name>/<manufacturer>/<model>
+MaskCPU : host original readonly values unchanged=yes checked=<n> uncovered_partition_aliases=<n>
+MaskCPU : companion metadata reply: sent=yes areas=<n> patches=<n> reply_fds=0 status=0
+MaskCPU : companion post-specialize shared status: areas=<n> status=0 uid=<uid> pidfd_bound=yes
 ```
+
+The WebUI **Device property view** diagnostic reports success from the last
+line.
 
 Refusals are explicit. `experiment refused: ...` names the property and reason.
 An optional B property absent on the host is reported as

@@ -8,6 +8,7 @@ endif()
 add_library(maskcpu SHARED src/main.cpp src/property_view.cpp src/property_storage.cpp src/runtime_profile.cpp)
 target_include_directories(maskcpu PRIVATE third_party)
 target_compile_features(maskcpu PRIVATE cxx_std_17)
+target_compile_definitions(maskcpu PRIVATE $<$<CONFIG:Debug>:MASKCPU_DEBUG_LOG>)
 target_compile_options(maskcpu PRIVATE
     -Wall -Wextra -Werror
     -fno-exceptions -fno-rtti -fno-threadsafe-statics

@@ -48,8 +48,8 @@ public:
             return;
         }
         if (!viewReady_) {
-            __android_log_print(ANDROID_LOG_ERROR, kLogTag,
-                                "B identity experiment not applied: property view/host validation failed");
+            MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kLogTag,
+                            "B identity experiment not applied: property view/host validation failed");
             return;
         }
         const jint frameResult = env_->PushLocalFrame(256);
@@ -60,9 +60,9 @@ public:
         env_->PopLocalFrame(nullptr);
         const bool propertiesVerified = maskcpu::verifyPropertyView();
         const bool complete = viewReady_ && javaVerified && propertiesVerified;
-        __android_log_print(complete ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kLogTag,
-                            "package=%s B identity view complete=%s (no keygen/KeyMint self-test)",
-                            maskcpu::kTargetPackage, complete ? "yes" : "no");
+        MASKCPU_APP_LOG(complete ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kLogTag,
+                        "package=%s B identity view complete=%s (no keygen/KeyMint self-test)",
+                        maskcpu::kTargetPackage, complete ? "yes" : "no");
     }
 
     void preServerSpecialize(zygisk::ServerSpecializeArgs*) override {
@@ -75,7 +75,7 @@ private:
             return false;
         }
         env_->ExceptionClear();
-        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "JNI failed: %s", operation);
+        MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kLogTag, "JNI failed: %s", operation);
         return true;
     }
 
@@ -155,7 +155,7 @@ private:
                 if (missing) env_->DeleteLocalRef(missing);
             }
             if (exception) env_->DeleteLocalRef(exception);
-            if (!absent) __android_log_print(ANDROID_LOG_ERROR, kLogTag, "B view field unavailable: %s", name);
+            if (!absent) MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kLogTag, "B view field unavailable: %s", name);
             return absent;
         }
         if (*count >= 80) return false;
@@ -302,9 +302,9 @@ private:
             }
             return false;
         }
-        __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                            "B Java view verified fields=%zu fingerprint=%s sdk=%s (framework and host SPL unchanged)",
-                            count, property(13), property(32));
+        MASKCPU_APP_LOG(ANDROID_LOG_INFO, kLogTag,
+                        "B Java view verified fields=%zu fingerprint=%s sdk=%s (framework and host SPL unchanged)",
+                        count, property(13), property(32));
         return true;
     }
 
