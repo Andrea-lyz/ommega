@@ -53,7 +53,12 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         if security_level != kmr_wire::keymint::SecurityLevel::TrustedEnvironment {
             return Ok(None);
         }
-        match remote_identity_profile() {
+        // Runs under the TA lock while parsing keyblobs: read the cache only.
+        // The wrapper prefetches the profile before taking that lock.
+        let profile = super::cached_remote_identity_profile().and_then(|profile| {
+            profile.ok_or_else(|| anyhow::anyhow!("remote identity profile is not cached"))
+        });
+        match profile {
             Ok(profile) => {
                 // A matching snapshot is authoritative for every software-envelope
                 // version operation. When the peer cannot prove the A-native contract

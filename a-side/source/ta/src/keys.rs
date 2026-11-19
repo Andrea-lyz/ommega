@@ -30,7 +30,7 @@ use kmr_wire::{
     },
     *,
 };
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 /// Logs the full KeyMint `generate_key` duration, including pre/post work that
 /// is outside the remote relay phase. The Drop guard covers every return path.
@@ -56,6 +56,47 @@ impl Drop for GenerateTimer {
 }
 use std::{collections::btree_map::Entry, string::String, vec::Vec};
 use x509_cert::ext::pkix::KeyUsages;
+
+/// Outcome of starting key generation.
+pub(crate) enum KeyGeneration {
+    Done(KeyCreationResult),
+    Remote(Box<RemoteKeyGeneration>),
+}
+
+/// A validated remote-attested key generation. Only [`Self::attest`] contacts
+/// the relay, so it can run without the TA lock; the TA then finishes it.
+pub struct RemoteKeyGeneration {
+    backend: Arc<dyn device::RemoteBackend>,
+    params: Vec<KeyParam>,
+    attestation_key: Option<AttestationKey>,
+    issuer: Option<device::RemoteAttestationKey>,
+    a_authorized_signing: bool,
+    challenge: Vec<u8>,
+    app_id: Vec<u8>,
+    alias: String,
+    serial: Option<Vec<u8>>,
+    remote_params: device::RemoteAttestParams,
+    chars: Vec<KeyCharacteristics>,
+    phase_start: Instant,
+    http_us: u128,
+    _timer: GenerateTimer,
+}
+
+impl RemoteKeyGeneration {
+    /// Forward the attestation request to the remote backend.
+    pub fn attest(&mut self) -> Result<Option<device::RemoteAttestation>, Error> {
+        let http_start = Instant::now();
+        let result = self.backend.attest(
+            &self.challenge,
+            &self.app_id,
+            &self.alias,
+            self.serial.as_deref(),
+            &self.remote_params,
+        );
+        self.http_us = http_start.elapsed().as_micros();
+        result
+    }
+}
 
 /// Maximum size of an attestation challenge value.
 const MAX_ATTESTATION_CHALLENGE_LEN: usize = 128;
@@ -511,7 +552,24 @@ impl crate::KeyMintTa {
         attestation_key: Option<AttestationKey>,
         authorize_on_a: bool,
     ) -> Result<KeyCreationResult, Error> {
-        let _generate_timer = GenerateTimer::new();
+        match self.start_generate_key(params, attestation_key, authorize_on_a)? {
+            KeyGeneration::Done(result) => Ok(result),
+            KeyGeneration::Remote(mut remote) => {
+                let attestation = remote.attest();
+                self.finish_remote_generate_key_result(*remote, attestation)
+            }
+        }
+    }
+
+    /// Start key generation. Remote attestation is returned unfinished so the
+    /// relay wait can run without the TA lock.
+    pub(crate) fn start_generate_key(
+        &mut self,
+        params: &[KeyParam],
+        attestation_key: Option<AttestationKey>,
+        authorize_on_a: bool,
+    ) -> Result<KeyGeneration, Error> {
+        let generate_timer = GenerateTimer::new();
         // Remote mode: if a remote backend is enabled and attestation is
         // requested, mint the key on the B-side real TEE instead of locally.
         // A caller-selected remote attestation key is passed to B's native
@@ -572,15 +630,43 @@ impl crate::KeyMintTa {
             && !a_authorized_signing
             && (attestation_key.is_none() || remote_issuer.is_some());
         if remote_attest {
-            // `Ok(None)` from the remote backend means it was unavailable; fall
-            // back to the local software keybox when `fallback_local` allows.
-            if let Some(result) =
-                self.generate_key_remote(params, remote_issuer.as_ref(), a_authorized_signing)?
-            {
-                return Ok(result);
-            }
+            return self
+                .prepare_remote_generate_key(
+                    params,
+                    attestation_key,
+                    remote_issuer,
+                    a_authorized_signing,
+                    generate_timer,
+                )
+                .map(|remote| KeyGeneration::Remote(Box::new(remote)));
+        }
+        self.generate_local_key(params, attestation_key, a_authorized_signing)
+            .map(KeyGeneration::Done)
+    }
+
+    /// Complete remote key generation with the result of
+    /// [`RemoteKeyGeneration::attest`].
+    pub(crate) fn finish_remote_generate_key_result(
+        &mut self,
+        remote: RemoteKeyGeneration,
+        attestation: Result<Option<device::RemoteAttestation>, Error>,
+    ) -> Result<KeyCreationResult, Error> {
+        // `Ok(None)` from the remote backend means it was unavailable; fall
+        // back to the local software keybox when `fallback_local` allows.
+        if let Some(attestation) = attestation? {
+            return self.complete_remote_generate_key(remote, attestation);
+        }
+        let RemoteKeyGeneration {
+            params,
+            attestation_key,
+            issuer,
+            a_authorized_signing,
+            ..
+        } = remote;
+        let params = &params[..];
+        {
             let fallback_local = self.dev.remote.as_ref().is_some_and(|r| r.fallback_local());
-            if kmr_common::auth_signing::eligible(params) || remote_issuer.is_some() {
+            if kmr_common::auth_signing::eligible(params) || issuer.is_some() {
                 // An authentication-bound or caller-issued attestation requirement must
                 // never be satisfied by A's own keybox; only a hardware chain counts.
                 return Err(km_err!(
@@ -597,6 +683,15 @@ impl crate::KeyMintTa {
                 ));
             }
         }
+        self.generate_local_key(params, attestation_key, a_authorized_signing)
+    }
+
+    fn generate_local_key(
+        &mut self,
+        params: &[KeyParam],
+        attestation_key: Option<AttestationKey>,
+        a_authorized_signing: bool,
+    ) -> Result<KeyCreationResult, Error> {
         let (key_material, chars) = self.generate_key_material(params)?;
         self.finish_keyblob_creation(
             params,
@@ -610,15 +705,17 @@ impl crate::KeyMintTa {
 
     /// Remote-mode key generation: the B-side TEE mints the attestation chain.
     ///
-    /// Returns `Ok(None)` when the remote backend is unavailable (so the caller
-    /// may fall back to the local software keybox), and a hard `Err` only for
-    /// genuine protocol failures that must not be masked.
-    fn generate_key_remote(
-        &mut self,
+    /// Validates the request and prepares the relay call without contacting
+    /// the relay; a hard `Err` is returned only for failures that must not be
+    /// masked by the local fallback.
+    fn prepare_remote_generate_key(
+        &self,
         params: &[KeyParam],
-        attestation_key: Option<&device::RemoteAttestationKey>,
+        attestation_key: Option<AttestationKey>,
+        remote_issuer: Option<device::RemoteAttestationKey>,
         a_authorized_signing: bool,
-    ) -> Result<Option<KeyCreationResult>, Error> {
+        timer: GenerateTimer,
+    ) -> Result<RemoteKeyGeneration, Error> {
         // The relay protocol currently carries only EC/RSA. Never let an
         // unsupported family fall through to B's legacy default EC key.
         match tag::get_algorithm(params)? {
@@ -674,7 +771,7 @@ impl crate::KeyMintTa {
         // overwrites the first session and the first key's later sign/decrypt
         // fails with INVALID_KEY_BLOB (the blob was minted by the other HAL).
         seed_input.extend_from_slice(&(self.hw_info.security_level as i32).to_be_bytes());
-        if let Some(issuer) = attestation_key {
+        if let Some(issuer) = remote_issuer.as_ref() {
             seed_input.extend_from_slice(b"/issuer/");
             seed_input.extend_from_slice(issuer.alias.as_bytes());
         }
@@ -707,31 +804,61 @@ impl crate::KeyMintTa {
                 get_opt_tag_value!(params, AuthTimeout)?,
             );
         }
-        remote_params.attestation_key = attestation_key.cloned();
+        remote_params.attestation_key = remote_issuer.clone();
         // Tag the relay-minted chain with the requesting security level so a
         // STRONGBOX request is not misreported as TEE by the relay's default.
         remote_params.security_level = Some(self.hw_info.security_level as i32);
 
         // Validate generation parameters before any relay work; invalid input
         // must not become a physical B-side algorithm experiment.
-        let (mut chars, _) = tag::extract_key_gen_characteristics(
+        let (chars, _) = tag::extract_key_gen_characteristics(
             self.secure_storage_available(),
             params,
             self.hw_info.security_level,
         )?;
-        let remote = self
+        let backend = self
             .dev
             .remote
             .as_ref()
             .ok_or_else(|| km_err!(UnknownError, "remote backend not configured"))?;
-        let phase_start = Instant::now();
-        let http_start = Instant::now();
-        let Some(remote_attestation) =
-            remote.attest(challenge, app_id, &alias, effective_serial, &remote_params)?
-        else {
-            return Ok(None);
-        };
-        let http_us = http_start.elapsed().as_micros();
+        Ok(RemoteKeyGeneration {
+            backend: Arc::clone(backend),
+            params: params.to_vec(),
+            attestation_key,
+            issuer: remote_issuer,
+            a_authorized_signing,
+            challenge: challenge.clone(),
+            app_id: app_id.clone(),
+            alias,
+            serial: effective_serial.map(<[u8]>::to_vec),
+            remote_params,
+            chars,
+            phase_start: Instant::now(),
+            http_us: 0,
+            _timer: timer,
+        })
+    }
+
+    /// Validate a returned remote attestation and seal the remote keyblob.
+    fn complete_remote_generate_key(
+        &mut self,
+        remote: RemoteKeyGeneration,
+        remote_attestation: device::RemoteAttestation,
+    ) -> Result<KeyCreationResult, Error> {
+        let RemoteKeyGeneration {
+            params,
+            issuer,
+            challenge,
+            app_id,
+            alias,
+            remote_params,
+            mut chars,
+            phase_start,
+            http_us,
+            ..
+        } = remote;
+        let (params, challenge, app_id) = (&params[..], &challenge[..], &app_id[..]);
+        let attestation_key = issuer.as_ref();
         let validate_start = Instant::now();
         let relay_latency_ms = remote_attestation.relay_latency_ms;
         let remote_profile = remote_attestation.profile;
@@ -902,11 +1029,11 @@ impl crate::KeyMintTa {
             remote.attestation_verified(app_id, relay_latency_ms);
         }
 
-        Ok(Some(KeyCreationResult {
+        Ok(KeyCreationResult {
             key_blob: serialized_keyblob,
             key_characteristics: chars,
             certificate_chain,
-        }))
+        })
     }
 
     pub(crate) fn generate_key_material(

@@ -52,7 +52,8 @@ pub mod rkp;
 mod secret;
 mod versions;
 
-use keys::KeyImport;
+pub use keys::RemoteKeyGeneration;
+use keys::{KeyGeneration, KeyImport};
 pub use operation::RemoteSignTask;
 use operation::{OpHandle, Operation};
 
@@ -62,6 +63,20 @@ pub fn finish_response(result: Result<Vec<u8>, Error>) -> PerformOpResponse {
     match result {
         Ok(ret) => op_ok_rsp(PerformOpRsp::OperationFinish(FinishResponse { ret })),
         Err(error) => op_error_rsp(FinishRequest::CODE, error),
+    }
+}
+
+/// First step of a generateKey request. A remote attestation is returned
+/// unfinished so its relay wait need not block other TA operations.
+pub enum GenerateKeyStep {
+    Done(PerformOpResponse),
+    Remote(Box<RemoteKeyGeneration>),
+}
+
+fn generate_key_response(result: Result<keymint::KeyCreationResult, Error>) -> PerformOpResponse {
+    match result {
+        Ok(ret) => op_ok_rsp(PerformOpRsp::DeviceGenerateKey(GenerateKeyResponse { ret })),
+        Err(error) => op_error_rsp(GenerateKeyRequest::CODE, error),
     }
 }
 
@@ -849,6 +864,25 @@ impl KeyMintTa {
         }
     }
 
+    /// Start a generateKey request; finish a returned remote step with
+    /// [`Self::finish_remote_generate_key`] after [`RemoteKeyGeneration::attest`].
+    pub fn begin_generate_key(&mut self, req: GenerateKeyRequest) -> GenerateKeyStep {
+        match self.start_generate_key(&req.key_params, req.attestation_key, req.authorize_on_a) {
+            Ok(KeyGeneration::Remote(remote)) => GenerateKeyStep::Remote(remote),
+            Ok(KeyGeneration::Done(ret)) => GenerateKeyStep::Done(generate_key_response(Ok(ret))),
+            Err(error) => GenerateKeyStep::Done(generate_key_response(Err(error))),
+        }
+    }
+
+    /// Complete a remote generateKey step under the TA lock.
+    pub fn finish_remote_generate_key(
+        &mut self,
+        remote: Box<RemoteKeyGeneration>,
+        attestation: Result<Option<device::RemoteAttestation>, Error>,
+    ) -> PerformOpResponse {
+        generate_key_response(self.finish_remote_generate_key_result(*remote, attestation))
+    }
+
     /// Process a single request, returning a [`PerformOpResponse`].
     ///
     /// Select the appropriate method based on the request type, and use the
@@ -934,14 +968,11 @@ impl KeyMintTa {
                 Ok(_ret) => op_ok_rsp(PerformOpRsp::DeviceAddRngEntropy(AddRngEntropyResponse {})),
                 Err(e) => op_error_rsp(AddRngEntropyRequest::CODE, e),
             },
-            PerformOpReq::DeviceGenerateKey(req) => {
-                match self.generate_key(&req.key_params, req.attestation_key, req.authorize_on_a) {
-                    Ok(ret) => {
-                        op_ok_rsp(PerformOpRsp::DeviceGenerateKey(GenerateKeyResponse { ret }))
-                    }
-                    Err(e) => op_error_rsp(GenerateKeyRequest::CODE, e),
-                }
-            }
+            PerformOpReq::DeviceGenerateKey(req) => generate_key_response(self.generate_key(
+                &req.key_params,
+                req.attestation_key,
+                req.authorize_on_a,
+            )),
             PerformOpReq::DeviceImportKey(req) => {
                 match self.import_key(
                     &req.key_params,

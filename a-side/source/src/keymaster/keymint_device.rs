@@ -565,7 +565,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         });
 
         charge(TaOp::Operation);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.lock_ta_with_profile().process_req(req);
         let result: InternalBeginResult = match result.rsp {
             Some(PerformOpRsp::DeviceBegin(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -677,7 +677,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             attestation_key,
         });
         charge(TaOp::KeyGen);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.lock_ta_with_profile().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceImportKey(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -712,7 +712,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         });
 
         charge(TaOp::KeyGen);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.lock_ta_with_profile().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceImportWrappedKey(rsp)) => rsp.ret,
             Some(_) => {
@@ -742,7 +742,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         });
 
         charge(TaOp::KeyGen);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.lock_ta_with_profile().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceUpgradeKey(rsp)) => rsp.ret,
             Some(_) => {
@@ -797,7 +797,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             });
 
         charge(TaOp::KeyGen);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.lock_ta_with_profile().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceConvertStorageKeyToEphemeral(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -822,7 +822,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         });
 
         charge(TaOp::Operation);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.lock_ta_with_profile().process_req(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceGetKeyCharacteristics(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -948,13 +948,27 @@ impl KeyMintWrapper {
             None
         };
 
-        let req = PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
+        let req = GenerateKeyRequest {
             key_params: key_parameters,
             attestation_key,
             authorize_on_a,
-        });
+        };
         charge(TaOp::KeyGen);
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = {
+            let mut ta = self.lock_ta_with_profile();
+            match ta.begin_generate_key(req) {
+                kmr_ta::GenerateKeyStep::Done(result) => result,
+                kmr_ta::GenerateKeyStep::Remote(mut remote) => {
+                    drop(ta);
+                    let attestation = remote.attest();
+                    self.inner
+                        .keymint
+                        .lock()
+                        .unwrap()
+                        .finish_remote_generate_key(remote, attestation)
+                }
+            }
+        };
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceGenerateKey(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -976,6 +990,15 @@ impl KeyMintWrapper {
             security_level,
             inner: shared_keymint_wrapper_inner(security_level)?,
         })
+    }
+
+    /// Lock the TA after filling the relay profile cache that keyblob
+    /// version checks read, so no relay request runs under the lock.
+    fn lock_ta_with_profile(&self) -> std::sync::MutexGuard<'_, KeyMintTa> {
+        if self.security_level == SecurityLevel::TRUSTED_ENVIRONMENT {
+            crate::remote::prefetch_remote_identity_profile();
+        }
+        self.inner.keymint.lock().unwrap()
     }
 
     pub fn clear_attestation_cache(&self) {
