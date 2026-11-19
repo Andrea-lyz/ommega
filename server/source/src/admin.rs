@@ -83,9 +83,8 @@ pub async fn admin_login(
     // client-supplied X-Forwarded-For) so the login rate limit cannot be
     // bypassed by spoofing the header.
     let ip = crate::handlers::client_ip(&headers);
-    let key = format!("{ip}:{}", body.username);
     // Rate-limit login attempts (5/min per username+IP) to prevent brute force.
-    if !state.auth.allow_login_attempt(&key) {
+    if !state.auth.allow_login_attempt(&ip, &body.username) {
         return json_err(StatusCode::TOO_MANY_REQUESTS, "too many login attempts, try again later");
     }
     if !state.auth.verify_admin(&body.username, &body.password) {
