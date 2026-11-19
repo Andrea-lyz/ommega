@@ -611,9 +611,9 @@ function renderIdents() {
       <td>${x.active ? '<span class="tag on">激活中</span>' : '<span class="tag off">已停用</span>'}</td>
       <td>
         ${x.active
-          ? `<button class="btn small" onclick="setActive('${esc(x.device_id)}', false)">停用</button>`
-          : `<button class="btn small" onclick="setActive('${esc(x.device_id)}', true)">启用</button>`}
-        <button class="btn small danger" onclick="delIdent('${esc(x.device_id)}')">删除</button>
+          ? `<button class="btn small" data-action="set-active" data-device-id="${esc(x.device_id)}" data-active="false">停用</button>`
+          : `<button class="btn small" data-action="set-active" data-device-id="${esc(x.device_id)}" data-active="true">启用</button>`}
+        <button class="btn small danger" data-action="del-ident" data-device-id="${esc(x.device_id)}">删除</button>
       </td>
     </tr>`;
   });
@@ -932,7 +932,7 @@ async function loadAutoKeybox() {
     $('#akbBody').innerHTML = srcs.length
       ? srcs.map(s => `<tr>
           <td><b>${esc(s.name)}</b></td>
-          <td class="mono">${esc(s.device_id)} <button class="btn small" style="padding:1px 6px;line-height:1.4;" onclick="editAkbDevice('${esc(s.name)}','${esc(s.device_id)}')" title="修改目标设备 ID">改</button></td>
+          <td class="mono">${esc(s.device_id)} <button class="btn small" style="padding:1px 6px;line-height:1.4;" data-action="edit-akb-device" data-name="${esc(s.name)}" data-device-id="${esc(s.device_id)}" title="修改目标设备 ID">改</button></td>
           <td class="mono" title="${esc(s.url_primary)}">${esc(s.url_primary)}</td>
           <td class="mono" title="${esc(s.url_mirror)}">${esc(s.url_mirror || '—')}</td>
           <td>${s.decode_hex ? '是' : '否'}</td>
@@ -981,7 +981,7 @@ function renderIpList(ips) {
   c.innerHTML = ips.length
     ? ips.map(ip => `<span class="tag" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;">
         <span class="mono">${esc(ip)}</span>
-        <button onclick="removeIpFilter('${esc(ip)}')" style="background:none;border:none;color:var(--off);cursor:pointer;font-size:14px;line-height:1;">×</button>
+        <button data-action="remove-ip" data-ip="${esc(ip)}" style="background:none;border:none;color:var(--off);cursor:pointer;font-size:14px;line-height:1;">×</button>
       </span>`).join('')
     : '<span class="hint">暂无 IP</span>';
 }
@@ -1021,6 +1021,21 @@ async function removeIpFilter(ip) {
     loadIpFilter();
   } catch (e) { toast(e.message, 'err'); }
 }
+
+$('#identBody').addEventListener('click', e => {
+  const b = e.target.closest('button[data-action]');
+  if (!b) return;
+  if (b.dataset.action === 'set-active') setActive(b.dataset.deviceId, b.dataset.active === 'true');
+  else if (b.dataset.action === 'del-ident') delIdent(b.dataset.deviceId);
+});
+$('#akbBody').addEventListener('click', e => {
+  const b = e.target.closest('button[data-action="edit-akb-device"]');
+  if (b) editAkbDevice(b.dataset.name, b.dataset.deviceId);
+});
+$('#ipfList').addEventListener('click', e => {
+  const b = e.target.closest('button[data-action="remove-ip"]');
+  if (b) removeIpFilter(b.dataset.ip);
+});
 
 function loadAll() {
   loadOverview(); loadDevices(); loadTasks(); loadReports(); loadTokens(); loadAutoKeybox(); loadIpFilter();

@@ -953,6 +953,16 @@ impl Db {
         Ok(n.unwrap_or(0))
     }
 
+    /// Count today's winning lottery draws across all clients.
+    pub fn lottery_wins_today(&self, today: &str) -> anyhow::Result<i64> {
+        let mut conn = self.conn()?;
+        let n: Option<i64> = conn.exec_first(
+            "SELECT count(*) FROM card_lottery WHERE draw_date = :today AND won = 1",
+            params! { "today" => today },
+        )?;
+        Ok(n.unwrap_or(0))
+    }
+
     pub fn insert_lottery_record(
         &self,
         client_key: &str,

@@ -27,7 +27,7 @@ GLUE_HEADER = "\n// ── Ommega detector compatibility policy"
 
 # Reviewed vendor base with the legacy SPL editor, automation and rebind writers
 # removed. Unrelated vendor initialization and verified-boot hash/key stay intact.
-BASELINE = "911f3ab6d7114e83dfd7aad5cafebf9a822e73183c31842ce974043c35799828"
+BASELINE = "4ec833a05c6b7ec9896b770052064b85c7e59be6d5f183c8e52bfa9d1f39a704"
 
 
 def sha256(path: Path) -> str:
