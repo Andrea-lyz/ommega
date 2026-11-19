@@ -4261,7 +4261,8 @@ const OMMEGA_DIAG_PAGES = [
       'echo "==last"',
       'grep -a "relay_roundtrip" "$D/logs/keymint.log" 2>/dev/null | tail -n 6'].join("\n") },
   { id: "diag-cpu", zh: "设备属性视图", en: "Device property view",
-    zhNote: "CPU 与设备属性伪装是否真正注入", enNote: "Whether the CPU/property mask reached the app",
+    zhNote: "CPU 与设备属性伪装是否真正注入；应用侧详情需在诊断中启用「启用调试日志」并重启目标应用",
+    enNote: "Whether the CPU/property mask reached the app; enable Debug logging in Diagnostics and restart the target app for app-side details",
     command: ["set +e",
       'D=/data/misc/keystore/ommega/data',
       'echo "==config"', 'cat "$D/cpu-mask.conf" 2>/dev/null; echo',
@@ -5312,4 +5313,3 @@ function ommegaDiagAggregateErrors(entries) {
   }
   return [...map.values()].sort((left, right) => String(right.ts).localeCompare(String(left.ts)));
 }
-

@@ -69,12 +69,15 @@ uncovered are counted as informational.
 
 ## Logs
 
-Only the root companion writes the `MaskCPU` logcat tag in release builds. The
-Zygisk module code that runs inside the selected application's process (scope,
-private view, post-specialize status, Java and native/child self-checks) does
-not log there, because an application can read its own process's log entries.
-Debug builds of the module (`scripts/build_cpu_mask.py --debug`) also emit
-those in-app lines. A successful view logs, from the companion:
+The root companion always writes its `MaskCPU` logcat lines. In-app details
+(scope, private view, post-specialize status, Java and native/child self-checks)
+are written only when the first matching `log_level` in
+`/data/adb/ommega/ommegadata/config.toml` is `debug` or `trace`, as controlled
+by **Diagnostics → Enable debug logging**. The companion reads this setting for
+each target-app launch, so restart the target app after changing it. Missing,
+unreadable, oversized or non-debug configuration keeps in-app logging off.
+
+A successful view logs, from the companion:
 
 ```
 MaskCPU : host original readonly values unchanged=yes checked=<n> uncovered_partition_aliases=<n>
