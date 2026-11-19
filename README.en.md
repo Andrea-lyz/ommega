@@ -187,7 +187,9 @@ working directory is the one holding `.env` and `data/`. Defaults and endpoints:
 | `/login/` | Login page |
 
 With MySQL enabled you can issue separate role tokens for A and B from the admin
-console. To update `relay_rs`, upload a temporary file, verify its SHA-256, keep a
+console. A DB-issued B token serves only the device ids an admin bound to it (set
+when generating the token or later in the admin console); an unbound B token gets
+403 for every `device_id`. The static `RELAY_TOKEN` is not restricted. To update `relay_rs`, upload a temporary file, verify its SHA-256, keep a
 backup, stop the service, replace the file atomically, start it and check health.
 Never overwrite a running executable.
 
@@ -207,7 +209,9 @@ OMMEGA_RELAY_LOGCAT_ENABLED=true
 OMMEGA_RELAY_LOGCAT_LEVEL=info
 ```
 
-- `SERVER`, `DEVICE_ID` and `TOKEN` are required; `MACHINE_ID` is optional.
+- `SERVER`, `DEVICE_ID` and `TOKEN` are required; `MACHINE_ID` is optional and
+  defaults to the kernel boot id (Server rejects an empty one). A DB-issued B
+  token must already be bound to this `DEVICE_ID` in the admin console.
 - Connection settings hot-reload; logging settings take effect on the next relay
   start.
 - To force a reread, run `touch /data/adb/ommega/restart.all`. The marker only
@@ -447,6 +451,18 @@ payments, card binding or any risk-control outcome.
   default; a self-signed Server needs an SPKI pin. Explicitly enabling
   `tls_insecure` skips verification and exposes the token to network
   attackers. Public deployments must still protect tokens and Server.
+- **Server endpoints**: querying cards by contact returns only masked tokens and
+  order ids; the full token is returned only by the order status lookup with the
+  random order id. The lottery allows 3 draws per client per day, counts an IPv6
+  /64 as one client, and caps wins at 5 per day server-wide. Login is limited to
+  20 attempts per IP and 5 per IP+username per minute; every limiter map keeps at
+  most 4096 keys and stores long keys as hashes.
+- **Admin and WebUI rendering**: a keybox DeviceID may contain only
+  `A-Z a-z 0-9 . _ -` (max 128 characters), otherwise the upload is rejected; the
+  admin console passes device ids to its buttons through `data-*` attributes,
+  not inline script. The A WebUI renders app
+  names, file names and paths as text and quotes directory paths before they
+  reach a root shell command.
 - **Release signing**: both APKs use the Android default debug signing identity,
   which CI caches. It is not a formal release key; cache eviction can change the
   identity, so verify certificates before upgrading.
@@ -461,7 +477,7 @@ payments, card binding or any risk-control outcome.
 |---|---|
 | [A-side README](a-side/source/README.md) | Injection and routing, remote configuration, keybox, authentication signing, build and validation |
 | [B-side README](b-side/source/README.md) | Relay protocol, SPL rules, battery telemetry, screen-off availability |
-| [Server README](server/source/README.md) | Battery fields, rate limits and local tests |
+| [Server README](server/source/README.md) | Battery fields, B token device binding, cards and lottery, rate limits and local tests |
 | [UI README](ui/README.md) | Shared design system, previews, browser smoke tests, deployment and rollback |
 | [Mask README](StrongBoxCapabilityMask/README.md) | Hook point, verification, compatibility and rollback |
 | [CHANGELOG.en.md](CHANGELOG.en.md) | Per-version notes for 2.1.x / 2.0.x |

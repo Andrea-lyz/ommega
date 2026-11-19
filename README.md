@@ -165,7 +165,9 @@ RELAY_ATTEST_SOURCE=physical
 | `/jiyin004/` | 管理后台 |
 | `/login/` | 登录页 |
 
-启用 MySQL 后可在管理后台为 A/B 分配独立角色 Token。更新 `relay_rs` 时应先上传临时
+启用 MySQL 后可在管理后台为 A/B 分配独立角色 Token。数据库签发的 B Token 只服务管理员
+为它绑定的设备 ID（生成时填写，或之后在后台绑定），未绑定的 B Token 对任何 `device_id`
+都返回 403；静态 `RELAY_TOKEN` 不受此限制。更新 `relay_rs` 时应先上传临时
 文件、核对 SHA-256、保留旧版备份，再停服务原子替换并做健康检查；不要覆盖正在运行的
 可执行文件。
 
@@ -185,7 +187,8 @@ OMMEGA_RELAY_LOGCAT_ENABLED=true
 OMMEGA_RELAY_LOGCAT_LEVEL=info
 ```
 
-- `SERVER`、`DEVICE_ID`、`TOKEN` 为必填；`MACHINE_ID` 可选。
+- `SERVER`、`DEVICE_ID`、`TOKEN` 为必填；`MACHINE_ID` 可选，留空时 relay 使用内核 boot id
+  （Server 拒绝空值）。数据库签发的 B Token 必须已在后台绑定该 `DEVICE_ID`。
 - 连接参数由 relay 热加载；日志参数在 relay 下次启动时生效。
 - 需要主动触发重读时执行 `touch /data/adb/ommega/restart.all`。该标记只请求重读配置，
   不重启 relay 或设备，也不会重新初始化日志。
@@ -380,6 +383,14 @@ CI 只忽略纯 `*.md` 修改，TXT 修改仍会触发构建；默认使用源�
   [Mask 说明](StrongBoxCapabilityMask/README.md)。
 - **传输与凭据**：A/B 默认校验 Server 证书，自签证书需配置 SPKI 固定；显式开启
   `tls_insecure` 会跳过校验并使 Token 暴露给网络攻击者。公网部署仍需自行保护 Token 与 Server。
+- **Server 接口防护**：按联系方式查询卡密只返回脱敏 Token 与订单号，完整 Token 只在凭
+  随机订单号查询订单状态时返回。抽奖每个客户端每天 3 次，IPv6 按 /64 前缀计为同一客户端，
+  全站每天最多中奖 5 次。登录限流为每 IP 每分钟 20 次、每 IP+用户名每分钟 5 次；各限流表
+  最多保留 4096 个键，超长键以哈希存储。
+- **后台与 WebUI 渲染**：keybox 的 DeviceID 只允许 `A-Z a-z 0-9 . _ -`，最长 128 字符，否则
+  上传被拒绝；管理后台的设备按钮通过 `data-*` 属性传递
+  DeviceID，不再把它拼进内联脚本。A 端 WebUI 把应用名、文件名、路径当作文本显示，
+  目录路径加引号后才进入 root shell 命令。
 - **发布签名**：两个 APK 使用 Android 默认 debug 签名，CI 会缓存该调试身份；它不是正式
   发布签名，缓存失效可能导致签名身份变化，升级前务必核对证书。
 - **无担保**：本项目按现状提供，不保证适用性、安全性或任何检测结果。使用者自行承担
@@ -391,7 +402,7 @@ CI 只忽略纯 `*.md` 修改，TXT 修改仍会触发构建；默认使用源�
 |---|---|
 | [A 端说明](a-side/source/README.md) | 注入与路由、远程配置、keybox、认证签名、构建与校验 |
 | [B 端说明](b-side/source/README.md) | relay 协议、SPL 规则、电量遥测、灭屏可用性 |
-| [Server 说明](server/source/README.md) | 电量字段、速率限制与本地测试 |
+| [Server 说明](server/source/README.md) | 电量字段、B Token 设备绑定、卡密与抽奖、速率限制与本地测试 |
 | [UI 说明](ui/README.md) | 共享设计系统、预览、浏览器 smoke 与部署回滚 |
 | [Mask 说明](StrongBoxCapabilityMask/README.md) | hook 点、验证步骤、兼容前提与回滚 |
 | [CHANGELOG.md](CHANGELOG.md) | 2.1.x / 2.0.x 逐版本更新要点 |

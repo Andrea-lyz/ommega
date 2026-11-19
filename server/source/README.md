@@ -69,6 +69,21 @@ The static `RELAY_TOKEN` (the owner's credential) still serves any device.
 `/api/card/query/` (by contact) returns only masked tokens and order ids; the
 full token is returned only by `/api/card/order/status/` for the random order id.
 
+## Card lottery
+
+`/api/card/lottery/` allows 3 draws per client per UTC day. IPv4 (including
+IPv4-mapped IPv6) is counted per address; other IPv6 addresses are counted per
+/64 prefix, so rotating addresses inside one allocation does not add draws.
+At most 5 draws win per UTC day across all clients; once reached, later draws
+still count but do not win.
+
+## Admin keybox DeviceID
+
+An uploaded `keybox.xml` `DeviceID`, and any admin-supplied `device_id` for a
+stored identity, must be 1-128 characters from `A-Z a-z 0-9 . _ -`; anything
+else is rejected with `400`. Admin console device buttons carry the id in
+`data-*` attributes instead of inline script handlers.
+
 ## Rate limits
 
 `RELAY_DATA_RATE_LIMIT_REQUESTS` (default `20000`) is the work budget for the
@@ -80,6 +95,12 @@ The default also permits older clients that use short polling.
 Both values are per token per `RELAY_RATE_LIMIT_WINDOW` seconds (default
 `3600`) and can be set in the process environment or the working-directory
 `.env` file.
+
+Admin login allows 20 attempts per minute per IP and 5 per IP+username (`429`
+beyond that); the username enters the key only as a hash of its first 256
+bytes. Every limiter map drops keys whose window has emptied and holds at most
+4096 keys, evicting the least recently used when full; keys over 128 bytes are
+stored as hashes.
 
 ## Low-latency relay transport
 
