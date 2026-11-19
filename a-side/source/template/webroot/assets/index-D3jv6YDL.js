@@ -4438,7 +4438,7 @@ function ommegaDiagPageItems(page, output) {
     const profilePresent = (pick("profile")[0] || "") === "present";
     const logLines = pick("log");
     const enabled = /enabled=true/.test(config);
-    const applied = logLines.some(line => /error=none/.test(line));
+    const applied = logLines.some(line => /companion post-specialize shared status:.* status=0 /.test(line));
     items.push(ommegaDiagItem(enabled, "属性视图：" + (enabled ? "已启用" : "未启用"),
       "Property view: " + (enabled ? "enabled" : "disabled"),
       "在「CPU 与设备属性」中启用并选择目标应用", "Enable it under CPU and device properties and pick the target apps"));
@@ -4447,8 +4447,8 @@ function ommegaDiagPageItems(page, output) {
       "先在中继端拉取一次设备快照，再启用属性视图", "Pull a device snapshot from the relay before enabling the view"));
     items.push(ommegaDiagItem(applied, applied ? "注入结果：成功" : "注入结果：未见成功记录",
       "Injection: " + (applied ? "applied" : "no success yet"),
-      "确认 Zygisk 已启用、应用已被强停重开，并检查 MaskCPU 日志",
-      "Confirm Zygisk is enabled, restart the app, then check the MaskCPU log"));
+      "确认 Zygisk 已启用、应用已被强停重开，并检查 MaskCPU 日志中的 companion 状态行",
+      "Confirm Zygisk is enabled, restart the app, then check the companion status line in the MaskCPU log"));
   } else if (page.id === "diag-soter") {
     const enabled = (pick("enabled")[0] || "off") === "on";
     const status = pick("status").join(" ");

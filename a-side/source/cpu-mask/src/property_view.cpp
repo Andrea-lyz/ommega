@@ -815,20 +815,20 @@ bool preparePropertyView(zygisk::Api* api, int targetUid, const char* package, v
     // One diagnostic line per specialized process: which app requested the view
     // and the identity it will observe. Without it a report can only show that
     // the feature is enabled, not whether it reached a particular package.
-    __android_log_print(ANDROID_LOG_INFO, kTag,
-                        "property view scope: package=%s uid=%d pid=%d brand=%s device=%s product=%s "
-                        "manufacturer=%s model=%s",
-                        package, targetUid, getpid(), kIdentity[0].value, kIdentity[1].value,
-                        kIdentity[2].value, kIdentity[3].value, kIdentity[4].value);
+    MASKCPU_APP_LOG(ANDROID_LOG_INFO, kTag,
+                    "property view scope: package=%s uid=%d pid=%d brand=%s device=%s product=%s "
+                    "manufacturer=%s model=%s",
+                    package, targetUid, getpid(), kIdentity[0].value, kIdentity[1].value,
+                    kIdentity[2].value, kIdentity[3].value, kIdentity[4].value);
     captureHostIdentity();
     Fd stateFd(memfd_create("maskcpu-view-status", MFD_CLOEXEC));
     if (stateFd.get() < 0 || ftruncate(stateFd.get(), sysconf(_SC_PAGESIZE)) != 0) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "shared status create failed: %s", strerror(errno));
+        MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kTag, "shared status create failed: %s", strerror(errno));
         return false;
     }
     StatusPage status(stateFd.get());
     if (!status.get()) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "shared status map failed: %s", strerror(errno));
+        MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kTag, "shared status map failed: %s", strerror(errno));
         return false;
     }
     status.get()->protocol = kProtocol;
@@ -838,17 +838,17 @@ bool preparePropertyView(zygisk::Api* api, int targetUid, const char* package, v
     request.pid = getpid();
     request.uid = targetUid;
     if (!namespaceId(parentNamespace.get(), &request.parentNamespace) || unshare(CLONE_NEWNS) != 0) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "private namespace failed: %s", strerror(errno));
+        MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kTag, "private namespace failed: %s", strerror(errno));
         return false;
     }
     Fd targetNamespace(open("/proc/thread-self/ns/mnt", O_RDONLY | O_CLOEXEC));
     if (targetNamespace.get() < 0) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "target namespace open failed: %s", strerror(errno));
+        MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kTag, "target namespace open failed: %s", strerror(errno));
         return false;
     }
     const int requestFds[] = {targetNamespace.get(), stateFd.get()};
     if (!sendPacket(socket.get(), &request, sizeof(request), requestFds, 2, true)) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "companion request failed: %s", strerror(errno));
+        MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kTag, "companion request failed: %s", strerror(errno));
         return false;
     }
     Reply reply{};
@@ -870,19 +870,19 @@ bool preparePropertyView(zygisk::Api* api, int targetUid, const char* package, v
         const int remapped = opened ? remapSnapshots(reply.areas, snapshots, reply.count) : -1;
         success = remapped >= 0;
         const int error = success ? 0 : errno;
-        __android_log_print(success ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kTag,
-                            "private property view: areas=%u patches=%u reply_fds=%zu local_readonly=%s opened=%zu unmapped=%zu remapped=%d error=%s",
-                            reply.count, reply.patches, count, opened ? "yes" : "no", status.opened, status.skipped,
-                            remapped, error ? strerror(error) : "none");
+        MASKCPU_APP_LOG(success ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kTag,
+                        "private property view: areas=%u patches=%u reply_fds=%zu local_readonly=%s opened=%zu unmapped=%zu remapped=%d error=%s",
+                        reply.count, reply.patches, count, opened ? "yes" : "no", status.opened, status.skipped,
+                        remapped, error ? strerror(error) : "none");
         if (!opened) {
             const char* path = status.failedArea < reply.count ? reply.areas[status.failedArea].path : "<none>";
-            __android_log_print(ANDROID_LOG_ERROR, kTag, "snapshot reader failed: step=%s path=%s errno=%d",
-                                pathsValid ? status.step : "reply-path", path, error);
+            MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kTag, "snapshot reader failed: step=%s path=%s errno=%d",
+                            pathsValid ? status.step : "reply-path", path, error);
         }
     } else {
-        __android_log_print(ANDROID_LOG_ERROR, kTag,
-                            "property view reply failed: received=%s protocol=0x%x expected=0x%x status=%d fds=%zu areas=%u errno=%d",
-                            received ? "yes" : "no", reply.protocol, kProtocol, reply.error, count, reply.count, errno);
+        MASKCPU_APP_LOG(ANDROID_LOG_ERROR, kTag,
+                        "property view reply failed: received=%s protocol=0x%x expected=0x%x status=%d fds=%zu areas=%u errno=%d",
+                        received ? "yes" : "no", reply.protocol, kProtocol, reply.error, count, reply.count, errno);
     }
     for (int snapshot : snapshots) if (snapshot >= 0) close(snapshot);
     if (success) *pendingState = status.release();
@@ -900,9 +900,9 @@ bool finalizePropertyView(void* opaque) {
         error = completed ? status->error : errno;
     }
     const bool success = completed && error == 0;
-    __android_log_print(success ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kTag,
-                        "post-specialize shared status: completed=%s status=%d ready=%s (no post socket IPC)",
-                        completed ? "yes" : "no", error, success ? "yes" : "no");
+    MASKCPU_APP_LOG(success ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kTag,
+                    "post-specialize shared status: completed=%s status=%d ready=%s (no post socket IPC)",
+                    completed ? "yes" : "no", error, success ? "yes" : "no");
     munmap(opaque, static_cast<size_t>(sysconf(_SC_PAGESIZE)));
     return success;
 }
@@ -955,16 +955,16 @@ bool verifyPropertyView() {
     }
     AliasCheck aliases{};
     if (__system_property_foreach(enumerateForAliases, &aliases) != 0) ++aliases.mismatches;
-    __android_log_print(ANDROID_LOG_INFO, kTag, "native tuple=%s/%s/%s/%s/%s SOC_MODEL=%s APIs_verified=%s",
-                        native[0], native[1], native[2], native[3], native[4], nativeSoc, nativeOk ? "yes" : "no");
-    __android_log_print(ANDROID_LOG_INFO, kTag, "native FOR props=%s/%s/%s/%s/%s",
-                        attest[0][0] ? attest[0] : "<empty>", attest[1][0] ? attest[1] : "<empty>",
-                        attest[2][0] ? attest[2] : "<empty>", attest[3][0] ? attest[3] : "<empty>",
-                        attest[4][0] ? attest[4] : "<empty>");
-    __android_log_print(ANDROID_LOG_INFO, kTag, "native vendor fallback=%s/%s/%s/%s/%s",
-                        vendor[0][0] ? vendor[0] : "<empty>", vendor[1][0] ? vendor[1] : "<empty>",
-                        vendor[2][0] ? vendor[2] : "<empty>", vendor[3][0] ? vendor[3] : "<empty>",
-                        vendor[4][0] ? vendor[4] : "<empty>");
+    MASKCPU_APP_LOG(ANDROID_LOG_INFO, kTag, "native tuple=%s/%s/%s/%s/%s SOC_MODEL=%s APIs_verified=%s",
+                    native[0], native[1], native[2], native[3], native[4], nativeSoc, nativeOk ? "yes" : "no");
+    MASKCPU_APP_LOG(ANDROID_LOG_INFO, kTag, "native FOR props=%s/%s/%s/%s/%s",
+                    attest[0][0] ? attest[0] : "<empty>", attest[1][0] ? attest[1] : "<empty>",
+                    attest[2][0] ? attest[2] : "<empty>", attest[3][0] ? attest[3] : "<empty>",
+                    attest[4][0] ? attest[4] : "<empty>");
+    MASKCPU_APP_LOG(ANDROID_LOG_INFO, kTag, "native vendor fallback=%s/%s/%s/%s/%s",
+                    vendor[0][0] ? vendor[0] : "<empty>", vendor[1][0] ? vendor[1] : "<empty>",
+                    vendor[2][0] ? vendor[2] : "<empty>", vendor[3][0] ? vendor[3] : "<empty>",
+                    vendor[4][0] ? vendor[4] : "<empty>");
 
     constexpr size_t listingCapacity = 1024 * 1024;
     char* listing = static_cast<char*>(malloc(listingCapacity));
@@ -990,17 +990,17 @@ bool verifyPropertyView() {
         }
     }
     free(listing);
-    __android_log_print(childOk ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kTag,
-                        "child getprop tuple=%s/%s/%s/%s/%s SOC_MODEL=%s FOR_props_empty=%s verified=%s",
-                        child[0], child[1], child[2], child[3], child[4], childSoc,
-                        childOk ? "yes" : "not verified", childOk ? "yes" : "no");
+    MASKCPU_APP_LOG(childOk ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kTag,
+                    "child getprop tuple=%s/%s/%s/%s/%s SOC_MODEL=%s FOR_props_empty=%s verified=%s",
+                    child[0], child[1], child[2], child[3], child[4], childSoc,
+                    childOk ? "yes" : "not verified", childOk ? "yes" : "no");
     // Partition aliases and uncovered properties are reported for diagnosis, but
     // only the properties the policy actually claims decide completeness.
     const bool complete = nativeOk && childOk;
-    __android_log_print(complete ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kTag,
-                        "native/child identity complete=%s alias_mismatches=%u (informational) "
-                        "uncovered_partition_aliases=%u",
-                        complete ? "yes" : "no", aliases.mismatches, aliases.uncovered);
+    MASKCPU_APP_LOG(complete ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kTag,
+                    "native/child identity complete=%s alias_mismatches=%u (informational) "
+                    "uncovered_partition_aliases=%u",
+                    complete ? "yes" : "no", aliases.mismatches, aliases.uncovered);
     return complete;
 }
 
