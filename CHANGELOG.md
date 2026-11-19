@@ -10,6 +10,22 @@
 README 不再内嵌逐版本更新要点：发版时只更新版本号，并在这里追加条目。发布步骤见
 [RELEASING.md](RELEASING.md)。
 
+## 2.4.4 — 2026-11-19
+
+本版涉及 A、B、Server 和 B-app，均为安全加固与稳定性修复；StrongBoxCapabilityMask 仅同步产品版本号，随包 AProbe 未更新。
+
+- **中继 TLS 默认校验证书并支持公钥固定（[#102](https://github.com/Andrea-lyz/ommega/pull/102)）。** A 端 `tls_insecure` 默认改为 `false`，配置锁异常时报错而不是退回不校验；B 端 relay 不再一律接受任意证书。两端新增 SPKI SHA-256 固定：A 为 `remote.tls_pin_sha256`，B 为 `OMMEGA_RELAY_TLS_PIN_SHA256`；B 另有 `OMMEGA_RELAY_TLS_INSECURE`（默认 `false`）。设置了固定值时只接受持有该公钥的服务器；固定值格式错误直接报配置错误，不会降级为不校验。A WebUI 中继设置新增固定值输入框，「关闭 TLS 校验」在无配置时默认不勾选。
+- **B token 绑定设备，联系方式查询不再返回完整 token（[#101](https://github.com/Andrea-lyz/ommega/pull/101)）。** `/api/card/query/` 只返回打码的订单号和 token，完整 token 只能凭随机订单号领取。数据库签发的 B token 只能服务管理员绑定的 `device_id`（`api_token.allowed_device_ids`，首次使用时自动加列），否则 `b_poll`、`b_result`、身份上传与撤销均返回 403；静态 `RELAY_TOKEN` 不受影响。`b_poll` 要求非空 `machine_id`，同一设备第二台机器返回 409；B relay 在未配置时使用内核 `boot_id`，B-app 在服务启动时即使用 `ANDROID_ID`。管理后台可在签发时或之后为 token 绑定设备。
+- **Server 限流与抽奖加固（[#99](https://github.com/Andrea-lyz/ommega/pull/99)、[#100](https://github.com/Andrea-lyz/ommega/pull/100)）。** 抽奖每客户端每天 3 次，IPv6 按 /64 合并计数，全站每天最多 5 次中奖。五个滑动窗口限流表统一实现，每表最多 4096 个键，超长键以哈希保存；登录同时按 IP（每分钟 20 次）和 IP+用户名（每分钟 5 次）限流，匿名请求无法再无限撑大内存。
+- **管理后台与 A WebUI 的注入修复（[#97](https://github.com/Andrea-lyz/ommega/pull/97)、[#98](https://github.com/Andrea-lyz/ommega/pull/98)）。** 管理后台按钮改用 `data-*` 属性和事件委托，不再把 DeviceID 拼进内联脚本；上传 keybox 时 DeviceID 只接受 `[A-Za-z0-9._-]`，长度 1–128。A WebUI 对应用名、keybox 文件选择器中的文件名、目录名和路径做转义，进入目录和读取文件的 root shell 命令改为单引号转义，共享存储中的恶意文件名不能再执行命令。
+- **KeyMint 中继请求移出 TA 互斥锁（[#105](https://github.com/Andrea-lyz/ommega/pull/105)）。** keyblob 版本检查只读缓存的中继 profile，缓存在加锁前单次预取，失败按 2 秒起、最长 30 秒退避；带 challenge 的远程 generateKey 在锁外完成中继证明后再加锁封装。中继不可达时，同一安全级别的其他 KeyMint 调用不再排队等待网络超时。路由、错误映射和 auth-bound 密钥存储不变。
+- **cpu-mask App 内日志跟随调试开关（[#104](https://github.com/Andrea-lyz/ommega/pull/104)、[#106](https://github.com/Andrea-lyz/ommega/pull/106)）。** 目标 App 进程内的 `MaskCPU` logcat 只在「诊断 → 启用调试日志」开启时写入，release 与 debug 构建一致；开关由 root companion 在每次目标 App 启动时读取，改动后需重启目标 App。关闭时被伪装的 App 读不到这些痕迹；root companion 的 `MaskCPU` 日志照常写，WebUI「设备属性视图」诊断依据 companion 日志判断。keymint 默认 `log_level` 改为 `info`，新安装时调试日志默认关闭。
+- **文档（[#103](https://github.com/Andrea-lyz/ommega/pull/103)）。** README 与 Server README 补充上述行为与数值。
+
+升级：中继模式请成套更新 A、B、Server 和 B-app。使用自签名证书的 Server 必须在 A、B 两端配置公钥固定值（或明确开启不校验），否则请求会因证书校验失败；已显式保存 `tls_insecure = true` 的 A 配置保持原行为。数据库签发的 B token 升级后默认未绑定，需在管理后台绑定 `device_id` 后才能继续服务。上传 keybox 时 DeviceID 含其他字符会被拒绝。已有设备保存的 `log_level = "debug"` 不会被改写，调试日志仍保持开启，需要时请在 WebUI 手动关闭。A 端请使用整包更新，使同版 KeyMint 与注入器一同生效，再刷新 WebUI。
+
+验证：各 PR 在主机上通过 A/B Android 目标的 fmt、clippy 与测试编译，Server 单元测试，WebUI 与 UI 测试；#97、#101 另在本地 Server 与数据库上做了端到端检查。本次发版未在设备上执行验收；中继 TLS、B 设备绑定和 KeyMint 锁外请求仍需实机验证。
+
 ## 2.4.3 — 2026-11-19
 
 本版涉及 A、B 和 Server。B-app 与 StrongBoxCapabilityMask 仅同步产品版本号。
