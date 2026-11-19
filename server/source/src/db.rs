@@ -645,18 +645,27 @@ impl Db {
             return Ok(());
         }
         let mut conn = self.conn()?;
-        let present: Option<i64> = conn.exec_first(
-            "SELECT COUNT(*) FROM information_schema.COLUMNS
-             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'api_token'
-               AND COLUMN_NAME = 'allowed_device_ids'",
-            (),
-        )?;
-        if present.unwrap_or(0) == 0 {
-            conn.query_drop(
+        let column_present = |conn: &mut mysql::PooledConn| -> anyhow::Result<bool> {
+            let n: Option<i64> = conn.exec_first(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'api_token'
+                   AND COLUMN_NAME = 'allowed_device_ids'",
+                (),
+            )?;
+            Ok(n.unwrap_or(0) > 0)
+        };
+        if !column_present(&mut conn)? {
+            match conn.query_drop(
                 "ALTER TABLE api_token
                  ADD COLUMN allowed_device_ids VARCHAR(1024) NOT NULL DEFAULT ''",
-            )?;
-            tracing::info!("added api_token.allowed_device_ids");
+            ) {
+                Ok(()) => tracing::info!("added api_token.allowed_device_ids"),
+                // A concurrent caller may have added the column first.
+                Err(e) if column_present(&mut conn)? => {
+                    tracing::debug!("api_token.allowed_device_ids added concurrently: {e}")
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         self.token_binding_column_ready
             .store(true, Ordering::Release);
