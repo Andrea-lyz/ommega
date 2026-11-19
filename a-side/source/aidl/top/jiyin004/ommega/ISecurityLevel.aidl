@@ -17,8 +17,9 @@ interface ISecurityLevel {
     CreateOperationResponse createOperation(in @nullable CallerInfo ctx, in KeyDescriptor key,
                   in KeyParameter[] operationParameters, in boolean forced);
 
+    // callerPackages comes from the trusted injector, not from the app parcel.
     KeyMetadata generateKey(in @nullable CallerInfo ctx, in KeyDescriptor key, in @nullable KeyDescriptor attestationKey,
-                            in KeyParameter[] params, in int flags, in byte[] entropy);
+                            in KeyParameter[] params, in int flags, in byte[] entropy, in String[] callerPackages);
 
     KeyMetadata importKey(in @nullable CallerInfo ctx, in KeyDescriptor key, in @nullable KeyDescriptor attestationKey,
                           in KeyParameter[] params, in int flags, in byte[] keyData);

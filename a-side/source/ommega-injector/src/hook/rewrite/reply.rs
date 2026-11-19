@@ -580,7 +580,9 @@ pub(super) fn build_ommega_security_level_reply(
                 .iter()
                 .any(|param| param.tag == KeyTag::ATTESTATION_CHALLENGE);
             let has_attestation_key = attestation_key.is_some();
-            let timing_packages = if pending.packages.is_empty() {
+            // Global scope skips package lookup at interception. Resolve the full UID
+            // package list here, or reuse the exact identity selected for a system app.
+            let caller_packages = if pending.packages.is_empty() {
                 match crate::ipc::resolve_packages_for_uid(pending.caller.uid as u32) {
                     PackageResolution::Known(packages) => packages,
                     _ => Vec::new(),
@@ -595,10 +597,11 @@ pub(super) fn build_ommega_security_level_reply(
                 params,
                 *flags,
                 entropy,
+                &caller_packages,
             ) {
                 Ok(metadata) => {
                     crate::local_timing::after_generate(
-                        &timing_packages,
+                        &caller_packages,
                         has_challenge,
                         has_attestation_key,
                         timing_started,

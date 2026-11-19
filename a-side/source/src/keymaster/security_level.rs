@@ -751,11 +751,15 @@ impl KeystoreSecurityLevel {
         params: &[KeyParameter],
         attest_key: Option<&AttestationKey>,
         alias: Option<&str>,
+        caller_packages: &[String],
     ) -> Result<KeyCreationResult, Error> {
         let authorize_on_a = match &self.keymint {
-            KeyMintBackend::Ommega(keymint) => {
-                map_km_error(keymint.resolve_auth_signing(params, attest_key.is_some(), alias))?
-            }
+            KeyMintBackend::Ommega(keymint) => map_km_error(keymint.resolve_auth_signing(
+                params,
+                attest_key.is_some(),
+                alias,
+                caller_packages,
+            ))?,
             KeyMintBackend::System(_) => false,
         };
         crate::remote::attestation_metrics::clear_attempt();
@@ -853,7 +857,7 @@ impl KeystoreSecurityLevel {
         attest_key_descriptor: Option<&KeyDescriptor>,
         params: &[KeyParameter],
         flags: i32,
-        _entropy: &[u8],
+        caller_packages: &[String],
     ) -> Result<KeyMetadata> {
         if key.domain != Domain::BLOB && key.alias.is_none() {
             return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT))
@@ -934,6 +938,7 @@ impl KeystoreSecurityLevel {
                             &params,
                             Some(&attestation_key),
                             key.alias.as_deref(),
+                            caller_packages,
                         )
                     },
                     |upgraded_blob| {
@@ -982,6 +987,7 @@ impl KeystoreSecurityLevel {
                             &params,
                             attest_key.as_ref(),
                             key.alias.as_deref(),
+                            caller_packages,
                         )
                     },
                 )
@@ -992,7 +998,12 @@ impl KeystoreSecurityLevel {
                 ))
                 .map(|(result, _)| result),
             None => self
-                .generate_key_and_retry_on_att_id_mismatch(&params, None, key.alias.as_deref())
+                .generate_key_and_retry_on_att_id_mismatch(
+                    &params,
+                    None,
+                    key.alias.as_deref(),
+                    caller_packages,
+                )
                 .context(ks_err!(
                     "While generating without a provided \
                  attestation key and params: {:?}.",
@@ -1460,20 +1471,14 @@ impl IKeystoreSecurityLevel for AospSecurityLevelWrapper {
         attestation_key: Option<&KeyDescriptor>,
         params: &[KeyParameter],
         flags: i32,
-        entropy: &[u8],
+        _entropy: &[u8],
     ) -> Result<KeyMetadata, Status> {
         // Duration is set to 5 seconds, because generateKey - especially for RSA keys, takes more
         // time than other operations
         let _wp = self.watch_millis("IKeystoreSecurityLevel::generateKey", 5000);
         security_level_manager::notify_operation_performed(self.security_level);
-        let (latency, result) = crate::timed_call!(self.generate_key(
-            None,
-            key,
-            attestation_key,
-            params,
-            flags,
-            entropy
-        ));
+        let (latency, result) =
+            crate::timed_call!(self.generate_key(None, key, attestation_key, params, flags, &[]));
         log_key_creation_event_stats(
             caller_uid(None).0 as i32,
             self.security_level,
@@ -1609,7 +1614,8 @@ impl ISecurityLevel for OmmegaSecurityLevelWrapper {
         attestation_key: Option<&KeyDescriptor>,
         params: &[KeyParameter],
         flags: i32,
-        entropy: &[u8],
+        _entropy: &[u8],
+        caller_packages: &[String],
     ) -> Result<KeyMetadata, Status> {
         let ctx = Some(require_ommega_ctx(ctx, "ISecurityLevel::generateKey")?);
         let _wp = self.watch_millis("ISecurityLevel::generateKey", 5000);
@@ -1620,7 +1626,7 @@ impl ISecurityLevel for OmmegaSecurityLevelWrapper {
             attestation_key,
             params,
             flags,
-            entropy
+            caller_packages
         ));
         log_key_creation_event_stats(
             caller_uid(ctx).0 as i32,

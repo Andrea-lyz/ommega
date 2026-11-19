@@ -1,13 +1,13 @@
 # Authentication-signing policy
 
-The WebUI's **Settings > Authentication signing** entry controls new remote EC/RSA
-authentication-signing keys. It has three modes:
+The WebUI's **Apps > [app] > Authentication signing** card controls eligible new
+EC/RSA signing keys in relay mode. The default mode is Auto:
 
 | Mode | New eligible key |
 | --- | --- |
 | Auto (default) | Preserve the requested authentication policy for a recognized probe (relayed to B); certify other eligible requests locally on A. |
-| Payment compatibility | A certifies the key locally with its own keybox and enforces the authentication token itself; the certificate describes A's real policy. |
-| Preserve authentication | Send the original authentication requirements to B. B's hardware key is authentication-bound, so a signature over the A-authorized transport can still fail with -26. |
+| Payment compatibility | A verifies authentication and signs locally. A's local keybox issues the certificate. |
+| Preserve authentication | B keeps the requested authentication requirements and signs with its hardware key. |
 
 The compatibility path keeps the caller's authentication policy and certifies
 the key locally: A's keybox signs the chain and A's KeyMint enforces the token the
@@ -23,8 +23,8 @@ no caller-supplied attestation issuer, a user secure ID and nonzero auth type,
 and purposes limited to SIGN/VERIFY. Decrypt/agreement, attestation issuers,
 trusted presence, trusted confirmation and on-body requirements retain their
 existing behavior. Requests without a challenge retain local generation.
-Remote unavailability for eligible challenged keys is an error in every mode;
-it never silently switches the key to a local keybox.
+When a request selects B, remote unavailability returns an error rather than
+switching to a local keybox. A's native StrongBox backend is outside this policy.
 
 ## Token verification boundary
 
@@ -54,13 +54,10 @@ above also apply. A probe name alone or generic biometric key parameters do not
 select preservation. Unknown patterns use payment compatibility. Recognition
 does not use a package-name list or classify all keys belonging to one app.
 
-Preserve always sends the original requested authentication policy to B.
-Payment compatibility always uses A-authorized B signing for eligible keys,
-including recognized probes. These explicit choices override Auto recognition.
-B's real certificate is returned unchanged in every case. A hardware-bound B
-key cannot be authenticated with A's HAT; preserved keys can therefore return
--26 after A authentication. Probe acceptance does not establish hardware user
-authentication guarantees for the other, compatible keys.
+For eligible requests, explicit Payment compatibility always uses the A-side
+local key and explicit Preserve authentication always uses B. Neither explicit
+mode is subject to Auto recognition. B's hardware key cannot be authenticated
+with A's HAT, so a preserved key can return -26 after A authentication.
 
 The decision is resolved once per creation and reused through retries. There is
 no mutable global or thread-local request mode. Existing keys are not changed.
@@ -72,13 +69,12 @@ the default auth-signing mode only for callers already in scope. Exceptions
 remain saved and effective when global scope is enabled, and do not enroll an
 out-of-scope app. Core system-service exclusions remain unchanged.
 
-Package identities for authentication signing come from Keystore's caller AAID
-at key creation. In global scope, the separate takeover-mode policy resolves a
-caller package only for `getSecurityLevel` when explicit modes are configured;
-the scope decision itself does not depend on that lookup. For a shared UID, all
-package records in the AAID are considered. If explicit overrides
-conflict, Preserve wins over Auto, which wins over Compatibility; packages
-without an override inherit without canceling an explicit override.
+At key creation, the trusted injector supplies the caller package identities
+for both individual and global scope. A manually added system app admitted by
+its process and SELinux identity uses its resolved package. Regular app UIDs use
+the complete package list, independent of the size limit on the attestation AAID.
+If overrides for a shared UID conflict, Preserve wins over Auto, which wins over
+Compatibility; packages without an override do not cancel an explicit override.
 
 The Apps page places **Global scope** below its search bar. Search uses a native
 text input outside the legacy header, with its own controller and text-selection
@@ -95,10 +91,11 @@ App names come from the manager's injected package bridge. Android WebView only
 answers a bridge method called through its injected object, so every label query
 keeps the live `ksu` receiver; the page falls back to the packaged
 `applist.json`, then to the package id, when the bridge is unavailable.
-Each app has an individual policy page with Auto, Payment compatibility and
-Preserve authentication choices. An app with no explicit override displays its inherited global default;
-choosing a mode writes only that app's exception and preserves the global default
-and all other exceptions. The policy page remains accessible in global scope.
+Each app can inherit the global default or explicitly choose Auto, Payment
+compatibility, or Preserve authentication. Choosing a mode saves an override
+for just that app, even when it matches the current default. Selecting **Use
+global default** removes just that app's override. The policy page remains
+accessible in global scope.
 Browser history, native WebView back events, Escape and the Back button return
 to the application list.
 The **Positive key ID compatibility** switch is a separate global setting in
@@ -131,8 +128,8 @@ stale input or a concurrent editor. Locks release when the process exits. Its
 operations use fixed destinations and do not initialize Binder, HALs or a daemon.
 The same executable separately writes the app scope, system-app list and security-mode files;
 its auth operation writes only the auth policy. The UI verifies the saved
-policy by reading it back. Other config writers and
-global-scope changes do not rewrite this file. Read/parse/save failures remain
+policy by reading it back. Scope changes and the optional AProbe setup leave
+this file unchanged. Read/parse/save failures remain
 visible and do not report successful payment or detector validation.
 
 Only newly created keys use changed policy. Existing keys keep their keyblob,
@@ -144,15 +141,14 @@ Keystore or GMS data as a policy update step.
 ## Trust boundary and validation
 
 Authentication in compatibility mode is enforced by A's software service, not
-B's hardware. The existing relay transport authenticates its client, but B and
-the server do not independently verify A's HAT or a fresh per-signature A
-approval. A relay credential holder can access a B no-auth key outside A's
-authorization path. This mode is not end-to-end hardware user authentication.
+B's hardware. The application key is held and used on A; the relay and B are not
+involved. This mode does not provide B-side hardware user authentication.
 
 A detector's probe result does not establish the compatibility key's hardware
 authentication guarantees. Authenticated signing, detector acceptance and
-wallet/payment acceptance require separate device tests. This A-only policy
-needs no B-module or server update.
+wallet/payment acceptance require separate device tests. The A-side injector
+and KeyMint daemon are built from the same release. The policy needs no B-module
+or server update.
 
 ## Locally certified keys and the StrongBox keybox
 
@@ -165,9 +161,9 @@ chain that signs those certificates is selectable between the two keybox slots:
   `chain=strongbox-unavailable`.
 
 The selection lives in `/data/adb/ommega/ommegadata/data/auth-signing-keybox.conf`
-as `source=tee` or `source=strongbox`, and is changed from **Settings → App
-policies → Authentication signing**. It only affects certificates issued after
-the change; existing keys are not re-signed.
+as `source=tee` or `source=strongbox`, and is changed from **Settings > Fingerprint
+signing keybox**. It only affects certificates issued after the change;
+existing keys are not re-signed.
 
 The decision is logged per request:
 

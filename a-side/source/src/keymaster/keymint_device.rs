@@ -636,7 +636,8 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let decision = self.resolve_auth_signing(keyParams, attestation_key.is_some(), None)?;
+        let decision =
+            self.resolve_auth_signing(keyParams, attestation_key.is_some(), None, &[])?;
         self.generate_key_with_policy(keyParams, attestation_key, decision)
     }
 
@@ -904,6 +905,7 @@ impl KeyMintWrapper {
         params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
         supplied_issuer: bool,
         alias: Option<&str>,
+        caller_packages: &[String],
     ) -> rsbinder::status::Result<bool> {
         if !crate::remote::remote_enabled() {
             return Ok(false);
@@ -911,13 +913,14 @@ impl KeyMintWrapper {
         let version = resolve_hardware_profile(self.security_level).version_number;
         let params =
             key_parameters_to_km(params, version).map_err(key_parameter_conversion_status)?;
-        crate::auth_signing::authorize_on_a(alias, &params, supplied_issuer).map_err(|error| {
-            log::error!("Cannot resolve auth-signing policy: {error:#}");
-            Status::new_service_specific_error(
-                kmr_wire::keymint::ErrorCode::UnknownError as i32,
-                None,
-            )
-        })
+        crate::auth_signing::authorize_on_a(alias, &params, supplied_issuer, caller_packages)
+            .map_err(|error| {
+                log::error!("Cannot resolve auth-signing policy: {error:#}");
+                Status::new_service_specific_error(
+                    kmr_wire::keymint::ErrorCode::UnknownError as i32,
+                    None,
+                )
+            })
     }
 
     pub fn generate_key_with_policy(

@@ -633,11 +633,10 @@ async function ommegaDiagRunNativeProbe() {
 }
 
 
-// Optional AProbe app: shipped inside the module, installed on demand, and
-// configured for the diagnostics contract (auto auth-signing + property view).
+// Optional AProbe app: install on demand and enable its property view.
+// Authentication signing uses the normal default or the user's app override.
 const OMMEGA_DIAG_PROBE_APK = "/data/adb/modules/ommega/probe/a-probe.apk";
 const OMMEGA_DIAG_MASK_CONF = "/data/misc/keystore/ommega/data/cpu-mask.conf";
-const OMMEGA_DIAG_AUTH_CONF = "/data/adb/ommega/ommegadata/data/auth-signing.toml";
 const OMMEGA_DIAG_ROTATION = "/data/adb/ommega/ommegadata/data/log-rotation.conf";
 const OMMEGA_DIAG_SOTER_DEBUG = "/data/adb/ommega/soterta/debug";
 
@@ -655,18 +654,6 @@ async function ommegaDiagConfigureProbePolicy() {
     : nextMask + "enabled=true\n";
   if (!/^package=aprobes\.agap$/m.test(nextMask)) nextMask += "package=" + OMMEGA_DIAG_PROBE_PKG + "\n";
   await ommegaDiagWrite(OMMEGA_DIAG_MASK_CONF, nextMask);
-
-  const auth = await ommegaDiagRead(OMMEGA_DIAG_AUTH_CONF);
-  let nextAuth = (auth && auth.trim())
-    ? auth
-    : "# Ommega authentication-signing policy. New keys only.\nversion = 1\ndefault = \"auto\"\n\n[apps]\n";
-  if (!/^version\s*=/m.test(nextAuth)) nextAuth = "version = 1\n" + nextAuth;
-  if (!/^default\s*=/m.test(nextAuth)) nextAuth = nextAuth.replace(/^version[^\n]*\n/, "function ommegaDiagEnsureProbePage() {default = \"auto\"\n");
-  if (!/^\[apps\]/m.test(nextAuth)) nextAuth += "\n[apps]\n";
-  const entry = /^"aprobes\.agap"\s*=\s*"[a-z]+"/m;
-  if (entry.test(nextAuth)) nextAuth = nextAuth.replace(entry, '"aprobes.agap" = "auto"');
-  else nextAuth = nextAuth.replace(/^\[apps\]\s*$/m, '[apps]\n"aprobes.agap" = "auto"');
-  await ommegaDiagWrite(OMMEGA_DIAG_AUTH_CONF, nextAuth);
 }
 
 async function ommegaDiagInstallProbe() {
@@ -692,8 +679,8 @@ async function ommegaDiagInstallProbe() {
     await ommegaDiagConfigureProbePolicy();
     await ommegaDiagUpdateProbeButtons();
     if (await ommegaDiagProbeInstalled()) {
-      show(ommegaDiagT("AProbe 已安装，并已加入「CPU 与设备属性」与自动授权策略。",
-        "AProbe installed and added to CPU/device properties with the automatic policy."));
+      show(ommegaDiagT("AProbe 已安装，并已加入「CPU 与设备属性」。",
+        "AProbe installed and added to CPU/device properties."));
     } else {
       show(ommegaDiagT("安装失败：", "Install failed: ") + output.replace(/\s+/g, " ").slice(0, 160));
     }
