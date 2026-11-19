@@ -12,6 +12,20 @@ running Server and does not install the optional APKs.
 The README no longer embeds per-version notes: a release only bumps the version
 and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
 
+## 2.4.3 — 2026-11-19
+
+This release changes A, B and Server. B-app and StrongBoxCapabilityMask only receive the synchronized product version.
+
+- **Read-only A-side SPL ([#91](https://github.com/Andrea-lyz/ommega/pull/91), [#92](https://github.com/Andrea-lyz/ommega/pull/92)).** A uses its native firmware version snapshot from startup. SPL editors and legacy override replay are removed, and the application property view retains the host SPL. Settings → Diagnostics and support → SPL sources and differences shows published sources and status without requesting a relay profile or calling a HAL.
+- **Guarded relay attestation ([#91](https://github.com/Andrea-lyz/ommega/pull/91), [#93](https://github.com/Andrea-lyz/ommega/pull/93)).** Physical B checks its version snapshot and revision before hardware key creation. A and B must agree on OS version, System SPL and Vendor SPL. Boot SPL differences are informational, and a missing Boot field on B is not by itself a rejection. Returned certificates are still checked against B's snapshot. Server-side keybox fulfilment does not substitute for the guarded physical-B path.
+- **Transient unavailability is distinct from failed verification ([#94](https://github.com/Andrea-lyz/ommega/pull/94)).** An unreachable relay profile is treated as unavailable rather than as a mismatch. Confirmed version or certificate mismatches still fail. Local fallback remains opt-in and is limited to new requests that do not require a remote hardware chain.
+- **Per-app authentication signing ([#95](https://github.com/Andrea-lyz/ommega/pull/95)).** Auto remains the default. For eligible new keys, Payment compatibility authenticates and signs on A with local keybox issuance; Preserve authentication keeps the requirements and signs on B. Overrides apply to ordinary apps in global scope and to manually added system apps that pass the existing identity checks. WebUI distinguishes inheritance from an explicit choice, and AProbe installation no longer changes these choices. Existing keys are unchanged.
+- **Bundled AProbe ([#96](https://github.com/Andrea-lyz/ommega/pull/96)).** Updates from 1.8.8-paytm (versionCode 19) to 1.8.9-paytm (versionCode 20) with the same signing certificate. The paired dAtt diagnostic reports an inconclusive result instead of a false hit when local key-generation timing shaping makes the comparison unreliable.
+
+Upgrade: local mode only needs the A update; use matching A, B and Server builds for relay mode. Update A as a complete module so KeyMint and the injector stay in sync, then refresh WebUI. Existing explicit OS/SPL overrides report `migration-required` with the original configuration and keys preserved. Do not lower patch levels or clear Keystore or credential data as a workaround.
+
+Validation: the release pipeline checks the A/B Android modules, Server for both Linux architectures, the APKs, WebUI and the complete asset manifest. This release was not deployed or tested on a device; relay and authentication signing still require normal on-device acceptance.
+
 ## 2.4.2 — 2026-11-12
 
 A-side automatic renewal, local attestation timing and a dark-mode WebUI fix

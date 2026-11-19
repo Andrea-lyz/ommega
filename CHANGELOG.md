@@ -10,6 +10,20 @@
 README 不再内嵌逐版本更新要点：发版时只更新版本号，并在这里追加条目。发布步骤见
 [RELEASING.md](RELEASING.md)。
 
+## 2.4.3 — 2026-11-19
+
+本版涉及 A、B 和 Server。B-app 与 StrongBoxCapabilityMask 仅同步产品版本号。
+
+- **A 端 SPL 只读化（[#91](https://github.com/Andrea-lyz/ommega/pull/91)、[#92](https://github.com/Andrea-lyz/ommega/pull/92)）。** A 端以启动时读取的原生固件版本为依据，移除 SPL 写入入口，不再重放旧的覆盖配置；应用属性视图也保留本机 SPL。「设置 → 诊断与支持 → SPL 来源与差异」只展示已发布的来源和状态，不触发中继或 HAL 请求。
+- **中继出证准入（[#91](https://github.com/Andrea-lyz/ommega/pull/91)、[#93](https://github.com/Andrea-lyz/ommega/pull/93)）。** 物理 B 端在硬件调用前核对版本快照及其修订号。A、B 的 OS 版本、System SPL、Vendor SPL 必须一致；Boot SPL 的差异仅供诊断，B 缺少 Boot 字段不再单独导致拒绝。返回证书仍按 B 的版本快照校验，Server 不用本机 keybox 替代受保护的物理 B 路径。
+- **区分暂时断连和验证失败（[#94](https://github.com/Andrea-lyz/ommega/pull/94)）。** 取不到中继 profile 时按「暂不可用」处理；已确认的版本或证书不匹配仍拒绝。只有配置明确允许且不要求远端硬件链的新建请求才可本地回退，默认不变。
+- **单应用认证签名策略（[#95](https://github.com/Andrea-lyz/ommega/pull/95)）。** 默认「自动」；符合条件的新密钥选「支付兼容」时在 A 端认证并签名、由本地 keybox 签发证书，选「保持认证要求」时由 B 端保留认证要求并签名。全局作用域下的普通应用和已手动加入且通过身份检查的系统应用均可显式覆盖。WebUI 区分继承与手选，安装 AProbe 不再改写认证策略。已有密钥不变。
+- **随包 AProbe（[#96](https://github.com/Andrea-lyz/ommega/pull/96)）。** 从 1.8.8-paytm（versionCode 19）更新至 1.8.9-paytm（versionCode 20），签名证书未变。成对 dAtt 诊断会把受本地密钥生成时序整形影响、无法可靠比较的结果标为「无法判定」，不再报成命中。
+
+升级：本地模式只需更新 A 端；中继模式请成套使用本版 A、B、Server。A 端需使用整包使同版 KeyMint 与注入器一同生效，再刷新 WebUI。旧的显式 SPL/OS 覆盖会报告 `migration-required`；不自动改写原配置或密钥，也不要降补丁级别、清除 Keystore 或凭据数据来处理。
+
+验证：发布流水线校验 A/B Android 模块、两种 Linux 架构的 Server、APK、WebUI 及完整资产清单。本次发版未部署或在设备上执行验收；中继与认证签名的实机行为仍需使用各自正常业务流程验证。
+
 ## 2.4.2 — 2026-11-12
 
 A 端自动续签、本地出证时序与 WebUI 暗色显示（仅 A 端；B、Server 无改动，无需单独更新 Server）。
