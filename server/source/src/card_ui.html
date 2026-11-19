@@ -97,7 +97,7 @@ label { color: var(--muted); font-size: 13px; display: block; margin-bottom: 6px
         </div>
       </div>
       <div style="margin-top:14px;">
-        <label for="contactInput">联系方式（用于付款后查询卡密）</label>
+        <label for="contactInput">联系方式（用于查询订单发卡状态）</label>
         <input type="text" id="contactInput" placeholder="填写 QQ / 微信 / 手机号等">
       </div>
       <div>
@@ -136,10 +136,13 @@ label { color: var(--muted); font-size: 13px; display: block; margin-bottom: 6px
   <div class="panel">
     <h2>查询卡密</h2>
     <div class="body">
-      <p class="hint" style="margin-top:0;">付款后，输入下单时填写的联系方式即可查询已发放的卡密。</p>
+      <p class="hint" style="margin-top:0;">输入下单时填写的联系方式可查看订单是否已发卡（卡密已脱敏）。完整卡密只能凭订单号获取，请妥善保存订单号与卡密。</p>
       <input type="text" id="queryInput" placeholder="输入下单时的联系方式" style="margin-top:10px;">
-      <button class="btn sec" onclick="queryCard()">查询卡密</button>
+      <button class="btn sec" onclick="queryCard()">查询订单</button>
       <div class="result" id="queryResult"></div>
+      <input type="text" id="orderIdInput" placeholder="输入完整订单号（ord 开头）获取卡密" style="margin-top:14px;">
+      <button class="btn sec" onclick="queryOrder()">凭订单号取卡</button>
+      <div class="result" id="orderResult"></div>
     </div>
   </div>
 
@@ -166,6 +169,10 @@ function selectPay(p) {
   const link = $('#qrOpen');
   link.classList.toggle('wx', p === 'wxpay');
   link.textContent = p === 'wxpay' ? '打开微信收银台' : '打开支付宝收银台';
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function showResult(el, ok, html) {
@@ -271,9 +278,32 @@ async function queryCard() {
         showResult(r, false, '未查到该联系方式的已发卡订单（可能未付款或未发放）');
       } else {
         showResult(r, true, cards.map(c =>
-          `<span class="mono">${c.token}</span>（${c.role === 'a' ? 'A端' : 'B端'} ${c.card_type === 'year' ? '年卡' : '月卡'}）`
+          `订单 <span class="mono">${esc(c.order_id_masked)}</span>：<span class="mono">${esc(c.token_masked)}</span>（${c.role === 'a' ? 'A端' : 'B端'} ${c.card_type === 'year' ? '年卡' : '月卡'}）`
         ).join('<br>'));
       }
+    } else {
+      showResult(r, false, d.error || '查询失败');
+    }
+  } catch (e) {
+    showResult(r, false, '网络错误：' + e.message);
+  }
+}
+
+async function queryOrder() {
+  const r = $('#orderResult');
+  const orderId = $('#orderIdInput').value.trim();
+  if (!orderId) { showResult(r, false, '请输入订单号'); return; }
+  r.className = 'result'; r.textContent = '查询中…';
+  try {
+    const resp = await fetch('/api/card/order/status/', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: orderId })
+    });
+    const d = await resp.json();
+    if (resp.ok && d.token) {
+      showResult(r, true, `卡密 Token：<span class="mono">${esc(d.token)}</span>（${d.role === 'a' ? 'A端' : 'B端'}）`);
+    } else if (resp.ok) {
+      showResult(r, false, '订单尚未发卡（可能未付款或未发放）');
     } else {
       showResult(r, false, d.error || '查询失败');
     }

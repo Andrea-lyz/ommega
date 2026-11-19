@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import java.lang.ref.WeakReference
 import java.util.concurrent.ExecutorService
@@ -99,6 +100,9 @@ class RelayService : Service() {
         val deviceId = prefs.getString("device_id", ServerClient.deviceId)!!.trim()
         val token = prefs.getString("relay_token", ServerClient.relayToken)!!.trim()
         val tlsInsecure = prefs.getBoolean("tls_insecure", false)
+        ServerClient.machineId = {
+            Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: ""
+        }
         if (url != ServerClient.serverUrl ||
             deviceId != ServerClient.deviceId ||
             token != ServerClient.relayToken ||

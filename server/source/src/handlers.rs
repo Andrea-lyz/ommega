@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::{AuthState, TokenCheck};
+use crate::auth::{AuthState, DeviceBinding, TokenCheck};
 use crate::config::Config;
 use crate::db::Db;
 use crate::fulfill::Fulfill;
@@ -228,6 +228,32 @@ fn check_auth_class(
         ));
     }
     Ok(token)
+}
+
+/// Reject a B request whose `device_id` is not bound to the calling token.
+/// Run after `check_auth_class` with role `b`.
+fn check_b_device(state: &AppState, headers: &HeaderMap, device_id: &str) -> Result<(), Response> {
+    if device_id.is_empty() {
+        return Err(json_err(StatusCode::BAD_REQUEST, "device_id required"));
+    }
+    match state
+        .auth
+        .check_device_binding(token_from_headers(headers), device_id)
+    {
+        DeviceBinding::Allowed => Ok(()),
+        DeviceBinding::Denied => Err(json_err(
+            StatusCode::FORBIDDEN,
+            "token is not bound to this device_id",
+        )),
+        DeviceBinding::Unavailable(reason) => {
+            tracing::warn!("device binding unavailable for device={device_id}: {reason}");
+            Err(json_err_retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "token verification temporarily unavailable",
+                5,
+            ))
+        }
+    }
 }
 
 /// Physical-mode fulfilment: enqueue a task for the exact requested B device
@@ -782,10 +808,16 @@ pub async fn b_poll(
         return json_err(StatusCode::BAD_REQUEST, "device_id required");
     }
     let machine_id = q.machine_id.unwrap_or_default();
+    if machine_id.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "machine_id required");
+    }
+    if let Err(r) = check_b_device(&state, &headers, &q.device_id) {
+        return r;
+    }
 
     // Concurrency guard: reject if another machine is actively serving this device.
     if let Some(active) = state.store.get_active_machine_id(&q.device_id).await {
-        if !machine_id.is_empty() && active != machine_id {
+        if active != machine_id {
             return json_err(
                 StatusCode::CONFLICT,
                 "another machine is already serving this device",
@@ -846,6 +878,9 @@ pub async fn b_result(
     if task_id.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "task_id required");
     }
+    if let Err(r) = check_b_device(&state, &headers, &device_id) {
+        return r;
+    }
     match state
         .store
         .complete_task(&task_id, result, &device_id)
@@ -872,6 +907,9 @@ pub async fn b_upload_keybox_identity(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    if let Err(r) = check_b_device(&state, &headers, &device_id) {
+        return r;
+    }
     let result = tokio::task::spawn_blocking(move || {
         fulfill.try_handle_b_upload_keybox_identity(&device_id, &b)
     })
@@ -913,6 +951,9 @@ pub async fn b_revoke_server_identity(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    if let Err(r) = check_b_device(&state, &headers, &device_id) {
+        return r;
+    }
     let result =
         tokio::task::spawn_blocking(move || db.set_device_identity_active(&device_id, false)).await;
     match result {
@@ -1055,6 +1096,123 @@ mod tests {
         ).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(state.store.get_connected_devices().await.is_empty());
+    }
+
+    fn bound_b_state() -> AppState {
+        let state = soter_state(false);
+        state.auth.insert_test_token("card-b", "b", "bound-b");
+        state
+    }
+
+    fn poll_query(device_id: &str, machine_id: &str) -> Query<PollQuery> {
+        battery_query(&format!(
+            "/api/b/poll/?device_id={device_id}&machine_id={machine_id}&timeout=0"
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_b_token_can_only_poll_its_bound_device() {
+        let state = bound_b_state();
+        let task_id = state
+            .store
+            .create_task("profile", json!({}), "other-b", None)
+            .await;
+        let headers = headers_with_token("card-b");
+        let denied = b_poll(
+            State(state.clone()),
+            headers.clone(),
+            poll_query("other-b", "m1"),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(state.store.counts().await.pending, 1);
+        let ok = b_poll(State(state.clone()), headers, poll_query("bound-b", "m1")).await;
+        assert_eq!(ok.status(), StatusCode::NO_CONTENT);
+        assert!(!task_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_poll_without_machine_id_is_rejected_and_cannot_steal_a_device() {
+        let state = bound_b_state();
+        let headers = headers_with_token("card-b");
+        let missing = b_poll(
+            State(state.clone()),
+            headers.clone(),
+            poll_query("bound-b", ""),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        let first = b_poll(
+            State(state.clone()),
+            headers.clone(),
+            poll_query("bound-b", "m1"),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::NO_CONTENT);
+        let second = b_poll(State(state.clone()), headers, poll_query("bound-b", "m2")).await;
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_b_token_cannot_post_results_for_an_unbound_device() {
+        let state = bound_b_state();
+        let task_id = state
+            .store
+            .create_task("profile", json!({}), "other-b", None)
+            .await;
+        let body = json!({"task_id": task_id, "result": {"forged": true}, "device_id": "other-b"});
+        let denied = b_result(
+            State(state.clone()),
+            headers_with_token("card-b"),
+            Json(body),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let missing = json!({"task_id": task_id, "result": {}});
+        let denied = b_result(
+            State(state.clone()),
+            headers_with_token("card-b"),
+            Json(missing),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.store.counts().await.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn a_b_token_cannot_upload_or_revoke_an_unbound_device_identity() {
+        let mut state = bound_b_state();
+        state.db = Some(Arc::new(Db::open_lazy(
+            "mysql://ommega@127.0.0.1:1/unreachable",
+        )));
+        let body = json!({"device_id": "other-b"});
+        let revoke = b_revoke_server_identity(
+            State(state.clone()),
+            headers_with_token("card-b"),
+            Json(body.clone()),
+        )
+        .await;
+        assert_eq!(revoke.status(), StatusCode::FORBIDDEN);
+        let upload = b_upload_keybox_identity(
+            State(state.clone()),
+            headers_with_token("card-b"),
+            Json(body),
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_unbound_b_token_serves_no_device() {
+        let state = soter_state(false);
+        state.auth.insert_test_token("card-unbound", "b", "");
+        let response = b_poll(
+            State(state.clone()),
+            headers_with_token("card-unbound"),
+            poll_query("bound-b", "m1"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

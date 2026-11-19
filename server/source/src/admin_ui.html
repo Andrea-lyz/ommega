@@ -397,6 +397,7 @@ h3.sec-title { font-size: 13px; color: var(--muted); text-transform: uppercase; 
         <option value="2592000">30 天</option>
         <option value="31536000">1 年</option>
       </select>
+      <input type="text" id="tokDevices" placeholder="B 端绑定设备 ID（逗号分隔，必填）" style="flex:1;min-width:200px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px;">
       <input type="text" id="tokNote" placeholder="备注（可选）" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px;">
       <button class="btn primary" onclick="generateToken()">生成 Token</button>
     </div>
@@ -407,8 +408,8 @@ h3.sec-title { font-size: 13px; color: var(--muted); text-transform: uppercase; 
     </div>
     <div class="table-wrap">
     <table>
-      <thead><tr><th>Token</th><th>角色</th><th>有效期</th><th>状态</th><th>激活时间</th><th>最后使用 IP</th><th>最后使用时间</th><th>备注</th><th>操作</th></tr></thead>
-      <tbody id="tokenBody"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
+      <thead><tr><th>Token</th><th>角色</th><th>有效期</th><th>状态</th><th>激活时间</th><th>最后使用 IP</th><th>最后使用时间</th><th>绑定设备</th><th>备注</th><th>操作</th></tr></thead>
+      <tbody id="tokenBody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
     </table>
     </div>
     <div class="collapse-bar" id="tokenCollapse" style="display:none" onclick="toggleCollapse('token')">显示全部</div>
@@ -709,15 +710,20 @@ async function generateToken() {
   const role = $('#tokRole').value;
   const duration = parseInt($('#tokDuration').value, 10);
   const note = $('#tokNote').value.trim();
+  const allowed_device_ids = $('#tokDevices').value.trim();
+  if (role === 'b' && !allowed_device_ids) {
+    if (!confirm('未绑定设备的 B 端 Token 无法服务任何设备，仍要生成吗？')) return;
+  }
   try {
     const d = await api('/api/admin/tokens/', {
       method: 'POST',
-      body: JSON.stringify({ role, duration_seconds: duration, note })
+      body: JSON.stringify({ role, duration_seconds: duration, note, allowed_device_ids })
     });
     const r = $('#genResult');
     r.style.display = 'block';
     r.innerHTML = `已生成 ${d.role === 'a' ? 'A 端' : 'B 端'} Token（有效期 ${fmtDuration(d.duration_seconds)}）：<br><b class="mono">${esc(d.token)}</b>`;
     $('#tokNote').value = '';
+    $('#tokDevices').value = '';
     toast('Token 生成成功');
     loadTokens();
   } catch (e) { toast('生成失败: ' + e.message, 'err'); }
@@ -857,6 +863,20 @@ async function loadTokens() {
   } catch (e) {}
 }
 
+async function editTokenDevices(id) {
+  const t = _tokenData.find(x => x.id === id);
+  const v = prompt('该 B 端 Token 允许服务的设备 ID（逗号分隔，留空则不允许任何设备）：', (t && t.allowed_device_ids) || '');
+  if (v === null) return;
+  try {
+    await api('/api/admin/tokens/devices/', {
+      method: 'POST',
+      body: JSON.stringify({ id, allowed_device_ids: v.trim() })
+    });
+    toast('设备绑定已更新');
+    loadTokens();
+  } catch (e) { toast('更新失败: ' + e.message, 'err'); }
+}
+
 function filterTokens() {
   renderTokens();
 }
@@ -867,13 +887,14 @@ function renderTokens() {
     (t.token && t.token.toLowerCase().includes(q)) ||
     (t.note && t.note.toLowerCase().includes(q)) ||
     (t.last_ip && t.last_ip.toLowerCase().includes(q)) ||
+    (t.allowed_device_ids && t.allowed_device_ids.toLowerCase().includes(q)) ||
     (t.role && t.role.toLowerCase().includes(q))
   );
   document.getElementById('tokenCount').textContent = q
     ? `${filtered.length} / ${_tokenData.length} 条`
     : `${_tokenData.length} 条`;
   if (!filtered.length) {
-    document.getElementById('tokenBody').innerHTML = '<tr><td colspan="9" class="empty">' + (q ? '无匹配 Token' : '暂无 API Token') + '</td></tr>';
+    document.getElementById('tokenBody').innerHTML = '<tr><td colspan="10" class="empty">' + (q ? '无匹配 Token' : '暂无 API Token') + '</td></tr>';
     document.getElementById('tokenCollapse').style.display = 'none';
     return;
   }
@@ -886,9 +907,11 @@ function renderTokens() {
       <td class="mono">${t.activated_at ? fmtTimeStr(t.activated_at) : '未激活'}</td>
       <td class="mono">${esc(t.last_ip || '—')}</td>
       <td>${t.last_used_at ? fmtTimeStr(t.last_used_at) : '—'}</td>
+      <td class="mono">${t.role === 'b' ? esc(t.allowed_device_ids || '未绑定') : '—'}</td>
       <td>${esc(t.note || '—')}</td>
       <td>
         <button class="btn small" onclick="viewTokenIps('${encodeURIComponent(t.token)}')">查看 IP</button>
+        ${t.role === 'b' ? `<button class="btn small" onclick="editTokenDevices(${t.id})">绑定设备</button>` : ''}
         ${t.enabled
           ? `<button class="btn small" onclick="toggleToken(${t.id}, false)">禁用</button>`
           : `<button class="btn small" onclick="toggleToken(${t.id}, true)">启用</button>`}

@@ -191,6 +191,17 @@ impl RelayConfig {
     }
 }
 
+/// The server rejects polls without a `machine_id`; when none is configured,
+/// identify this machine by its kernel boot id (read-only, unique per boot).
+fn default_machine_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|id| id.trim().to_string())
+        .ok()
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("boot-{id}"))
+        .unwrap_or_else(|| format!("pid-{}", std::process::id()))
+}
+
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.trim().is_empty())
 }
@@ -262,8 +273,9 @@ fn load_config_from_file() -> Result<RelayConfig> {
         .context("OMMEGA_RELAY_TOKEN missing in relay.conf")?;
     let machine_id = m
         .get("OMMEGA_RELAY_MACHINE_ID")
-        .cloned()
-        .unwrap_or_default();
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(default_machine_id);
     let soter_enabled = m
         .get("OMMEGA_RELAY_SOTER_ENABLED")
         .is_some_and(|v| parse_bool(v));
@@ -377,7 +389,9 @@ fn load_config() -> Result<(RelayConfig, &'static str)> {
         .context("OMMEGA_RELAY_DEVICE_ID not set and relay.conf unreadable")?;
     let token = env("OMMEGA_RELAY_TOKEN")
         .context("OMMEGA_RELAY_TOKEN not set and relay.conf unreadable")?;
-    let machine_id = env("OMMEGA_RELAY_MACHINE_ID").unwrap_or_default();
+    let machine_id = env("OMMEGA_RELAY_MACHINE_ID")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_else(default_machine_id);
     let soter_enabled = env("OMMEGA_RELAY_SOTER_ENABLED").is_some_and(|v| parse_bool(&v));
     let soter_allow_mutation = env("OMMEGA_RELAY_SOTER_MUTATION").is_some_and(|v| parse_bool(&v));
     let probe_uid = env("OMMEGA_RELAY_SOTER_PROBE_UID");

@@ -416,9 +416,10 @@ pub struct QueryCardBody {
     pub contact: String,
 }
 
-/// POST /api/card/query/ — query delivered card(s) by exact contact match.
-/// Returns the card token(s) for any delivered order matching the contact.
-/// Rate-limited by client IP so contacts cannot be trivially enumerated.
+/// POST /api/card/query/ — list delivered card(s) by exact contact match.
+/// A contact is public or guessable, so this never returns a usable token or
+/// the order id (which `/api/card/order/status/` redeems for the token): both
+/// are masked. The full token is only available with the random order id.
 pub async fn card_query_by_contact(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -454,12 +455,39 @@ pub async fn card_query_by_contact(
             .map(|t| t.token)
             .unwrap_or_default();
         cards.push(json!({
-            "order_id": o.order_id,
+            "order_id_masked": mask_secret(&o.order_id),
             "role": o.role,
             "card_type": o.card_type,
-            "token": token,
+            "token_masked": mask_secret(&token),
             "paid_at": o.paid_at,
         }));
     }
     Json(json!({ "status": "ok", "cards": cards })).into_response()
+}
+
+/// Keep only the first and last four characters, enough for a buyer to tell
+/// cards apart but not to use or redeem one.
+fn mask_secret(secret: &str) -> String {
+    let chars: Vec<char> = secret.chars().collect();
+    if chars.len() <= 12 {
+        return "*".repeat(chars.len());
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}****{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_secret;
+
+    #[test]
+    fn masked_values_never_contain_the_secret_body() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let masked = mask_secret(token);
+        assert_eq!(masked, "0123****cdef");
+        assert!(!masked.contains("456789abcdef0123"));
+        assert_eq!(mask_secret("ord1234"), "*******");
+        assert_eq!(mask_secret(""), "");
+    }
 }
