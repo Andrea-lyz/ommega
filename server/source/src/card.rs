@@ -19,6 +19,18 @@ use crate::handlers::AppState;
 
 const YEAR_PRICE_CENTS: i64 = 500; // 5.00 CNY
 
+const LOTTERY_DRAWS_PER_CLIENT_PER_DAY: i64 = 3;
+/// Server-wide ceiling on lottery wins per UTC day, independent of how many
+/// distinct clients draw.
+const LOTTERY_WINS_PER_DAY: i64 = 5;
+/// IPv6 prefix length treated as one client; a single subscriber normally
+/// controls at least a /64.
+const LOTTERY_IPV6_PREFIX_LEN: u32 = 64;
+
+/// Serializes the check-then-insert lottery sequence so concurrent requests
+/// cannot overrun the per-client or global daily limits.
+static LOTTERY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn json_err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
@@ -161,31 +173,46 @@ pub async fn card_order(State(state): State<AppState>, Json(body): Json<OrderBod
 // Lottery
 // ---------------------------------------------------------------------------
 
-/// POST /api/card/lottery/ — three free draws per day; bonus draws from purchases.
+/// POST /api/card/lottery/ — three free draws per client per day, with a
+/// server-wide daily cap on wins.
 pub async fn card_lottery(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(db) = &state.db else {
         return json_err(StatusCode::NOT_FOUND, "no db");
     };
-    let ip = client_ip(&headers);
+    let client_key = lottery_client_key(&client_ip(&headers));
     let today = today_str();
-    let client_key = format!("ip:{ip}");
 
-    // Strict daily limit: at most 3 draws per client per day.
-    match db.lottery_draws_today(&client_key, &today) {
-        Ok(n) if n >= 3 => {
-            return json_err(StatusCode::TOO_MANY_REQUESTS, "daily draw limit reached (3/day)");
+    let won = {
+        let _guard = LOTTERY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        match db.lottery_draws_today(&client_key, &today) {
+            Ok(n) if n >= LOTTERY_DRAWS_PER_CLIENT_PER_DAY => {
+                return json_err(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "daily draw limit reached (3/day)",
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}"))
+            }
         }
-        Ok(_) => {}
-        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}")),
-    }
+        let wins_today = match db.lottery_wins_today(&today) {
+            Ok(n) => n,
+            Err(e) => {
+                return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}"))
+            }
+        };
 
-    // Draw: 10% chance to win a 7-day A-side card.
-    let won = draw_won();
-    let card_type = if won { "week" } else { "none" };
+        // Draw: 10% chance to win a 7-day A-side card while today's prize pool lasts.
+        let won = wins_today < LOTTERY_WINS_PER_DAY && draw_won();
+        let card_type = if won { "week" } else { "none" };
 
-    if let Err(e) = db.insert_lottery_record(&client_key, &today, won, card_type) {
-        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}"));
-    }
+        if let Err(e) = db.insert_lottery_record(&client_key, &today, won, card_type) {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}"));
+        }
+        won
+    };
 
     if won {
         let token = crate::util::generate_token_string();
@@ -209,6 +236,27 @@ pub async fn card_lottery(State(state): State<AppState>, headers: HeaderMap) -> 
         "message": "better luck next time",
     }))
     .into_response()
+}
+
+/// Per-client lottery budget key. IPv6 addresses are grouped by their
+/// `LOTTERY_IPV6_PREFIX_LEN` prefix so rotating addresses inside one
+/// subscriber allocation does not grant extra draws.
+fn lottery_client_key(ip: &str) -> String {
+    use std::net::{IpAddr, Ipv6Addr};
+    let Ok(addr) = ip.parse::<IpAddr>() else {
+        return format!("ip:{ip}");
+    };
+    match addr {
+        IpAddr::V4(v4) => format!("ip:{v4}"),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return format!("ip:{v4}");
+            }
+            let mask = u128::MAX << (128 - LOTTERY_IPV6_PREFIX_LEN);
+            let prefix = Ipv6Addr::from(u128::from(v6) & mask);
+            format!("ip6:{prefix}/{LOTTERY_IPV6_PREFIX_LEN}")
+        }
+    }
 }
 
 fn draw_won() -> bool {
@@ -462,4 +510,40 @@ pub async fn card_query_by_contact(
         }));
     }
     Json(json!({ "status": "ok", "cards": cards })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lottery_client_key;
+
+    #[test]
+    fn ipv6_addresses_in_same_64_share_lottery_budget() {
+        let a = lottery_client_key("2001:db8:1:2::1");
+        let b = lottery_client_key("2001:db8:1:2:ffff:ffff:ffff:fffe");
+        assert_eq!(a, b);
+        assert_eq!(a, "ip6:2001:db8:1:2::/64");
+    }
+
+    #[test]
+    fn ipv6_addresses_in_different_64s_get_separate_budgets() {
+        assert_ne!(
+            lottery_client_key("2001:db8:1:2::1"),
+            lottery_client_key("2001:db8:1:3::1")
+        );
+    }
+
+    #[test]
+    fn ipv4_and_mapped_ipv4_keep_per_address_keys() {
+        assert_eq!(lottery_client_key("203.0.113.7"), "ip:203.0.113.7");
+        assert_eq!(lottery_client_key("::ffff:203.0.113.7"), "ip:203.0.113.7");
+        assert_ne!(
+            lottery_client_key("203.0.113.7"),
+            lottery_client_key("203.0.113.8")
+        );
+    }
+
+    #[test]
+    fn unparseable_ip_falls_back_to_raw_string() {
+        assert_eq!(lottery_client_key("unknown"), "ip:unknown");
+    }
 }
