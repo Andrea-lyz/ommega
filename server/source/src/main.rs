@@ -189,6 +189,10 @@ fn build_router(cfg: &Arc<Config>) -> Router {
         .route("/api/admin/tokens/", get(admin::admin_tokens))
         .route("/api/admin/tokens/", post(admin::admin_generate_token))
         .route(
+            "/api/admin/tokens/devices/",
+            post(admin::admin_set_token_devices),
+        )
+        .route(
             "/api/admin/autokeybox/",
             get(admin::admin_autokeybox_status),
         )

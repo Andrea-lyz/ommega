@@ -83,7 +83,8 @@ OMMEGA_RELAY_LOGCAT_LEVEL=info
   and `https://` are supported, and the relay accepts self-signed certs).
 - `OMMEGA_RELAY_DEVICE_ID` — this B-side device's id as registered on the
   relay_server (required).
-- `OMMEGA_RELAY_MACHINE_ID` — machine id used in the `b/poll` query (optional).
+- `OMMEGA_RELAY_MACHINE_ID` — machine id used in the `b/poll` query (optional;
+  defaults to the kernel boot id because the server rejects an empty one).
 - `OMMEGA_RELAY_TOKEN` — B-side token sent as `X-Relay-Token` (required).
 - All four logging keys are managed in one place (`relay.conf`) and read at
   relay startup. Saving them does not change the running logger; they take

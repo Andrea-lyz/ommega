@@ -525,6 +525,9 @@ pub struct TokenGenBody {
     pub role: String, // "a" | "b"
     pub duration_seconds: i64,
     pub note: Option<String>,
+    /// B tokens only: device ids this token may serve (comma/space separated).
+    #[serde(default)]
+    pub allowed_device_ids: Option<String>,
 }
 
 /// GET /api/admin/tokens/ — list all API tokens.
@@ -535,12 +538,22 @@ pub async fn admin_tokens(State(state): State<AppState>, headers: HeaderMap) -> 
     let Some(db) = state.db.clone() else {
         return json_err(StatusCode::NOT_FOUND, "no db");
     };
-    let result = tokio::task::spawn_blocking(move || db.list_api_tokens()).await;
+    let result = tokio::task::spawn_blocking(move || {
+        let rows = db.list_api_tokens()?;
+        // A schema that cannot take the binding column must not hide the list.
+        let bindings = db.list_token_allowed_devices().unwrap_or_else(|e| {
+            tracing::warn!("token binding list unavailable: {e}");
+            Default::default()
+        });
+        anyhow::Ok((rows, bindings))
+    })
+    .await;
     let tokens: Vec<Value> = match result {
-        Ok(Ok(rows)) => rows
+        Ok(Ok((rows, bindings))) => rows
             .iter()
             .map(|t| {
                 json!({
+                    "allowed_device_ids": bindings.get(&t.id).cloned().unwrap_or_default(),
                     "id": t.id,
                     "token": t.token,
                     "role": t.role,
@@ -587,8 +600,18 @@ pub async fn admin_generate_token(
     let note = body.note.clone().unwrap_or_default();
     let role = body.role.clone();
     let duration = body.duration_seconds;
+    let allowed = if role == "b" {
+        crate::db::normalize_device_ids(body.allowed_device_ids.as_deref().unwrap_or(""))
+    } else {
+        String::new()
+    };
+    let allowed_clone = allowed.clone();
     let result = tokio::task::spawn_blocking(move || {
-        db.insert_api_token(&token_clone, &role, duration, &note)
+        if allowed_clone.is_empty() {
+            db.insert_api_token(&token_clone, &role, duration, &note)
+        } else {
+            db.insert_api_token_with_devices(&token_clone, &role, duration, &note, &allowed_clone)
+        }
     })
     .await;
     match result {
@@ -597,6 +620,7 @@ pub async fn admin_generate_token(
             "token": token,
             "role": body.role,
             "duration_seconds": body.duration_seconds,
+            "allowed_device_ids": allowed,
         }))
         .into_response(),
         Ok(Err(e)) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}")),
@@ -629,6 +653,48 @@ pub async fn admin_toggle_token(
         Ok(Ok(())) => Json(json!({ "status": "ok", "id": id, "enabled": body.enabled })).into_response(),
         Ok(Err(e)) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}")),
         Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("join error: {e}")),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct TokenDevicesBody {
+    pub id: i64,
+    #[serde(default)]
+    pub allowed_device_ids: String,
+}
+
+/// POST /api/admin/tokens/devices/ — set the device ids a B token may serve.
+/// An empty list unbinds the token, so it can no longer serve any device.
+pub async fn admin_set_token_devices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TokenDevicesBody>,
+) -> Response {
+    if let Err(r) = check_auth(&state, &headers) {
+        return r;
+    }
+    let Some(db) = state.db.clone() else {
+        return json_err(StatusCode::NOT_FOUND, "no db");
+    };
+    let id = body.id;
+    let allowed = crate::db::normalize_device_ids(&body.allowed_device_ids);
+    let allowed_clone = allowed.clone();
+    let result = tokio::task::spawn_blocking(move || match db.get_token_by_id(id)? {
+        None => Ok(Err("token not found")),
+        Some(t) if t.role != "b" => Ok(Err("device binding applies to B tokens only")),
+        Some(_) => db.set_token_allowed_devices(id, &allowed_clone).map(Ok),
+    })
+    .await;
+    match result {
+        Ok(Ok(Ok(()))) => {
+            Json(json!({ "status": "ok", "id": id, "allowed_device_ids": allowed })).into_response()
+        }
+        Ok(Ok(Err(msg))) => json_err(StatusCode::BAD_REQUEST, msg),
+        Ok(Err(e)) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db error: {e}")),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("join error: {e}"),
+        ),
     }
 }
 

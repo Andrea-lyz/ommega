@@ -2,7 +2,8 @@
 //!
 //! Tables (reuse the Django portal_* schema, but with relay_rs-specific names):
 //!   - `device_server_identity`: DeviceServerIdentity (server_keybox keybox)
-//!   - `api_token`: ApiToken (issued A/B tokens)
+//!   - `api_token`: ApiToken (issued A/B tokens). `allowed_device_ids` (the
+//!     B device ids a B token may serve) is added on first use if missing.
 //!   - `token_usage_log`: token -> IP usage history
 //!   - `card_order`: card orders
 //!   - `card_lottery`: card lottery records
@@ -14,6 +15,7 @@
 use mysql::prelude::*;
 use mysql::{params, Column, OptsBuilder, Pool, Value};
 use serde_json::Value as JsonValue;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -75,6 +77,23 @@ fn row_str(row: &mysql::Row, col: &str) -> String {
     row_str_opt(row, col).unwrap_or_default()
 }
 
+/// Canonical form of an admin-entered device id list: split on commas or
+/// whitespace, trimmed, de-duplicated, joined with `,`.
+pub fn normalize_device_ids(raw: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for id in raw.split(|c: char| c == ',' || c.is_whitespace()) {
+        if !id.is_empty() && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out.join(",")
+}
+
+/// Whether `device_id` is one of the ids in a normalized binding list.
+pub fn device_id_is_bound(allowed: &str, device_id: &str) -> bool {
+    !device_id.is_empty() && allowed.split(',').any(|id| id == device_id)
+}
+
 /// How long to wait before trying to rebuild a pool that just failed to
 /// connect. Without this, every request during an outage would serialize on the
 /// pool lock behind its own full connect timeout, turning a fast 503 into a
@@ -91,6 +110,8 @@ pub struct Db {
     pool: RwLock<Option<Pool>>,
     /// When the last pool build failed, used to rate-limit reconnect attempts.
     last_connect_failure: Mutex<Option<Instant>>,
+    /// Set once `api_token.allowed_device_ids` is known to exist.
+    token_binding_column_ready: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +182,7 @@ impl Db {
             url: url.to_string(),
             pool: RwLock::new(None),
             last_connect_failure: Mutex::new(None),
+            token_binding_column_ready: AtomicBool::new(false),
         }
     }
 
@@ -471,6 +493,34 @@ impl Db {
         Ok(())
     }
 
+    /// Insert a token together with its B device binding in one statement so
+    /// a failure cannot leave an enabled token without its intended binding.
+    pub fn insert_api_token_with_devices(
+        &self,
+        token: &str,
+        role: &str,
+        duration_seconds: i64,
+        note: &str,
+        allowed_device_ids: &str,
+    ) -> anyhow::Result<()> {
+        self.ensure_token_binding_column()?;
+        let mut conn = self.conn()?;
+        conn.exec_drop(
+            "INSERT INTO api_token
+                 (token, role, duration_seconds, note, enabled, created_at, allowed_device_ids)
+             VALUES (:token, :role, :duration_seconds, :note, :enabled, NOW(), :ids)",
+            params! {
+                "token" => token,
+                "role" => role,
+                "duration_seconds" => duration_seconds,
+                "note" => note,
+                "enabled" => 1i64,
+                "ids" => normalize_device_ids(allowed_device_ids),
+            },
+        )?;
+        Ok(())
+    }
+
     pub fn list_api_tokens(&self) -> anyhow::Result<Vec<ApiTokenRow>> {
         let mut conn = self.conn()?;
         let rows: Vec<mysql::Row> = conn.exec(
@@ -613,6 +663,85 @@ impl Db {
             Some(r) => Ok(Some(Self::api_token_from_row(r)?)),
             None => Ok(None),
         }
+    }
+
+    // ---- B token device binding ----
+
+    /// Add `api_token.allowed_device_ids` when the deployed schema predates it.
+    fn ensure_token_binding_column(&self) -> anyhow::Result<()> {
+        if self.token_binding_column_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let column_present = |conn: &mut mysql::PooledConn| -> anyhow::Result<bool> {
+            let n: Option<i64> = conn.exec_first(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'api_token'
+                   AND COLUMN_NAME = 'allowed_device_ids'",
+                (),
+            )?;
+            Ok(n.unwrap_or(0) > 0)
+        };
+        if !column_present(&mut conn)? {
+            match conn.query_drop(
+                "ALTER TABLE api_token
+                 ADD COLUMN allowed_device_ids VARCHAR(1024) NOT NULL DEFAULT ''",
+            ) {
+                Ok(()) => tracing::info!("added api_token.allowed_device_ids"),
+                // A concurrent caller may have added the column first.
+                Err(e) if column_present(&mut conn)? => {
+                    tracing::debug!("api_token.allowed_device_ids added concurrently: {e}")
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.token_binding_column_ready
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Normalized comma-separated device ids a token may serve, or `None` when
+    /// the token does not exist.
+    pub fn get_token_allowed_devices(&self, token: &str) -> anyhow::Result<Option<String>> {
+        self.ensure_token_binding_column()?;
+        let mut conn = self.conn()?;
+        let rows: Vec<mysql::Row> = conn.exec(
+            "SELECT allowed_device_ids FROM api_token WHERE token = :token LIMIT 1",
+            params! { "token" => token },
+        )?;
+        Ok(rows
+            .first()
+            .map(|r| normalize_device_ids(&row_str(r, "allowed_device_ids"))))
+    }
+
+    /// `token id -> allowed device ids` for every token (admin listing).
+    pub fn list_token_allowed_devices(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<i64, String>> {
+        self.ensure_token_binding_column()?;
+        let mut conn = self.conn()?;
+        let rows: Vec<mysql::Row> =
+            conn.exec("SELECT id, allowed_device_ids FROM api_token", ())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let id: i64 = r.get("id").unwrap_or(0);
+                (id, normalize_device_ids(&row_str(&r, "allowed_device_ids")))
+            })
+            .collect())
+    }
+
+    pub fn set_token_allowed_devices(&self, id: i64, device_ids: &str) -> anyhow::Result<()> {
+        self.ensure_token_binding_column()?;
+        let mut conn = self.conn()?;
+        conn.exec_drop(
+            "UPDATE api_token SET allowed_device_ids = :ids WHERE id = :id",
+            params! {
+                "ids" => normalize_device_ids(device_ids),
+                "id" => id,
+            },
+        )?;
+        Ok(())
     }
 
     // ---- Card orders ----
@@ -902,6 +1031,16 @@ impl Db {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_id_lists_are_normalized_and_matched_exactly() {
+        assert_eq!(super::normalize_device_ids(" b1, b2\nb1 ,,b3 "), "b1,b2,b3");
+        assert_eq!(super::normalize_device_ids(""), "");
+        assert!(super::device_id_is_bound("b1,b2", "b2"));
+        assert!(!super::device_id_is_bound("b1,b2", "b"));
+        assert!(!super::device_id_is_bound("b1,b2", "b1,b2"));
+        assert!(!super::device_id_is_bound("", ""));
+    }
+
     use super::*;
 
     #[test]

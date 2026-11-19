@@ -35,6 +35,9 @@ pub struct AuthState {
     sessions: Arc<Mutex<HashMap<String, Instant>>>,
     /// Last time `record_token_use` wrote a row, keyed by token + IP.
     token_use_seen: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Test stand-in for DB-issued tokens: token -> (role, allowed device ids).
+    #[cfg(test)]
+    test_tokens: Arc<Mutex<HashMap<String, (String, String)>>>,
     pub rate_limit_requests: u64,
     /// Limit for the relay work data plane (A
     /// attest/sign/decrypt/agree/profile and B result). These carry real work
@@ -118,6 +121,14 @@ pub enum TokenCheck {
     Unavailable(String),
 }
 
+/// Outcome of checking a B credential against the `device_id` it acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceBinding {
+    Allowed,
+    Denied,
+    Unavailable(String),
+}
+
 impl AuthState {
     pub fn new(
         relay_token: String,
@@ -138,6 +149,8 @@ impl AuthState {
             login_rate: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             token_use_seen: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            test_tokens: Arc::new(Mutex::new(HashMap::new())),
             rate_limit_requests,
             relay_rate_limit_requests: DEFAULT_RELAY_RATE_LIMIT_REQUESTS,
             poll_rate_limit_requests: DEFAULT_POLL_RATE_LIMIT_REQUESTS,
@@ -149,6 +162,17 @@ impl AuthState {
             ip_filter_list: Arc::new(Mutex::new(HashSet::new())),
             auth_required,
         }
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_token(&self, token: &str, role: &str, allowed_device_ids: &str) {
+        self.test_tokens.lock().unwrap().insert(
+            token.to_string(),
+            (
+                role.to_string(),
+                crate::db::normalize_device_ids(allowed_device_ids),
+            ),
+        );
     }
 
     /// Attach the DB handle (set once after `Db::open`).
@@ -326,6 +350,15 @@ impl AuthState {
             return TokenCheck::Valid;
         }
 
+        #[cfg(test)]
+        if let Some((token_role, _)) = self.test_tokens.lock().unwrap().get(token) {
+            return if role.is_none_or(|r| r == token_role) {
+                TokenCheck::Valid
+            } else {
+                TokenCheck::Invalid
+            };
+        }
+
         // 2) DB card token
         if let Some(db) = &self.db {
             if !token.is_empty() {
@@ -396,6 +429,52 @@ impl AuthState {
         }
 
         TokenCheck::Invalid
+    }
+
+    /// Whether an already-authenticated B credential may act as `device_id`.
+    ///
+    /// The static token and the explicit anonymous mode are the owner's own
+    /// credentials and serve any device. A DB-issued token serves only the
+    /// device ids the admin bound to it; an unbound token serves none.
+    pub fn check_device_binding(&self, header: Option<&str>, device_id: &str) -> DeviceBinding {
+        if device_id.is_empty() {
+            return DeviceBinding::Denied;
+        }
+        let token = header.unwrap_or("");
+        if self.check_static_token(Some(token)) {
+            return DeviceBinding::Allowed;
+        }
+        #[cfg(test)]
+        if let Some((_, allowed)) = self.test_tokens.lock().unwrap().get(token) {
+            return if crate::db::device_id_is_bound(allowed, device_id) {
+                DeviceBinding::Allowed
+            } else {
+                DeviceBinding::Denied
+            };
+        }
+        if let Some(db) = &self.db {
+            if !token.is_empty() {
+                match db.get_token_allowed_devices(token) {
+                    Ok(Some(allowed)) => {
+                        return if crate::db::device_id_is_bound(&allowed, device_id) {
+                            DeviceBinding::Allowed
+                        } else {
+                            DeviceBinding::Denied
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return DeviceBinding::Unavailable(format!(
+                            "token binding lookup failed: {e}"
+                        ));
+                    }
+                }
+            }
+        }
+        if !self.auth_required && self.relay_token.is_empty() {
+            return DeviceBinding::Allowed;
+        }
+        DeviceBinding::Denied
     }
 
     /// True when enough time has passed to write another `token_usage_log` row
@@ -694,6 +773,37 @@ mod tests {
         assert!(matches!(
             auth.check_token(Some("wrong"), Some("a"), "10.0.0.1"),
             TokenCheck::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn only_owner_credentials_serve_any_device_without_a_binding() {
+        let auth = AuthState::new("static-token".into(), 100, 60, true);
+        assert_eq!(
+            auth.check_device_binding(Some("static-token"), "b1"),
+            DeviceBinding::Allowed
+        );
+        assert_eq!(
+            auth.check_device_binding(Some("static-token"), ""),
+            DeviceBinding::Denied
+        );
+        assert_eq!(
+            auth.check_device_binding(Some("other"), "b1"),
+            DeviceBinding::Denied
+        );
+        let open = AuthState::new(String::new(), 100, 60, false);
+        assert_eq!(
+            open.check_device_binding(None, "b1"),
+            DeviceBinding::Allowed
+        );
+    }
+
+    #[test]
+    fn a_dead_database_makes_the_binding_unavailable_not_allowed() {
+        let auth = AuthState::new(String::new(), 100, 60, true).with_db(Some(unreachable_db()));
+        assert!(matches!(
+            auth.check_device_binding(Some("db-token"), "b1"),
+            DeviceBinding::Unavailable(_)
         ));
     }
 

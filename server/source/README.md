@@ -53,6 +53,22 @@ Both updated B relay and server binaries must be explicitly deployed before
 battery values arrive. This change does not restart, deploy to or probe devices;
 server restart also discards the in-memory snapshots until the next poll.
 
+## B token device binding
+
+A DB-issued B token serves only the device ids an admin bound to it
+(`api_token.allowed_device_ids`, comma separated; set when generating the token
+or with `POST /api/admin/tokens/devices/` `{id, allowed_device_ids}`). The
+column is added automatically on first use; if the DB user cannot `ALTER`,
+add it manually: `ALTER TABLE api_token ADD COLUMN allowed_device_ids
+VARCHAR(1024) NOT NULL DEFAULT ''`. `b/poll`, `b/result`,
+`b/upload_keybox_identity` and `b/revoke_server_identity` answer `403` for a
+`device_id` the token is not bound to, so an unbound B token serves nothing.
+The static `RELAY_TOKEN` (the owner's credential) still serves any device.
+`b/poll` also requires a non-empty `machine_id` (`400` otherwise).
+
+`/api/card/query/` (by contact) returns only masked tokens and order ids; the
+full token is returned only by `/api/card/order/status/` for the random order id.
+
 ## Rate limits
 
 `RELAY_DATA_RATE_LIMIT_REQUESTS` (default `20000`) is the work budget for the
