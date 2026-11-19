@@ -26,13 +26,13 @@ bool validPackage(const char* package) {
     return !first;
 }
 
-int readFile(const char* path, char* contents, size_t capacity) {
+int readFile(const char* path, char* contents, size_t capacity, mode_t forbiddenMode = 0022) {
     const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return errno;
     struct stat info{};
     if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0 ||
         static_cast<uint64_t>(info.st_size) >= capacity ||
-        (info.st_uid != 0 && info.st_uid != 1017) || (info.st_mode & 0022)) {
+        (info.st_uid != 0 && info.st_uid != 1017) || (info.st_mode & forbiddenMode)) {
         close(fd); return EINVAL;
     }
     size_t used = 0;
@@ -158,7 +158,8 @@ bool debugLoggingEnabled(const char* tomlContents) {
 
 bool readDebugLoggingSwitch() {
     char contents[64 * 1024 + 1];
-    return readFile("/data/adb/ommega/ommegadata/config.toml", contents, sizeof(contents)) == 0 &&
+    // KeyMint owns this file and keeps it group-writable, so reject only world-write here.
+    return readFile("/data/misc/keystore/ommega/config.toml", contents, sizeof(contents), 0002) == 0 &&
         debugLoggingEnabled(contents);
 }
 

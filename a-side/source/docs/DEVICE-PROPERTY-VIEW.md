@@ -72,10 +72,11 @@ uncovered are counted as informational.
 The root companion always writes its `MaskCPU` logcat lines. In-app details
 (scope, private view, post-specialize status, Java and native/child self-checks)
 are written only when the first matching `log_level` in
-`/data/adb/ommega/ommegadata/config.toml` is `debug` or `trace`, as controlled
-by **Diagnostics → Enable debug logging**. The companion reads this setting for
-each target-app launch, so restart the target app after changing it. Missing,
-unreadable, oversized or non-debug configuration keeps in-app logging off.
+`/data/misc/keystore/ommega/config.toml` is `debug` or `trace`, as controlled by
+**Diagnostics → Enable debug logging** through the WebUI's
+`/data/adb/ommega/ommegadata/config.toml` link. The companion reads this setting
+for each target-app launch, so restart the target app after changing it.
+Missing, unreadable, oversized or non-debug configuration keeps in-app logging off.
 
 A successful view logs, from the companion:
 
