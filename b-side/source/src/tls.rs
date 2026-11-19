@@ -57,11 +57,16 @@ impl TlsPolicy {
 /// SubjectPublicKeyInfo, as 64 hex digits (colons allowed) or base64,
 /// optionally prefixed with `sha256/` or `sha256//`.
 pub fn parse_pins(raw: &str) -> Result<Vec<SpkiPin>> {
-    raw.split(',')
+    let pins = raw
+        .split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
         .map(parse_pin)
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    if pins.is_empty() && !raw.trim().is_empty() {
+        return Err(anyhow!("invalid TLS pin list {raw:?}: no pins"));
+    }
+    Ok(pins)
 }
 
 fn parse_pin(entry: &str) -> Result<SpkiPin> {
@@ -250,6 +255,7 @@ mod tests {
             vec![pin, pin]
         );
         assert!(parse_pins("").unwrap().is_empty());
+        assert!(parse_pins(" , ").is_err());
         assert!(parse_pins("abcd").is_err());
         assert!(parse_pins(&hex[..62]).is_err());
     }
@@ -270,6 +276,7 @@ mod tests {
             TlsPolicy::Pinned(vec![[1u8; 32]])
         );
         assert!(TlsPolicy::from_settings("not-a-pin", true).is_err());
+        assert!(TlsPolicy::from_settings(",", true).is_err());
     }
 
     #[test]
