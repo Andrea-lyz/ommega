@@ -1005,6 +1005,81 @@ pub(crate) fn remote_identity_profile() -> Result<RemoteIdentityProfile> {
     Ok(profile)
 }
 
+/// Identity profile already cached for the current relay route. Never
+/// contacts the relay, so it is safe to call while holding the TA lock.
+pub(crate) fn cached_remote_identity_profile() -> Result<Option<RemoteIdentityProfile>> {
+    let route = RemoteRoute::current()?;
+    Ok(REMOTE_IDENTITY_PROFILE.read().ok().and_then(|guard| {
+        guard
+            .as_ref()
+            .filter(|entry| entry.route == route)
+            .map(|entry| entry.profile.clone())
+    }))
+}
+
+/// Last failed profile fetch for one route and config epoch.
+struct ProfileFetchFailure {
+    route: RemoteRoute,
+    epoch: u64,
+    failures: u32,
+    retry_at: Instant,
+}
+
+static REMOTE_PROFILE_FETCH: Mutex<Option<ProfileFetchFailure>> = Mutex::new(None);
+const PROFILE_RETRY_BASE: Duration = Duration::from_secs(2);
+const PROFILE_RETRY_MAX: Duration = Duration::from_secs(30);
+
+fn profile_retry_delay(failures: u32) -> Duration {
+    PROFILE_RETRY_BASE
+        .saturating_mul(1 << failures.saturating_sub(1).min(4))
+        .min(PROFILE_RETRY_MAX)
+}
+
+/// Fill the identity-profile cache before a TA request takes its lock.
+///
+/// Fetches are single-flight. A failure is remembered for the current route
+/// and config epoch with exponential backoff, so callers do not each wait
+/// out the relay timeout while it is unreachable; a config change retries
+/// immediately.
+pub(crate) fn prefetch_remote_identity_profile() {
+    if !remote_enabled() || matches!(cached_remote_identity_profile(), Ok(Some(_))) {
+        return;
+    }
+    // Wait for an in-flight fetch rather than sealing keys without its
+    // profile; `remote_identity_profile` then answers from the cache.
+    let mut failure = REMOTE_PROFILE_FETCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(route) = RemoteRoute::current() else {
+        return;
+    };
+    let epoch = REMOTE_PROFILE_EPOCH.load(Ordering::Acquire);
+    let previous = failure
+        .as_ref()
+        .filter(|last| last.route == route && last.epoch == epoch)
+        .map(|last| (last.failures, last.retry_at));
+    if previous.is_some_and(|(_, retry_at)| Instant::now() < retry_at) {
+        return;
+    }
+    match remote_identity_profile() {
+        Ok(_) => *failure = None,
+        Err(error) => {
+            let failures = previous.map_or(1, |(failures, _)| failures.saturating_add(1));
+            let delay = profile_retry_delay(failures);
+            log::warn!(
+                "remote identity profile unavailable; next fetch in {}s: {error:#}",
+                delay.as_secs()
+            );
+            *failure = Some(ProfileFetchFailure {
+                route,
+                epoch,
+                failures,
+                retry_at: Instant::now() + delay,
+            });
+        }
+    }
+}
+
 /// Convenience: `true` if remote relay is enabled in config.
 pub fn remote_enabled() -> bool {
     match config::config().read() {
@@ -1041,6 +1116,15 @@ mod tests {
             assert!(parse_version_tags(&broken).is_err());
         }
         assert!(parse_version_tags(&json!({"boot_patchlevel": 20251201})).is_err());
+    }
+
+    #[test]
+    fn profile_fetch_backoff_grows_and_is_capped() {
+        assert_eq!(profile_retry_delay(1), Duration::from_secs(2));
+        assert_eq!(profile_retry_delay(2), Duration::from_secs(4));
+        assert_eq!(profile_retry_delay(4), Duration::from_secs(16));
+        assert_eq!(profile_retry_delay(5), Duration::from_secs(30));
+        assert_eq!(profile_retry_delay(u32::MAX), Duration::from_secs(30));
     }
 
     #[test]

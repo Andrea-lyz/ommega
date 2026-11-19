@@ -20,8 +20,8 @@ use std::time::Duration;
 use x509_cert::der::Decode as _;
 
 use super::{
-    parse_identity_profile, reject_strongbox_demotion, remote_enabled, remote_identity_profile,
-    remote_operation_error, RemoteRelay,
+    parse_identity_profile, reject_strongbox_demotion, remote_enabled, remote_operation_error,
+    RemoteRelay,
 };
 use crate::config;
 
@@ -53,7 +53,12 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         if security_level != kmr_wire::keymint::SecurityLevel::TrustedEnvironment {
             return Ok(None);
         }
-        match remote_identity_profile() {
+        // Runs under the TA lock while parsing keyblobs: read the cache only.
+        // The wrapper prefetches the profile before taking that lock.
+        let profile = super::cached_remote_identity_profile().and_then(|profile| {
+            profile.ok_or_else(|| anyhow::anyhow!("remote identity profile is not cached"))
+        });
+        match profile {
             Ok(profile) => {
                 // A matching snapshot is authoritative for every software-envelope
                 // version operation. When the peer cannot prove the A-native contract
@@ -94,7 +99,10 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         cert_serial: Option<&[u8]>,
         params: &kmr_ta::device::RemoteAttestParams,
     ) -> Result<Option<kmr_ta::device::RemoteAttestation>, kmr_common::Error> {
-        let profile = match remote_identity_profile() {
+        super::prefetch_remote_identity_profile();
+        let profile = match super::cached_remote_identity_profile().and_then(|profile| {
+            profile.ok_or_else(|| anyhow::anyhow!("remote identity profile is not cached"))
+        }) {
             Ok(profile) => profile,
             Err(error)
                 if config::config()

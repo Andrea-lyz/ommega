@@ -33,6 +33,18 @@ monotonic version checks, downgrade B's ratchet or guarantee hardware rollback
 resistance. Routing remains all-or-nothing for the current allowed caller, not
 selected by descriptor, key origin or version tags.
 
+Keyblob version checks run under the per-security-level TA lock and read only
+the B profile already cached for the current relay route. The TEE wrapper
+fetches that profile before taking the lock; one fetch runs at a time and
+concurrent callers wait for it outside the lock. A failed fetch is retried for the same route and
+configuration after 2 s, doubling to at most 30 s, and a route or configuration
+change retries immediately. Without a cached profile, local keys keep the native
+A snapshot when `fallback_local` is enabled and otherwise fail with
+`HARDWARE_NOT_YET_AVAILABLE`. Remote `generateKey` validates and prepares the
+request under the TA lock, releases it for the relay attestation call, then
+relocks to verify the result and seal the keyblob, or to apply the local
+fallback rules.
+
 The UI reads `/data/misc/keystore/ommega/data/spl-status.json` only. It does not
 fetch a profile or invoke a HAL. Firmware, observed Android properties, frozen
 A TA configuration, cached B profile and signed-certificate evidence are separate
