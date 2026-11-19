@@ -83,9 +83,8 @@ pub async fn admin_login(
     // client-supplied X-Forwarded-For) so the login rate limit cannot be
     // bypassed by spoofing the header.
     let ip = crate::handlers::client_ip(&headers);
-    let key = format!("{ip}:{}", body.username);
     // Rate-limit login attempts (5/min per username+IP) to prevent brute force.
-    if !state.auth.allow_login_attempt(&key) {
+    if !state.auth.allow_login_attempt(&ip, &body.username) {
         return json_err(StatusCode::TOO_MANY_REQUESTS, "too many login attempts, try again later");
     }
     if !state.auth.verify_admin(&body.username, &body.password) {
@@ -364,6 +363,12 @@ pub async fn admin_upload_keybox(
     } else {
         keyboxes[0].device_id.clone()
     };
+    if !keybox::is_safe_device_id(&device_id) {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "keybox.xml DeviceID may only contain A-Z, a-z, 0-9, '.', '_' or '-' (max 128 chars)",
+        );
+    }
 
     let mut imported = Vec::new();
     for kb in &keyboxes {
@@ -784,6 +789,12 @@ pub async fn admin_autokeybox_set_device(
     }
     if body.device_id.trim().is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "device_id must not be empty");
+    }
+    if !keybox::is_safe_device_id(&body.device_id) {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "device_id may only contain A-Z, a-z, 0-9, '.', '_' or '-' (max 128 chars)",
+        );
     }
     crate::autokeybox::set_device_id(&body.name, &body.device_id);
     Json(json!({
