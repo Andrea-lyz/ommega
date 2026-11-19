@@ -20,8 +20,8 @@ use std::time::Duration;
 use x509_cert::der::Decode as _;
 
 use super::{
-    parse_identity_profile, reject_strongbox_demotion, remote_enabled, remote_identity_profile,
-    remote_operation_error, RemoteRelay,
+    parse_identity_profile, reject_strongbox_demotion, remote_enabled, remote_operation_error,
+    RemoteRelay,
 };
 use crate::config;
 
@@ -99,7 +99,10 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
         cert_serial: Option<&[u8]>,
         params: &kmr_ta::device::RemoteAttestParams,
     ) -> Result<Option<kmr_ta::device::RemoteAttestation>, kmr_common::Error> {
-        let profile = match remote_identity_profile() {
+        super::prefetch_remote_identity_profile();
+        let profile = match super::cached_remote_identity_profile().and_then(|profile| {
+            profile.ok_or_else(|| anyhow::anyhow!("remote identity profile is not cached"))
+        }) {
             Ok(profile) => profile,
             Err(error)
                 if config::config()
