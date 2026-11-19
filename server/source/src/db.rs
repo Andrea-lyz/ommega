@@ -493,6 +493,34 @@ impl Db {
         Ok(())
     }
 
+    /// Insert a token together with its B device binding in one statement so
+    /// a failure cannot leave an enabled token without its intended binding.
+    pub fn insert_api_token_with_devices(
+        &self,
+        token: &str,
+        role: &str,
+        duration_seconds: i64,
+        note: &str,
+        allowed_device_ids: &str,
+    ) -> anyhow::Result<()> {
+        self.ensure_token_binding_column()?;
+        let mut conn = self.conn()?;
+        conn.exec_drop(
+            "INSERT INTO api_token
+                 (token, role, duration_seconds, note, enabled, created_at, allowed_device_ids)
+             VALUES (:token, :role, :duration_seconds, :note, :enabled, NOW(), :ids)",
+            params! {
+                "token" => token,
+                "role" => role,
+                "duration_seconds" => duration_seconds,
+                "note" => note,
+                "enabled" => 1i64,
+                "ids" => normalize_device_ids(allowed_device_ids),
+            },
+        )?;
+        Ok(())
+    }
+
     pub fn list_api_tokens(&self) -> anyhow::Result<Vec<ApiTokenRow>> {
         let mut conn = self.conn()?;
         let rows: Vec<mysql::Row> = conn.exec(

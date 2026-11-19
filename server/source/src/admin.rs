@@ -602,15 +602,11 @@ pub async fn admin_generate_token(
     };
     let allowed_clone = allowed.clone();
     let result = tokio::task::spawn_blocking(move || {
-        db.insert_api_token(&token_clone, &role, duration, &note)?;
-        if !allowed_clone.is_empty() {
-            let id = db
-                .get_api_token(&token_clone)?
-                .map(|t| t.id)
-                .ok_or_else(|| anyhow::anyhow!("token row missing after insert"))?;
-            db.set_token_allowed_devices(id, &allowed_clone)?;
+        if allowed_clone.is_empty() {
+            db.insert_api_token(&token_clone, &role, duration, &note)
+        } else {
+            db.insert_api_token_with_devices(&token_clone, &role, duration, &note, &allowed_clone)
         }
-        anyhow::Ok(())
     })
     .await;
     match result {
