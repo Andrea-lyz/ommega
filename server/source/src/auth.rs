@@ -99,6 +99,11 @@ const LOGIN_USERNAME_MAX_LEN: usize = 256;
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const LOGIN_MAX_ATTEMPTS: u64 = 5;
 
+/// Login attempts per minute from one IP across all usernames. This also caps
+/// how many username buckets one IP can create, so it cannot flush its own
+/// active buckets out of the map by spraying usernames.
+const LOGIN_MAX_ATTEMPTS_PER_IP: u64 = 20;
+
 /// Outcome of authenticating a request.
 ///
 /// `Invalid` is a verdict about the credential; `Unavailable` means the server
@@ -495,19 +500,17 @@ impl AuthState {
 
     /// Sliding-window rate limit for admin login attempts, keyed by client IP
     /// plus a short hash of the (length-capped) username. Returns true if the
-    /// attempt is allowed. Limits to 5 attempts per minute (independent of the
-    /// general request rate limit).
+    /// attempt is allowed. Limits to 5 attempts per minute per username and 20
+    /// per minute per IP (independent of the general request rate limit).
     pub fn allow_login_attempt(&self, ip: &str, username: &str) -> bool {
         let name = &username.as_bytes()[..username.len().min(LOGIN_USERNAME_MAX_LEN)];
-        let key = format!("{ip}:{}", short_hash(name));
+        let ip_key = format!("ip|{ip}");
+        let user_key = format!("user|{ip}|{}", short_hash(name));
+        let now = Instant::now();
         let mut map = crate::util::mu(&self.login_rate);
-        sliding_window_allow(
-            &mut map,
-            &key,
-            LOGIN_MAX_ATTEMPTS,
-            LOGIN_WINDOW,
-            Instant::now(),
-        )
+        let per_ip = LOGIN_MAX_ATTEMPTS_PER_IP;
+        sliding_window_allow(&mut map, &ip_key, per_ip, LOGIN_WINDOW, now)
+            && sliding_window_allow(&mut map, &user_key, LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW, now)
     }
 
     fn allow_with_limit(
@@ -841,6 +844,22 @@ mod tests {
             );
             assert!(map.keys().all(|k| k.len() <= RATE_LIMIT_MAX_KEY_LEN));
         }
+    }
+
+    #[test]
+    fn one_ip_cannot_spray_usernames_to_reset_its_login_limit() {
+        let auth = AuthState::new("t".into(), 100, 60, true);
+        for _ in 0..LOGIN_MAX_ATTEMPTS {
+            assert!(auth.allow_login_attempt("10.0.0.1", "admin"));
+        }
+        for i in 0..RATE_LIMIT_MAX_KEYS * 2 {
+            auth.allow_login_attempt("10.0.0.1", &format!("spray{i}"));
+        }
+        assert!(!auth.allow_login_attempt("10.0.0.1", "admin"));
+        assert!(
+            crate::util::mu(&auth.login_rate).len() as u64 <= LOGIN_MAX_ATTEMPTS_PER_IP + 1,
+            "the per-IP budget caps the buckets one IP can create"
+        );
     }
 
     #[test]
