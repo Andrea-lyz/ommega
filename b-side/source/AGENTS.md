@@ -96,8 +96,13 @@ The relay daemon supports every task type the relay_server can dispatch:
 - `template/service.sh` kills leftover/duplicate `relay` processes
   (`kill_all`) before each start and keeps `module.prop`'s `description`
   in sync (✅ 运行中 / ❌ 启动失败 / ⏳ 启动中), mirroring client-a.
-- Both `http://` and `https://` are supported; the relay accepts self-signed
-  certificates (the relay_server uses a self-signed cert).
+- Both `http://` and `https://` are supported. The relay client always
+  verifies the server certificate: `OMMEGA_RELAY_TLS_PIN_SHA256` pins a
+  self-signed relay_server by SPKI SHA-256 (`src/tls.rs`), otherwise Web PKI
+  roots apply. Only an explicit `OMMEGA_RELAY_TLS_INSECURE=true` disables
+  verification; an invalid pin or missing config never falls back to it.
+- The `uplink` probe client skips certificate checks and therefore must never
+  send `X-Relay-Token` or any other credential.
 
 ### Persistent and Temporary Files
 

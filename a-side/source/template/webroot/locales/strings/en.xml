@@ -147,7 +147,11 @@
 
     <string name="remote_config_local_hw">Local key uses hardware</string>
 
-    <string name="remote_config_tls_insecure">Disable TLS verification</string>
+    <string name="remote_config_tls_pin">TLS pin (SPKI SHA-256, for a self-signed server)</string>
+
+    <string name="remote_config_tls_pin_invalid">Invalid TLS pin: use SHA-256 hex or base64, comma-separated</string>
+
+    <string name="remote_config_tls_insecure">Disable TLS verification (unsafe, exposes the token)</string>
 
     <string name="remote_config_disable_native_strongbox">Disable native StrongBox for global-default apps</string>
 

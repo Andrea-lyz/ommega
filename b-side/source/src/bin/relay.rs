@@ -69,6 +69,7 @@ use ommegaclient_b::keymaster::tee_ops::{
     self, AttestationKeyRef, KeyAlgorithm, KeySpec, VersionSnapshot, NATIVE_VERSION_POLICY,
     VERSION_TAG_FIELDS,
 };
+use ommegaclient_b::tls::TlsPolicy;
 use ommegaclient_b::wakelock;
 
 /// Hold an idle poll open so task arrival wakes B immediately. Stay below the
@@ -174,6 +175,9 @@ struct RelayConfig {
     wakelock: bool,
     /// Outgoing interface policy: auto | none | always | <ifname>.
     bind_iface: String,
+    /// Server certificate policy from `OMMEGA_RELAY_TLS_PIN_SHA256` /
+    /// `OMMEGA_RELAY_TLS_INSECURE`.
+    tls: TlsPolicy,
 }
 
 impl RelayConfig {
@@ -303,7 +307,27 @@ fn load_config_from_file() -> Result<RelayConfig> {
             .get("OMMEGA_RELAY_BIND_IFACE")
             .cloned()
             .unwrap_or_else(|| "auto".to_string()),
+        tls: tls_policy(
+            m.get("OMMEGA_RELAY_TLS_PIN_SHA256").map(String::as_str),
+            m.get("OMMEGA_RELAY_TLS_INSECURE").map(String::as_str),
+        )?,
     })
+}
+
+fn tls_policy(pins: Option<&str>, insecure: Option<&str>) -> Result<TlsPolicy> {
+    TlsPolicy::from_settings(pins.unwrap_or_default(), insecure.is_some_and(parse_bool))
+        .context(InvalidTlsConfig)
+}
+
+/// Marks a relay.conf whose TLS settings are present but invalid, so loading
+/// fails instead of falling back to the startup environment's TLS policy.
+#[derive(Debug)]
+struct InvalidTlsConfig;
+
+impl std::fmt::Display for InvalidTlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid OMMEGA_RELAY_TLS_PIN_SHA256")
+    }
 }
 
 fn parse_log_level(v: &str) -> Option<log::LevelFilter> {
@@ -379,9 +403,13 @@ fn preload_log_config() -> (bool, log::LevelFilter, bool, log::LevelFilter) {
 /// Prefer the config file; fall back to environment variables (the wrapper may
 /// supply them directly). Returns the chosen source for logging.
 fn load_config() -> Result<(RelayConfig, &'static str)> {
-    if let Ok(cfg) = load_config_from_file() {
-        cfg.validate()?;
-        return Ok((cfg, "file"));
+    match load_config_from_file() {
+        Ok(cfg) => {
+            cfg.validate()?;
+            return Ok((cfg, "file"));
+        }
+        Err(e) if e.downcast_ref::<InvalidTlsConfig>().is_some() => return Err(e),
+        Err(_) => {}
     }
     let server = env("OMMEGA_RELAY_SERVER")
         .context("OMMEGA_RELAY_SERVER not set and relay.conf unreadable")?;
@@ -410,6 +438,10 @@ fn load_config() -> Result<(RelayConfig, &'static str)> {
             .map(|v| parse_bool(&v))
             .unwrap_or(true),
         bind_iface: env("OMMEGA_RELAY_BIND_IFACE").unwrap_or_else(|| "auto".to_string()),
+        tls: tls_policy(
+            env("OMMEGA_RELAY_TLS_PIN_SHA256").as_deref(),
+            env("OMMEGA_RELAY_TLS_INSECURE").as_deref(),
+        )?,
     };
     cfg.validate()?;
     Ok((cfg, "env"))
@@ -418,50 +450,69 @@ fn load_config() -> Result<(RelayConfig, &'static str)> {
 // ---------------------------------------------------------------------------
 // HTTP client (reqwest-based with rustls).
 //
-// Uses reqwest's blocking client with rustls TLS backend.  The relay_server
-// uses a self-signed certificate, so certificate verification is disabled.
+// Uses reqwest's blocking client with rustls TLS backend. The server
+// certificate is verified against the Web PKI roots, or against the
+// `OMMEGA_RELAY_TLS_PIN_SHA256` SPKI pins for a self-signed relay; only an
+// explicit `OMMEGA_RELAY_TLS_INSECURE=true` disables verification.
 // reqwest provides built-in connection pooling, keep-alive, and chunked
-// transfer encoding support — all things the old hand-rolled client lacked.
+// transfer encoding support.
 //
-// The client is rebuilt on config hot-reload so that a server URL change
-// does not leave stale pooled connections pointing at the old address.
+// The client is rebuilt on config hot-reload so that a server URL or TLS
+// policy change does not leave stale pooled connections behind.
 // ---------------------------------------------------------------------------
 
-/// Shared reqwest blocking client.  Wrapped in `RwLock<Option<Arc<...>>>` so
-/// the config watcher can drop it (forcing a rebuild) without blocking
-/// in-flight requests (the old `Arc` stays alive until its last user drops it).
-static HTTP_CLIENT: RwLock<Option<(Option<String>, Arc<Client>)>> = RwLock::new(None);
-/// (bind_iface, server URL) for the shared client. Set on startup and on reload.
-static UPLINK_CONFIG: RwLock<Option<(String, String)>> = RwLock::new(None);
+/// Shared reqwest blocking client, keyed by the bound interface and TLS
+/// policy it was built for. Wrapped in `RwLock<Option<...>>` so the config
+/// watcher can drop it (forcing a rebuild) without blocking in-flight
+/// requests (the old `Arc` stays alive until its last user drops it).
+type SharedClient = (Option<String>, TlsPolicy, Arc<Client>);
+static HTTP_CLIENT: RwLock<Option<SharedClient>> = RwLock::new(None);
+/// Transport settings for the shared client. Set on startup and on reload.
+#[derive(Clone)]
+struct UplinkConfig {
+    bind_iface: String,
+    server: String,
+    tls: TlsPolicy,
+}
+static UPLINK_CONFIG: RwLock<Option<UplinkConfig>> = RwLock::new(None);
 
 fn set_uplink_config(cfg: &RelayConfig) {
     if let Ok(mut guard) = UPLINK_CONFIG.write() {
-        *guard = Some((cfg.bind_iface.clone(), cfg.server.clone()));
+        *guard = Some(UplinkConfig {
+            bind_iface: cfg.bind_iface.clone(),
+            server: cfg.server.clone(),
+            tls: cfg.tls.clone(),
+        });
     }
 }
 
-fn uplink_config() -> (String, String) {
+/// The current transport settings. Fails instead of falling back to a
+/// default TLS policy when the config is missing or its lock is poisoned.
+fn uplink_config() -> Result<UplinkConfig> {
     UPLINK_CONFIG
         .read()
-        .ok()
-        .and_then(|guard| guard.clone())
-        .unwrap_or_else(|| ("auto".to_string(), String::new()))
+        .map_err(|_| anyhow!("uplink config lock poisoned"))?
+        .clone()
+        .context("uplink config not loaded")
 }
 
-fn build_http_client(iface: Option<&str>) -> Result<Client> {
+fn build_http_client(iface: Option<&str>, tls: &TlsPolicy) -> Result<Client> {
     let mut builder = Client::builder()
-        .danger_accept_invalid_certs(true)
         .connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS))
         .timeout(Duration::from_millis(READ_TIMEOUT_MS));
     if let Some(name) = iface {
         builder = builder.interface(name);
     }
-    builder.build().context("build reqwest client")
+    tls.apply(builder)?.build().context("build reqwest client")
 }
 
 /// Returns the shared HTTP client, building it on first use.
 fn get_http_client() -> Result<Arc<Client>> {
-    let (bind_iface, server) = uplink_config();
+    let UplinkConfig {
+        bind_iface,
+        server,
+        tls,
+    } = uplink_config()?;
     let mut iface = ommegaclient_b::uplink::desired_iface(&bind_iface, &server);
     if let Some(name) = iface.as_deref() {
         if !std::path::Path::new(&format!("/sys/class/net/{name}")).exists() {
@@ -470,25 +521,26 @@ fn get_http_client() -> Result<Arc<Client>> {
             iface = None;
         }
     }
+    let matches =
+        |cached: &SharedClient| cached.0.as_deref() == iface.as_deref() && cached.1 == tls;
     // Fast path: read lock, return if present.
     if let Ok(guard) = HTTP_CLIENT.read() {
-        if let Some((cached, client)) = guard.as_ref() {
-            if cached.as_deref() == iface.as_deref() {
-                return Ok(client.clone());
-            }
+        if let Some(cached) = guard.as_ref().filter(|c| matches(c)) {
+            return Ok(cached.2.clone());
         }
     }
     // Slow path: write lock, build if still absent.
     let mut guard = HTTP_CLIENT
         .write()
         .map_err(|_| anyhow!("HTTP client lock poisoned"))?;
-    if let Some((cached, client)) = guard.as_ref() {
-        if cached.as_deref() == iface.as_deref() {
-            return Ok(client.clone());
-        }
+    if let Some(cached) = guard.as_ref().filter(|c| matches(c)) {
+        return Ok(cached.2.clone());
     }
-    let client = Arc::new(build_http_client(iface.as_deref())?);
-    *guard = Some((iface, client.clone()));
+    if tls == TlsPolicy::Insecure {
+        log::warn!("relay TLS verification disabled by OMMEGA_RELAY_TLS_INSECURE");
+    }
+    let client = Arc::new(build_http_client(iface.as_deref(), &tls)?);
+    *guard = Some((iface, tls, client.clone()));
     Ok(client)
 }
 
@@ -1741,6 +1793,7 @@ fn main() {
             soter_probe: None,
             wakelock: true,
             bind_iface: "auto".to_string(),
+            tls: TlsPolicy::Verify,
         });
         log::info!(
             "relay daemon starting (config from {source}) server={} device={} machine={}",
@@ -2085,6 +2138,23 @@ mod tests {
     }
 
     #[test]
+    fn relay_tls_verifies_by_default_and_rejects_bad_pins() {
+        assert_eq!(tls_policy(None, None).unwrap(), TlsPolicy::Verify);
+        assert_eq!(
+            tls_policy(Some(""), Some("false")).unwrap(),
+            TlsPolicy::Verify
+        );
+        assert_eq!(tls_policy(None, Some("true")).unwrap(), TlsPolicy::Insecure);
+        let pin = "ab".repeat(32);
+        assert_eq!(
+            tls_policy(Some(&pin), Some("true")).unwrap(),
+            TlsPolicy::Pinned(vec![[0xab; 32]])
+        );
+        let err = tls_policy(Some("bogus"), Some("true")).unwrap_err();
+        assert!(err.downcast_ref::<InvalidTlsConfig>().is_some());
+    }
+
+    #[test]
     fn disabled_soter_never_probes_or_advertises_caps() {
         let cfg = RelayConfig {
             server: String::new(),
@@ -2095,6 +2165,7 @@ mod tests {
             soter_allow_mutation: false,
             wakelock: true,
             bind_iface: "auto".to_string(),
+            tls: TlsPolicy::Verify,
             soter_probe: Some(ommegaclient_b::caps::SignProbeTarget {
                 uid: 10001,
                 alias: "AuthKey".to_string(),

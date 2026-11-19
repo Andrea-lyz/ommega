@@ -197,15 +197,18 @@ Install/load the A ZIP as required by the manager. /data/adb/ommega/config examp
   token: <a-token-or-static-token>
   remote: true
   local_hw: false
-  tls_insecure: true
+  tls_pin_sha256: <server-spki-sha256>
+  tls_insecure: false
   debug_logging: false
   disable_native_strongbox: false
 
 With debug_logging=true, A records the relayed chain layout in the keymint log (event=remote_attest_chain: certificate count, tail bytes, and each certificate's length, signature OID and SPKI OID); off by default.
 
 This shows syntax, not the exact acceptance configuration in section 1.
-tls_insecure=true skips A certificate verification; configure for your trusted-cert
-environment. remote and local_hw are independent. Use an A-role Token where required.
+A verifies the server certificate by default. tls_pin_sha256 pins a self-signed
+server by its SPKI SHA-256 (hex or base64, comma-separated); B uses
+OMMEGA_RELAY_TLS_PIN_SHA256. tls_insecure=true disables verification and exposes
+the token; debugging only. remote and local_hw are independent. Use an A-role Token where required.
 
 Targets: /data/misc/keystore/ommega/target.txt, plain package names, no !/? suffixes.
 Policies: /data/misc/keystore/ommega/target-security.toml.

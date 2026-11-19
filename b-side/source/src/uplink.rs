@@ -306,7 +306,8 @@ pub fn probe(base_url: &str, iface: Option<&str>) -> bool {
         .no_proxy()
         .connect_timeout(PROBE_TIMEOUT)
         .timeout(PROBE_TIMEOUT)
-        // 探针只问「包出得去吗」，证书问题不是路由问题。
+        // 探针只问「包出得去吗」，证书问题不是路由问题。这个客户端不校验证书，
+        // 所以绝不能带 relay token 或任何凭据：它只发一个裸的 GET ping。
         .danger_accept_invalid_certs(true);
     if let Some(name) = iface {
         builder = builder.interface(name);

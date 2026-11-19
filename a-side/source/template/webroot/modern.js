@@ -257,15 +257,29 @@ export function parseBStatusConfig(raw) {
     const at = line.indexOf(':');
     if (at < 0) continue;
     const key = line.slice(0,at).trim().toLowerCase();
-    if (['url','device_id','remote','tls_insecure','tls_skip_verify','insecure_tls'].includes(key)) fields[key] = line.slice(at+1).trim();
+    if (['url','device_id','remote','tls_insecure','tls_skip_verify','insecure_tls','tls_pin_sha256'].includes(key)) fields[key] = line.slice(at+1).trim();
   }
   if (!fields.url || !fields.device_id || /^(none|off)$/i.test(fields.url) || /^(0|false|no|off)$/i.test(fields.remote || '')) return null;
   try {
     const url = new URL(fields.url);
     if (!['http:','https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) return null;
     const tls = fields.tls_insecure || fields.tls_skip_verify || fields.insecure_tls || '';
-    return {url:url.toString().replace(/\/+$/,''), deviceId:fields.device_id, insecure:/^(1|true|yes|on)$/i.test(tls)};
+    return {url:url.toString().replace(/\/+$/,''), deviceId:fields.device_id, insecure:/^(1|true|yes|on)$/i.test(tls), pin:curlPinnedPubkeys(fields.tls_pin_sha256)};
   } catch { return null; }
+}
+// tls_pin_sha256 as a curl --pinnedpubkey list: '' when unset, null when the
+// relay client would reject it.
+export function curlPinnedPubkeys(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const pins = [];
+  for (const entry of text.split(',').map(entry => entry.trim()).filter(Boolean)) {
+    const value = entry.replace(/^sha256\/\/?/, ''), hex = value.replace(/:/g, '');
+    if (/^[0-9A-Fa-f]{64}$/.test(hex)) pins.push(btoa(String.fromCharCode(...hex.match(/../g).map(byte => parseInt(byte, 16)))));
+    else if (/^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/.test(value)) pins.push(value);
+    else return null;
+  }
+  return pins.length ? pins.map(pin => `sha256//${pin}`).join(';') : null;
 }
 export function bOnlineState(raw, deviceId) {
   const status = typeof raw === 'string' ? parseJson(raw) : raw;
@@ -613,7 +627,7 @@ function renderBConnection() {
 async function readBConnection() {
   const configCommand = `ommega_status_config=/data/adb/ommega/ommegadata/config
 [ -r "$ommega_status_config" ] || exit 1
-grep -iE '^[[:space:]]*(url|device_id|remote|tls_insecure|tls_skip_verify|insecure_tls)[[:space:]]*:' "$ommega_status_config"`;
+grep -iE '^[[:space:]]*(url|device_id|remote|tls_insecure|tls_skip_verify|insecure_tls|tls_pin_sha256)[[:space:]]*:' "$ommega_status_config"`;
   const config = await execBStatus(configCommand);
   if (Number(config.errno) !== 0) {
     // The config could not be read at all: that is a failed read.
@@ -625,14 +639,20 @@ grep -iE '^[[:space:]]*(url|device_id|remote|tls_insecure|tls_skip_verify|insecu
     // read here, so this must not be reported as an incomplete refresh.
     bOnline = 'unknown'; renderBConnection(); renderBBattery(null); return true;
   }
+  if (settings.pin === null) {
+    bOnline = 'unknown'; renderBConnection(); renderBBattery(null); return false;
+  }
+  // A pinned (self-signed) relay is checked by its key; busybox wget cannot pin.
+  const curlTls = settings.pin ? `--insecure --pinnedpubkey '${settings.pin}'` : settings.insecure ? '--insecure' : '';
+  const wgetFetch = settings.pin ? 'exit 1' : `busybox wget -q -O - -T 5 ${settings.insecure ? '--no-check-certificate' : ''} "$ommega_status_url" | head -c 262145`;
   const bytes = new TextEncoder().encode(settings.url + '/api/status/');
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
   const encoded = btoa(binary);
   const output = await execBStatus(`ommega_status_url=$(printf '%s' '${encoded}' | base64 -d)
 if command -v curl >/dev/null 2>&1; then
-  curl --silent --show-error --fail --connect-timeout 3 --max-time 5 ${settings.insecure ? '--insecure' : ''} -- "$ommega_status_url" | head -c 262145
+  curl --silent --show-error --fail --connect-timeout 3 --max-time 5 ${curlTls} -- "$ommega_status_url" | head -c 262145
 elif command -v busybox >/dev/null 2>&1; then
-  busybox wget -q -O - -T 5 ${settings.insecure ? '--no-check-certificate' : ''} "$ommega_status_url" | head -c 262145
+  ${wgetFetch}
 else exit 1; fi`);
   const current = await execBStatus(configCommand);
   const currentSettings = !current.errno && parseBStatusConfig(current.stdout);

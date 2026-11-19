@@ -57,6 +57,7 @@ fn held_poll_does_not_block_result_upload_on_shared_client() {
         soter_probe: None,
         wakelock: false,
         bind_iface: "none".into(),
+        tls: TlsPolicy::Verify,
     };
     set_uplink_config(&cfg);
     let (ready_tx, ready_rx) = mpsc::channel();

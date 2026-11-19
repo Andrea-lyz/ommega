@@ -79,9 +79,15 @@ software TA switch is turned off.
    token: <relay-token>
    remote: true
    local_hw: false
-   tls_insecure: true
+   tls_pin_sha256: <server-spki-sha256>
+   tls_insecure: false
    debug_logging: false
    ```
+
+   The server certificate is always verified: `tls_pin_sha256` pins a
+   self-signed relay by the SHA-256 of its SubjectPublicKeyInfo (hex or base64,
+   comma-separated); without it the certificate must chain to a public CA.
+   `tls_insecure: true` disables verification and exposes the token.
 
 3. Open the WebUI Apps page. It enumerates installed packages from the system
    on startup and on each manual refresh, independent of the current
