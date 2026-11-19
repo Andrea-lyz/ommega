@@ -78,6 +78,11 @@ test('B online status comes from the configured device in the server response', 
   assert.equal(bOnlineState({status:'ok',online_b_devices:[{}]},'b-one'),'unknown');
   assert.equal(bOnlineState('not json','b-one'),'unknown');
   assert.equal(parseBStatusConfig('url: https://user:pass@example.test\ndevice_id: b'),null);
+  assert.equal(config.pin,'');
+  const hex = 'ab'.repeat(32), b64 = Buffer.from(hex,'hex').toString('base64');
+  assert.equal(parseBStatusConfig(`url: https://r.test\ndevice_id: b\ntls_pin_sha256: sha256/${hex.match(/../g).join(':')}, ${b64}`).pin,`sha256//${b64};sha256//${b64}`);
+  assert.equal(parseBStatusConfig('url: https://r.test\ndevice_id: b\ntls_pin_sha256: abcd').pin,null);
+  assert.equal(parseBStatusConfig('url: https://r.test\ndevice_id: b\ntls_pin_sha256: ,').pin,null);
   assert.equal(parseBStatusConfig('url: https://relay.example.test\ndevice_id: b\nremote: false'),null);
 });
 test('battery telemetry uses exact B identity, fresh receipt and real nullable values', () => {
