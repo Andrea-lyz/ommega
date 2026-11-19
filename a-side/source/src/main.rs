@@ -5,7 +5,7 @@ use std::panic;
 use std::sync::Arc;
 use std::{ffi::CString, os::unix::fs::PermissionsExt, path::Path};
 
-use kmr_common::consts::{KEYSTORE_GID, KEYSTORE_UID};
+use kmr_common::consts::{AID_INET, KEYSTORE_GID, KEYSTORE_UID};
 use kmr_common::rpc;
 use kmr_common::selinux::{clear_sockcreate_con, set_sockcreate_con};
 use log::{debug, error, info, warn, LevelFilter};
@@ -191,8 +191,18 @@ fn create_rpc_server() -> Result<Arc<RpcServer>> {
     Ok(server)
 }
 
+fn keystore_supplementary_groups() -> [libc::gid_t; 1] {
+    [AID_INET as libc::gid_t]
+}
+
 fn set_keystore_identity() -> Result<()> {
-    let failed = unsafe { libc::setgid(KEYSTORE_GID) != 0 || libc::setuid(KEYSTORE_UID) != 0 };
+    let supplementary_groups = keystore_supplementary_groups();
+    // Netd DNS requires the inet group for relay clients built after the UID drop.
+    let failed = unsafe {
+        libc::setgroups(supplementary_groups.len(), supplementary_groups.as_ptr()) != 0
+            || libc::setgid(KEYSTORE_GID) != 0
+            || libc::setuid(KEYSTORE_UID) != 0
+    };
     if failed {
         return Err(std::io::Error::last_os_error()).context("failed to enter keystore uid/gid");
     }
@@ -407,4 +417,14 @@ fn run() -> Result<()> {
     info!("serving ommega RPC socket={}", rpc::SOCKET);
     server.run().context("ommega RPC server stopped")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keystore_supplementary_groups;
+
+    #[test]
+    fn keystore_supplementary_groups_include_only_inet() {
+        assert_eq!(keystore_supplementary_groups(), [3003]);
+    }
 }

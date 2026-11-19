@@ -10,6 +10,7 @@ pub const AIDL_GET_INTERFACE_VERSION_TRANSACTION: u32 = 0x00ff_ffff;
 pub const AID_ROOT: u32 = 0;
 pub const AID_SYSTEM: u32 = 1000;
 pub const AID_KEYSTORE: u32 = 1017;
+pub const AID_INET: u32 = 3003;
 pub const AID_APP_START: u32 = 10_000;
 pub const AID_APP_END: u32 = 19_999;
 pub const AID_USER_OFFSET: u32 = 100_000;
