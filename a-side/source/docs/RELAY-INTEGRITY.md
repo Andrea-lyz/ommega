@@ -35,8 +35,8 @@ selected by descriptor, key origin or version tags.
 
 Keyblob version checks run under the per-security-level TA lock and read only
 the B profile already cached for the current relay route. The TEE wrapper
-fetches that profile before taking the lock; one fetch runs at a time and other
-callers do not wait for it. A failed fetch is retried for the same route and
+fetches that profile before taking the lock; one fetch runs at a time and
+concurrent callers wait for it outside the lock. A failed fetch is retried for the same route and
 configuration after 2 s, doubling to at most 30 s, and a route or configuration
 change retries immediately. Without a cached profile, local keys keep the native
 A snapshot when `fallback_local` is enabled and otherwise fail with

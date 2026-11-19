@@ -1037,7 +1037,7 @@ fn profile_retry_delay(failures: u32) -> Duration {
 
 /// Fill the identity-profile cache before a TA request takes its lock.
 ///
-/// Fetches are single-flight and never waited for. A failure is remembered for the current route
+/// Fetches are single-flight. A failure is remembered for the current route
 /// and config epoch with exponential backoff, so callers do not each wait
 /// out the relay timeout while it is unreachable; a config change retries
 /// immediately.
@@ -1045,12 +1045,11 @@ pub(crate) fn prefetch_remote_identity_profile() {
     if !remote_enabled() || matches!(cached_remote_identity_profile(), Ok(Some(_))) {
         return;
     }
-    // Another thread is already fetching; do not queue behind its timeout.
-    let mut failure = match REMOTE_PROFILE_FETCH.try_lock() {
-        Ok(guard) => guard,
-        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => return,
-    };
+    // Wait for an in-flight fetch rather than sealing keys without its
+    // profile; `remote_identity_profile` then answers from the cache.
+    let mut failure = REMOTE_PROFILE_FETCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Ok(route) = RemoteRoute::current() else {
         return;
     };
