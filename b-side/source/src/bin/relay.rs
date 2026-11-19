@@ -304,7 +304,18 @@ fn load_config_from_file() -> Result<RelayConfig> {
 
 fn tls_policy(pins: Option<&str>, insecure: Option<&str>) -> Result<TlsPolicy> {
     TlsPolicy::from_settings(pins.unwrap_or_default(), insecure.is_some_and(parse_bool))
-        .context("OMMEGA_RELAY_TLS_PIN_SHA256")
+        .context(InvalidTlsConfig)
+}
+
+/// Marks a relay.conf whose TLS settings are present but invalid, so loading
+/// fails instead of falling back to the startup environment's TLS policy.
+#[derive(Debug)]
+struct InvalidTlsConfig;
+
+impl std::fmt::Display for InvalidTlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid OMMEGA_RELAY_TLS_PIN_SHA256")
+    }
 }
 
 fn parse_log_level(v: &str) -> Option<log::LevelFilter> {
@@ -380,9 +391,13 @@ fn preload_log_config() -> (bool, log::LevelFilter, bool, log::LevelFilter) {
 /// Prefer the config file; fall back to environment variables (the wrapper may
 /// supply them directly). Returns the chosen source for logging.
 fn load_config() -> Result<(RelayConfig, &'static str)> {
-    if let Ok(cfg) = load_config_from_file() {
-        cfg.validate()?;
-        return Ok((cfg, "file"));
+    match load_config_from_file() {
+        Ok(cfg) => {
+            cfg.validate()?;
+            return Ok((cfg, "file"));
+        }
+        Err(e) if e.downcast_ref::<InvalidTlsConfig>().is_some() => return Err(e),
+        Err(_) => {}
     }
     let server = env("OMMEGA_RELAY_SERVER")
         .context("OMMEGA_RELAY_SERVER not set and relay.conf unreadable")?;
@@ -2121,7 +2136,8 @@ mod tests {
             tls_policy(Some(&pin), Some("true")).unwrap(),
             TlsPolicy::Pinned(vec![[0xab; 32]])
         );
-        assert!(tls_policy(Some("bogus"), Some("true")).is_err());
+        let err = tls_policy(Some("bogus"), Some("true")).unwrap_err();
+        assert!(err.downcast_ref::<InvalidTlsConfig>().is_some());
     }
 
     #[test]
