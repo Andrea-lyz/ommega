@@ -235,16 +235,24 @@ device_id: <b-device-id>
 token: <a-token-or-static-token>
 remote: true
 local_hw: false
-tls_insecure: true
+tls_pin_sha256: <server-spki-sha256>
+tls_insecure: false
 debug_logging: false
 disable_native_strongbox: false
 ```
 
 - `device_id` must match B's `OMMEGA_RELAY_DEVICE_ID`; `token` is the role token
   issued by Server or the static token.
-- `tls_insecure: true` skips A's certificate verification. Tighten this after
-  deploying a trusted certificate. B currently accepts self-signed certificates,
-  so **an HTTPS URL alone does not prove Server identity**.
+- A and B verify the Server certificate by default and never send the token
+  to a server that fails verification. For a self-signed Server, pin its key
+  with `tls_pin_sha256` (B: `OMMEGA_RELAY_TLS_PIN_SHA256`): the SHA-256 of the
+  certificate's SubjectPublicKeyInfo, hex or base64, comma-separated for
+  rotation. Compute it on the Server with
+  `openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256`.
+  Without a pin the certificate must chain to a public CA and match the host.
+  `tls_insecure: true` (B: `OMMEGA_RELAY_TLS_INSECURE=true`) disables
+  verification entirely and lets a network attacker capture the token; use it
+  only for debugging.
 - On the **Apps** page, enable an app's scope and choose its takeover mode
   (global default / StrongBox / TEE). The effective target set is the union of
   `target.txt` and `scoop` in `injector.toml`; apps in neither keep the original
@@ -435,10 +443,10 @@ payments, card binding or any risk-control outcome.
   boot problems, and cannot prove the device hides its unlock state or passes
   integrity checks. Use it only on A with real StrongBox and read the
   [Mask documentation](StrongBoxCapabilityMask/README.md).
-- **Transport and credentials**: `tls_insecure: true` skips A's certificate
-  verification and B accepts invalid certificates. Public deployments must
-  protect transport, tokens and Server themselves. An HTTPS URL alone is not
-  proof of authenticated identity.
+- **Transport and credentials**: A and B verify the Server certificate by
+  default; a self-signed Server needs an SPKI pin. Explicitly enabling
+  `tls_insecure` skips verification and exposes the token to network
+  attackers. Public deployments must still protect tokens and Server.
 - **Release signing**: both APKs use the Android default debug signing identity,
   which CI caches. It is not a formal release key; cache eviction can change the
   identity, so verify certificates before upgrading.

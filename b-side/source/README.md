@@ -80,7 +80,13 @@ OMMEGA_RELAY_LOGCAT_LEVEL=info
 ```
 
 - `OMMEGA_RELAY_SERVER` — base URL of the relay_server (required; both `http://`
-  and `https://` are supported, and the relay accepts self-signed certs).
+  and `https://` are supported).
+- `OMMEGA_RELAY_TLS_PIN_SHA256` — comma-separated SHA-256 pins (hex or base64)
+  of the server certificate's SubjectPublicKeyInfo; required to trust a
+  self-signed relay_server. Without it the certificate must chain to a public
+  CA. An invalid pin is a config error.
+- `OMMEGA_RELAY_TLS_INSECURE` — `true` accepts any certificate (unsafe, exposes
+  the token). Default `false`; ignored when a pin is set.
 - `OMMEGA_RELAY_DEVICE_ID` — this B-side device's id as registered on the
   relay_server (required).
 - `OMMEGA_RELAY_MACHINE_ID` — machine id used in the `b/poll` query (optional).

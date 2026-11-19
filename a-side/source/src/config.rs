@@ -547,7 +547,8 @@ fn publish_relay_mode(remote: &RemoteConfig) {
 ///
 /// The file is a simple `key: value` map (one pair per line, `#` comments and
 /// blank lines ignored, keys lowercased). `remote` / `local_hw` /
-/// `tls_insecure` accept `0|1|false|true|no|yes|off|on`; an empty or
+/// `tls_insecure` accept `0|1|false|true|no|yes|off|on`; `tls_pin_sha256`
+/// pins the server key (see `RemoteConfig::tls_pin_sha256`); an empty or
 /// `none`/`off` URL disables the relay. Returns `None` when neither file is
 /// present (or readable), in which case the `[remote]` table in `config.toml`
 /// is used.
@@ -602,6 +603,7 @@ fn parse_clienta_remote(contents: &str) -> Option<RemoteConfig> {
         Some("1" | "true" | "yes" | "on")
     );
 
+    let tls_pin_sha256 = get(&["tls_pin_sha256"]).unwrap_or_default().to_string();
     let device_id = get(&["device_id"]).unwrap_or_default().to_string();
     let token = get(&["token"]).unwrap_or_default().to_string();
     let debug_logging = matches!(
@@ -623,6 +625,7 @@ fn parse_clienta_remote(contents: &str) -> Option<RemoteConfig> {
         token,
         device_id,
         tls_insecure,
+        tls_pin_sha256,
         fallback_local,
         debug_logging,
     })
@@ -694,7 +697,7 @@ impl Default for ConfigFile {
 /// TEE through the relay_server, and sign/decrypt operations for remote keys
 /// are forwarded to it. If the remote is unreachable, `fallback_local` controls
 /// whether ommega falls back to its local software keybox attestation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RemoteConfig {
     pub enabled: bool,
@@ -704,32 +707,21 @@ pub struct RemoteConfig {
     pub token: String,
     /// B-side device id (must match the device registered on the relay_server).
     pub device_id: String,
-    /// Accept self-signed TLS certificates (client-a default is `false`; the
-    /// `/data/adb/ommega/config` `tls_insecure` flag controls this on-device).
+    /// Accept any server certificate without verification. Off by default;
+    /// ignored when `tls_pin_sha256` is set.
     pub tls_insecure: bool,
+    /// Comma-separated SHA-256 pins of the server certificate's
+    /// SubjectPublicKeyInfo (hex or base64, optional `sha256/` prefix). When
+    /// set, only a server holding a pinned key is accepted, which is how a
+    /// self-signed relay certificate is trusted. When empty, the certificate
+    /// must chain to a Web PKI root and match the host name.
+    pub tls_pin_sha256: String,
     /// Fall back to local software keybox attestation when the remote is unreachable.
     pub fallback_local: bool,
     /// Extra remote-relay diagnostic logging (`debug_logging` / `debug` /
     /// `verbose` in `/data/adb/ommega/config`, client-a semantics).
     #[serde(default)]
     pub debug_logging: bool,
-}
-
-impl Default for RemoteConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            url: String::new(),
-            token: String::new(),
-            device_id: String::new(),
-            // The production relay serves a self-signed cert on :8443, so the
-            // WebUI default and this fallback both accept any server cert;
-            // operators who pin a proper CA set `tls_insecure = false`.
-            tls_insecure: true,
-            fallback_local: false,
-            debug_logging: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1158,6 +1150,7 @@ mod tests {
             token: "t".to_string(),
             device_id: "op11-b".to_string(),
             tls_insecure: true,
+            tls_pin_sha256: String::new(),
             fallback_local: false,
             debug_logging: false,
         }

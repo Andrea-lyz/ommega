@@ -167,14 +167,17 @@ ro.build.version.sdk 不随之改变，严格校验方可能看出两者不一�
   token: <a-token-or-static-token>
   remote: true
   local_hw: false
-  tls_insecure: true
+  tls_pin_sha256: <server-spki-sha256>
+  tls_insecure: false
   debug_logging: false
   disable_native_strongbox: false
 
 `debug_logging: true` 时 A 端会把远端返回的证书链布局写入 keymint 日志（`event=remote_attest_chain`：证书数、尾链总字节数、每张证书的 len/签名 OID/SPKI OID），默认关闭。
 
 这是格式示例，不是第一节测试配置的完整复刻。
-tls_insecure=true 跳过 A 的证书验证；有可信证书时按实际环境设置。
+A 默认校验 Server 证书；自签证书用 tls_pin_sha256 固定 SPKI SHA-256（十六进制或 base64，
+多个用逗号分隔），B 对应 OMMEGA_RELAY_TLS_PIN_SHA256。tls_insecure=true 会跳过校验并暴露
+Token，仅用于调试。
 remote 与 local_hw 独立；角色 Token 使用 A 角色。
 
 目标列表：/data/misc/keystore/ommega/target.txt，每行普通包名，不加 !/?。

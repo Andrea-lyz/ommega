@@ -208,15 +208,20 @@ device_id: <b-device-id>
 token: <a-token-or-static-token>
 remote: true
 local_hw: false
-tls_insecure: true
+tls_pin_sha256: <server-spki-sha256>
+tls_insecure: false
 debug_logging: false
 disable_native_strongbox: false
 ```
 
 - `device_id` 必须与 B 的 `OMMEGA_RELAY_DEVICE_ID` 一致；`token` 使用 Server 上为该角色
   分配的 Token 或静态 Token。
-- `tls_insecure: true` 会跳过 A 的证书验证。部署可信证书后应按实际环境收紧；B 当前接受
-  自签证书，**仅凭 HTTPS 地址不能证明已认证 Server 身份**。
+- A 与 B 默认校验 Server 证书，校验失败时不会发送 Token。自签证书的 Server 用
+  `tls_pin_sha256`（B 为 `OMMEGA_RELAY_TLS_PIN_SHA256`）固定证书公钥：值为 Server 证书
+  SubjectPublicKeyInfo 的 SHA-256，十六进制或 base64，多个用逗号分隔。可在 Server 上用
+  `openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256`
+  得到。未设置时证书必须由公共 CA 签发且匹配主机名。`tls_insecure: true`
+  （B 为 `OMMEGA_RELAY_TLS_INSECURE=true`）完全跳过校验，网络攻击者可截获 Token，仅用于调试。
 - 在「应用」页按应用打开作用域，并按需选择接管模式（全局默认 / StrongBox / TEE）。
   目标范围是 `target.txt` 与 `injector.toml` 中 `scoop` 的并集；两者都未命中的应用继续
   使用系统原始 Keystore 路径。
@@ -373,8 +378,8 @@ CI 只忽略纯 `*.md` 修改，TXT 修改仍会触发构建；默认使用源�
   应用；可能引起兼容性、崩溃或启动异常，也不能证明设备已隐藏解锁或通过完整性校验。
   只在 A 确有 StrongBox 且希望应用按“未声明”处理时使用，并阅读
   [Mask 说明](StrongBoxCapabilityMask/README.md)。
-- **传输与凭据**：`tls_insecure: true` 跳过 A 的证书验证，B 接受无效证书；公网部署需
-  自行保护传输、Token 与 Server。不要把 HTTPS 地址当作已认证身份的证明。
+- **传输与凭据**：A/B 默认校验 Server 证书，自签证书需配置 SPKI 固定；显式开启
+  `tls_insecure` 会跳过校验并使 Token 暴露给网络攻击者。公网部署仍需自行保护 Token 与 Server。
 - **发布签名**：两个 APK 使用 Android 默认 debug 签名，CI 会缓存该调试身份；它不是正式
   发布签名，缓存失效可能导致签名身份变化，升级前务必核对证书。
 - **无担保**：本项目按现状提供，不保证适用性、安全性或任何检测结果。使用者自行承担

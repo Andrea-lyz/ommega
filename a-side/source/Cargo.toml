@@ -60,6 +60,8 @@ regex = "1.13.1"
 base64 = "0.23.0"
 quick-xml = { version = "0.41.0", features = ["serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+ring = "0.17"
 android_logger = "0.15.1"
 multi_log = "0.1.2"
 

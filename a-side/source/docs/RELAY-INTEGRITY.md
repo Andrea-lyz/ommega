@@ -88,7 +88,15 @@ remote latency sample selects the cost; no attestation fields or key policies
 are changed. This is a bounded software timing model, not hardware execution
 or a guarantee about application-level scheduling or remote RTT.
 
-A keeps pooled HTTP clients per TLS verification policy. At debug level,
+A verifies the relay server certificate before sending `X-Relay-Token`.
+`remote.tls_pin_sha256` accepts only a server whose certificate
+SubjectPublicKeyInfo SHA-256 is pinned, and the TLS handshake signature is
+checked against that key; without a pin the certificate must chain to the
+bundled Web PKI roots and match the host name. `remote.tls_insecure` disables
+verification only when set explicitly and no pin is configured. An invalid
+pin or an unreadable config fails the request instead of downgrading.
+
+A keeps one pooled HTTP client for the current TLS policy. At debug level,
 `event=relay_roundtrip` reports the endpoint, request ID, returned task ID,
 attempt count, monotonic `elapsed_us`, HTTP status and decode outcome. The
 timer includes transport, server/B waiting, retry backoff and JSON decoding;

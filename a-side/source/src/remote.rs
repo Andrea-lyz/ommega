@@ -20,19 +20,18 @@
 //! the relay_server API, mirroring the protocol used by the B-side relay agent
 //! (`ommegaclient-b`).
 //!
-//! The relay_server uses a self-signed certificate by default, so
-//! `tls_insecure` (default true) accepts any server certificate — matching the
-//! B-side client behaviour.
+//! The server certificate is always verified unless `tls_insecure` is set
+//! explicitly: `tls_pin_sha256` pins a self-signed relay certificate by its
+//! SubjectPublicKeyInfo SHA-256, otherwise the Web PKI roots are used (see
+//! `tls`).
 //!
-//! Two long-lived reqwest clients (insecure / verify) are kept in `OnceLock`s
-//! and selected per request based on the current `tls_insecure` config value.
-//! Each client has its own internal connection pool, so concurrent requests
-//! are not serialised through a single Mutex — fixing the previous single-
-//! connection pool bottleneck.  reqwest also natively supports chunked transfer
-//! encoding and HTTP keep-alive, both of which the hand-written client did not.
+//! One long-lived reqwest client is cached per TLS policy and rebuilt when the
+//! policy changes. reqwest pools connections internally, so concurrent
+//! requests are not serialised, and natively supports chunked transfer
+//! encoding and HTTP keep-alive.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -47,6 +46,7 @@ pub(crate) mod attestation_metrics;
 mod backend;
 mod health;
 mod spl;
+mod tls;
 pub use backend::RemoteRelayBackend;
 use health::{record_remote_failure, record_remote_ok};
 pub use health::{remote_health, RemoteHealth, REMOTE_HEALTH_PATH};
@@ -80,6 +80,7 @@ struct RemoteRoute {
     device_id: String,
     token: String,
     tls_insecure: bool,
+    tls_pin_sha256: String,
 }
 
 impl RemoteRoute {
@@ -89,6 +90,7 @@ impl RemoteRoute {
             device_id: config.device_id.clone(),
             token: config.token.clone(),
             tls_insecure: config.tls_insecure,
+            tls_pin_sha256: config.tls_pin_sha256.clone(),
         }
     }
 
@@ -257,38 +259,43 @@ fn remote_operation_error(error: anyhow::Error, operation: &str) -> kmr_common::
 
 // ── reqwest client management ──────────────────────────────────────────
 
-/// Returns a reqwest blocking client configured for the current `tls_insecure`
-/// setting.  Two clients (insecure / verify) are lazily initialised and cached
-/// in `OnceLock`s — each carries its own connection pool, so flipping
-/// `tls_insecure` at runtime just picks the other pool.
+/// Returns a reqwest blocking client for the current TLS policy. A config
+/// read failure or an invalid pin is an error, never a downgrade to an
+/// unverified connection.
 fn get_client() -> Result<Client> {
-    let insecure = config::config()
+    let policy = config::config()
         .read()
-        .map(|c| c.remote.tls_insecure)
-        .unwrap_or(true);
+        .map_err(|_| anyhow!("config lock poisoned while reading TLS policy"))
+        .and_then(|c| {
+            tls::TlsPolicy::from_settings(&c.remote.tls_pin_sha256, c.remote.tls_insecure)
+        })?;
 
-    if insecure {
-        static INSECURE_CLIENT: OnceLock<Client> = OnceLock::new();
-        Ok(INSECURE_CLIENT.get_or_init(|| build_client(true)).clone())
-    } else {
-        static VERIFY_CLIENT: OnceLock<Client> = OnceLock::new();
-        Ok(VERIFY_CLIENT.get_or_init(|| build_client(false)).clone())
+    static CLIENT: Mutex<Option<(tls::TlsPolicy, Client)>> = Mutex::new(None);
+    let mut slot = CLIENT
+        .lock()
+        .map_err(|_| anyhow!("HTTP client lock poisoned"))?;
+    if let Some((cached, client)) = slot.as_ref() {
+        if *cached == policy {
+            return Ok(client.clone());
+        }
     }
+    if policy == tls::TlsPolicy::Insecure {
+        log::warn!("remote relay TLS verification disabled by tls_insecure");
+    }
+    let client = build_client(&policy)?;
+    *slot = Some((policy, client.clone()));
+    Ok(client)
 }
 
-fn build_client(insecure: bool) -> Client {
-    let mut builder = Client::builder()
+fn build_client(policy: &tls::TlsPolicy) -> Result<Client> {
+    let builder = Client::builder()
         .connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS))
         .timeout(Duration::from_millis(READ_TIMEOUT_MS))
         .user_agent("ommegaclient-a/1.3");
-
-    if insecure {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-
-    builder
+    policy
+        .apply(builder)?
         .build()
-        .expect("failed to build reqwest blocking client")
+        .context("failed to build reqwest blocking client")
 }
 
 /// Minimal HTTP(S) request helper backed by reqwest.
@@ -1207,6 +1214,7 @@ mod tests {
             device_id: "test".into(),
             token: String::new(),
             tls_insecure: false,
+            tls_pin_sha256: String::new(),
         };
         *REMOTE_IDENTITY_PROFILE.write().unwrap() = Some(CachedIdentityProfile { route, profile });
         assert!(REMOTE_IDENTITY_PROFILE.read().unwrap().is_some());
