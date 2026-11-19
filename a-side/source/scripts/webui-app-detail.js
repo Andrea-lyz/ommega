@@ -436,15 +436,14 @@ async function ommegaDetailLoad(session, refreshScope = false) {
   } catch (error) { failed("om-detail-mode-status", error, 'input[name="om-app-mode"]'); }
   try {
     if (auth.status !== "fulfilled") throw auth.reason;
-    const mode = auth.value.config.apps[state.pkg] || auth.value.config.default;
+    const mode = auth.value.config.apps[state.pkg] || "inherit";
     const input = document.querySelector('#om-app-detail input[name="om-app-auth"][value="' + mode + '"]');
     if (!input) throw new Error("Invalid app authentication policy");
     input.checked = true;
     ommegaDetailControls('input[name="om-app-auth"]', false);
-    const inherited = !Object.hasOwn(auth.value.config.apps, state.pkg);
-    ommegaDetailMessage("om-detail-auth-status", inherited
-      ? ommegaDetailText("当前继承全局默认策略；选择后单独保存。", "Currently inheriting the global default; a choice saves an app override.")
-      : ommegaDetailText("仅对之后新建的密钥生效。", "Applies to newly created keys."));
+    ommegaDetailMessage("om-detail-auth-status", mode === "inherit"
+      ? ommegaDetailText("当前全局策略", "Current global policy") + ": " + ommegaAuthModeName(auth.value.config.default)
+      : "");
   } catch (error) { failed("om-detail-auth-status", error, 'input[name="om-app-auth"]'); }
   try {
     const box = document.getElementById("om-detail-local-timing");
@@ -603,7 +602,9 @@ async function ommegaDetailSaveAuth(input) {
   ommegaDetailControls('input[name="om-app-auth"]', true);
   try {
     const read = await ommegaAuthRead();
-    const apps = {...read.config.apps, [state.pkg]:input.value};
+    const apps = {...read.config.apps};
+    if (input.value === "inherit") delete apps[state.pkg];
+    else apps[state.pkg] = input.value;
     await ommegaAuthCommit(read.contents, {...read.config, apps});
     if (ommegaDetailCurrent(session)) ommegaDetailMessage("om-detail-auth-status", ommegaDetailText("已保存，对新建密钥生效。", "Saved for newly created keys."));
   } catch (error) {
@@ -611,7 +612,7 @@ async function ommegaDetailSaveAuth(input) {
       ommegaDetailMessage("om-detail-auth-status", ommegaDetailText("保存失败", "Save failed") + ": " + error.message, true);
       try {
         const read = await ommegaAuthRead();
-        const actual = read.config.apps[state.pkg] || read.config.default;
+        const actual = read.config.apps[state.pkg] || "inherit";
         if (ommegaDetailCurrent(session)) document.querySelector('#om-app-detail input[name="om-app-auth"][value="' + actual + '"]').checked = true;
       } catch (_) { readable = false; }
     }
@@ -790,10 +791,11 @@ function ommegaOpenAppDetail(card) {
       ommegaDetailRadio("om-app-mode", "strongbox", "StrongBox", ommegaDetailText("为此应用选择 StrongBox。", "Use StrongBox for this app.")) +
       ommegaDetailRadio("om-app-mode", "tee", "TEE", ommegaDetailText("为此应用选择 TEE。", "Use TEE for this app."))) +
       '<p class="om-detail-status" id="om-detail-mode-status" role="status"></p>') +
-    ommegaRelayOnly(ommegaDetailCard('lock', ommegaDetailText("认证签名策略", "Authentication signing"), ommegaDetailText("选择一项", "Choose one"),
-      (ommegaDetailRadio("om-app-auth", "auto", ommegaDetailText("自动", "Auto"), ommegaDetailText("已知认证检测探针保留认证要求，其余符合条件的请求使用支付兼容。", "Preserve known authentication probes; use payment compatibility for other eligible requests.")) +
-      ommegaDetailRadio("om-app-auth", "compatibility", ommegaDetailText("支付兼容", "Payment compatibility"), ommegaDetailText("在本机验证认证，由远端签名。", "Authenticate locally and sign remotely.")) +
-      ommegaDetailRadio("om-app-auth", "preserve", ommegaDetailText("保持认证要求", "Preserve authentication"), ommegaDetailText("远端保留认证要求。", "Keep the remote authentication requirement."))) +
+    ommegaRelayOnly(ommegaDetailCard('lock', ommegaDetailText("认证签名策略", "Authentication signing"), ommegaDetailText("仅影响符合条件的新建密钥。", "Only affects eligible new keys."),
+      (ommegaDetailRadio("om-app-auth", "inherit", ommegaDetailText("继承全局", "Use global default"), ommegaDetailText("跟随全局认证签名策略，默认自动。", "Follow the global signing policy, which defaults to Auto.")) +
+      ommegaDetailRadio("om-app-auth", "auto", ommegaDetailText("自动", "Auto"), ommegaDetailText("已知认证检测探针保留认证要求，其余符合条件的请求使用支付兼容。", "Preserve known authentication probes; use payment compatibility for other eligible requests.")) +
+      ommegaDetailRadio("om-app-auth", "compatibility", ommegaDetailText("支付兼容", "Payment compatibility"), ommegaDetailText("在 A 端验证认证并签名，使用本地 keybox 签发证书。", "Authenticate and sign on A; issue the certificate with its local keybox.")) +
+      ommegaDetailRadio("om-app-auth", "preserve", ommegaDetailText("保持认证要求", "Preserve authentication"), ommegaDetailText("在 B 端保留认证要求并签名。", "Keep the authentication requirements and sign on B."))) +
       '<p class="om-detail-status" id="om-detail-auth-status" role="status"></p>')) +
     ommegaDetailCard('shield', ommegaDetailText("SOTER 身份", "SOTER identity"), ommegaDetailText("选择一项", "Choose one"),
       '<div id="om-detail-soter-options"><p class="om-detail-status">' + ommegaDetailText("正在读取身份…", "Reading identities…") + '</p></div>' +

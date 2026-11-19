@@ -346,7 +346,7 @@ test("per-app scope switch cannot write when global scope is enabled", async () 
 test("detail loads explicit app modes without changing their stored values", async () => {
   const ctx = loadGlue({language:'zh-CN'});
   const modes = Object.fromEntries(['global_default','strongbox','tee'].map(value=>[value,{checked:false,disabled:true}]));
-  const auth = Object.fromEntries(['auto','compatibility','preserve'].map(value=>[value,{checked:false,disabled:true}]));
+  const auth = Object.fromEntries(['inherit','auto','compatibility','preserve'].map(value=>[value,{checked:false,disabled:true}]));
   const status = () => ({textContent:'',classList:{toggle() {}}});
   const elements = {'om-detail-mode-status':status(),'om-detail-auth-status':status(),'om-detail-cpu-status':status(),'om-detail-cpu':{},'om-detail-cpu-settings':{}};
   ctx.document.getElementById = id => elements[id] || null;
@@ -375,8 +375,8 @@ function detailRefreshFixture() {
     }});
     return group;
   };
-  const modes = radios(['global_default','strongbox','tee']), auth = radios(['auto','compatibility','preserve']);
-  modes.tee.checked = true; auth.auto.checked = true;
+  const modes = radios(['global_default','strongbox','tee']), auth = radios(['inherit','auto','compatibility','preserve']);
+  modes.tee.checked = true; auth.inherit.checked = true;
   const status = () => ({textContent:'', error:false, classList:{toggle(name, value) {this.owner.error=value;}}});
   const elements = Object.fromEntries(['mode','auth','cpu','scope'].map(group => [`om-detail-${group}-status`, status()]));
   Object.values(elements).forEach(element => {element.classList.owner=element;});
@@ -413,6 +413,42 @@ function detailRefreshFixture() {
   vm.runInContext('ommegaDetail = {pkg:"com.example.app",session:7,box:detailBoxFixture,card:detailCardFixture}; ommegaTargetSnapshot = detailTargetFixture; ommegaAppsBaseline = ommegaAppSettingsSnapshot(Qe); ommegaGlobalScopeKnown = true', ctx);
   return f;
 }
+
+test('global scope allows pinning either inherited signing mode and removing only that override', async () => {
+  const f = detailRefreshFixture(), {ctx} = f;
+  vm.runInContext('ommegaGlobalScopeEnabled = true', ctx);
+  f.authConfig.apps['com.example.other'] = 'auto';
+  for (const mode of ['compatibility', 'preserve']) {
+    f.authConfig.default = mode;
+    assert.equal(await ctx.ommegaDetailLoad(7), true);
+    assert.equal(f.auth.inherit.checked, true);
+    assert.equal(f.auth[mode].checked, false);
+    f.auth[mode].checked = true;
+    await ctx.ommegaDetailSaveAuth(f.auth[mode]);
+    assert.equal(f.authConfig.apps['com.example.app'], mode);
+    assert.equal(f.authConfig.default, mode);
+
+    f.authConfig.default = 'auto';
+    assert.equal(await ctx.ommegaDetailLoad(7), true);
+    assert.equal(f.auth[mode].checked, true);
+    f.auth.inherit.checked = true;
+    await ctx.ommegaDetailSaveAuth(f.auth.inherit);
+    assert.deepEqual(f.authConfig.apps, {'com.example.other': 'auto'});
+  }
+});
+
+test('probe setup only updates property view and leaves authentication policy alone', async () => {
+  const ctx = loadGlue();
+  const readPaths = [], writes = [];
+  ctx.ommegaDiagRead = async path => { readPaths.push(path); return ''; };
+  ctx.ommegaDiagWrite = async (path, contents) => { writes.push({path, contents}); };
+  await ctx.ommegaDiagConfigureProbePolicy();
+  assert.equal(readPaths.length, 1);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, readPaths[0]);
+  assert.match(writes[0].path, /cpu-mask[.]conf$/);
+  assert.match(writes[0].contents, /package=aprobes[.]agap/);
+});
 
 for (const kind of ['mode','auth','cpu']) test(`detail ${kind} read failures return false and recover without false-success feedback`, async () => {
   const f = detailRefreshFixture(), {ctx} = f;

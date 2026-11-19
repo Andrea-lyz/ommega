@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use der::Decode;
-use kmr_common::auth_signing::{self, Config};
+use kmr_common::auth_signing::{self, Config, Mode};
 use kmr_wire::keymint::KeyParam;
 use std::{fs, os::unix::fs::MetadataExt, sync::Mutex};
 
@@ -67,6 +67,7 @@ pub fn authorize_on_a(
     alias: Option<&str>,
     params: &[KeyParam],
     supplied_issuer: bool,
+    caller_packages: &[String],
 ) -> Result<bool> {
     if supplied_issuer
         || !auth_signing::eligible(params)
@@ -76,13 +77,26 @@ pub fn authorize_on_a(
     {
         return Ok(false);
     }
-    let config = load()?;
+    let mode = mode_for_caller(&load()?, params, caller_packages)?;
+    let decision = auth_signing::authorize_on_a(mode, alias, params);
+    log::info!("Auth-signing creation policy: mode={mode:?} authorize_on_a={decision}");
+    Ok(decision)
+}
+
+fn mode_for_caller(
+    config: &Config,
+    params: &[KeyParam],
+    caller_packages: &[String],
+) -> Result<Mode> {
+    if !caller_packages.is_empty() {
+        return Ok(config.mode_for_packages(caller_packages.iter().map(String::as_str)));
+    }
+
     let app_id = params.iter().find_map(|p| match p {
         KeyParam::AttestationApplicationId(value) => Some(value.as_slice()),
         _ => None,
     });
-    // AAID was added by Keystore for the authenticated caller, not by the app.
-    // Reusing it keeps global interception free of additional package queries.
+    // Keep the AAID fallback for calls without an injector package resolution.
     let aaid = app_id
         .map(AttestationApplicationId::from_der)
         .transpose()
@@ -99,8 +113,48 @@ pub fn authorize_on_a(
             "caller AAID missing for auth-signing app exceptions"
         ));
     }
-    let mode = config.mode_for_packages(packages);
-    let decision = auth_signing::authorize_on_a(mode, alias, params);
-    log::info!("Auth-signing creation policy: mode={mode:?} authorize_on_a={decision}");
-    Ok(decision)
+    Ok(config.mode_for_packages(packages))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plat::aaid::PackageInfoRecord;
+    use der::{
+        asn1::{OctetString, SetOfVec},
+        Encode,
+    };
+
+    #[test]
+    fn forwarded_packages_match_overrides_even_when_absent_from_aaid() {
+        let app = "com.example.app";
+        let mut config = Config::default();
+        for (encoded_package, caller_packages) in [
+            // A scoped system app is identified by the injector, not the synthetic AAID.
+            ("AndroidSystem", vec![app.to_owned()]),
+            // A regular shared UID can have more packages than its AAID can encode.
+            (
+                "com.example.sibling",
+                vec!["com.example.sibling".to_owned(), app.to_owned()],
+            ),
+        ] {
+            let aaid = AttestationApplicationId {
+                package_info_records: SetOfVec::from_iter([PackageInfoRecord {
+                    package_name: OctetString::new(encoded_package.as_bytes()).unwrap(),
+                    version: 1,
+                }])
+                .unwrap(),
+                signature_digests: SetOfVec::new(),
+            };
+            let params = [KeyParam::AttestationApplicationId(aaid.to_der().unwrap())];
+            for mode in [Mode::Compatibility, Mode::Preserve] {
+                config.apps.insert(app.to_owned(), mode);
+                assert_eq!(
+                    mode_for_caller(&config, &params, &caller_packages).unwrap(),
+                    mode
+                );
+                assert_eq!(mode_for_caller(&config, &params, &[]).unwrap(), Mode::Auto);
+            }
+        }
+    }
 }
