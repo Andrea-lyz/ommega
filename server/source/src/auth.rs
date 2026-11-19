@@ -85,6 +85,20 @@ const TOKEN_USE_KEY_SEP: char = '\u{1f}';
 /// Minimum spacing between `token_usage_log` writes for one token + IP pair.
 const TOKEN_USE_WRITE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Most keys a sliding-window limiter map may hold. Keys come from client
+/// input (IP, token, login username), so without a cap an anonymous caller
+/// could grow the map without limit.
+const RATE_LIMIT_MAX_KEYS: usize = 4096;
+
+/// Keys longer than this are stored as a hash so one entry stays small.
+const RATE_LIMIT_MAX_KEY_LEN: usize = 128;
+
+/// Only this many bytes of a login username feed the login limiter key.
+const LOGIN_USERNAME_MAX_LEN: usize = 256;
+
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+const LOGIN_MAX_ATTEMPTS: u64 = 5;
+
 /// Outcome of authenticating a request.
 ///
 /// `Invalid` is a verdict about the credential; `Unavailable` means the server
@@ -457,7 +471,7 @@ impl AuthState {
         key: &str,
     ) -> u64 {
         let map = crate::util::mu(bucket);
-        let Some(entries) = map.get(key) else {
+        let Some(entries) = map.get(bounded_key(key).as_ref()) else {
             return 1;
         };
         let now = Instant::now();
@@ -479,21 +493,21 @@ impl AuthState {
         self.allow_with_limit(&self.invalid_rate, key, self.invalid_rate_limit_requests)
     }
 
-    /// Sliding-window rate limit for admin login attempts, keyed by username+IP.
-    /// Returns true if the attempt is allowed. Limits to 5 attempts per minute
-    /// (independent of the general request rate limit).
-    pub fn allow_login_attempt(&self, key: &str) -> bool {
-        let now = Instant::now();
-        let window = Duration::from_secs(60);
+    /// Sliding-window rate limit for admin login attempts, keyed by client IP
+    /// plus a short hash of the (length-capped) username. Returns true if the
+    /// attempt is allowed. Limits to 5 attempts per minute (independent of the
+    /// general request rate limit).
+    pub fn allow_login_attempt(&self, ip: &str, username: &str) -> bool {
+        let name = &username.as_bytes()[..username.len().min(LOGIN_USERNAME_MAX_LEN)];
+        let key = format!("{ip}:{}", short_hash(name));
         let mut map = crate::util::mu(&self.login_rate);
-        let bucket = map.entry(key.to_string()).or_default();
-        bucket.retain(|t| now.duration_since(*t) < window);
-        if bucket.len() as u64 >= 5 {
-            false
-        } else {
-            bucket.push(now);
-            true
-        }
+        sliding_window_allow(
+            &mut map,
+            &key,
+            LOGIN_MAX_ATTEMPTS,
+            LOGIN_WINDOW,
+            Instant::now(),
+        )
     }
 
     fn allow_with_limit(
@@ -502,16 +516,73 @@ impl AuthState {
         key: &str,
         limit: u64,
     ) -> bool {
-        let now = Instant::now();
         let mut map = crate::util::mu(rate);
-        let bucket = map.entry(key.to_string()).or_default();
-        bucket.retain(|t| now.duration_since(*t) < self.rate_limit_window);
-        if bucket.len() as u64 >= limit {
-            false
-        } else {
-            bucket.push(now);
-            true
+        sliding_window_allow(&mut map, key, limit, self.rate_limit_window, Instant::now())
+    }
+}
+
+/// First 16 hex digits of SHA-256 over `data`.
+fn short_hash(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data)[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The map key for a limiter key: itself when short, a hash when long.
+fn bounded_key(key: &str) -> std::borrow::Cow<'_, str> {
+    if key.len() <= RATE_LIMIT_MAX_KEY_LEN {
+        std::borrow::Cow::Borrowed(key)
+    } else {
+        std::borrow::Cow::Owned(format!("#{}", short_hash(key.as_bytes())))
+    }
+}
+
+/// One sliding-window check against a bounded limiter map. Keys whose
+/// buckets empty out are removed, and the map never holds more than
+/// [`RATE_LIMIT_MAX_KEYS`] keys.
+fn sliding_window_allow(
+    map: &mut HashMap<String, Vec<Instant>>,
+    key: &str,
+    limit: u64,
+    window: Duration,
+    now: Instant,
+) -> bool {
+    let key = bounded_key(key);
+    if !map.contains_key(key.as_ref()) && map.len() >= RATE_LIMIT_MAX_KEYS {
+        evict_rate_keys(map, window, now);
+    }
+    let bucket = map.entry(key.into_owned()).or_default();
+    bucket.retain(|t| now.duration_since(*t) < window);
+    if bucket.len() as u64 >= limit {
+        if bucket.is_empty() {
+            map.retain(|_, b| !b.is_empty());
         }
+        false
+    } else {
+        bucket.push(now);
+        true
+    }
+}
+
+/// Make room in a full limiter map. Keys with no hit inside the window are
+/// dropped first; if the map is still full, the keys whose latest hit is
+/// oldest go until it is back to three quarters of the cap, so the next
+/// inserts do not each pay for a full scan.
+fn evict_rate_keys(map: &mut HashMap<String, Vec<Instant>>, window: Duration, now: Instant) {
+    map.retain(|_, b| b.iter().any(|t| now.duration_since(*t) < window));
+    let target = RATE_LIMIT_MAX_KEYS * 3 / 4;
+    if map.len() < RATE_LIMIT_MAX_KEYS {
+        return;
+    }
+    let mut by_age: Vec<(Instant, String)> = map
+        .iter()
+        .map(|(k, b)| (b.iter().copied().max().unwrap_or(now), k.clone()))
+        .collect();
+    by_age.sort_unstable_by_key(|(last, _)| *last);
+    for (_, k) in by_age.into_iter().take(map.len() - target) {
+        map.remove(&k);
     }
 }
 
@@ -719,5 +790,85 @@ mod tests {
         assert!(!extra.verify_admin("admin", ""));
         assert!(!extra.verify_admin("ops", ""));
         assert!(!extra.verify_admin("x", ""));
+    }
+
+    #[test]
+    fn the_login_limiter_stays_bounded_under_many_distinct_keys() {
+        let auth = AuthState::new("t".into(), 100, 60, true);
+        let long = "u".repeat(LOGIN_USERNAME_MAX_LEN);
+        for i in 0..100_000 {
+            assert!(auth.allow_login_attempt(
+                &format!("10.{}.{}.1", i / 256, i % 256),
+                &format!("{i}{long}")
+            ));
+        }
+        let map = crate::util::mu(&auth.login_rate);
+        assert!(
+            map.len() <= RATE_LIMIT_MAX_KEYS,
+            "map holds {} keys",
+            map.len()
+        );
+        assert!(
+            map.keys().all(|k| k.len() <= 64),
+            "keys must not carry the raw username"
+        );
+    }
+
+    #[test]
+    fn the_request_limiters_stay_bounded_under_many_distinct_keys() {
+        let auth = AuthState::new("t".into(), 100, 60, true)
+            .with_relay_rate_limit(10)
+            .with_poll_rate_limit(10);
+        let long = "k".repeat(RATE_LIMIT_MAX_KEY_LEN);
+        for i in 0..100_000 {
+            let key = format!("{i}{long}");
+            assert!(auth.allow(&key));
+            assert!(auth.allow_relay(&key));
+            assert!(auth.allow_poll(&key));
+            assert!(auth.allow_invalid(&key));
+        }
+        for m in [
+            &auth.rate,
+            &auth.relay_rate,
+            &auth.poll_rate,
+            &auth.invalid_rate,
+        ] {
+            let map = crate::util::mu(m);
+            assert!(
+                map.len() <= RATE_LIMIT_MAX_KEYS,
+                "map holds {} keys",
+                map.len()
+            );
+            assert!(map.keys().all(|k| k.len() <= RATE_LIMIT_MAX_KEY_LEN));
+        }
+    }
+
+    #[test]
+    fn the_login_limit_still_applies_per_ip_and_username() {
+        let auth = AuthState::new("t".into(), 100, 60, true);
+        for _ in 0..LOGIN_MAX_ATTEMPTS {
+            assert!(auth.allow_login_attempt("10.0.0.1", "admin"));
+        }
+        assert!(!auth.allow_login_attempt("10.0.0.1", "admin"));
+        assert!(auth.allow_login_attempt("10.0.0.2", "admin"));
+        assert!(auth.allow_login_attempt("10.0.0.1", "other"));
+    }
+
+    #[test]
+    fn a_throttled_long_key_still_reports_its_retry_after() {
+        let auth = AuthState::new("t".into(), 1, 60, true);
+        let key = "k".repeat(RATE_LIMIT_MAX_KEY_LEN * 4);
+        assert!(auth.allow(&key));
+        assert!(!auth.allow(&key));
+        assert!(auth.retry_after_secs(&key, false) > 1);
+    }
+
+    #[test]
+    fn a_zero_limit_does_not_leave_empty_buckets_behind() {
+        let auth = AuthState::new("t".into(), 100, 60, true).with_invalid_rate_limit(0);
+        for i in 0..1000 {
+            assert!(!auth.allow_invalid(&format!("10.0.{}.{}", i / 256, i % 256)));
+        }
+        assert!(crate::util::mu(&auth.invalid_rate).is_empty());
     }
 }
