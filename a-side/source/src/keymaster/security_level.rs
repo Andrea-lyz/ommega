@@ -143,6 +143,12 @@ static ZERO_BLOB_32: &[u8] = &[0; 32];
 
 impl KeystoreSecurityLevel {
     fn new(security_level: SecurityLevel, id_rotation_state: IdRotationState) -> Result<Self> {
+        if security_level == SecurityLevel::STRONGBOX
+            && !crate::plat::keymint_profile::strongbox_available()
+        {
+            return Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
+                .context(ks_err!("StrongBox KeyMint is unavailable"));
+        }
         let use_native_strongbox = security_level == SecurityLevel::STRONGBOX
             && crate::config::config()
                 .read()

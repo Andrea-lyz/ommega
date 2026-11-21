@@ -508,7 +508,11 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
     const SYSTEM_KEYMINT_STRONGBOX: &str =
         "android.hardware.security.keymint.IKeyMintDevice/strongbox";
 
-    let services = [SYSTEM_KEYMINT_DEFAULT, SYSTEM_KEYMINT_STRONGBOX];
+    let services: &[&str] = if crate::plat::keymint_profile::strongbox_feature_globally_hidden() {
+        &[SYSTEM_KEYMINT_DEFAULT]
+    } else {
+        &[SYSTEM_KEYMINT_DEFAULT, SYSTEM_KEYMINT_STRONGBOX]
+    };
     let key_params = verifier_key_params(auth_token)
         .context(ks_err!("failed to build system verifier key parameters"))?;
     let op_params = key_params_to_aidl(
@@ -521,7 +525,7 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
     let mut saw_rejection = false;
     let mut failures = Vec::new();
 
-    for service in services {
+    for &service in services {
         let keymint = match get_system_keymint(service) {
             Ok(keymint) => keymint,
             Err(error) => {

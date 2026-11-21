@@ -43,38 +43,97 @@ fn resolve_global_policy_packages(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrongboxRejectAction {
+    GloballyHidden,
+    GlobalDefaultDisabled,
+}
+
+impl StrongboxRejectAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::GloballyHidden => "strongbox_globally_hidden",
+            Self::GlobalDefaultDisabled => "strongbox_unavailable",
+        }
+    }
+}
+
+fn strongbox_unavailable_reply() -> PrecomputedServiceReply {
+    PrecomputedServiceReply::Error(Status::new_service_specific_error(
+        crate::android::hardware::security::keymint::ErrorCode::ErrorCode::HARDWARE_TYPE_UNAVAILABLE
+            .0,
+        None,
+    ))
+}
+
+#[cfg(test)]
 fn apply_target_security_policy(
     request: &mut ParsedServiceRequest,
     decision: &filter::FilterDecision,
     config: &config::InjectorConfig,
 ) -> Option<PrecomputedServiceReply> {
-    if !decision.allowed || !config.intercept.get_security_level {
-        return None;
-    }
+    apply_strongbox_and_target_security_policy(request, decision, config, || false)
+        .map(|(reply, _)| reply)
+}
+
+fn apply_strongbox_and_target_security_policy(
+    request: &mut ParsedServiceRequest,
+    decision: &filter::FilterDecision,
+    config: &config::InjectorConfig,
+    strongbox_globally_hidden: impl FnOnce() -> bool,
+) -> Option<(PrecomputedServiceReply, StrongboxRejectAction)> {
     let ParsedServiceRequest::GetSecurityLevel { security_level } = request else {
         return None;
     };
-    let mode = config.target_security_mode_for(&decision.packages)?;
     use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+    // When android.hardware.strongbox_keystore is globally hidden in the active
+    // boot, reject every explicit StrongBox request with HARDWARE_TYPE_UNAVAILABLE
+    // regardless of caller scope, disable_native_strongbox, or per-app overrides
+    // so keystore2 matches PackageManager across all apps.
+    if *security_level == SecurityLevel::STRONGBOX {
+        if strongbox_globally_hidden() {
+            return Some((
+                strongbox_unavailable_reply(),
+                StrongboxRejectAction::GloballyHidden,
+            ));
+        }
+        if !decision.allowed || !config.intercept.get_security_level {
+            return None;
+        }
+        let mode = config.target_security_mode_for(&decision.packages)?;
+        return match mode {
+            config::TargetSecurityMode::Strongbox => None,
+            config::TargetSecurityMode::Tee => {
+                *security_level = SecurityLevel::TRUSTED_ENVIRONMENT;
+                None
+            }
+            config::TargetSecurityMode::GlobalDefault if config.disable_native_strongbox => Some((
+                strongbox_unavailable_reply(),
+                StrongboxRejectAction::GlobalDefaultDisabled,
+            )),
+            config::TargetSecurityMode::GlobalDefault => None,
+        };
+    }
+
+    if !decision.allowed || !config.intercept.get_security_level {
+        return None;
+    }
+    let mode = config.target_security_mode_for(&decision.packages)?;
     match mode {
         config::TargetSecurityMode::Strongbox => {
+            if strongbox_globally_hidden() {
+                info!(
+                    "event=security_level_policy packages={:?} mode=Strongbox suppressed=strongbox_globally_hidden keeping={:?}",
+                    decision.packages, security_level
+                );
+                return None;
+            }
             *security_level = SecurityLevel::STRONGBOX;
             None
         }
         config::TargetSecurityMode::Tee => {
             *security_level = SecurityLevel::TRUSTED_ENVIRONMENT;
             None
-        }
-        config::TargetSecurityMode::GlobalDefault
-            if config.disable_native_strongbox
-                && *security_level == SecurityLevel::STRONGBOX =>
-        {
-            Some(
-            PrecomputedServiceReply::Error(Status::new_service_specific_error(
-                crate::android::hardware::security::keymint::ErrorCode::ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0,
-                None,
-            )),
-            )
         }
         config::TargetSecurityMode::GlobalDefault => None,
     }
@@ -414,9 +473,14 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             let _guard = BypassGuard::enter();
             ipc::resolve_packages_for_uid(caller.uid as u32)
         });
-        if let Some(reply) = apply_target_security_policy(&mut request, &decision, &cfg) {
+        if let Some((reply, action)) = apply_strongbox_and_target_security_policy(
+            &mut request,
+            &decision,
+            &cfg,
+            ipc::strongbox_feature_globally_hidden,
+        ) {
             info!(
-                "event=compat command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} action=strongbox_unavailable error_code={}",
+                "event=compat command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} action={} error_code={}",
                 command_name,
                 method,
                 original_code,
@@ -424,6 +488,8 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                 caller.pid,
                 caller.sid,
                 decision.packages,
+                decision.allowed,
+                action.as_str(),
                 crate::android::hardware::security::keymint::ErrorCode::ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0,
             );
             block_system_request(tr);
@@ -432,7 +498,11 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                     request,
                     caller,
                     packages: decision.packages,
-                    route: RouteTarget::Ommega,
+                    route: if decision.allowed {
+                        RouteTarget::Ommega
+                    } else {
+                        RouteTarget::System
+                    },
                 };
                 replace_top_pending(connection, PendingCall::PrecomputedService(pending, reply));
             }

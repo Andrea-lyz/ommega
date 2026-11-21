@@ -6,8 +6,12 @@ use std::time::{Duration, Instant};
 use std::{cmp, thread};
 
 use anyhow::{Context, Result};
+use kmr_common::capability_mask::{
+    mounted_strongbox_masked, pm_has_system_feature_offset, PmFeatureProbe, StrongboxFeatureCache,
+    PACKAGE_MANAGER_NATIVE_DESCRIPTOR, PACKAGE_MANAGER_NATIVE_SERVICE, STRONGBOX_FEATURE,
+};
 use kmr_common::rpc;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use rsbinder::rpc::RpcSession;
 use rsbinder::{
     hub, DeathRecipient, ExceptionCode, FromIBinder, SIBinder, Status, StatusCode, Strong, WIBinder,
@@ -410,6 +414,100 @@ where
         is_rpc_cache_invalidating_error,
         f,
     )
+}
+
+static STRONGBOX_FEATURE_CACHE: StrongboxFeatureCache = StrongboxFeatureCache::new();
+
+pub fn strongbox_feature_globally_hidden() -> bool {
+    STRONGBOX_FEATURE_CACHE
+        .is_globally_hidden_with(probe_strongbox_system_feature, mounted_strongbox_masked)
+}
+
+fn probe_strongbox_system_feature() -> PmFeatureProbe {
+    let _guard = crate::forward::BypassGuard::enter();
+    ensure_process_state();
+
+    let binder = match hub::try_get_service(PACKAGE_MANAGER_NATIVE_SERVICE) {
+        Ok(Some(binder)) => binder,
+        Ok(None)
+        | Err(StatusCode::DeadObject | StatusCode::FailedTransaction | StatusCode::NameNotFound) => {
+            return PmFeatureProbe::Unavailable;
+        }
+        Err(error) => {
+            warn!(
+                "failed to query {PACKAGE_MANAGER_NATIVE_SERVICE} for StrongBox feature: {error:?}"
+            );
+            return PmFeatureProbe::Failed;
+        }
+    };
+
+    let descriptor = binder.descriptor();
+    if descriptor != PACKAGE_MANAGER_NATIVE_DESCRIPTOR {
+        warn!("unexpected {PACKAGE_MANAGER_NATIVE_SERVICE} descriptor: {descriptor}");
+        return PmFeatureProbe::Failed;
+    }
+    let Some(proxy) = binder.as_proxy() else {
+        warn!("{PACKAGE_MANAGER_NATIVE_SERVICE} binder was unexpectedly local");
+        return PmFeatureProbe::Failed;
+    };
+    let mut data = match proxy.prepare_transact(true) {
+        Ok(data) => data,
+        Err(error) => {
+            warn!("failed to prepare PackageManager hasSystemFeature transaction: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    if let Err(error) = data
+        .write(STRONGBOX_FEATURE)
+        .and_then(|()| data.write(&0_i32))
+    {
+        warn!("failed to encode PackageManager hasSystemFeature arguments: {error:?}");
+        return PmFeatureProbe::Failed;
+    }
+
+    let code = rsbinder::FIRST_CALL_TRANSACTION
+        + pm_has_system_feature_offset(kmr_common::android_version::android_major_version());
+    let mut reply = match proxy.submit_transact(code, &data, rsbinder::FLAG_CLEAR_BUF) {
+        Ok(Some(reply)) => reply,
+        Ok(None) => {
+            warn!("PackageManager hasSystemFeature returned no reply");
+            return PmFeatureProbe::Failed;
+        }
+        Err(StatusCode::DeadObject | StatusCode::FailedTransaction) => {
+            return PmFeatureProbe::Unavailable;
+        }
+        Err(error) => {
+            warn!("PackageManager hasSystemFeature transact failed: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    reply.set_data_position(0);
+
+    let status: Status = match reply.read() {
+        Ok(status) => status,
+        Err(error) => {
+            warn!("failed to decode PackageManager hasSystemFeature status: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    if !status.is_ok() {
+        warn!("PackageManager hasSystemFeature returned non-ok status: {status}");
+        return PmFeatureProbe::Failed;
+    }
+    match reply.read::<bool>() {
+        Ok(declared) => {
+            if !declared {
+                info!(
+                    "event=capability_mask feature={STRONGBOX_FEATURE} declared=false; disabling StrongBox security level for all callers"
+                );
+            }
+            PmFeatureProbe::Resolved(declared)
+        }
+        Err(error) => {
+            warn!("failed to decode PackageManager hasSystemFeature result: {error:?}");
+            PmFeatureProbe::Failed
+        }
+    }
 }
 
 pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {

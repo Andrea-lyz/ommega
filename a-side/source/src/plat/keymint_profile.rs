@@ -1,9 +1,13 @@
 use std::{sync::OnceLock, thread, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
+use kmr_common::capability_mask::{
+    mounted_strongbox_masked, pm_has_system_feature_offset, PmFeatureProbe, StrongboxFeatureCache,
+    PACKAGE_MANAGER_NATIVE_DESCRIPTOR, PACKAGE_MANAGER_NATIVE_SERVICE, STRONGBOX_FEATURE,
+};
 use kmr_common::crypto::Sha256;
 use kmr_crypto_ommega::sha256::OmmegaSha256;
-use rsbinder::{hub, Strong};
+use rsbinder::{hub, ProcessState, Status, StatusCode, Strong};
 
 use super::resetprop;
 use crate::android::hardware::security::keymint::{
@@ -35,6 +39,104 @@ pub(crate) struct KeyMintHardwareProfile {
 pub(crate) fn strongbox_keymint_present() -> bool {
     static STRONGBOX_PRESENT: OnceLock<bool> = OnceLock::new();
     *STRONGBOX_PRESENT.get_or_init(detect_strongbox_keymint_present)
+}
+
+pub(crate) fn strongbox_feature_globally_hidden() -> bool {
+    static STRONGBOX_FEATURE_CACHE: StrongboxFeatureCache = StrongboxFeatureCache::new();
+    STRONGBOX_FEATURE_CACHE
+        .is_globally_hidden_with(probe_strongbox_system_feature, mounted_strongbox_masked)
+}
+
+pub(crate) fn strongbox_available() -> bool {
+    !strongbox_feature_globally_hidden() && strongbox_keymint_present()
+}
+
+fn probe_strongbox_system_feature() -> PmFeatureProbe {
+    if !ProcessState::is_initialized() {
+        return PmFeatureProbe::Unavailable;
+    }
+
+    let binder = match hub::try_get_service(PACKAGE_MANAGER_NATIVE_SERVICE) {
+        Ok(Some(binder)) => binder,
+        Ok(None)
+        | Err(StatusCode::DeadObject | StatusCode::FailedTransaction | StatusCode::NameNotFound) => {
+            return PmFeatureProbe::Unavailable;
+        }
+        Err(error) => {
+            log::warn!(
+                "failed to query {PACKAGE_MANAGER_NATIVE_SERVICE} for StrongBox feature: {error:?}"
+            );
+            return PmFeatureProbe::Failed;
+        }
+    };
+
+    let descriptor = binder.descriptor();
+    if descriptor != PACKAGE_MANAGER_NATIVE_DESCRIPTOR {
+        log::warn!("unexpected {PACKAGE_MANAGER_NATIVE_SERVICE} descriptor: {descriptor}");
+        return PmFeatureProbe::Failed;
+    }
+    let Some(proxy) = binder.as_proxy() else {
+        log::warn!("{PACKAGE_MANAGER_NATIVE_SERVICE} binder was unexpectedly local");
+        return PmFeatureProbe::Failed;
+    };
+    let mut data = match proxy.prepare_transact(true) {
+        Ok(data) => data,
+        Err(error) => {
+            log::warn!("failed to prepare PackageManager hasSystemFeature transaction: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    if let Err(error) = data
+        .write(STRONGBOX_FEATURE)
+        .and_then(|()| data.write(&0_i32))
+    {
+        log::warn!("failed to encode PackageManager hasSystemFeature arguments: {error:?}");
+        return PmFeatureProbe::Failed;
+    }
+
+    let code = rsbinder::FIRST_CALL_TRANSACTION
+        + pm_has_system_feature_offset(kmr_common::android_version::android_major_version());
+    let mut reply = match proxy.submit_transact(code, &data, rsbinder::FLAG_CLEAR_BUF) {
+        Ok(Some(reply)) => reply,
+        Ok(None) => {
+            log::warn!("PackageManager hasSystemFeature returned no reply");
+            return PmFeatureProbe::Failed;
+        }
+        Err(StatusCode::DeadObject | StatusCode::FailedTransaction) => {
+            return PmFeatureProbe::Unavailable;
+        }
+        Err(error) => {
+            log::warn!("PackageManager hasSystemFeature transact failed: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    reply.set_data_position(0);
+
+    let status: Status = match reply.read() {
+        Ok(status) => status,
+        Err(error) => {
+            log::warn!("failed to decode PackageManager hasSystemFeature status: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    if !status.is_ok() {
+        log::warn!("PackageManager hasSystemFeature returned non-ok status: {status}");
+        return PmFeatureProbe::Failed;
+    }
+    match reply.read::<bool>() {
+        Ok(declared) => {
+            if !declared {
+                log::info!(
+                    "event=capability_mask feature={STRONGBOX_FEATURE} declared=false; disabling StrongBox KeyMint"
+                );
+            }
+            PmFeatureProbe::Resolved(declared)
+        }
+        Err(error) => {
+            log::warn!("failed to decode PackageManager hasSystemFeature result: {error:?}");
+            PmFeatureProbe::Failed
+        }
+    }
 }
 
 pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMintHardwareProfile {

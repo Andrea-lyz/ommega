@@ -25,9 +25,17 @@ until the next normal boot. The dialog checks the visible XML and distinguishes
 the saved policy from the mounted policy; an absent mount is reported explicitly.
 
 No LSPosed or Zygisk component is used by this feature. Vendor hard-coded feature
-answers may bypass SystemConfig and need firmware-specific validation. The mask
-does not stop HAL services, change certificates, migrate keys or block explicit
-StrongBox requests.
+answers may bypass SystemConfig and need firmware-specific validation. The vendor
+StrongBox HAL process is kept running so Android's `keystore2` startup and
+`ISharedSecret` negotiation remain intact, while both `ommega-injector` (for all
+callers to `keystore2`, including apps outside Ommega's scope) and Ommega's
+KeyMint return `HARDWARE_TYPE_UNAVAILABLE` (`StrongBoxUnavailableException`) for
+`SecurityLevel::STRONGBOX` whenever `android.hardware.strongbox_keystore` is
+globally hidden in the active boot (whether by this mounted XML or by another
+global feature mask). While that global mask is active, `main.use_native_strongbox`
+and per-app StrongBox overrides are suppressed so StrongBox declaration and
+Keystore2 behavior remain consistent; ordinary TEE requests continue normally.
+The mask does not change certificates or migrate existing keys.
 
 To restore the device's own declarations, turn both switches off, save and restart
 A. Another enabled capability-mask module can still hide the same declarations;
