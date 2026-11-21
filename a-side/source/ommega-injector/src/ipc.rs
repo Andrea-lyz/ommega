@@ -6,8 +6,12 @@ use std::time::{Duration, Instant};
 use std::{cmp, thread};
 
 use anyhow::{Context, Result};
+use kmr_common::capability_mask::{
+    monotonic_ms, mounted_strongbox_masked, PmFeatureProbe, StrongboxFeatureCache,
+    STRONGBOX_FEATURE,
+};
 use kmr_common::rpc;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use rsbinder::rpc::RpcSession;
 use rsbinder::{
     hub, DeathRecipient, ExceptionCode, FromIBinder, SIBinder, Status, StatusCode, Strong, WIBinder,
@@ -410,6 +414,70 @@ where
         is_rpc_cache_invalidating_error,
         f,
     )
+}
+
+static STRONGBOX_FEATURE_CACHE: StrongboxFeatureCache = StrongboxFeatureCache::new();
+
+pub fn strongbox_feature_globally_hidden() -> bool {
+    STRONGBOX_FEATURE_CACHE.is_globally_hidden_with(
+        probe_strongbox_system_feature,
+        mounted_strongbox_masked,
+        monotonic_ms,
+    )
+}
+
+fn probe_strongbox_system_feature() -> PmFeatureProbe {
+    let _guard = crate::forward::BypassGuard::enter();
+    ensure_process_state();
+    let probe = kmr_common::capability_mask::probe_strongbox_system_feature();
+    if let PmFeatureProbe::Resolved(false) = probe {
+        info!(
+            "event=capability_mask feature={STRONGBOX_FEATURE} declared=false; disabling StrongBox security level for all callers"
+        );
+    }
+    probe
+}
+
+const KEYSTORE_SERVICE_NAME: &str = "android.system.keystore2.IKeystoreService/default";
+const BINDER_FLUSH_TRANSACTIONS: usize = 24;
+const BINDER_FLUSH_RESOLVE_ATTEMPTS: u32 = 50;
+const BINDER_FLUSH_RESOLVE_DELAY: Duration = Duration::from_millis(100);
+
+/// Binder looper threads that were already parked inside
+/// `ioctl(BINDER_WRITE_READ)` when the ioctl hook was committed complete that
+/// parked ioctl un-intercepted: the driver delivers their next transaction
+/// straight to libbinder, so the first request each such thread receives
+/// bypasses request rewriting and reply observation entirely. Wake every
+/// parked looper once with concurrent no-op pings so each re-parks through the
+/// hooked ioctl before real caller traffic arrives.
+pub fn flush_parked_binder_threads() {
+    ensure_process_state();
+    let mut service = hub::check_service(KEYSTORE_SERVICE_NAME);
+    for _ in 0..BINDER_FLUSH_RESOLVE_ATTEMPTS {
+        if service.is_some() {
+            break;
+        }
+        thread::sleep(BINDER_FLUSH_RESOLVE_DELAY);
+        service = hub::check_service(KEYSTORE_SERVICE_NAME);
+    }
+    let Some(service) = service else {
+        warn!(
+            "event=binder_flush {KEYSTORE_SERVICE_NAME} not registered; parked binder threads stay un-intercepted until their first request"
+        );
+        return;
+    };
+    let mut workers = Vec::with_capacity(BINDER_FLUSH_TRANSACTIONS);
+    for _ in 0..BINDER_FLUSH_TRANSACTIONS {
+        let service = service.clone();
+        workers.push(thread::spawn(move || service.ping_binder().is_ok()));
+    }
+    let mut completed = 0usize;
+    for worker in workers {
+        if worker.join().unwrap_or(false) {
+            completed += 1;
+        }
+    }
+    info!("event=binder_flush ping transactions completed={completed}/{BINDER_FLUSH_TRANSACTIONS}");
 }
 
 pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {

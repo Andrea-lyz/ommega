@@ -1,9 +1,7 @@
 //! Fixed-path WebUI policy writer and early-boot XML preparation. No HAL calls.
-#[path = "../capability_mask.rs"]
-mod capability_mask;
 
 use anyhow::{anyhow, Context, Result};
-use capability_mask::{Config, CONFIG_PATH, MAX_CONFIG, XML_PATH};
+use kmr_common::capability_mask::{Config, CONFIG_PATH, MAX_CONFIG, XML_PATH};
 use kmr_common::runtime::fs::{
     atomic_compare_replace_preserving_metadata, atomic_replace_preserving_metadata,
 };

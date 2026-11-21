@@ -186,7 +186,7 @@ remote 与 local_hw 独立；角色 Token 使用 A 角色。
 为勾选的包分配正数 key id；默认空，即保持原厂随机 64 位 id）。
 WebUI 长按已选应用：
   全局默认：遵循全局与能力。
-  StrongBox：显式选择，覆盖全局禁用。
+  StrongBox：显式选择，覆盖全局禁用；StrongBox 功能声明被全局隐藏时对所有调用者不可用。
   TEE：将安全级别请求改为 TEE，包括显式 StrongBox。
 未选择的应用仍走系统路径。旧 strongbox_unavailable_packages 仅在新策略文件不存在时迁移。
 
@@ -235,7 +235,9 @@ Android 16 的进程功能缓存说明见 README 中 AOSP 源码链接。
 禁止将该重启步骤应用到禁止硬重启的 B。
 
 模块不改系统 XML，不停止 StrongBox HAL，不删除/迁移已有密钥，不改变真实
-Bootloader 证明状态，也不阻止直接 StrongBox 请求。HAL running 与 Mask 生效不矛盾。
+Bootloader 证明状态；配合 Ommega A 模块使用时，声明隐藏期间 StrongBox 对所有
+调用者不可用（getSecurityLevel 返回 -68，已有 StrongBox 密钥 getKeyEntry 返回
+SYSTEM_ERROR）。HAL running 与 Mask 生效不矛盾。
 原生硬件证明仍可能暴露解锁状态，TEE 证明也有相应字段；feature=false 不代表已隐藏。
 
 后果：应用可能降级、拒绝运行、丢失 StrongBox 相关功能或改变分发行为，

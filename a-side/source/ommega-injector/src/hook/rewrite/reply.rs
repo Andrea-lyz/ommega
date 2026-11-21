@@ -265,6 +265,38 @@ pub(super) unsafe fn observe_system_service_reply(
     tr: &binder_transaction_data,
     pending: &PendingServiceCall,
 ) -> anyhow::Result<Option<OutboundReply>> {
+    observe_system_service_reply_with_probe(tr, pending, ipc::strongbox_feature_globally_hidden)
+}
+
+/// With `android.hardware.strongbox_keystore` globally hidden, a System
+/// getKeyEntry reply naming a StrongBox key is replaced with a service-specific
+/// SYSTEM_ERROR — the same status keystore2 returns when the key's KeyMint
+/// instance is missing (`get_i_sec_level_by_uuid` -> Error::sys). The Package
+/// Manager probe runs only for replies that are actually StrongBox; other
+/// replies never trigger it.
+fn masked_strongbox_system_key_entry_reply(
+    metadata: &crate::android::system::keystore2::KeyMetadata::KeyMetadata,
+    pending: &PendingServiceCall,
+    strongbox_globally_hidden: impl FnOnce() -> bool,
+) -> Option<OutboundReply> {
+    if metadata.r#keySecurityLevel
+        != crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel::STRONGBOX
+        || !strongbox_globally_hidden()
+    {
+        return None;
+    }
+    info!(
+        "event=security_level_policy uid={} pid={} packages={:?} system getKeyEntry resolved StrongBox while feature globally hidden; returning SYSTEM_ERROR",
+        pending.caller.uid, pending.caller.pid, pending.packages
+    );
+    Some(synthetic_fallback_reply())
+}
+
+unsafe fn observe_system_service_reply_with_probe(
+    tr: &binder_transaction_data,
+    pending: &PendingServiceCall,
+    strongbox_globally_hidden: impl FnOnce() -> bool,
+) -> anyhow::Result<Option<OutboundReply>> {
     let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     match &pending.request {
         ParsedServiceRequest::GetSecurityLevel { security_level } => {
@@ -310,6 +342,17 @@ pub(super) unsafe fn observe_system_service_reply(
                         );
                     }
                 };
+            if let Some(reply) = masked_strongbox_system_key_entry_reply(
+                &metadata,
+                pending,
+                strongbox_globally_hidden,
+            ) {
+                // Replacing the whole reply follows the same pattern as
+                // malformed_system_success_reply: install_outbound_reply swaps
+                // the buffer, and the dropped reply's binder objects are
+                // released with its transaction buffer.
+                return Ok(Some(reply));
+            }
             finalize_system_success!(
                 register_security_level_carrier(
                     &carrier,

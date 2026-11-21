@@ -522,13 +522,8 @@ fn execute_has_system_feature(feature: &str) -> Result<bool> {
 }
 
 fn has_system_feature_transaction(android_major: Option<i32>) -> rsbinder::TransactionCode {
-    let offset = match android_major {
-        Some(..=13) => 12,
-        Some(14) => 9,
-        Some(15 | 16) | None => 10,
-        Some(17..) => 13,
-    };
-    rsbinder::FIRST_CALL_TRANSACTION + offset
+    rsbinder::FIRST_CALL_TRANSACTION
+        + kmr_common::capability_mask::pm_has_system_feature_offset(android_major)
 }
 
 fn telephony_transactions() -> TelephonyTransactions {

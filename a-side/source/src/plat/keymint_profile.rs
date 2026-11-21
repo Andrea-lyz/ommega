@@ -1,9 +1,13 @@
 use std::{sync::OnceLock, thread, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
+use kmr_common::capability_mask::{
+    monotonic_ms, mounted_strongbox_masked, PmFeatureProbe, StrongboxFeatureCache,
+    STRONGBOX_FEATURE,
+};
 use kmr_common::crypto::Sha256;
 use kmr_crypto_ommega::sha256::OmmegaSha256;
-use rsbinder::{hub, Strong};
+use rsbinder::{hub, ProcessState, Strong};
 
 use super::resetprop;
 use crate::android::hardware::security::keymint::{
@@ -35,6 +39,32 @@ pub(crate) struct KeyMintHardwareProfile {
 pub(crate) fn strongbox_keymint_present() -> bool {
     static STRONGBOX_PRESENT: OnceLock<bool> = OnceLock::new();
     *STRONGBOX_PRESENT.get_or_init(detect_strongbox_keymint_present)
+}
+
+pub(crate) fn strongbox_feature_globally_hidden() -> bool {
+    static STRONGBOX_FEATURE_CACHE: StrongboxFeatureCache = StrongboxFeatureCache::new();
+    STRONGBOX_FEATURE_CACHE.is_globally_hidden_with(
+        probe_strongbox_system_feature,
+        mounted_strongbox_masked,
+        monotonic_ms,
+    )
+}
+
+pub(crate) fn strongbox_available() -> bool {
+    !strongbox_feature_globally_hidden() && strongbox_keymint_present()
+}
+
+fn probe_strongbox_system_feature() -> PmFeatureProbe {
+    if !ProcessState::is_initialized() {
+        return PmFeatureProbe::Unavailable;
+    }
+    let probe = kmr_common::capability_mask::probe_strongbox_system_feature();
+    if probe == PmFeatureProbe::Resolved(false) {
+        log::info!(
+            "event=capability_mask feature={STRONGBOX_FEATURE} declared=false; disabling StrongBox KeyMint"
+        );
+    }
+    probe
 }
 
 pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMintHardwareProfile {

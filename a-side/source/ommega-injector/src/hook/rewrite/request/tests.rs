@@ -139,6 +139,122 @@ fn target_security_policy_supports_explicit_modes_and_stays_narrow() {
 }
 
 #[test]
+fn globally_hidden_strongbox_blocks_all_callers_regardless_of_scope_or_mode() {
+    let callers = [
+        filter::FilterDecision {
+            allowed: false,
+            reason: filter::FilterReason::RejectedNotInScope,
+            packages: vec!["com.unscoped.detector".to_string()],
+        },
+        filter::FilterDecision {
+            allowed: false,
+            reason: filter::FilterReason::RejectedByDenylist,
+            packages: vec!["com.denied.app".to_string()],
+        },
+        filter::FilterDecision {
+            allowed: false,
+            reason: filter::FilterReason::RejectedNonApplicationUid,
+            packages: Vec::new(),
+        },
+        allowed_decision(&["net.one97.paytm"]),
+    ];
+
+    for mut config in [
+        policy_config("net.one97.paytm", config::TargetSecurityMode::GlobalDefault),
+        policy_config("net.one97.paytm", config::TargetSecurityMode::Strongbox),
+        policy_config("net.one97.paytm", config::TargetSecurityMode::Tee),
+    ] {
+        config.disable_native_strongbox = false;
+        for decision in &callers {
+            let mut request = strongbox_request();
+            let Some((PrecomputedServiceReply::Error(status), action)) =
+                apply_strongbox_and_target_security_policy(&mut request, decision, &config, || {
+                    true
+                })
+            else {
+                panic!(
+                    "globally hidden StrongBox must reject {:?}",
+                    decision.reason
+                );
+            };
+            assert_eq!(action, StrongboxRejectAction::GloballyHidden);
+            assert_eq!(
+                status.exception_code(),
+                rsbinder::ExceptionCode::ServiceSpecific
+            );
+            assert_eq!(
+                status.service_specific_error(),
+                ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0
+            );
+        }
+
+        // Also blocks even when get_security_level interception is disabled.
+        config.intercept.get_security_level = false;
+        let mut request = strongbox_request();
+        let Some((PrecomputedServiceReply::Error(status), action)) =
+            apply_strongbox_and_target_security_policy(&mut request, &callers[0], &config, || true)
+        else {
+            panic!("globally hidden StrongBox must reject even with intercept.get_security_level=false");
+        };
+        assert_eq!(action, StrongboxRejectAction::GloballyHidden);
+        assert_eq!(
+            status.service_specific_error(),
+            ErrorCode::HARDWARE_TYPE_UNAVAILABLE.0
+        );
+    }
+}
+
+#[test]
+fn globally_hidden_strongbox_suppresses_strongbox_promotion_and_skips_plain_tee_probe() {
+    let config = policy_config("com.example.sb", config::TargetSecurityMode::Strongbox);
+    let decision = allowed_decision(&["com.example.sb"]);
+    let mut tee_request = ParsedServiceRequest::GetSecurityLevel {
+        security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+    };
+    assert!(apply_strongbox_and_target_security_policy(
+        &mut tee_request,
+        &decision,
+        &config,
+        || true
+    )
+    .is_none());
+    assert!(matches!(
+        tee_request,
+        ParsedServiceRequest::GetSecurityLevel {
+            security_level: SecurityLevel::TRUSTED_ENVIRONMENT
+        }
+    ));
+
+    // Normal TEE requests without a StrongBox override must not probe PackageManager.
+    let default_config =
+        policy_config("com.example.app", config::TargetSecurityMode::GlobalDefault);
+    let default_decision = allowed_decision(&["com.example.app"]);
+    let mut plain_tee = ParsedServiceRequest::GetSecurityLevel {
+        security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+    };
+    assert!(apply_strongbox_and_target_security_policy(
+        &mut plain_tee,
+        &default_decision,
+        &default_config,
+        || panic!("plain TEE request must not probe StrongBox capability mask"),
+    )
+    .is_none());
+
+    let unscoped = filter::FilterDecision {
+        allowed: false,
+        reason: filter::FilterReason::RejectedNotInScope,
+        packages: vec!["com.unscoped.app".to_string()],
+    };
+    assert!(apply_strongbox_and_target_security_policy(
+        &mut plain_tee,
+        &unscoped,
+        &default_config,
+        || panic!("unscoped TEE request must not probe StrongBox capability mask"),
+    )
+    .is_none());
+}
+
+#[test]
 fn tee_wins_for_conflicting_shared_uid_modes() {
     let mut config = policy_config("com.example.strong", config::TargetSecurityMode::Strongbox);
     config.target_packages.push("com.example.tee".to_string());

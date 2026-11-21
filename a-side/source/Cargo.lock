@@ -1825,6 +1825,7 @@ dependencies = [
  "pkcs8 0.11.0",
  "quick-xml 0.41.0",
  "rand 0.10.2",
+ "rsbinder",
  "rsproperties 0.6.0",
  "sec1 0.8.1",
  "serde",

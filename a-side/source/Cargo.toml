@@ -28,7 +28,7 @@ path = "src/bin/rkp.rs"
 [dependencies]
 ommega-rkp-engine = { path = "rkp-engine" }
 soter-ta = { path = "soter-ta" }
-kmr-common = { path = "common" }
+kmr-common = { path = "common", features = ["binder"] }
 kmr-crypto-ommega = { path = "crypto" }
 kmr-ta = { path = "ta" }
 kmr-wire = { path = "wire" }

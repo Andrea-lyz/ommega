@@ -27,9 +27,13 @@ rand = "0.10.2"
 quick-xml = { version = "0.41.0", features = ["serialize"] }
 rsproperties = { version = "0.6.0", features = ["builder"] }
 sec1 = { version = "0.8.1", features = ["alloc", "der"] }
+rsbinder = { version = "0.10.0", features = ["android_12_plus", "rpc"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 spki = { version = "0.8.0"}
 zeroize = { version = "1.9.0", features = ["alloc", "zeroize_derive"] }
+
+[features]
+binder = ["dep:rsbinder"]
 
 [dev-dependencies]
 hex = "0.4.3"

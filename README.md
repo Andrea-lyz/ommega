@@ -282,7 +282,8 @@ A/B WebUI 只提供简体中文与 English，可跟随系统语言，并切换�
   StrongBox HAL，证明密钥通过 `IRemotelyProvisionedComponent/strongbox` 获取；实际返回
   的安全级别会被校验。修改该后端只需重启 Ommega keymint，不重启整台设备。
 - **每应用安全级别**：`全局默认`遵循设备能力与“禁用原生 StrongBox”总开关；
-  `StrongBox` 覆盖全局禁用；`TEE` 把该应用的请求改写为 TEE。策略保存在
+  `StrongBox` 覆盖全局禁用，但 StrongBox 功能声明被全局隐藏时对所有调用者
+  不可用；`TEE` 把该应用的请求改写为 TEE。策略保存在
   `target-security.toml`，注入器实时读取。
 - **冷启动与生物认证**：Binder hook 先于远程 RPC 安装；`ommega-rpc-warmup` 后台初始化
   RPC；`OnDeviceUnlocked`、auth token 和用户维护事件进入内存 mirror 队列，RPC 恢复后

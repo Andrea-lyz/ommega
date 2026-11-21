@@ -4079,6 +4079,18 @@ mod tests {
     }
 
     #[test]
+    fn uuid_with_unknown_security_level_maps_to_none() {
+        // GC's invalidate closure turns this into an error instead of a
+        // panic; a uuid whose level word is not a known SecurityLevel is
+        // treated as not keybox-bound.
+        let mut bytes = [0u8; 16];
+        bytes[KEYBOX_UUID_DIGEST_BYTES..].copy_from_slice(&99u32.to_be_bytes());
+        let uuid = Uuid(bytes);
+        assert_eq!(uuid.to_security_level(), None);
+        assert!(!uuid.is_keybox_bound());
+    }
+
+    #[test]
     fn retire_stale_keybox_bound_entries_only_retires_stale_attest_keys() {
         let current_digest = [0x11; 32];
         let stale_digest = [0x22; 32];
