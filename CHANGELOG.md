@@ -10,6 +10,19 @@
 README 不再内嵌逐版本更新要点：发版时只更新版本号，并在这里追加条目。发布步骤见
 [RELEASING.md](RELEASING.md)。
 
+## 2.4.5 — 2026-11-21
+
+本版涉及 A、B 和 Server；B-app 与 StrongBoxCapabilityMask 仅同步产品版本号。随包 AProbe 更新到 1.9.4-review。
+
+- **StrongBox 功能声明隐藏后，所有应用都看不到 StrongBox（[#110](https://github.com/Andrea-lyz/ommega/pull/110)）。** 当 `android.hardware.strongbox_keystore` 被全局隐藏（A 的「屏蔽 StrongBox」开关或其他全局屏蔽模块）时，keystore2 对所有调用者——包括不在作用域内的应用——的 StrongBox 请求都返回 `HARDWARE_TYPE_UNAVAILABLE`（`StrongBoxUnavailableException`），与 PackageManager 的声明一致；单应用「StrongBox」模式和 `use_native_strongbox` 在屏蔽期间不生效。屏蔽期间已有的 StrongBox 密钥不可用（读取返回 `SYSTEM_ERROR`），关闭屏蔽并重启后恢复。系统 StrongBox HAL 进程保持运行。普通 TEE 请求不受影响。
+- **删除中继密钥时同步删除 B / Server 上的会话（[#109](https://github.com/Andrea-lyz/ommega/pull/109)）。** App 删除密钥、清除数据或卸载后，A 在最后一个引用该别名的密钥块被回收时排队删除，后台调用 Server 新增的 `/api/delete/`；physical 模式由 B 删除会话文件（不调用 TEE），server_keybox 模式删除 Server 上的会话。失败按 1 分钟起、最长 6 小时重试，30 天后放弃。本版之前创建、之后从未使用过的远端密钥不会被登记，删除后仍会留在 B 上。
+- **KeyMint 行为对齐（[#108](https://github.com/Andrea-lyz/ommega/pull/108)）。** 建钥接受并执行 `MIN_SECONDS_BETWEEN_OPS`（原来返回 `INVALID_ARGUMENT`），窗口内再次使用返回 `KEY_RATE_LIMIT_EXCEEDED`；`earlyBootEnded` 在 boot-level 缓存初始化失败时仍会通知 KeyMint。
+- **其他修复。** 屏蔽开启后删除旧 StrongBox 密钥不再导致 keymint 进程中止；注入后首个请求不再可能绕过拦截；`getHardwareInfo` 出错返回错误码而不是崩溃；删除无用的旧权限函数。
+
+升级：A 请整包更新，使 KeyMint 与注入器同版生效。中继密钥删除需要 A、B、Server 都更新到 2.4.5；只更新 A 时删除请求会持续重试，不影响其他功能。使用「屏蔽 StrongBox」的设备在更新后，所有应用的 StrongBox 请求都会失败，依赖 StrongBox 的应用可能需要重新建钥或退回 TEE。
+
+验证：三个 PR 均通过 A/B Android 目标的 fmt、clippy 与测试编译，Server 单元测试和 WebUI 测试；A 端相关测试二进制在 A 设备上执行通过，release 版热更新到 A 后实测 `MIN_SECONDS_BETWEEN_OPS` 限流、StrongBox 屏蔽（作用域内外均返回 -68）和中继密钥登记与排队。B 与 Server 的删除接口只有单元测试，未在线上部署验证；屏蔽期间读取旧 StrongBox 密钥返回 `SYSTEM_ERROR` 只有单元测试覆盖。
+
 ## 2.4.4 — 2026-11-19
 
 本版涉及 A、B、Server 和 B-app，均为安全加固与稳定性修复；StrongBoxCapabilityMask 仅同步产品版本号，随包 AProbe 未更新。

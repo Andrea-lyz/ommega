@@ -1,3 +1,11 @@
+Ommega 2.4.5
+
+- 「屏蔽 StrongBox」开启时，所有应用（含作用域外）的 StrongBox 请求都返回不可用，与系统声明一致；屏蔽期间旧 StrongBox 密钥不可用。
+- 删除中继密钥时同步删除 B / Server 上的会话（需 A、B、Server 都更新到 2.4.5）。
+- 支持 MIN_SECONDS_BETWEEN_OPS 限流；earlyBootEnded 不再因缓存初始化失败而跳过通知。
+- 修复屏蔽期间删除 StrongBox 密钥导致 keymint 中止等问题；随包 AProbe 更新到 1.9.4。
+- A 请整包更新。
+
 Ommega 2.4.4
 
 - 中继 TLS 默认校验证书，A、B 两端支持公钥固定；自签名 Server 需在两端配置固定值（或明确开启不校验）。

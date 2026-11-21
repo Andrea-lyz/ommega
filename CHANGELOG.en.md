@@ -12,6 +12,19 @@ running Server and does not install the optional APKs.
 The README no longer embeds per-version notes: a release only bumps the version
 and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
 
+## 2.4.5 — 2026-11-21
+
+This release changes A, B and Server. B-app and StrongBoxCapabilityMask only receive the synchronized product version. The bundled AProbe is updated to 1.9.4-review.
+
+- **A hidden StrongBox declaration now hides StrongBox from every app ([#110](https://github.com/Andrea-lyz/ommega/pull/110)).** While `android.hardware.strongbox_keystore` is globally hidden (A's "Mask StrongBox" switch or another global mask module), keystore2 rejects StrongBox requests from every caller, including apps outside the scope, with `HARDWARE_TYPE_UNAVAILABLE` (`StrongBoxUnavailableException`), matching PackageManager. Per-app "StrongBox" mode and `use_native_strongbox` do not apply while the mask is active. Existing StrongBox keys are unusable while masked (reading them returns `SYSTEM_ERROR`) and become usable again after the mask is turned off and the device restarts. The system StrongBox HAL keeps running, and ordinary TEE requests are unaffected.
+- **Deleting a relayed key also deletes its session on B / Server ([#109](https://github.com/Andrea-lyz/ommega/pull/109)).** When an app deletes a key, clears its data or is uninstalled, A queues a deletion once the last keyblob referencing that alias is collected and calls the Server's new `/api/delete/` in the background. In physical mode B removes the session file (no TEE call); in server_keybox mode the Server removes its session. Failures retry from 1 minute up to every 6 hours and are dropped after 30 days. Remote keys created before this release and never used afterwards are not registered and stay on B after deletion.
+- **KeyMint behavior alignment ([#108](https://github.com/Andrea-lyz/ommega/pull/108)).** Key generation accepts and enforces `MIN_SECONDS_BETWEEN_OPS` (it used to return `INVALID_ARGUMENT`); a second use inside the window returns `KEY_RATE_LIMIT_EXCEEDED`. `earlyBootEnded` still notifies KeyMint when the boot-level cache setup fails.
+- **Other fixes.** Deleting an old StrongBox key while the mask is active no longer aborts keymint; the first request after injection can no longer bypass interception; `getHardwareInfo` returns an error code instead of crashing; unused legacy permission helpers are removed.
+
+Upgrade: update A as a complete module so KeyMint and the injector stay in sync. Relayed-key deletion needs A, B and Server on 2.4.5; with only A updated, deletions keep retrying without affecting anything else. On devices using "Mask StrongBox", StrongBox requests fail for every app after the update, so apps relying on StrongBox may need to recreate keys or fall back to TEE.
+
+Validation: all three PRs passed fmt, clippy and test compilation for the A/B Android targets, Server unit tests and the WebUI tests. The relevant A test binaries ran on an A device, and a release hot update on A confirmed `MIN_SECONDS_BETWEEN_OPS` rate limiting, the StrongBox mask (-68 inside and outside the scope) and relayed-key registration and queuing. The B and Server deletion endpoints have unit tests only and were not deployed to production; `SYSTEM_ERROR` for old StrongBox keys while masked is covered by unit tests only.
+
 ## 2.4.4 — 2026-11-19
 
 This release changes A, B, Server and B-app with security hardening and stability fixes. StrongBoxCapabilityMask only receives the synchronized product version, and the bundled AProbe is unchanged.
