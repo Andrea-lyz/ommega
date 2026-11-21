@@ -368,6 +368,10 @@ fn run() -> Result<()> {
     // Before the uid drop: the child needs to write the keybox slots.
     crate::rkp_auto::spawn();
 
+    // Open the remote blob-reference registry and start the asynchronous
+    // remote session deletion worker.
+    crate::remote::deletion::spawn();
+
     info!("setting uid/gid={} role=keystore", KEYSTORE_UID);
     set_keystore_identity()?;
 

@@ -336,6 +336,13 @@ pub trait RemoteBackend: Send + Sync {
     fn fallback_local(&self) -> bool {
         true
     }
+
+    /// Records that the serialized keyblob with SHA-256 `blob_digest` references remote `alias`.
+    /// Local only; must never block on the network. Errors are logged by the implementation.
+    fn register_remote_blob(&self, _alias: &str, _blob_digest: &[u8; 32]) {}
+    /// Releases one keyblob reference. When no registered keyblob references the alias any more,
+    /// the implementation schedules an asynchronous remote deletion. Local only; never blocks on the network.
+    fn release_remote_blob(&self, _blob_digest: &[u8; 32]) {}
 }
 
 /// Retrieval of attestation certificate signing information.  The caller is expected to drop key

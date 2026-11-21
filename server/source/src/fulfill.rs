@@ -47,6 +47,7 @@ const SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// every previously stored attestation key and forced a manual app reset. With
 /// alias-keying, a sign request for a known alias always resolves to the same
 /// leaf key — across server restarts, device_id changes and identity rotation.
+#[cfg(not(test))]
 const SESSION_FILE: &str = "data/sessions.json";
 
 #[derive(Debug, Clone)]
@@ -97,6 +98,10 @@ pub struct Fulfill {
     inner: Mutex<Inner>,
     enabled: AtomicBool,
     pub db: Option<Arc<Db>>,
+    /// Where the session map is persisted. Under `cfg(test)` this is a
+    /// per-instance throwaway file so no test can read or clobber the
+    /// deployed `data/sessions.json`.
+    session_path: std::path::PathBuf,
 }
 
 impl Fulfill {
@@ -106,6 +111,7 @@ impl Fulfill {
             inner: Mutex::new(Inner::default()),
             enabled: AtomicBool::new(enabled),
             db,
+            session_path: Self::session_file(),
         });
         f.load_sessions();
         f
@@ -132,7 +138,20 @@ impl Fulfill {
     }
 
     fn session_file() -> std::path::PathBuf {
-        std::path::Path::new(SESSION_FILE).to_path_buf()
+        #[cfg(test)]
+        {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let name = format!(
+                "relay_rs_test_sessions_{}_{}.json",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            return std::env::temp_dir().join(name);
+        }
+        #[cfg(not(test))]
+        {
+            std::path::Path::new(SESSION_FILE).to_path_buf()
+        }
     }
 
     /// Restore persisted sessions at startup. Expired entries are purged.
@@ -141,8 +160,8 @@ impl Fulfill {
     /// are stored encrypted at rest; `SessionFile -> Session` decrypts and
     /// falls back to legacy plaintext rows transparently.
     fn load_sessions(&self) {
-        let path = Self::session_file();
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let path = &self.session_path;
+        let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
         let mut inner = crate::util::mu(&self.inner);
@@ -168,7 +187,7 @@ impl Fulfill {
     /// keys encrypted at rest (same Fernet cipher as the DB identities).
     fn persist_sessions(&self) {
         let inner = crate::util::mu(&self.inner);
-        let path = Self::session_file();
+        let path = &self.session_path;
         let out: HashMap<String, SessionFile> = inner
             .sessions
             .iter()
@@ -180,7 +199,7 @@ impl Fulfill {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Err(e) = std::fs::write(&path, text) {
+        if let Err(e) = std::fs::write(path, text) {
             // A lost session file means every A-side `KeyMaterial::Remote` key
             // becomes unsignable after a restart — surface it, don't swallow it.
             tracing::error!("persist_sessions: failed to write {}: {e}", path.display());
@@ -199,6 +218,34 @@ impl Fulfill {
         inner.sessions.insert(alias.to_string(), s);
         drop(inner);
         self.persist_sessions();
+    }
+
+    /// Test-only: insert a session without touching `sessions.json`.
+    #[cfg(test)]
+    pub fn insert_test_session(&self, alias: &str) {
+        crate::util::mu(&self.inner).sessions.insert(
+            alias.to_string(),
+            Session {
+                chain_pem: "test-chain".to_string(),
+                leaf_key_pem: "test-key".to_string(),
+                created_epoch_ms: Utc::now().timestamp_millis() as u64,
+            },
+        );
+    }
+
+    /// Remove a stored session because the A-side deleted the corresponding
+    /// key. Returns whether a session existed; the file is persisted only
+    /// when something changed.
+    pub fn delete_session(&self, alias: &str) -> bool {
+        let removed = {
+            let mut inner = crate::util::mu(&self.inner);
+            Self::purge_locked(&mut inner.sessions);
+            inner.sessions.remove(alias).is_some()
+        };
+        if removed {
+            self.persist_sessions();
+        }
+        removed
     }
 
     /// Algorithm string implied by an A-side attest context ("ec" | "rsa"),

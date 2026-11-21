@@ -272,7 +272,7 @@ async fn try_b_device_layer(
         .store
         .create_task(task_type, body.clone(), device_id, request_id)
         .await;
-    let timeout = if task_type == "sign" {
+    let timeout = if matches!(task_type, "sign" | "delete") {
         Duration::from_secs(state.cfg.wait_result_timeout_secs.min(10))
     } else {
         Duration::from_secs(state.cfg.wait_result_timeout_secs)
@@ -287,7 +287,7 @@ async fn try_b_device_layer(
         None => {
             // Cancel only work that has not reached B. An assigned HAL call
             // must finish normally; timing out HTTP must never interrupt it.
-            if task_type == "sign" {
+            if matches!(task_type, "sign" | "delete") {
                 state.store.cancel_pending_task(&task_id).await;
             }
             Some(json!({
@@ -355,6 +355,7 @@ fn result_shape_valid(task_type: &str, value: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some(),
         "decrypt" => value.get("data").and_then(Value::as_str).is_some(),
+        "delete" => value.get("deleted").and_then(Value::as_bool).is_some(),
         "agree" => {
             use base64::Engine as _;
             value.get("error").is_none()
@@ -381,6 +382,10 @@ fn try_keybox_layer_sync(
         "attest" => fulfill.try_handle_attest(device_id, body),
         "sign" => fulfill.try_handle_sign(device_id, body),
         "decrypt" => fulfill.try_handle_decrypt(device_id, body),
+        "delete" => body
+            .get("alias")
+            .and_then(Value::as_str)
+            .map(|alias| json!({ "deleted": fulfill.delete_session(alias) })),
         "agree" => Some(json!({
             "error": "server_keybox does not hold an EC agreement private key",
             "keymint_error_code": -100,
@@ -654,6 +659,28 @@ pub async fn agree(
         return r;
     }
     run_a_side_task(&state, "agree", &body).await
+}
+
+/// A-side deleted a remote key: drop the persisted session for `alias`.
+/// Served by the keybox layer in `server_keybox` mode and forwarded to the
+/// named B device in `physical` mode; the task is idempotent (deleting a
+/// missing alias reports `deleted: false`).
+pub async fn delete_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(r) = check_auth_class(&state, &headers, Some("a"), RateClass::Relay) {
+        return r;
+    }
+    let alias = body.get("alias").and_then(Value::as_str).unwrap_or("");
+    if alias.is_empty() || alias.len() > 128 {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "alias required (non-empty, at most 128 bytes)",
+        );
+    }
+    run_a_side_task(&state, "delete", &body).await
 }
 
 /// Forward SOTER to the explicitly named physical B device. Never substitute
@@ -1711,6 +1738,136 @@ mod tests {
             .unwrap();
         let response: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(response["keymint_error_code"], -100);
+        assert!(state.store.list_tasks(10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_missing_empty_or_overlong_alias() {
+        let state = agreement_state(true);
+        for body in [
+            json!({"device_id": "synthetic-b"}),
+            json!({"device_id": "synthetic-b", "alias": ""}),
+            json!({"device_id": "synthetic-b", "alias": "x".repeat(129)}),
+            json!({"device_id": "synthetic-b", "alias": 7}),
+        ] {
+            let response =
+                delete_session(State(state.clone()), agreement_headers(), Json(body)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(state.store.list_tasks(10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_session_requires_auth() {
+        let state = agreement_state(true);
+        let body = json!({"device_id": "synthetic-b", "alias": "key"});
+        let denied = delete_session(State(state), HeaderMap::new(), Json(body)).await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn delete_session_keybox_removes_session_and_is_idempotent() {
+        let state = agreement_state(true);
+        state.fulfill.insert_test_session("doomed-alias");
+        let body = json!({"device_id": "synthetic-b", "alias": "doomed-alias"});
+        let response = delete_session(
+            State(state.clone()),
+            agreement_headers(),
+            Json(body.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["deleted"], true);
+        // The stored session is gone; a repeat delete is a successful no-op.
+        assert!(!state.fulfill.delete_session("doomed-alias"));
+        let second = delete_session(State(state.clone()), agreement_headers(), Json(body)).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(second.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["deleted"], false);
+        assert!(state.store.list_tasks(10).await.is_empty());
+    }
+
+    #[test]
+    fn delete_result_shape_requires_a_boolean_deleted() {
+        assert!(result_shape_valid("delete", &json!({"deleted": true})));
+        assert!(result_shape_valid("delete", &json!({"deleted": false})));
+        for bad in [
+            json!({}),
+            json!({"deleted": "true"}),
+            json!({"deleted": 1}),
+            json!({"alias": "a"}),
+        ] {
+            assert!(!result_shape_valid("delete", &bad));
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_session_physical_mode_forwards_to_named_b_device() {
+        let state = agreement_state(false);
+        state
+            .store
+            .pop_for_b("synthetic-b", "mock", Duration::ZERO)
+            .await;
+        let body = json!({
+            "device_id": "synthetic-b",
+            "alias": "doomed-alias",
+            "request_id": "delete:doomed-alias",
+        });
+        let worker = async {
+            let task = state
+                .store
+                .pop_for_b("synthetic-b", "mock", Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(task.task_type, "delete");
+            assert_eq!(task.payload, body);
+            assert_eq!(task.target_device_id, "synthetic-b");
+            state
+                .store
+                .complete_task(
+                    &task.task_id,
+                    json!({"deleted": true, "alias": "doomed-alias"}),
+                    "synthetic-b",
+                )
+                .await
+                .unwrap();
+        };
+        let (response, ()) = tokio::join!(
+            delete_session(
+                State(state.clone()),
+                agreement_headers(),
+                Json(body.clone())
+            ),
+            worker
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["deleted"], true);
+        assert!(result["task_id"].is_string());
+        assert_eq!(state.store.counts().await.completed, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_session_physical_mode_reports_offline_b() {
+        let state = agreement_state(false);
+        let body = json!({"device_id": "synthetic-b", "alias": "doomed-alias"});
+        let response = delete_session(State(state.clone()), agreement_headers(), Json(body)).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(result["error"].as_str().unwrap().contains("not online"));
         assert!(state.store.list_tasks(10).await.is_empty());
     }
 

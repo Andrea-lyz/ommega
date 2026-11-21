@@ -44,6 +44,7 @@ use crate::config;
 
 pub(crate) mod attestation_metrics;
 mod backend;
+pub(crate) mod deletion;
 mod health;
 mod spl;
 mod tls;
@@ -790,6 +791,18 @@ impl RemoteRelay {
             "device_id": Self::device_id()?,
         });
         Self::post_json("/api/agree/", &body)
+    }
+
+    /// Ask the relay to delete the persisted session for `alias` on
+    /// `device_id`. The request id is deterministic per alias so retries of
+    /// the same deletion collapse into the same server-side task.
+    pub fn delete_session(alias: &str, device_id: &str) -> Result<Option<Value>> {
+        let body = json!({
+            "request_id": format!("delete:{alias}"),
+            "alias": alias,
+            "device_id": device_id,
+        });
+        Self::post_json("/api/delete/", &body)
     }
 }
 

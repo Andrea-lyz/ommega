@@ -969,7 +969,7 @@ impl crate::KeyMintTa {
         }
         let validate_us = validate_start.elapsed().as_micros();
         let remote_key = KeyMaterial::Remote(crypto::RemoteRef {
-            alias,
+            alias: alias.clone(),
             public_key,
             root_of_trust,
         });
@@ -1027,6 +1027,12 @@ impl crate::KeyMintTa {
 
         if let Some(remote) = self.dev.remote.as_ref() {
             remote.attestation_verified(app_id, relay_latency_ms);
+            match self.imp.sha256.hash(&serialized_keyblob) {
+                Ok(digest) => remote.register_remote_blob(&alias, &digest),
+                Err(e) => {
+                    log::warn!("remote blob digest for registration failed: {e:?}")
+                }
+            }
         }
 
         Ok(KeyCreationResult {
@@ -1597,6 +1603,12 @@ impl crate::KeyMintTa {
         // Now re-build the keyblob. Use a potentially fresh key encryption key and context, and
         // potentially a new secure deletion secret slot. (The old slot will be released when
         // Keystore performs the corresponding `deleteKey` operation on the old keyblob.)
+        // An upgraded remote key keeps the same remote alias; both the old and
+        // the new blob digests are tracked until keystore2 deletes each blob.
+        let remote_alias = match &keyblob.key_material {
+            KeyMaterial::Remote(remote) => Some(remote.alias.clone()),
+            _ => None,
+        };
         let kek_context = self.dev.keys.kek_context()?;
         let root_kek = self.root_kek(&kek_context)?;
         let hidden = tag::hidden(&upgrade_params, self.root_of_trust()?)?;
@@ -1615,7 +1627,16 @@ impl crate::KeyMintTa {
             hidden,
             keyblob::SlotPurpose::KeyUpgrade,
         )?;
-        Ok(encrypted_keyblob.into_vec()?)
+        let serialized_keyblob = encrypted_keyblob.into_vec()?;
+        if let (Some(alias), Some(remote)) = (remote_alias, self.dev.remote.as_ref()) {
+            match self.imp.sha256.hash(&serialized_keyblob) {
+                Ok(digest) => remote.register_remote_blob(&alias, &digest),
+                Err(e) => {
+                    log::warn!("remote blob digest for registration failed: {e:?}")
+                }
+            }
+        }
+        Ok(serialized_keyblob)
     }
 }
 

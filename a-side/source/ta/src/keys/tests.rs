@@ -20,6 +20,9 @@ impl crypto::MonotonicClock for TestClock {
     }
 }
 
+type RegisterLog = std::sync::Arc<std::sync::Mutex<Vec<(String, [u8; 32])>>>;
+type ReleaseLog = std::sync::Arc<std::sync::Mutex<Vec<[u8; 32]>>>;
+
 #[derive(Default)]
 struct TestRemote {
     version_tags: Option<device::KeyMintVersionTags>,
@@ -31,6 +34,8 @@ struct TestRemote {
     expected_user_auth: Option<Vec<(u32, i64)>>,
     sign_calls: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     verified_calls: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    register_log: Option<RegisterLog>,
+    release_log: Option<ReleaseLog>,
 }
 impl device::RemoteBackend for TestRemote {
     fn version_tags(
@@ -110,6 +115,16 @@ impl device::RemoteBackend for TestRemote {
     }
     fn enabled(&self) -> bool {
         true
+    }
+    fn register_remote_blob(&self, alias: &str, blob_digest: &[u8; 32]) {
+        if let Some(log) = &self.register_log {
+            log.lock().unwrap().push((alias.to_string(), *blob_digest));
+        }
+    }
+    fn release_remote_blob(&self, blob_digest: &[u8; 32]) {
+        if let Some(log) = &self.release_log {
+            log.lock().unwrap().push(*blob_digest);
+        }
     }
 }
 
@@ -682,6 +697,108 @@ fn native_remote_delegation_returns_only_the_child_certificate() {
         panic!("remote child")
     };
     assert_ne!(reference.alias, fixture.issuer_alias);
+}
+
+#[test]
+fn remote_generate_registers_the_final_blob_digest() {
+    let registered: RegisterLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut fixture = DelegationFixture::new();
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        cert_chain: Some(fixture.chain.clone()),
+        expected_issuer: Some(fixture.issuer_alias.clone()),
+        register_log: Some(registered.clone()),
+        ..TestRemote::default()
+    }));
+    let result = fixture.generate().unwrap();
+    let (stored, _) = fixture
+        .ta
+        .keyblob_parse_decrypt(&result.key_blob, &[])
+        .unwrap();
+    let KeyMaterial::Remote(reference) = stored.key_material else {
+        panic!("remote child")
+    };
+    let expected: [u8; 32] = self_hash_sha256(&result.key_blob).try_into().unwrap();
+    assert_eq!(
+        registered.lock().unwrap().as_slice(),
+        &[(reference.alias, expected)]
+    );
+}
+
+#[test]
+fn begin_on_a_remote_key_registers_the_blob_digest() {
+    let registered: RegisterLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut fixture = DelegationFixture::new();
+    // Generate with the plain backend so the registration log starts empty.
+    let result = fixture.generate().unwrap();
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        register_log: Some(registered.clone()),
+        ..TestRemote::default()
+    }));
+    let (stored, _) = fixture
+        .ta
+        .keyblob_parse_decrypt(&result.key_blob, &[])
+        .unwrap();
+    let KeyMaterial::Remote(reference) = stored.key_material else {
+        panic!("remote child")
+    };
+    fixture
+        .ta
+        .begin_operation(
+            KeyPurpose::Sign,
+            &result.key_blob,
+            vec![KeyParam::Digest(Digest::Sha256)],
+            None,
+        )
+        .unwrap();
+    let expected: [u8; 32] = self_hash_sha256(&result.key_blob).try_into().unwrap();
+    assert_eq!(
+        registered.lock().unwrap().as_slice(),
+        &[(reference.alias, expected)]
+    );
+}
+
+#[test]
+fn remote_key_upgrade_registers_the_new_blob_digest() {
+    let registered: RegisterLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut fixture = DelegationFixture::new();
+    let result = fixture.generate().unwrap();
+    // Newer remote version tags make the stored blob stale so `upgrade_key`
+    // emits a fresh blob for the same remote alias.
+    fixture.ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        version_tags: Some(device::KeyMintVersionTags {
+            os_version: 160000,
+            os_patchlevel: 202608,
+            vendor_patchlevel: Some(20260801),
+            boot_patchlevel: Some(20260901),
+        }),
+        register_log: Some(registered.clone()),
+        ..TestRemote::default()
+    }));
+    let upgraded = fixture.ta.upgrade_key(&result.key_blob, vec![]).unwrap();
+    assert!(!upgraded.is_empty());
+    let (stored, _) = fixture.ta.keyblob_parse_decrypt(&upgraded, &[]).unwrap();
+    let KeyMaterial::Remote(reference) = stored.key_material else {
+        panic!("remote child")
+    };
+    let expected: [u8; 32] = self_hash_sha256(&upgraded).try_into().unwrap();
+    assert_eq!(
+        registered.lock().unwrap().as_slice(),
+        &[(reference.alias, expected)]
+    );
+}
+
+#[test]
+fn delete_key_releases_the_blob_digest_even_when_unparseable() {
+    let released: ReleaseLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut ta = test_ta();
+    ta.dev.remote = Some(std::sync::Arc::new(TestRemote {
+        release_log: Some(released.clone()),
+        ..TestRemote::default()
+    }));
+    let blob = vec![0xde, 0xad, 0xbe, 0xef];
+    ta.delete_key(&blob).unwrap();
+    let expected: [u8; 32] = self_hash_sha256(&blob).try_into().unwrap();
+    assert_eq!(released.lock().unwrap().as_slice(), &[expected]);
 }
 
 #[test]

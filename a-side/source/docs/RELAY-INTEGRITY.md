@@ -125,3 +125,56 @@ Software-only regression fixtures cover valid EC/RSA chains, tampered signatures
 reordered or truncated chains and rejection before remote-key storage. They use
 no Binder, network or physical TEE. Android cross-compilation is mandatory, and
 on-device execution remains a separate gate.
+
+## Remote key deletion
+
+When keystore2 garbage collection calls `deleteKey` for a remote
+(`KeyMaterial::Remote`) keyblob, the TA cannot decrypt the blob to recover the
+remote alias because hidden parameters are unavailable at delete time. The TA
+therefore reports the SHA-256 digest of every serialized remote blob it emits
+or sees, and of every blob passed to `deleteKey`, to a persistent registry at
+`data/remote-blobs.db` (under the standard ommega data directory). Each digest
+maps to the remote alias and the configured B device id. Registration happens
+at remote key generation, at remote blob upgrade, lazily at `beginOperation`
+for keys created before the registry existed, and is a no-op when remote is
+not configured. Release happens unconditionally at `deleteKey`; an unknown
+digest is a no-op, so local keys are unaffected.
+
+An alias is scheduled for remote deletion only when its last registered blob
+digest is released. Because `upgradeKey` emits a new blob for the same alias
+and registers it before keystore2 collects the superseded blob, a superseded
+`deleteKey` cannot tear down the still-live remote session. Re-registering an
+alias deletes any outstanding pending row, so a live reference always wins.
+Every failure mode fails toward not deleting: registry open/write errors are
+logged and swallowed, and a missed registration only means a session is never
+removed.
+
+Queued deletions are drained by the `ommega-remote-gc` worker thread, which
+runs only while the remote relay is configured and never holds the TA lock
+during network I/O. It POSTs `/api/delete/` with a deterministic
+`delete:<alias>` request id so retries collapse into the same server-side
+task. A server answer of `deleted: true` or `false` completes the row; a
+validation rejection drops it permanently; every other failure (unreachable
+relay, an old server without the route, an old B relay without the task type,
+malformed response) retries with `min(60s * 2^attempts, 6h)` exponential
+backoff. Rows pending for more than 30 days are dropped rather than retried
+forever; the stale session then simply remains on the remote side.
+
+On the relay server the request is strict per backend: `server_keybox` mode
+removes the alias from its own session map and persists `sessions.json`;
+`physical` mode enqueues a short idempotent `delete` task to the named B
+device. The B relay removes the alias from its session cache and deletes the
+session file under the same lock that serializes every session write, then
+fsyncs the sessions directory. A missing alias is a successful no-op
+(`deleted: false`). No KeyMint/HAL/TEE call is made on B: the persisted
+keyblob becoming unreachable is what retires the key. An in-flight
+sign/decrypt/agree that cloned the session before the delete cannot republish
+it afterwards and fails with the normal "no key for alias" error; only a new
+`attest` may recreate the alias. `deleteAllKeys` performs no remote action —
+keystore2 deletes each blob individually through `deleteKey`.
+
+Remote keys created before this mechanism have no registered digest, so their
+first-use `beginOperation` backfill is what makes them deletable; a remote key
+never used again after the update is never scheduled for deletion. Switching
+between `physical` and `server_keybox` modes can leave sessions behind in the
+other backend, because each backend tracks its own session store.

@@ -51,7 +51,8 @@ src/
 ```
 
 The relay daemon supports every task type the relay_server can dispatch:
-`attest`, `sign`, and `decrypt`.
+`profile`, `attest`, `sign`, `decrypt`, `agree`, `soter`, and `delete`
+(session removal after the A-side deletes a remote key).
 
 ## Behavioral Invariants
 
