@@ -643,7 +643,10 @@ impl KmKeyParameter {
                 }
                 _ => return Err(ValueNotRecognized::DateTime),
             },
-            keymint::Tag::MinSecondsBetweenOps => return Err(ValueNotRecognized::Tag),
+            keymint::Tag::MinSecondsBetweenOps => match value {
+                KeyParameterValue::Integer(v) => Some(KeyParam::MinSecondsBetweenOps(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
+            },
             keymint::Tag::MaxUsesPerBoot => match value {
                 KeyParameterValue::Integer(v) => Some(KeyParam::MaxUsesPerBoot(v as u32)),
                 _ => return Err(ValueNotRecognized::Integer),
@@ -926,7 +929,8 @@ pub fn key_param_to_aidl(kp: KeyParam, km_dev_version: i32) -> Result<KmKeyParam
         | KeyParam::CreationDatetime(v)
         | KeyParam::CertificateNotBefore(v)
         | KeyParam::CertificateNotAfter(v) => KeyParameterValue::DateTime(v.ms_since_epoch),
-        KeyParam::MaxUsesPerBoot(v)
+        KeyParam::MinSecondsBetweenOps(v)
+        | KeyParam::MaxUsesPerBoot(v)
         | KeyParam::UsageCountLimit(v)
         | KeyParam::UserId(v)
         | KeyParam::AuthTimeout(v)

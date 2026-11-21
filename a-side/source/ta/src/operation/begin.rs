@@ -36,6 +36,16 @@ use kmr_wire::{
 use log::{debug, info, warn};
 use std::vec::Vec;
 
+/// Pending MIN_SECONDS_BETWEEN_OPS access record produced by `check_begin_auths`.
+/// It is committed only once the operation has been successfully installed, so a
+/// `begin()` that fails a later check does not consume the rate-limit window.
+struct PendingAccessTime {
+    slot: usize,
+    key_id: crate::KeyId,
+    last_access_ms: i64,
+    timeout_secs: u32,
+}
+
 impl crate::KeyMintTa {
     pub(crate) fn begin_operation(
         &mut self,
@@ -56,7 +66,7 @@ impl crate::KeyMintTa {
         // Validate parameters.
         let key_chars = characteristics_at(&characteristics, self.hw_info.security_level)?;
         check_begin_params(key_chars, purpose, &params)?;
-        self.check_begin_auths(key_chars, key_blob)?;
+        let pending_access = self.check_begin_auths(key_chars, key_blob)?;
 
         let trusted_conf_data = if purpose == KeyPurpose::Sign
             && get_bool_tag_value!(key_chars, TrustedConfirmationRequired)?
@@ -349,6 +359,14 @@ impl crate::KeyMintTa {
                 },
             },
         };
+        if let Some(pending) = pending_access {
+            self.record_access_time(
+                pending.slot,
+                pending.key_id,
+                pending.last_access_ms,
+                pending.timeout_secs,
+            );
+        }
         self.operations[op_idx] = Some(op);
         if presence_required {
             info!("this operation requires proof-of-presence");
@@ -362,7 +380,14 @@ impl crate::KeyMintTa {
     }
 
     /// Check TA-specific key authorizations on `begin()`.
-    fn check_begin_auths(&mut self, key_chars: &[KeyParam], key_blob: &[u8]) -> Result<(), Error> {
+    ///
+    /// Returns the pending MIN_SECONDS_BETWEEN_OPS access record to commit once
+    /// the operation is installed, or `None` when the key does not carry the tag.
+    fn check_begin_auths(
+        &mut self,
+        key_chars: &[KeyParam],
+        key_blob: &[u8],
+    ) -> Result<Option<PendingAccessTime>, Error> {
         if self.dev.bootloader.done() && get_bool_tag_value!(key_chars, BootloaderOnly)? {
             return Err(km_err!(
                 InvalidKeyBlob,
@@ -376,12 +401,40 @@ impl crate::KeyMintTa {
             ));
         }
 
+        let mut pending_access = None;
+        if let Some(&min_secs) = get_opt_tag_value!(key_chars, MinSecondsBetweenOps)? {
+            let clock = self.imp.clock.as_ref().ok_or_else(|| {
+                km_err!(Unimplemented, "MIN_SECONDS_BETWEEN_OPS requires a clock")
+            })?;
+            let now_ms = clock.now().0;
+            let key_id = self.key_id(key_blob)?;
+            // Reject a begin that lands inside the per-key rate-limit window.
+            for entry in self.access_time.iter().flatten() {
+                if entry.key_id == key_id && now_ms - entry.last_access_ms < min_secs as i64 * 1000
+                {
+                    return Err(km_err!(
+                        KeyRateLimitExceeded,
+                        "key accessed within MIN_SECONDS_BETWEEN_OPS window"
+                    ));
+                }
+            }
+            // Reserve a slot now so a full table fails before the op is built.
+            let slot = self.access_time_slot(&key_id, now_ms)?;
+            pending_access = Some(PendingAccessTime {
+                slot,
+                key_id,
+                last_access_ms: now_ms,
+                timeout_secs: min_secs,
+            });
+        }
+
         if let Some(max_uses) = get_opt_tag_value!(key_chars, MaxUsesPerBoot)? {
-            // Track the use count for this key.
+            // Track the use count for this key. This runs after the rate-limit
+            // check so a KeyRateLimitExceeded rejection does not consume a use.
             let key_id = self.key_id(key_blob)?;
             self.update_use_count(key_id, *max_uses)?;
         }
-        Ok(())
+        Ok(pending_access)
     }
 }
 

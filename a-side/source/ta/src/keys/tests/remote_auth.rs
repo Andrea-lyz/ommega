@@ -154,7 +154,7 @@ fn local_attestation_accounting_excludes_invalid_challenges_and_failed_signature
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-struct TestHmac;
+pub(super) struct TestHmac;
 impl device::DeviceHmac for TestHmac {
     fn hmac(&self, imp: &dyn crypto::Hmac, data: &[u8]) -> Result<Vec<u8>, Error> {
         let mut op = imp.begin(

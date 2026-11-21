@@ -13,10 +13,10 @@ impl device::RetrieveKeyMaterial for TestKeys {
     }
 }
 
-struct TestClock;
+struct TestClock(std::sync::Arc<std::sync::atomic::AtomicI64>);
 impl crypto::MonotonicClock for TestClock {
     fn now(&self) -> crypto::MillisecondsSinceEpoch {
-        crypto::MillisecondsSinceEpoch(1000)
+        crypto::MillisecondsSinceEpoch(self.0.load(std::sync::atomic::Ordering::SeqCst))
     }
 }
 
@@ -190,10 +190,17 @@ fn oversized_detached_sign_consumes_the_handle_and_rejects_before_io() {
     assert!(ta.operations[0].is_none());
 }
 
-fn test_ta() -> KeyMintTa {
+fn test_ta_with_clock() -> (KeyMintTa, std::sync::Arc<std::sync::atomic::AtomicI64>) {
+    test_ta_at_level(SecurityLevel::TrustedEnvironment)
+}
+
+fn test_ta_at_level(
+    security_level: SecurityLevel,
+) -> (KeyMintTa, std::sync::Arc<std::sync::atomic::AtomicI64>) {
+    let clock = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(1000));
     let mut ta = KeyMintTa::new_allowing_versions(
         HardwareInfo {
-            security_level: SecurityLevel::TrustedEnvironment,
+            security_level,
             version_number: 500,
             impl_name: "test",
             author_name: "test",
@@ -207,7 +214,7 @@ fn test_ta() -> KeyMintTa {
         }),
         kmr_crypto_ommega::implementation(
             Box::new(kmr_crypto_ommega::rng::OmmegaRng),
-            Box::new(TestClock),
+            Box::new(TestClock(clock.clone())),
         ),
         device::Implementation {
             keys: Box::new(TestKeys),
@@ -243,7 +250,11 @@ fn test_ta() -> KeyMintTa {
         .error_code,
         0
     );
-    ta
+    (ta, clock)
+}
+
+fn test_ta() -> KeyMintTa {
+    test_ta_with_clock().0
 }
 
 fn key_params(purpose: KeyPurpose) -> Vec<KeyParam> {
@@ -1309,4 +1320,212 @@ fn empty_remote_chain_is_a_protocol_error_not_an_unavailability_fallback() {
         error.kind(),
         ErrorKind::Hal(ErrorCode::VerificationFailed, _)
     ));
+}
+
+// ---------------------------------------------------------------------
+// MIN_SECONDS_BETWEEN_OPS per-key rate limiting.
+
+fn rate_limited_params() -> Vec<KeyParam> {
+    let mut params = key_params(KeyPurpose::Sign);
+    params.push(KeyParam::MinSecondsBetweenOps(10));
+    params
+}
+
+fn begin_ec_sign(ta: &mut KeyMintTa, key_blob: &[u8]) -> Result<(), Error> {
+    ta.begin_operation(
+        KeyPurpose::Sign,
+        key_blob,
+        vec![KeyParam::Digest(Digest::Sha256)],
+        None,
+    )
+    .map(|_| ())
+}
+
+fn expect_hal_error(result: Result<(), Error>, expected: ErrorCode) {
+    match result {
+        Err(error) => assert!(
+            matches!(error.kind(), ErrorKind::Hal(code, _) if *code == expected),
+            "expected {expected:?}, got {error:?}"
+        ),
+        Ok(()) => panic!("expected {expected:?}, got Ok"),
+    }
+}
+
+#[test]
+fn min_seconds_between_ops_rate_limits_second_begin() {
+    let (mut ta, clock) = test_ta_with_clock();
+    let key = ta
+        .generate_key_default(&rate_limited_params(), None)
+        .unwrap();
+
+    begin_ec_sign(&mut ta, &key.key_blob).unwrap();
+    expect_hal_error(
+        begin_ec_sign(&mut ta, &key.key_blob),
+        ErrorCode::KeyRateLimitExceeded,
+    );
+
+    // Once the 10-second window has elapsed the key can be used again.
+    clock.store(1000 + 10_000, std::sync::atomic::Ordering::SeqCst);
+    begin_ec_sign(&mut ta, &key.key_blob).unwrap();
+}
+
+#[test]
+fn min_seconds_between_ops_is_per_key() {
+    let (mut ta, _clock) = test_ta_with_clock();
+    let key1 = ta
+        .generate_key_default(&rate_limited_params(), None)
+        .unwrap();
+    let key2 = ta
+        .generate_key_default(&rate_limited_params(), None)
+        .unwrap();
+
+    begin_ec_sign(&mut ta, &key1.key_blob).unwrap();
+    // A different key is not affected by the first key's access.
+    begin_ec_sign(&mut ta, &key2.key_blob).unwrap();
+    expect_hal_error(
+        begin_ec_sign(&mut ta, &key1.key_blob),
+        ErrorCode::KeyRateLimitExceeded,
+    );
+    expect_hal_error(
+        begin_ec_sign(&mut ta, &key2.key_blob),
+        ErrorCode::KeyRateLimitExceeded,
+    );
+}
+
+fn auth_bound_rate_limited_params() -> Vec<KeyParam> {
+    let mut params = rate_limited_params();
+    params.retain(|p| !matches!(p, KeyParam::NoAuthRequired));
+    params.extend([
+        KeyParam::UserSecureId(42),
+        KeyParam::UserAuthType(HardwareAuthenticatorType::Fingerprint as u32),
+        KeyParam::AuthTimeout(30),
+    ]);
+    params
+}
+
+fn test_auth_token(ta: &KeyMintTa) -> kmr_wire::keymint::HardwareAuthToken {
+    let mut token = kmr_wire::keymint::HardwareAuthToken {
+        challenge: 0,
+        user_id: 42,
+        authenticator_id: 42,
+        authenticator_type: HardwareAuthenticatorType::Fingerprint,
+        timestamp: kmr_wire::secureclock::Timestamp { milliseconds: 1000 },
+        mac: vec![],
+    };
+    token.mac = ta
+        .device_hmac(&crate::hardware_auth_token_mac_input(&token).unwrap())
+        .unwrap();
+    token
+}
+
+fn begin_ec_sign_authed(ta: &mut KeyMintTa, key_blob: &[u8]) -> Result<(), Error> {
+    ta.begin_operation(
+        KeyPurpose::Sign,
+        key_blob,
+        vec![KeyParam::Digest(Digest::Sha256)],
+        Some(test_auth_token(ta)),
+    )
+    .map(|_| ())
+}
+
+#[test]
+fn failed_begin_does_not_consume_rate_limit_window() {
+    let (mut ta, _clock) = test_ta_with_clock();
+    ta.set_device_hmac(Box::new(remote_auth::TestHmac));
+    let key = ta
+        .generate_key_default(&auth_bound_rate_limited_params(), None)
+        .unwrap();
+
+    // A begin missing the required auth token passes the rate-limit check but
+    // is rejected by the later authentication check.
+    let error = ta
+        .begin_operation(
+            KeyPurpose::Sign,
+            &key.key_blob,
+            vec![KeyParam::Digest(Digest::Sha256)],
+            None,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::KeyUserNotAuthenticated, _)
+    ));
+
+    // The failed begin recorded no access, so an immediate authenticated
+    // begin succeeds...
+    begin_ec_sign_authed(&mut ta, &key.key_blob).unwrap();
+    // ...and only then does the window apply.
+    expect_hal_error(
+        begin_ec_sign_authed(&mut ta, &key.key_blob),
+        ErrorCode::KeyRateLimitExceeded,
+    );
+}
+
+#[test]
+fn min_seconds_between_ops_table_full_and_expiry() {
+    let (mut ta, clock) = test_ta_with_clock();
+    let now = clock.load(std::sync::atomic::Ordering::SeqCst);
+    for (i, slot) in ta.access_time.iter_mut().enumerate() {
+        let mut id = [0u8; 32];
+        id[31] = i as u8;
+        *slot = Some(crate::AccessTime {
+            key_id: crate::KeyId(id),
+            last_access_ms: now,
+            timeout_secs: 100,
+        });
+    }
+    let key = ta
+        .generate_key_default(&rate_limited_params(), None)
+        .unwrap();
+
+    // Every slot holds a non-expired entry for a different key.
+    expect_hal_error(
+        begin_ec_sign(&mut ta, &key.key_blob),
+        ErrorCode::TooManyOperations,
+    );
+
+    // Once the entries expire their slots are reused.
+    clock.store(now + 100_000 + 1, std::sync::atomic::Ordering::SeqCst);
+    begin_ec_sign(&mut ta, &key.key_blob).unwrap();
+}
+
+#[test]
+fn min_seconds_between_ops_rejected_in_strongbox() {
+    let (mut ta, _clock) = test_ta_at_level(SecurityLevel::Strongbox);
+    let error = ta
+        .generate_key_default(&rate_limited_params(), None)
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::Hal(ErrorCode::InvalidTag, _)
+    ));
+}
+
+#[test]
+fn rate_limited_begin_does_not_consume_max_uses_per_boot() {
+    let (mut ta, clock) = test_ta_with_clock();
+    let mut params = rate_limited_params();
+    params.push(KeyParam::MaxUsesPerBoot(2));
+    let key = ta.generate_key_default(&params, None).unwrap();
+
+    // First begin succeeds and records both the use and the access time.
+    begin_ec_sign(&mut ta, &key.key_blob).unwrap();
+    // A begin inside the rate-limit window is rejected without consuming a use.
+    expect_hal_error(
+        begin_ec_sign(&mut ta, &key.key_blob),
+        ErrorCode::KeyRateLimitExceeded,
+    );
+
+    // After the window the key can begin again: this would fail with
+    // KeyMaxOpsExceeded if the rejected attempt had consumed a use.
+    clock.store(1000 + 10_000, std::sync::atomic::Ordering::SeqCst);
+    begin_ec_sign(&mut ta, &key.key_blob).unwrap();
+
+    // Both permitted uses are now consumed; once the window elapses again the
+    // next begin exceeds MAX_USES_PER_BOOT.
+    clock.store(1000 + 20_000, std::sync::atomic::Ordering::SeqCst);
+    expect_hal_error(
+        begin_ec_sign(&mut ta, &key.key_blob),
+        ErrorCode::KeyMaxOpsExceeded,
+    );
 }

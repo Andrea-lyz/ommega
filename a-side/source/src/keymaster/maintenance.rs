@@ -120,13 +120,19 @@ impl MaintenanceManager {
     fn early_boot_ended(&self, ctx: Option<&CallerInfo>) -> Result<()> {
         check_maintenance_permission(KeystorePerm::EarlyBootEnded, ctx, "earlyBootEnded")
             .context(err!("caller missing early_boot_ended permission"))?;
-        DB.with(|db| {
-            crate::keymaster::super_key::SuperKeyManager::set_up_boot_level_cache(
-                &SUPER_KEY,
-                &mut db.borrow_mut(),
-            )
-        })
-        .context(err!("setting up boot-level key cache"))?;
+        // A failure to set up the boot-level key cache must not short-circuit the
+        // earlyBootEnded replay to KeyMint, matching AOSP keystore2 Maintenance.
+        if let Err(error) = DB
+            .with(|db| {
+                crate::keymaster::super_key::SuperKeyManager::set_up_boot_level_cache(
+                    &SUPER_KEY,
+                    &mut db.borrow_mut(),
+                )
+            })
+            .context(err!("setting up boot-level key cache"))
+        {
+            log::error!("{error:?}");
+        }
         replay_early_boot_ended()?;
         Ok(())
     }
