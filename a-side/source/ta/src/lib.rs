@@ -115,6 +115,9 @@ pub const MAX_OPERATION_LIMIT: usize = 1024;
 /// Maximum number of keys whose use count can be tracked.
 const MAX_USE_COUNTED_KEYS: usize = 32;
 
+/// Maximum number of keys whose MIN_SECONDS_BETWEEN_OPS access times can be tracked.
+const MAX_RATE_LIMITED_KEYS: usize = 32;
+
 /// Tags allowed in `KeyMintTa::additional_attestation_info`.
 const ALLOWED_ADDITIONAL_ATTESTATION_TAGS: &[Tag] = &[Tag::ModuleHash];
 
@@ -122,6 +125,13 @@ const ALLOWED_ADDITIONAL_ATTESTATION_TAGS: &[Tag] = &[Tag::ModuleHash];
 struct UseCount {
     key_id: KeyId,
     count: u64,
+}
+
+/// Per-key last-access record for MIN_SECONDS_BETWEEN_OPS enforcement.
+struct AccessTime {
+    key_id: KeyId,
+    last_access_ms: i64,
+    timeout_secs: u32,
 }
 
 /// Attestation chain information.
@@ -213,6 +223,9 @@ pub struct KeyMintTa {
 
     /// Use counts for keys where this is tracked.
     use_count: [Option<UseCount>; MAX_USE_COUNTED_KEYS],
+
+    /// Last-access times for keys carrying MIN_SECONDS_BETWEEN_OPS.
+    access_time: [Option<AccessTime>; MAX_RATE_LIMITED_KEYS],
 
     /// Operation handle of the (single) in-flight operation that requires trusted user presence.
     presence_required_op: Option<OpHandle>,
@@ -380,6 +393,7 @@ impl KeyMintTa {
             // Work around Rust limitation that `vec![None; n]` doesn't work.
             operations: (0..max_operations).map(|_| None).collect(),
             use_count: Default::default(),
+            access_time: Default::default(),
             presence_required_op: None,
             shared_secret_params: None,
             hw_info,
@@ -645,6 +659,47 @@ impl KeyMintTa {
                 "too many use-counted keys already in play"
             ))
         }
+    }
+
+    /// Find the access-time slot for `key_id`, treating entries whose timeout
+    /// has elapsed as free. Returns `TooManyOperations` when no slot is available.
+    fn access_time_slot(&self, key_id: &KeyId, now_ms: i64) -> Result<usize, Error> {
+        let mut free_idx = None;
+        for (idx, entry) in self.access_time.iter().enumerate() {
+            match entry {
+                None => {
+                    if free_idx.is_none() {
+                        free_idx = Some(idx);
+                    }
+                }
+                Some(AccessTime { key_id: k, .. }) if k == key_id => return Ok(idx),
+                Some(AccessTime {
+                    last_access_ms,
+                    timeout_secs,
+                    ..
+                }) if last_access_ms + *timeout_secs as i64 * 1000 <= now_ms => {
+                    if free_idx.is_none() {
+                        free_idx = Some(idx);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        free_idx.ok_or_else(|| {
+            km_err!(
+                TooManyOperations,
+                "too many rate-limited keys already in play"
+            )
+        })
+    }
+
+    /// Record a successful `begin()` for MIN_SECONDS_BETWEEN_OPS tracking.
+    fn record_access_time(&mut self, slot: usize, key_id: KeyId, now_ms: i64, timeout_secs: u32) {
+        self.access_time[slot] = Some(AccessTime {
+            key_id,
+            last_access_ms: now_ms,
+            timeout_secs,
+        });
     }
 
     /// Configure the boot-specific root of trust info.

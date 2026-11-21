@@ -123,11 +123,13 @@
 - For binary hot updates, prefer:
 
   ```sh
-  python scripts/deploy_hot_update.py --serial <serial> --abi arm64-v8a --restart all
+  python scripts/deploy_hot_update.py --serial <serial> --abi arm64-v8a --restart all --release
   ```
 
   It builds, deploys, verifies hashes, and restarts KeyMint and the injector without rebooting.
-  Verify the affected runtime path after deployment; a healthy KeyMint listener alone does not
-  prove that keystore2 has refreshed a stale injector RPC session.
+  The script defaults to the debug profile, which is unoptimized and makes RustCrypto RSA keygen
+  take seconds and stall the serialized TA; device validation and performance testing must pass
+  `--release`. Verify the affected runtime path after deployment; a healthy KeyMint listener alone
+  does not prove that keystore2 has refreshed a stale injector RPC session.
 - Do not add `#[allow(...)]` solely to silence Clippy. Any necessary exception must have a concrete,
   documented reason and direct approval from user.

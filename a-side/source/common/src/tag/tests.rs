@@ -114,6 +114,19 @@ fn test_legacy_serialization() {
 }
 
 #[test]
+fn test_min_seconds_between_ops_legacy_round_trip() {
+    let params = vec![
+        KeyParam::MinSecondsBetweenOps(30),
+        KeyParam::MaxUsesPerBoot(5),
+    ];
+    let data = legacy::serialize(&params).unwrap();
+    let mut slice = &data[..];
+    let got = legacy::deserialize(&mut slice).unwrap();
+    assert!(slice.is_empty(), "data left: {}", hex::encode(slice));
+    assert_eq!(got, params);
+}
+
+#[test]
 fn test_copyable_tags() {
     for tag in UNPOLICED_COPYABLE_TAGS {
         let info = info(*tag).unwrap();
