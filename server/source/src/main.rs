@@ -2,7 +2,7 @@
 //!
 //! Endpoints (parity with relay_server):
 //!   A-side  : GET  /api/ping/ , GET /api/health/ , POST /api/profile/, POST /api/attest/,
-//!             POST /api/sign/, POST /api/decrypt/, POST /api/client_report/
+//!             POST /api/sign/, POST /api/decrypt/, POST /api/delete/, POST /api/client_report/
 //!   B-side  : GET  /api/b/poll/?device_id=..&machine_id=..&timeout=N
 //!             POST /api/b/result/
 //!             POST /api/b/upload_keybox_identity/, POST /api/b/revoke_server_identity/
@@ -158,6 +158,7 @@ fn build_router(cfg: &Arc<Config>) -> Router {
         .route("/api/sign/", post(handlers::sign))
         .route("/api/decrypt/", post(handlers::decrypt))
         .route("/api/agree/", post(handlers::agree))
+        .route("/api/delete/", post(handlers::delete_session))
         .route("/api/soter/", post(handlers::soter))
         .route("/api/client_report/", post(handlers::client_report))
         .route("/api/b/poll/", get(handlers::b_poll))

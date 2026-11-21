@@ -322,42 +322,56 @@ impl crate::KeyMintTa {
                     }
                 },
             },
-            KeyMaterial::Remote(remote) => Operation {
-                handle: op_handle,
-                aad_allowed: false,
-                input_size: 0,
-                slot_to_delete,
-                trusted_conf_data,
-                auth_info: op_auth_info,
-                crypto_op: match purpose {
-                    KeyPurpose::Sign => CryptoOperation::RemoteSign {
-                        alias: remote.alias.clone(),
-                        algorithm: remote_sign_algorithm(get_algorithm(key_chars)?, &params)?,
-                        data: Vec::new(),
-                    },
-                    KeyPurpose::Decrypt => CryptoOperation::RemoteDecrypt {
-                        alias: remote.alias.clone(),
-                        algorithm: remote_decrypt_algorithm(&params)?,
-                        data: Vec::new(),
-                    },
-                    KeyPurpose::AgreeKey => CryptoOperation::RemoteAgree {
-                        alias: remote.alias.clone(),
-                        peer_public_key: Vec::new(),
-                        secret_size: match get_ec_curve(key_chars)? {
-                            EcCurve::P224 => 28,
-                            EcCurve::P256 | EcCurve::Curve25519 => 32,
-                            EcCurve::P384 => 48,
-                            EcCurve::P521 => 66,
-                        },
-                    },
-                    _ => {
-                        return Err(km_err!(
-                            IncompatiblePurpose,
-                            "invalid purpose {purpose:?} for remote key",
-                        ))
+            KeyMaterial::Remote(remote) => {
+                // Lazy backfill for remote keys created before blob-reference
+                // tracking existed: record digest->alias so that a later
+                // deleteKey of this blob can release the reference. The
+                // registry dedups repeat registrations.
+                if let Some(backend) = self.dev.remote.as_ref() {
+                    match self.imp.sha256.hash(key_blob) {
+                        Ok(digest) => backend.register_remote_blob(&remote.alias, &digest),
+                        Err(e) => {
+                            warn!("remote blob digest for registration failed: {e:?}")
+                        }
                     }
-                },
-            },
+                }
+                Operation {
+                    handle: op_handle,
+                    aad_allowed: false,
+                    input_size: 0,
+                    slot_to_delete,
+                    trusted_conf_data,
+                    auth_info: op_auth_info,
+                    crypto_op: match purpose {
+                        KeyPurpose::Sign => CryptoOperation::RemoteSign {
+                            alias: remote.alias.clone(),
+                            algorithm: remote_sign_algorithm(get_algorithm(key_chars)?, &params)?,
+                            data: Vec::new(),
+                        },
+                        KeyPurpose::Decrypt => CryptoOperation::RemoteDecrypt {
+                            alias: remote.alias.clone(),
+                            algorithm: remote_decrypt_algorithm(&params)?,
+                            data: Vec::new(),
+                        },
+                        KeyPurpose::AgreeKey => CryptoOperation::RemoteAgree {
+                            alias: remote.alias.clone(),
+                            peer_public_key: Vec::new(),
+                            secret_size: match get_ec_curve(key_chars)? {
+                                EcCurve::P224 => 28,
+                                EcCurve::P256 | EcCurve::Curve25519 => 32,
+                                EcCurve::P384 => 48,
+                                EcCurve::P521 => 66,
+                            },
+                        },
+                        _ => {
+                            return Err(km_err!(
+                                IncompatiblePurpose,
+                                "invalid purpose {purpose:?} for remote key",
+                            ))
+                        }
+                    },
+                }
+            }
         };
         if let Some(pending) = pending_access {
             self.record_access_time(

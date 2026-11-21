@@ -1259,6 +1259,17 @@ impl KeyMintTa {
     }
 
     fn delete_key(&mut self, keyblob: &[u8]) -> Result<(), Error> {
+        // Release the remote blob reference for this digest even when the blob
+        // does not parse: the remote alias cannot be recovered here (hidden
+        // parameters are unavailable) and an unknown digest is a registry
+        // no-op. Releasing a superseded upgrade blob does not delete the remote
+        // session while the upgraded blob still references the same alias.
+        if let Some(remote) = self.dev.remote.as_ref() {
+            match self.imp.sha256.hash(keyblob) {
+                Ok(digest) => remote.release_remote_blob(&digest),
+                Err(e) => error!("remote blob digest for release failed: {e:?}"),
+            }
+        }
         // Parse the keyblob. It cannot be decrypted, because hidden parameters are not available
         // (there is no `params` for them to arrive in).
         if let Ok(keyblob::EncryptedKeyBlob::V1(encrypted_keyblob)) =
@@ -1292,6 +1303,11 @@ impl KeyMintTa {
         if let Some(sdd_mgr) = &mut self.dev.sdd_mgr {
             error!("secure deleting all keys -- device likely to need factory reset!");
             sdd_mgr.delete_all();
+        }
+        if self.dev.remote.is_some() {
+            // No remote action: keystore2 deletes each blob via deleteKey,
+            // which releases the registered references individually.
+            info!("deleteAllKeys does not directly delete remote sessions");
         }
         Ok(())
     }

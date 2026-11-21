@@ -587,7 +587,11 @@ fn session_stem(alias: &str) -> String {
 }
 
 fn session_path(alias: &str) -> PathBuf {
-    sessions_dir().join(format!("{}.json", session_stem(alias)))
+    session_path_in(&sessions_dir(), alias)
+}
+
+fn session_path_in(dir: &Path, alias: &str) -> PathBuf {
+    dir.join(format!("{}.json", session_stem(alias)))
 }
 
 fn load_session_from_disk(alias: &str) -> Option<TeeSession> {
@@ -722,6 +726,41 @@ fn persist_pending_session(
         cached.needs_persistence = false;
     }
     Ok(())
+}
+
+/// Drops the persisted session for `alias` from both the in-memory cache and
+/// disk. The `sessions()` mutex is held for the whole operation: every session
+/// writer (`session_put`, `session_get` recovery, pending-persist, and
+/// upgrade repersistence) serializes on it, so an in-flight operation that
+/// cloned the session before the deletion cannot republish it afterwards.
+/// A missing cache entry or file is a successful no-op; only a fresh
+/// `attest`/`session_put` may create the alias again.
+///
+/// No KeyMint/HAL/TEE call is made: the hardware keyblob is simply no longer
+/// reachable for subsequent `session_get` lookups.
+///
+/// Returns whether either store contained the alias.
+pub fn delete_session(alias: &str) -> Result<bool> {
+    delete_session_in(&sessions_dir(), alias)
+}
+
+fn delete_session_in(dir: &Path, alias: &str) -> Result<bool> {
+    let mut sessions = sessions().lock().unwrap();
+    let cached = sessions.remove(alias).is_some();
+    let path = session_path_in(dir, alias);
+    let file_existed = match std::fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("remove session {}", path.display()));
+        }
+    };
+    // Durably commit the directory metadata so a restart cannot resurrect
+    // the deleted file.
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .with_context(|| format!("sync session directory {}", dir.display()))?;
+    Ok(cached || file_existed)
 }
 
 fn recover_upgraded_session(
@@ -1337,11 +1376,14 @@ fn upgrade_session_for_use(
     keymint: &dyn IKeyMintDevice,
 ) -> Result<TeeSession> {
     // Preserve the established persist-before-retry protocol for both begin
-    // and native generateKey calls using an existing attestation key.
+    // and native generateKey calls using an existing attestation key. The
+    // entry may have been deleted between the caller's `session_get` clone and
+    // this lock acquisition; a missing alias must surface the same error a
+    // fresh lookup would and must not repersist the stale session.
     let mut sessions = sessions().lock().unwrap();
     let cached = sessions
         .get_mut(alias)
-        .context("upgrade session is missing")?;
+        .ok_or_else(|| anyhow!("no key for alias '{alias}' (call attest first)"))?;
     let upgraded = recover_upgraded_session(
         cached,
         session,
@@ -3042,6 +3084,54 @@ mod upgrade_tests {
         });
         assert_eq!(upgrades.load(Ordering::SeqCst), 1);
         assert_eq!(saves.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn delete_session_removes_cache_and_file_and_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let alias = "delete-session-idempotent";
+        let path = session_path_in(directory.path(), alias);
+        save_session_at(&path, alias, &session()).unwrap();
+        sessions()
+            .lock()
+            .unwrap()
+            .insert(alias.to_string(), session().into());
+        assert!(delete_session_in(directory.path(), alias).unwrap());
+        assert!(!path.exists());
+        assert!(!sessions().lock().unwrap().contains_key(alias));
+        // A second deletion is a successful no-op.
+        assert!(!delete_session_in(directory.path(), alias).unwrap());
+        // A later lookup finds neither a cache entry nor a persisted file,
+        // so session_get-style resolution fails with "no key for alias".
+        assert!(sessions().lock().unwrap().get(alias).is_none());
+        assert!(load_session_from_path(&path).is_none());
+    }
+
+    #[test]
+    fn deleted_alias_cannot_be_repersisted_by_stale_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let alias = "delete-session-resurrect";
+        let path = session_path_in(directory.path(), alias);
+        save_session_at(&path, alias, &session()).unwrap();
+        sessions().lock().unwrap().insert(
+            alias.to_string(),
+            CachedSession {
+                session: session(),
+                needs_persistence: true,
+            },
+        );
+        // An in-flight operation cloned the session; then the alias is
+        // deleted. The write paths that could repersist stale state resolve
+        // the alias through the session map under the same lock, so the
+        // missing entry makes them fail before any persist runs.
+        let _stale_clone = sessions().lock().unwrap()[alias].session.clone();
+        assert!(delete_session_in(directory.path(), alias).unwrap());
+        assert!(sessions().lock().unwrap().get_mut(alias).is_none());
+        assert!(!path.exists());
+        assert!(load_session_from_path(&path).is_none());
+        // The pending-persist flag died with the cache entry; nothing
+        // recreates the file.
+        assert!(!delete_session_in(directory.path(), alias).unwrap());
     }
 }
 

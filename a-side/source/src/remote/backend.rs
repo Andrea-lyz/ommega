@@ -354,6 +354,14 @@ impl kmr_ta::device::RemoteBackend for RemoteRelayBackend {
             Err(_) => true,
         }
     }
+
+    fn register_remote_blob(&self, alias: &str, blob_digest: &[u8; 32]) {
+        super::deletion::register_remote_blob(alias, blob_digest);
+    }
+
+    fn release_remote_blob(&self, blob_digest: &[u8; 32]) {
+        super::deletion::release_remote_blob(blob_digest);
+    }
 }
 
 #[cfg(test)]

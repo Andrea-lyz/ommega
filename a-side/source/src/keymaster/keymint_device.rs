@@ -601,13 +601,8 @@ impl IKeyMintDevice for KeyMintWrapper {
         crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo,
         Status,
     > {
-        let hardware_info: keymint::KeyMintHardwareInfo = self
-            .inner
-            .keymint
-            .lock()
-            .unwrap()
-            .get_hardware_info()
-            .unwrap();
+        let hardware_info: keymint::KeyMintHardwareInfo =
+            self.get_hardware_info().map_err(map_ks_error)?;
 
         Ok(
             crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo {

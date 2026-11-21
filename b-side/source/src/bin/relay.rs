@@ -1479,6 +1479,28 @@ fn handle_agree(_task_type: &str, payload: &Value) -> Result<Value> {
     }))
 }
 
+/// A-side deleted a remote key: drop the persisted session for `alias`.
+/// Idempotent (a missing alias reports `deleted: false`) and deliberately
+/// makes no KeyMint/HAL/TEE call — deleting the persisted keyblob is what
+/// makes the key unreachable for later operations.
+fn handle_delete(_task_type: &str, payload: &Value) -> Result<Value> {
+    let alias = payload
+        .get("alias")
+        .and_then(Value::as_str)
+        .filter(|alias| !alias.trim().is_empty() && alias.len() <= 128)
+        .ok_or_else(|| {
+            keymint_error(
+                KmErrorCode::InvalidArgument,
+                "delete requires a non-empty alias of at most 128 bytes",
+            )
+        })?;
+    let existed = tee_ops::delete_session(alias)?;
+    Ok(json!({
+        "deleted": existed,
+        "alias": alias,
+    }))
+}
+
 fn handle_task(
     cfg: &RelayConfig,
     task_id: &str,
@@ -1493,6 +1515,7 @@ fn handle_task(
         "sign" => |_cfg, task_type, payload| handle_sign(task_type, payload),
         "decrypt" => |_cfg, task_type, payload| handle_decrypt(task_type, payload),
         "agree" => |_cfg, task_type, payload| handle_agree(task_type, payload),
+        "delete" => |_cfg, task_type, payload| handle_delete(task_type, payload),
         "soter" => |cfg, _task_type, payload| {
             if !cfg.soter_enabled {
                 return Err(anyhow!("B-side SOTER forwarding is disabled"));
