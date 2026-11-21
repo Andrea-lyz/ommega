@@ -16,7 +16,7 @@ use crate::{
     err,
     keymaster::{
         apex::ModuleInfoBundle, async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements,
-        gc::Gc, keymint_device::get_keymint_wrapper, super_key::SuperKeyManager,
+        gc::Gc, keymint_device::KeyMintWrapper, super_key::SuperKeyManager,
         utils::get_interface_once,
     },
     plat::property_watcher::PropertyWatcher,
@@ -39,9 +39,14 @@ static GC: LazyLock<Arc<Gc>> = LazyLock::new(|| {
     Arc::new(Gc::new_init_with(ASYNC_TASK.clone(), || {
         (
             Box::new(|uuid, blob| {
-                let security_level = uuid.to_security_level().unwrap();
+                let security_level = uuid
+                    .to_security_level()
+                    .context("blob uuid does not encode a security level")?;
 
-                let km_dev = get_keymint_wrapper(security_level).unwrap();
+                // Delete through the owning TA even when its security level
+                // is hidden from callers; an unwrap here would abort keymint
+                // on every GC pass over a StrongBox-bound blob.
+                let km_dev = KeyMintWrapper::for_blob_deletion(security_level)?;
                 let _wp = wd::watch("invalidate key closure: calling IKeyMintDevice::deleteKey");
                 km_dev
                     .delete_Key(blob)

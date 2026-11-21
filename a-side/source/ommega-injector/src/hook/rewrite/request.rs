@@ -122,7 +122,7 @@ fn apply_strongbox_and_target_security_policy(
     match mode {
         config::TargetSecurityMode::Strongbox => {
             if strongbox_globally_hidden() {
-                info!(
+                debug!(
                     "event=security_level_policy packages={:?} mode=Strongbox suppressed=strongbox_globally_hidden keeping={:?}",
                     decision.packages, security_level
                 );
@@ -469,6 +469,10 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             ParsedServiceRequest::GetSecurityLevel { security_level } => Some(*security_level),
             _ => None,
         };
+        debug!(
+            "event=service_request_enter method={:?} code=0x{:x} uid={} pid={} requested={:?}",
+            method, original_code, caller.uid, caller.pid, requested_security_level
+        );
         resolve_global_policy_packages(&mut decision, &cfg, &request, || {
             let _guard = BypassGuard::enter();
             ipc::resolve_packages_for_uid(caller.uid as u32)

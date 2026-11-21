@@ -987,6 +987,18 @@ impl KeyMintWrapper {
         })
     }
 
+    /// Wrapper used only to delete a stored keyblob. A blob created while
+    /// StrongBox was usable is still owned by that TA, and only it can free
+    /// the secure-deletion secret — even while the security level is hidden
+    /// from callers by the global capability mask. Caller-visible paths must
+    /// keep using [`KeyMintWrapper::new`].
+    pub(crate) fn for_blob_deletion(security_level: SecurityLevel) -> Result<Self> {
+        Ok(KeyMintWrapper {
+            security_level,
+            inner: shared_keymint_wrapper_inner(security_level)?,
+        })
+    }
+
     /// Lock the TA after filling the relay profile cache that keyblob
     /// version checks read, so no relay request runs under the lock.
     fn lock_ta_with_profile(&self) -> std::sync::MutexGuard<'_, KeyMintTa> {

@@ -43,6 +43,10 @@
   missing service/backend, connection failure, and stale or dead RPC transport failures such as
   `DeadObject`, `RpcError`, and `NotEnoughData`. Reuse the existing classifiers instead of
   maintaining another status list.
+- Exception while `android.hardware.strongbox_keystore` is globally hidden in the active boot: the
+  injector rejects `getSecurityLevel(STRONGBOX)` for all callers and turns System `getKeyEntry`
+  replies for StrongBox keys into `SYSTEM_ERROR`, so Keystore2 matches PackageManager. This is the
+  only case where non-allowed callers' requests are altered.
 
 ### Persistent and Temporary Files
 

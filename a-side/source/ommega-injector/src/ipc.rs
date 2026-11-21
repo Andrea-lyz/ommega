@@ -7,8 +7,8 @@ use std::{cmp, thread};
 
 use anyhow::{Context, Result};
 use kmr_common::capability_mask::{
-    mounted_strongbox_masked, pm_has_system_feature_offset, PmFeatureProbe, StrongboxFeatureCache,
-    PACKAGE_MANAGER_NATIVE_DESCRIPTOR, PACKAGE_MANAGER_NATIVE_SERVICE, STRONGBOX_FEATURE,
+    monotonic_ms, mounted_strongbox_masked, PmFeatureProbe, StrongboxFeatureCache,
+    STRONGBOX_FEATURE,
 };
 use kmr_common::rpc;
 use log::{debug, info, warn};
@@ -419,95 +419,65 @@ where
 static STRONGBOX_FEATURE_CACHE: StrongboxFeatureCache = StrongboxFeatureCache::new();
 
 pub fn strongbox_feature_globally_hidden() -> bool {
-    STRONGBOX_FEATURE_CACHE
-        .is_globally_hidden_with(probe_strongbox_system_feature, mounted_strongbox_masked)
+    STRONGBOX_FEATURE_CACHE.is_globally_hidden_with(
+        probe_strongbox_system_feature,
+        mounted_strongbox_masked,
+        monotonic_ms,
+    )
 }
 
 fn probe_strongbox_system_feature() -> PmFeatureProbe {
     let _guard = crate::forward::BypassGuard::enter();
     ensure_process_state();
-
-    let binder = match hub::try_get_service(PACKAGE_MANAGER_NATIVE_SERVICE) {
-        Ok(Some(binder)) => binder,
-        Ok(None)
-        | Err(StatusCode::DeadObject | StatusCode::FailedTransaction | StatusCode::NameNotFound) => {
-            return PmFeatureProbe::Unavailable;
-        }
-        Err(error) => {
-            warn!(
-                "failed to query {PACKAGE_MANAGER_NATIVE_SERVICE} for StrongBox feature: {error:?}"
-            );
-            return PmFeatureProbe::Failed;
-        }
-    };
-
-    let descriptor = binder.descriptor();
-    if descriptor != PACKAGE_MANAGER_NATIVE_DESCRIPTOR {
-        warn!("unexpected {PACKAGE_MANAGER_NATIVE_SERVICE} descriptor: {descriptor}");
-        return PmFeatureProbe::Failed;
+    let probe = kmr_common::capability_mask::probe_strongbox_system_feature();
+    if let PmFeatureProbe::Resolved(false) = probe {
+        info!(
+            "event=capability_mask feature={STRONGBOX_FEATURE} declared=false; disabling StrongBox security level for all callers"
+        );
     }
-    let Some(proxy) = binder.as_proxy() else {
-        warn!("{PACKAGE_MANAGER_NATIVE_SERVICE} binder was unexpectedly local");
-        return PmFeatureProbe::Failed;
-    };
-    let mut data = match proxy.prepare_transact(true) {
-        Ok(data) => data,
-        Err(error) => {
-            warn!("failed to prepare PackageManager hasSystemFeature transaction: {error:?}");
-            return PmFeatureProbe::Failed;
-        }
-    };
-    if let Err(error) = data
-        .write(STRONGBOX_FEATURE)
-        .and_then(|()| data.write(&0_i32))
-    {
-        warn!("failed to encode PackageManager hasSystemFeature arguments: {error:?}");
-        return PmFeatureProbe::Failed;
-    }
+    probe
+}
 
-    let code = rsbinder::FIRST_CALL_TRANSACTION
-        + pm_has_system_feature_offset(kmr_common::android_version::android_major_version());
-    let mut reply = match proxy.submit_transact(code, &data, rsbinder::FLAG_CLEAR_BUF) {
-        Ok(Some(reply)) => reply,
-        Ok(None) => {
-            warn!("PackageManager hasSystemFeature returned no reply");
-            return PmFeatureProbe::Failed;
-        }
-        Err(StatusCode::DeadObject | StatusCode::FailedTransaction) => {
-            return PmFeatureProbe::Unavailable;
-        }
-        Err(error) => {
-            warn!("PackageManager hasSystemFeature transact failed: {error:?}");
-            return PmFeatureProbe::Failed;
-        }
-    };
-    reply.set_data_position(0);
+const KEYSTORE_SERVICE_NAME: &str = "android.system.keystore2.IKeystoreService/default";
+const BINDER_FLUSH_TRANSACTIONS: usize = 24;
+const BINDER_FLUSH_RESOLVE_ATTEMPTS: u32 = 50;
+const BINDER_FLUSH_RESOLVE_DELAY: Duration = Duration::from_millis(100);
 
-    let status: Status = match reply.read() {
-        Ok(status) => status,
-        Err(error) => {
-            warn!("failed to decode PackageManager hasSystemFeature status: {error:?}");
-            return PmFeatureProbe::Failed;
+/// Binder looper threads that were already parked inside
+/// `ioctl(BINDER_WRITE_READ)` when the ioctl hook was committed complete that
+/// parked ioctl un-intercepted: the driver delivers their next transaction
+/// straight to libbinder, so the first request each such thread receives
+/// bypasses request rewriting and reply observation entirely. Wake every
+/// parked looper once with concurrent no-op pings so each re-parks through the
+/// hooked ioctl before real caller traffic arrives.
+pub fn flush_parked_binder_threads() {
+    ensure_process_state();
+    let mut service = hub::check_service(KEYSTORE_SERVICE_NAME);
+    for _ in 0..BINDER_FLUSH_RESOLVE_ATTEMPTS {
+        if service.is_some() {
+            break;
         }
-    };
-    if !status.is_ok() {
-        warn!("PackageManager hasSystemFeature returned non-ok status: {status}");
-        return PmFeatureProbe::Failed;
+        thread::sleep(BINDER_FLUSH_RESOLVE_DELAY);
+        service = hub::check_service(KEYSTORE_SERVICE_NAME);
     }
-    match reply.read::<bool>() {
-        Ok(declared) => {
-            if !declared {
-                info!(
-                    "event=capability_mask feature={STRONGBOX_FEATURE} declared=false; disabling StrongBox security level for all callers"
-                );
-            }
-            PmFeatureProbe::Resolved(declared)
-        }
-        Err(error) => {
-            warn!("failed to decode PackageManager hasSystemFeature result: {error:?}");
-            PmFeatureProbe::Failed
+    let Some(service) = service else {
+        warn!(
+            "event=binder_flush {KEYSTORE_SERVICE_NAME} not registered; parked binder threads stay un-intercepted until their first request"
+        );
+        return;
+    };
+    let mut workers = Vec::with_capacity(BINDER_FLUSH_TRANSACTIONS);
+    for _ in 0..BINDER_FLUSH_TRANSACTIONS {
+        let service = service.clone();
+        workers.push(thread::spawn(move || service.ping_binder().is_ok()));
+    }
+    let mut completed = 0usize;
+    for worker in workers {
+        if worker.join().unwrap_or(false) {
+            completed += 1;
         }
     }
+    info!("event=binder_flush ping transactions completed={completed}/{BINDER_FLUSH_TRANSACTIONS}");
 }
 
 pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {

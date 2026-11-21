@@ -118,6 +118,14 @@ pub extern "C" fn entry(handle: *const c_void) -> bool {
         return false;
     }
     if let Err(error) = std::thread::Builder::new()
+        .name("ommega-binder-flush".to_string())
+        .spawn(ipc::flush_parked_binder_threads)
+    {
+        warn!(
+            "failed to start binder looper flush thread; requests delivered to binder threads parked before hook commit may bypass interception: {error}"
+        );
+    }
+    if let Err(error) = std::thread::Builder::new()
         .name("ommega-rpc-warmup".to_string())
         .spawn(|| {
             if let Err(error) = ipc::install_direct_rpc_session() {

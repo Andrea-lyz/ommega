@@ -87,6 +87,35 @@ impl SecurityLevels {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum StrongboxRegistrationAction {
+    Register,
+    Unregister,
+    Keep,
+}
+
+/// Decision for the optional StrongBox security level: unavailable unregisters
+/// a registered level but is a no-op otherwise; available registers when the
+/// registered uuid is missing or stale and keeps a current registration.
+fn strongbox_registration_action(
+    available: bool,
+    registered: Option<Uuid>,
+    expected: Uuid,
+) -> StrongboxRegistrationAction {
+    if !available {
+        return if registered.is_some() {
+            StrongboxRegistrationAction::Unregister
+        } else {
+            StrongboxRegistrationAction::Keep
+        };
+    }
+    if registered != Some(expected) {
+        StrongboxRegistrationAction::Register
+    } else {
+        StrongboxRegistrationAction::Keep
+    }
+}
+
 impl KeystoreService {
     /// Create a new instance of the Keystore 2.0 service.
     pub fn new_native_binder() -> Result<KeystoreService> {
@@ -151,16 +180,24 @@ impl KeystoreService {
                 .copied()
         };
         if let Some(current_uuid) = registered_strongbox_uuid {
-            if !crate::plat::keymint_profile::strongbox_available() {
-                let mut security_levels = self.security_levels.write().unwrap();
-                security_levels.unregister(SecurityLevel::STRONGBOX);
-                log::info!("Unregistered optional StrongBox security level because StrongBox is unavailable");
-            } else if current_uuid != Uuid::from(SecurityLevel::STRONGBOX) {
-                if let Err(error) = self.register_security_level(SecurityLevel::STRONGBOX) {
-                    log::warn!(
-                        "Failed to refresh optional StrongBox security level after keybox change: {error:#}"
-                    );
+            match strongbox_registration_action(
+                crate::plat::keymint_profile::strongbox_available(),
+                Some(current_uuid),
+                Uuid::from(SecurityLevel::STRONGBOX),
+            ) {
+                StrongboxRegistrationAction::Unregister => {
+                    let mut security_levels = self.security_levels.write().unwrap();
+                    security_levels.unregister(SecurityLevel::STRONGBOX);
+                    log::info!("Unregistered optional StrongBox security level because StrongBox is unavailable");
                 }
+                StrongboxRegistrationAction::Register => {
+                    if let Err(error) = self.register_security_level(SecurityLevel::STRONGBOX) {
+                        log::warn!(
+                            "Failed to refresh optional StrongBox security level after keybox change: {error:#}"
+                        );
+                    }
+                }
+                StrongboxRegistrationAction::Keep => {}
             }
         }
 
@@ -168,29 +205,34 @@ impl KeystoreService {
     }
 
     fn ensure_strongbox_security_level(&self) {
-        if !crate::plat::keymint_profile::strongbox_available() {
-            let mut security_levels = self.security_levels.write().unwrap();
-            if security_levels
-                .unregister(SecurityLevel::STRONGBOX)
-                .is_some()
-            {
-                log::info!("Unregistered optional StrongBox security level because StrongBox is unavailable");
-            }
-            return;
-        }
         let strongbox_uuid = Uuid::from(SecurityLevel::STRONGBOX);
-        let needs_register = {
+        let registered_uuid = {
             let security_levels = self.security_levels.read().unwrap();
             security_levels
                 .uuid_by_sec_level
                 .get(&SecurityLevel::STRONGBOX)
                 .copied()
-                != Some(strongbox_uuid)
         };
-        if needs_register {
-            if let Err(error) = self.register_security_level(SecurityLevel::STRONGBOX) {
-                log::warn!("Failed to construct optional StrongBox security level: {error:#}");
+        match strongbox_registration_action(
+            crate::plat::keymint_profile::strongbox_available(),
+            registered_uuid,
+            strongbox_uuid,
+        ) {
+            StrongboxRegistrationAction::Unregister => {
+                let mut security_levels = self.security_levels.write().unwrap();
+                if security_levels
+                    .unregister(SecurityLevel::STRONGBOX)
+                    .is_some()
+                {
+                    log::info!("Unregistered optional StrongBox security level because StrongBox is unavailable");
+                }
             }
+            StrongboxRegistrationAction::Register => {
+                if let Err(error) = self.register_security_level(SecurityLevel::STRONGBOX) {
+                    log::warn!("Failed to construct optional StrongBox security level: {error:#}");
+                }
+            }
+            StrongboxRegistrationAction::Keep => {}
         }
     }
 
@@ -980,5 +1022,45 @@ impl IKeymintService for KeystoreService {
         let _wp = wd::watch("IKeymintService::hasDelegatedScope");
         let caller = require_ommega_ctx(ctx, "IKeymintService::hasDelegatedScope")?;
         self.has_delegated_scope(caller).map_err(into_logged_binder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strongbox_registration_action_covers_all_branches() {
+        let expected = Uuid::from(SecurityLevel::STRONGBOX);
+        let stale = Uuid::from_keybox_digest(SecurityLevel::STRONGBOX, [0xab; 32]);
+        assert_ne!(expected, stale);
+
+        // Unavailable: only a registered level is unregistered.
+        assert_eq!(
+            strongbox_registration_action(false, None, expected),
+            StrongboxRegistrationAction::Keep
+        );
+        assert_eq!(
+            strongbox_registration_action(false, Some(expected), expected),
+            StrongboxRegistrationAction::Unregister
+        );
+        assert_eq!(
+            strongbox_registration_action(false, Some(stale), expected),
+            StrongboxRegistrationAction::Unregister
+        );
+
+        // Available: register when missing or stale, keep when current.
+        assert_eq!(
+            strongbox_registration_action(true, None, expected),
+            StrongboxRegistrationAction::Register
+        );
+        assert_eq!(
+            strongbox_registration_action(true, Some(stale), expected),
+            StrongboxRegistrationAction::Register
+        );
+        assert_eq!(
+            strongbox_registration_action(true, Some(expected), expected),
+            StrongboxRegistrationAction::Keep
+        );
     }
 }

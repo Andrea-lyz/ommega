@@ -62,6 +62,14 @@ pub(in crate::hook::intercept) unsafe fn parse_read_buffer(
                         } else {
                             copy_process_c_string(tr.secctx as usize).map(Some)
                         };
+                        if caller_sid.is_none() {
+                            debug!(
+                                "event=br_transaction_drop reason=secctx_copy_failed code=0x{:x} uid={} pid={}",
+                                tr.transaction_data.code,
+                                tr.transaction_data.sender_euid,
+                                tr.transaction_data.sender_pid
+                            );
+                        }
                         caller_sid.map(|caller_sid| {
                             (tr.transaction_data, caller_sid, "BR_TRANSACTION_SEC_CTX")
                         })

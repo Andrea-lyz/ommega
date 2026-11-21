@@ -1,7 +1,7 @@
 //! Boot-time system feature declarations, independent of KeyMint routing.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 
 pub const CONFIG_PATH: &str = "/data/misc/keystore/ommega/data/system-capability-mask.conf";
 pub const XML_PATH: &str = "system/etc/permissions/ommega-capability-mask.xml";
@@ -89,8 +89,33 @@ pub fn mounted_config_from_path(path: &Path) -> Option<Config> {
     Config::from_xml(&xml).ok()
 }
 
+/// Reads the persisted capability config. Returns `None` when the file is
+/// missing, unreadable, or fails `Config::parse`.
+fn persistent_config_from_path(path: &Path) -> Option<Config> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Config::parse(&text).ok()
+}
+
+fn strongbox_masked_from_paths(xml_path: &Path, conf_path: &Path) -> bool {
+    match mounted_config_from_path(xml_path) {
+        Some(config) => config.strongbox,
+        None => {
+            log::debug!(
+                "capability mask XML unreadable at {}; using persisted config",
+                xml_path.display()
+            );
+            persistent_config_from_path(conf_path).is_some_and(|config| config.strongbox)
+        }
+    }
+}
+
+/// Whether the StrongBox feature declaration is masked for this boot. The
+/// mounted permissions XML is authoritative; when it cannot be read — for
+/// example inside `keystore`, which may lack read access to the
+/// module-mounted file — the persisted config that generated it is used
+/// instead.
 pub fn mounted_strongbox_masked() -> bool {
-    mounted_config_from_path(Path::new(MOUNTED_XML_PATH)).is_some_and(|config| config.strongbox)
+    strongbox_masked_from_paths(Path::new(MOUNTED_XML_PATH), Path::new(CONFIG_PATH))
 }
 
 /// Transaction offset from `FIRST_CALL_TRANSACTION` for
@@ -114,7 +139,23 @@ pub enum PmFeatureProbe {
 const STATE_UNPROBED: u8 = 0;
 const STATE_DECLARED: u8 = 1;
 const STATE_HIDDEN: u8 = 2;
-const STATE_UNSUPPORTED: u8 = 3;
+
+/// Minimum interval between `package_native` probes after a failed probe.
+/// A failure (transport error, dead object, parse failure) may be transient,
+/// so probing resumes after this delay instead of being cached forever.
+pub const PM_PROBE_RETRY_MS: i64 = 30_000;
+
+/// Monotonic time in milliseconds (CLOCK_BOOTTIME) for the retry interval.
+#[allow(clippy::unnecessary_cast)]
+pub fn monotonic_ms() -> i64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid out-pointer; clock_gettime writes it before returning.
+    unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) };
+    now.tv_sec as i64 * 1000 + (now.tv_nsec as i64 / 1_000_000)
+}
 
 /// Per-process cache for whether `android.hardware.strongbox_keystore` is
 /// globally hidden in the current boot.
@@ -122,8 +163,13 @@ const STATE_UNSUPPORTED: u8 = 3;
 /// Android's `SystemConfig` feature table is immutable once initialized, so a
 /// definitive `package_native::hasSystemFeature` verdict is cached for the rest
 /// of the process lifetime. While `package_native` is not yet registered during
-/// early boot, this falls back to the mounted capability XML without caching.
-pub struct StrongboxFeatureCache(AtomicU8);
+/// early boot, or a probe fails transiently, this falls back to the local mask
+/// files without caching a verdict. After a failed probe, the next probe is
+/// delayed by at least `PM_PROBE_RETRY_MS`.
+pub struct StrongboxFeatureCache {
+    state: AtomicU8,
+    last_failed_ms: AtomicI64,
+}
 
 impl Default for StrongboxFeatureCache {
     fn default() -> Self {
@@ -133,35 +179,127 @@ impl Default for StrongboxFeatureCache {
 
 impl StrongboxFeatureCache {
     pub const fn new() -> Self {
-        Self(AtomicU8::new(STATE_UNPROBED))
+        Self {
+            state: AtomicU8::new(STATE_UNPROBED),
+            last_failed_ms: AtomicI64::new(0),
+        }
     }
 
     pub fn is_globally_hidden_with(
         &self,
         probe_pm: impl FnOnce() -> PmFeatureProbe,
-        mounted_xml_masked: impl FnOnce() -> bool,
+        masked_fallback: impl FnOnce() -> bool,
+        now_ms: impl Fn() -> i64,
     ) -> bool {
-        match self.0.load(Ordering::Acquire) {
+        match self.state.load(Ordering::Acquire) {
             STATE_DECLARED => return false,
             STATE_HIDDEN => return true,
-            STATE_UNSUPPORTED => return mounted_xml_masked(),
             _ => {}
+        }
+
+        let last_failed_ms = self.last_failed_ms.load(Ordering::Acquire);
+        if last_failed_ms != 0 && now_ms().wrapping_sub(last_failed_ms) < PM_PROBE_RETRY_MS {
+            return masked_fallback();
         }
 
         match probe_pm() {
             PmFeatureProbe::Resolved(true) => {
-                self.0.store(STATE_DECLARED, Ordering::Release);
+                self.state.store(STATE_DECLARED, Ordering::Release);
                 false
             }
             PmFeatureProbe::Resolved(false) => {
-                self.0.store(STATE_HIDDEN, Ordering::Release);
+                self.state.store(STATE_HIDDEN, Ordering::Release);
                 true
             }
             PmFeatureProbe::Failed => {
-                self.0.store(STATE_UNSUPPORTED, Ordering::Release);
-                mounted_xml_masked()
+                self.last_failed_ms.store(now_ms(), Ordering::Release);
+                masked_fallback()
             }
-            PmFeatureProbe::Unavailable => mounted_xml_masked(),
+            PmFeatureProbe::Unavailable => masked_fallback(),
+        }
+    }
+}
+
+/// `package_native::hasSystemFeature(STRONGBOX_FEATURE)` transaction shared by
+/// the keymint daemon and the injector. The caller must satisfy its own binder
+/// environment first: the daemon returns `Unavailable` until `ProcessState` is
+/// initialized, and the injector wraps the call in its bypass guard.
+#[cfg(feature = "binder")]
+pub fn probe_strongbox_system_feature() -> PmFeatureProbe {
+    use rsbinder::{hub, Status, StatusCode};
+
+    let binder = match hub::try_get_service(PACKAGE_MANAGER_NATIVE_SERVICE) {
+        Ok(Some(binder)) => binder,
+        Ok(None)
+        | Err(StatusCode::DeadObject | StatusCode::FailedTransaction | StatusCode::NameNotFound) => {
+            return PmFeatureProbe::Unavailable;
+        }
+        Err(error) => {
+            log::warn!(
+                "failed to query {PACKAGE_MANAGER_NATIVE_SERVICE} for StrongBox feature: {error:?}"
+            );
+            return PmFeatureProbe::Failed;
+        }
+    };
+
+    let descriptor = binder.descriptor();
+    if descriptor != PACKAGE_MANAGER_NATIVE_DESCRIPTOR {
+        log::warn!("unexpected {PACKAGE_MANAGER_NATIVE_SERVICE} descriptor: {descriptor}");
+        return PmFeatureProbe::Failed;
+    }
+    let Some(proxy) = binder.as_proxy() else {
+        log::warn!("{PACKAGE_MANAGER_NATIVE_SERVICE} binder was unexpectedly local");
+        return PmFeatureProbe::Failed;
+    };
+    let mut data = match proxy.prepare_transact(true) {
+        Ok(data) => data,
+        Err(error) => {
+            log::warn!("failed to prepare PackageManager hasSystemFeature transaction: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    if let Err(error) = data
+        .write(STRONGBOX_FEATURE)
+        .and_then(|()| data.write(&0_i32))
+    {
+        log::warn!("failed to encode PackageManager hasSystemFeature arguments: {error:?}");
+        return PmFeatureProbe::Failed;
+    }
+
+    let code = rsbinder::FIRST_CALL_TRANSACTION
+        + pm_has_system_feature_offset(crate::android_version::android_major_version());
+    let mut reply = match proxy.submit_transact(code, &data, rsbinder::FLAG_CLEAR_BUF) {
+        Ok(Some(reply)) => reply,
+        Ok(None) => {
+            log::warn!("PackageManager hasSystemFeature returned no reply");
+            return PmFeatureProbe::Failed;
+        }
+        Err(StatusCode::DeadObject | StatusCode::FailedTransaction) => {
+            return PmFeatureProbe::Unavailable;
+        }
+        Err(error) => {
+            log::warn!("PackageManager hasSystemFeature transact failed: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    reply.set_data_position(0);
+
+    let status: Status = match reply.read() {
+        Ok(status) => status,
+        Err(error) => {
+            log::warn!("failed to decode PackageManager hasSystemFeature status: {error:?}");
+            return PmFeatureProbe::Failed;
+        }
+    };
+    if !status.is_ok() {
+        log::warn!("PackageManager hasSystemFeature returned non-ok status: {status}");
+        return PmFeatureProbe::Failed;
+    }
+    match reply.read::<bool>() {
+        Ok(declared) => PmFeatureProbe::Resolved(declared),
+        Err(error) => {
+            log::warn!("failed to decode PackageManager hasSystemFeature result: {error:?}");
+            PmFeatureProbe::Failed
         }
     }
 }
@@ -169,7 +307,7 @@ impl StrongboxFeatureCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicI64, AtomicUsize};
 
     #[test]
     fn switches_mask_only_the_selected_features() {
@@ -238,23 +376,75 @@ mod tests {
     }
 
     #[test]
+    fn strongbox_mask_falls_back_to_persisted_config_when_xml_unreadable() {
+        let dir = std::env::temp_dir();
+        let tag = format!("ommega-cap-mask-fallback-{}", std::process::id());
+        let xml = dir.join(format!("{tag}.xml"));
+        let conf = dir.join(format!("{tag}.conf"));
+        let _ = std::fs::remove_file(&xml);
+        let _ = std::fs::remove_file(&conf);
+
+        // Neither source readable -> not masked.
+        assert!(!strongbox_masked_from_paths(&xml, &conf));
+
+        // A masked persisted config applies when the XML cannot be read.
+        std::fs::write(
+            &conf,
+            "version=1\nstrongbox=true\ndevice_id_attestation=true\n",
+        )
+        .unwrap();
+        assert!(strongbox_masked_from_paths(&xml, &conf));
+
+        // An unmasked persisted config applies the same way.
+        std::fs::write(
+            &conf,
+            "version=1\nstrongbox=false\ndevice_id_attestation=true\n",
+        )
+        .unwrap();
+        assert!(!strongbox_masked_from_paths(&xml, &conf));
+
+        // A readable XML is authoritative over the persisted config.
+        std::fs::write(
+            &conf,
+            "version=1\nstrongbox=true\ndevice_id_attestation=true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &xml,
+            Config {
+                strongbox: false,
+                device_id_attestation: true,
+            }
+            .permissions_xml(),
+        )
+        .unwrap();
+        assert!(!strongbox_masked_from_paths(&xml, &conf));
+
+        let _ = std::fs::remove_file(&xml);
+        let _ = std::fs::remove_file(&conf);
+    }
+
+    #[test]
     fn feature_cache_prefers_live_pm_and_caches_definitive_verdicts() {
         let cache = StrongboxFeatureCache::new();
         let probes = AtomicUsize::new(0);
         // Service unavailable falls back to mounted XML without caching.
+        let now = || 0i64;
         assert!(cache.is_globally_hidden_with(
             || {
                 probes.fetch_add(1, Ordering::Relaxed);
                 PmFeatureProbe::Unavailable
             },
-            || true
+            || true,
+            now
         ));
         assert!(!cache.is_globally_hidden_with(
             || {
                 probes.fetch_add(1, Ordering::Relaxed);
                 PmFeatureProbe::Unavailable
             },
-            || false
+            || false,
+            now
         ));
         assert_eq!(probes.load(Ordering::Relaxed), 2);
 
@@ -264,24 +454,80 @@ mod tests {
                 probes.fetch_add(1, Ordering::Relaxed);
                 PmFeatureProbe::Resolved(false)
             },
-            || false
+            || false,
+            now
         ));
-        assert!(
-            cache.is_globally_hidden_with(|| panic!("resolved verdict must be cached"), || false)
-        );
+        assert!(cache.is_globally_hidden_with(
+            || panic!("resolved verdict must be cached"),
+            || false,
+            now
+        ));
         assert_eq!(probes.load(Ordering::Relaxed), 3);
 
         // Once PM resolves to true (declared), the verdict is cached even if XML claims masked.
         let declared_cache = StrongboxFeatureCache::new();
-        assert!(!declared_cache.is_globally_hidden_with(|| PmFeatureProbe::Resolved(true), || true));
-        assert!(!declared_cache
-            .is_globally_hidden_with(|| panic!("declared verdict must be cached"), || true));
+        assert!(!declared_cache.is_globally_hidden_with(
+            || PmFeatureProbe::Resolved(true),
+            || true,
+            now
+        ));
+        assert!(!declared_cache.is_globally_hidden_with(
+            || panic!("declared verdict must be cached"),
+            || true,
+            now
+        ));
 
-        // A persistent PM failure caches Unsupported and falls back to mounted XML.
+        // A failed PM probe falls back to mounted XML and stays retryable.
         let failed_cache = StrongboxFeatureCache::new();
-        assert!(failed_cache.is_globally_hidden_with(|| PmFeatureProbe::Failed, || true));
-        assert!(!failed_cache
-            .is_globally_hidden_with(|| panic!("failed PM probe must not repeat"), || false));
+        let clock = AtomicI64::new(10_000);
+        let now = || clock.load(Ordering::Relaxed);
+        assert!(failed_cache.is_globally_hidden_with(|| PmFeatureProbe::Failed, || true, now));
+        // Inside the retry window the probe is rate-limited.
+        assert!(!failed_cache.is_globally_hidden_with(
+            || panic!("failed PM probe is rate-limited"),
+            || false,
+            now
+        ));
+        // After the window the probe runs again and a resolved verdict caches.
+        clock.store(10_000 + PM_PROBE_RETRY_MS, Ordering::Relaxed);
+        assert!(failed_cache.is_globally_hidden_with(
+            || PmFeatureProbe::Resolved(false),
+            || false,
+            now
+        ));
+        assert!(failed_cache.is_globally_hidden_with(
+            || panic!("resolved verdict must be cached"),
+            || false,
+            now
+        ));
+    }
+
+    #[test]
+    fn failed_pm_probe_retries_after_retry_interval() {
+        let cache = StrongboxFeatureCache::new();
+        let probes = AtomicUsize::new(0);
+        let clock = AtomicI64::new(1_000);
+        let now = || clock.load(Ordering::Relaxed);
+        let probe = || {
+            probes.fetch_add(1, Ordering::Relaxed);
+            PmFeatureProbe::Failed
+        };
+
+        assert!(cache.is_globally_hidden_with(probe, || true, now));
+        // Repeated calls inside the window skip PM and use the mounted XML.
+        for t in [2_000, 30_999] {
+            clock.store(t, Ordering::Relaxed);
+            assert!(!cache.is_globally_hidden_with(
+                || panic!("probe must be rate-limited"),
+                || false,
+                now
+            ));
+        }
+        assert_eq!(probes.load(Ordering::Relaxed), 1);
+        // Once the interval elapses, PM is probed again.
+        clock.store(31_000, Ordering::Relaxed);
+        assert!(cache.is_globally_hidden_with(probe, || true, now));
+        assert_eq!(probes.load(Ordering::Relaxed), 2);
     }
 
     #[test]

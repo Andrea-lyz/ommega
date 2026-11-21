@@ -326,9 +326,10 @@ paths, navigation and SPL behavior are defined by this README,
   checked. Switching the backend only restarts Ommega's keymint child, not the
   device.
 - **Per-app security policy**: `Global default` follows device capability and the
-  global native-StrongBox disable switch; `StrongBox` overrides that switch; `TEE`
-  rewrites the app's requests to TEE. Policies live in `target-security.toml` and
-  are read live.
+  global native-StrongBox disable switch; `StrongBox` overrides that switch but is
+  unavailable for every caller while the StrongBox feature declaration is globally
+  hidden; `TEE` rewrites the app's requests to TEE. Policies live in
+  `target-security.toml` and are read live.
 - **Cold boot and biometrics**: Binder hooks install before remote RPC is ready;
   `ommega-rpc-warmup` initializes RPC in the background; `OnDeviceUnlocked`, auth
   tokens and user-maintenance events are queued in memory and replayed in order

@@ -217,7 +217,8 @@ WebUI mode dialog allocates positive key ids for the selected packages; empty by
 keeps the stock random 64 bit ids).
 Long-press selected apps in WebUI:
   Global default: follows global settings/capability.
-  StrongBox: explicit selection, overriding global disable.
+  StrongBox: explicit selection, overriding global disable; unavailable for every
+  caller while the StrongBox feature declaration is globally hidden.
   TEE: rewrites security-level requests, including explicit StrongBox.
 Unselected apps keep system routing. Legacy strongbox_unavailable_packages migrates
 only when the new policy file is absent.
@@ -271,7 +272,9 @@ Usage:
 Never apply these reboot steps to B when hard reboot is prohibited.
 
 Mask does not edit XML, stop HALs, delete/migrate keys, alter real Bootloader
-attestation state or block direct StrongBox requests. A running HAL is compatible
+attestation state; with Ommega's A module installed, Ommega rejects StrongBox for
+all callers while the feature is hidden (getSecurityLevel returns -68 and existing
+StrongBox keys fail getKeyEntry with SYSTEM_ERROR). A running HAL is compatible
 with a working Mask. Native attestation may still expose unlocked state; TEE
 attestation also has corresponding fields. feature=false does not prove concealment.
 

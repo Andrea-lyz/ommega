@@ -78,7 +78,10 @@ Expected results:
 - logcat contains `event=hook_registered` and one `event=feature_removed`.
 
 The module masks the PackageManager capability only. It does not stop the
-vendor StrongBox HAL or change direct KeyStore/KeyMint routing.
+vendor StrongBox HAL. With Ommega's A module installed, Ommega rejects
+StrongBox for all callers while the feature is hidden: getSecurityLevel returns
+HARDWARE_TYPE_UNAVAILABLE and existing StrongBox keys fail getKeyEntry with
+SYSTEM_ERROR until the mask is removed and the device restarted.
 
 ## Device validation
 
