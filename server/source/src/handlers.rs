@@ -257,7 +257,19 @@ fn check_b_device(state: &AppState, headers: &HeaderMap, device_id: &str) -> Res
 }
 
 // Leave headroom for the response before the A-side 30-second HTTP timeout.
-const ATTEST_WAIT_LIMIT_SECS: u64 = 25;
+const B_TASK_WAIT_LIMIT_SECS: u64 = 25;
+
+/// (result wait, claim window). The claim window closes before the result
+/// deadline so B is not handed work whose result can no longer be returned.
+fn b_task_timeouts(task_type: &str, configured_secs: u64) -> (Duration, Option<Duration>) {
+    match task_type {
+        "sign" | "delete" => (Duration::from_secs(configured_secs.min(10)), None),
+        _ => {
+            let wait = Duration::from_secs(configured_secs.min(B_TASK_WAIT_LIMIT_SECS));
+            (wait, Some(wait - wait / 5))
+        }
+    }
+}
 
 /// Physical-mode fulfilment: enqueue a task for the exact requested B device
 /// and wait for the result. Device substitution is deliberately forbidden.
@@ -271,26 +283,18 @@ async fn try_b_device_layer(
         return Some(json!({ "error": format!("B-side device {device_id} is not online") }));
     }
     let request_id = body.get("request_id").and_then(Value::as_str);
-    let configured = state.cfg.wait_result_timeout_secs;
-    let timeout = Duration::from_secs(match task_type {
-        "sign" | "delete" => configured.min(10),
-        "attest" => configured.min(ATTEST_WAIT_LIMIT_SECS),
-        _ => configured,
-    });
+    let (wait, claim) = b_task_timeouts(task_type, state.cfg.wait_result_timeout_secs);
     let (task_id, claim_deadline) = state
         .store
-        .create_task_with_deadline(
-            task_type,
-            body.clone(),
-            device_id,
-            request_id,
-            (task_type == "attest").then_some(timeout),
-        )
+        .create_task_with_deadline(task_type, body.clone(), device_id, request_id, claim)
         .await;
-    let timeout = claim_deadline.map_or(timeout, |deadline| {
-        deadline.saturating_duration_since(Instant::now())
+    // The result deadline is the claim deadline plus the margin, so a retry
+    // joining an already-claimed task still waits for the original deadline.
+    let wait = claim_deadline.map_or(wait, |deadline| {
+        (deadline + (wait - claim.unwrap_or_default()))
+            .saturating_duration_since(Instant::now())
     });
-    match state.store.wait_for_result(&task_id, timeout).await {
+    match state.store.wait_for_result(&task_id, wait).await {
         Some(mut result) => {
             if let Some(obj) = result.as_object_mut() {
                 obj.insert("task_id".to_string(), json!(task_id));
@@ -1275,6 +1279,32 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&der);
         assert_eq!(aaid_package(&encoded), "com.tencent.mm");
         assert_eq!(aaid_package("not base64"), "");
+    }
+
+    #[test]
+    fn b_task_timeouts_cap_all_tee_work_and_close_claims_early() {
+        for task_type in ["attest", "profile", "decrypt", "agree"] {
+            assert_eq!(
+                b_task_timeouts(task_type, 120),
+                (Duration::from_secs(25), Some(Duration::from_secs(20))),
+                "{task_type}"
+            );
+        }
+        assert_eq!(
+            b_task_timeouts("attest", 5),
+            (Duration::from_secs(5), Some(Duration::from_secs(4)))
+        );
+        assert_eq!(
+            b_task_timeouts("attest", 0),
+            (Duration::ZERO, Some(Duration::ZERO))
+        );
+        for task_type in ["sign", "delete"] {
+            assert_eq!(
+                b_task_timeouts(task_type, 120),
+                (Duration::from_secs(10), None),
+                "{task_type}"
+            );
+        }
     }
 
     #[tokio::test]

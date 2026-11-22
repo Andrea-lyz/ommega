@@ -1478,6 +1478,40 @@ mod tests {
             .contains("execution state unknown"));
     }
 
+    /// A replayable task reclaimed after its claim deadline must be expired in
+    /// the same poll, not handed to the next claimant.
+    #[tokio::test]
+    async fn reclaimed_task_past_claim_deadline_is_expired_not_redispatched() {
+        let store = store();
+        let (id, _) = store
+            .create_task_with_deadline(
+                "decrypt",
+                json!({}),
+                "dev",
+                None,
+                Some(Duration::from_secs(3600)),
+            )
+            .await;
+        store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
+        {
+            let mut inner = store.inner.lock().await;
+            let task = inner.tasks.get_mut(&id).unwrap();
+            task.assigned_at_ms = 1;
+            task.claim_deadline = Some(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap_or_else(Instant::now),
+            );
+            inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
+        }
+        // A different device polls while the assignee is stale: the reclaim
+        // requeues the task and the expiry pass must fail it before dispatch.
+        store.pop_for_b("other", "m2", Duration::ZERO).await;
+        assert!(store.pop_for_b("dev", "m1", Duration::ZERO).await.is_none());
+        let result = store.wait_for_result(&id, Duration::ZERO).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("claim deadline"));
+    }
+
     #[tokio::test]
     async fn result_must_match_the_active_assignment() {
         let store = store();

@@ -114,10 +114,13 @@ appropriate poll. Lost attest/agree/SOTER assignments fail with execution
 state unknown; the server does not replay them or accept a late result for
 the failed assignment.
 
-Physical `attest` waits at most 25 seconds (or `RELAY_WAIT_RESULT_TIMEOUT` if
-it is lower). A retry with the same request ID keeps the original deadline.
-An unclaimed task past that deadline is expired before dispatch; reaching the
-HTTP deadline does not interrupt work already claimed by B.
+Physical `attest`/`profile`/`decrypt`/`agree` waits at most 25 seconds (or
+`RELAY_WAIT_RESULT_TIMEOUT` if it is lower). B may claim the task only during
+the first 80% of that wait so a claimed result can still be returned. A retry
+with the same request ID keeps the original deadlines; unclaimed or reclaimed
+work past the claim deadline is expired before dispatch; reaching the HTTP
+deadline does not interrupt work already claimed by B. `sign`/`delete` keep
+the 10-second wait and cancel unclaimed work.
 
 A result is published through that task's watch channel, not broadcast to B
 polls. Both the HTTP and Rustls HTTPS listeners enable `TCP_NODELAY`; TLS,
