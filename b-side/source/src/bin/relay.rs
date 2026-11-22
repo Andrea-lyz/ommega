@@ -808,11 +808,34 @@ fn result_status_is_permanent(status: u16) -> bool {
     (400..500).contains(&status) && status != 429 && status != 408
 }
 
+/// What a finished result upload ended as. `Unknown` means a retry may have
+/// been recorded before the server answered 404; the upload is done either
+/// way, so it is not a failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UploadStatus {
+    Delivered,
+    Unknown,
+}
+
+/// Decide what a permanent rejection means for a retried upload. A 404 after
+/// an earlier network error is `Unknown`: the first POST may have been
+/// recorded and its task pruned before this attempt arrived. Any other
+/// permanent status, including a 409 on a server that acknowledges identical
+/// resends, means the result was genuinely rejected (`None`).
+fn rejected_upload_status(status: u16, maybe_delivered: bool) -> Option<UploadStatus> {
+    if status == 404 && maybe_delivered {
+        Some(UploadStatus::Unknown)
+    } else {
+        None
+    }
+}
+
 /// POST the task result to the server, retrying transient failures
 /// (network errors, 5xx, and throttling) with exponential backoff so a task is
 /// not lost to a single glitch. Permanent 4xx rejections (bad token, unknown
-/// task) are not retried.
-fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
+/// task) are not retried; a 404 after an earlier network error is reported
+/// as `UploadStatus::Unknown` rather than a failure.
+fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<UploadStatus> {
     const MAX_ATTEMPTS: u32 = 6;
     let url = format!("{}/api/b/result/", cfg.server);
     let body = json!({
@@ -827,16 +850,26 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
     let body = serde_json::to_vec(&body)?;
     let started = Instant::now();
     let mut last_err: Option<anyhow::Error> = None;
+    // True once any attempt failed at the transport layer: that request may
+    // have reached the server even though its reply never came back.
+    let mut maybe_delivered = false;
     for attempt in 1..=MAX_ATTEMPTS {
         // The server's own `Retry-After`, when it sent one, wins over our
         // exponential guess.
         let retry_hint = match http_request("POST", &url, &headers, Some(&body)) {
-            Ok(HttpResponse { status: 200, .. }) => {
+            Ok(HttpResponse {
+                status: 200, body, ..
+            }) => {
+                let duplicate = serde_json::from_slice::<Value>(&body)
+                    .ok()
+                    .and_then(|body| body.get("duplicate").and_then(Value::as_bool))
+                    .unwrap_or(false);
                 log::info!(
-                    "event=relay_upload task={task_id} attempts={attempt} elapsed_us={} status=200",
-                    started.elapsed().as_micros()
+                    "event=relay_upload task={task_id} attempts={attempt} elapsed_us={} status=200{}",
+                    started.elapsed().as_micros(),
+                    if duplicate { " duplicate=true" } else { "" }
                 );
-                return Ok(());
+                return Ok(UploadStatus::Delivered);
             }
             Ok(HttpResponse {
                 status,
@@ -844,6 +877,19 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
                 ..
             }) => {
                 if result_status_is_permanent(status) {
+                    if let Some(outcome) = rejected_upload_status(status, maybe_delivered) {
+                        log::warn!(
+                            "b/result task={task_id} HTTP {status} after a network error: \
+                             an earlier attempt may have been delivered and pruned; \
+                             outcome unknown"
+                        );
+                        log::info!(
+                            "event=relay_upload task={task_id} attempts={attempt} \
+                             elapsed_us={} status={status} outcome=unknown",
+                            started.elapsed().as_micros()
+                        );
+                        return Ok(outcome);
+                    }
                     log::warn!("b/result task={task_id} rejected: HTTP {status}");
                     return Err(anyhow!("b/result rejected with HTTP {status}"));
                 }
@@ -854,6 +900,7 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
                 retry_after
             }
             Err(e) => {
+                maybe_delivered = true;
                 log::warn!(
                     "b/result task={task_id} network error: {e:#} (attempt {attempt}/{MAX_ATTEMPTS})"
                 );
@@ -1545,13 +1592,19 @@ fn upload_result_and_log(
 ) -> Result<()> {
     let upload_started = Instant::now();
     let posted = post_result(cfg, task_id, result);
+    // `unknown`: a retry may have been delivered before the server replied
+    // 404; neither confirmed nor failed.
+    let upload_ok = match posted {
+        Ok(UploadStatus::Delivered) => "true",
+        Ok(UploadStatus::Unknown) => "unknown",
+        Err(_) => "false",
+    };
     log::info!(
         "event=relay_task task={task_id} type={task_type} outcome={outcome} \
-         dispatch_us={dispatch_us} execute_us={execute_us} upload_us={} upload_ok={}",
+         dispatch_us={dispatch_us} execute_us={execute_us} upload_us={} upload_ok={upload_ok}",
         upload_started.elapsed().as_micros(),
-        posted.is_ok()
     );
-    posted
+    posted.map(|_| ())
 }
 
 /// Hand a finished result to a detached uploader thread so `post_result`
@@ -2493,6 +2546,22 @@ mod tests {
         // 5xx is retried by the caller's own branch.
         assert!(!result_status_is_permanent(500));
         assert!(!result_status_is_permanent(503));
+    }
+
+    #[test]
+    fn a_lost_ack_makes_a_late_404_unknown_not_failed() {
+        // The first POST may have been recorded and its task pruned before
+        // this retry arrived, so a 404 after a network error is not a
+        // confirmed failure.
+        assert_eq!(
+            rejected_upload_status(404, true),
+            Some(UploadStatus::Unknown)
+        );
+        // Without a transport failure the 404 stands on its own, and the
+        // idempotent server keeps other rejections hard even after one.
+        assert_eq!(rejected_upload_status(404, false), None);
+        assert_eq!(rejected_upload_status(409, true), None);
+        assert_eq!(rejected_upload_status(403, true), None);
     }
 
     #[test]

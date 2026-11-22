@@ -17,7 +17,7 @@ use crate::auth::{AuthState, DeviceBinding, TokenCheck};
 use crate::config::Config;
 use crate::db::Db;
 use crate::fulfill::Fulfill;
-use crate::queue::{TaskStore, TaskWindow};
+use crate::queue::{Completion, TaskStore, TaskWindow};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -947,7 +947,11 @@ pub async fn b_result(
         .complete_task(&task_id, result, &device_id)
         .await
     {
-        Ok(()) => Json(json!({ "status": "ok" })).into_response(),
+        Ok(Completion::Recorded) => Json(json!({ "status": "ok" })).into_response(),
+        Ok(Completion::Duplicate) => {
+            tracing::info!(event = "relay_result_duplicate", task_id, device_id);
+            Json(json!({ "status": "ok", "duplicate": true })).into_response()
+        }
         Err(error) if error == "task not found" => json_err(StatusCode::NOT_FOUND, &error),
         Err(error) => json_err(StatusCode::CONFLICT, &error),
     }

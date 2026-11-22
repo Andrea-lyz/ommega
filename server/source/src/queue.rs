@@ -22,6 +22,14 @@ pub enum TaskStatus {
     Failed,
 }
 
+/// Whether a `complete_task` submission recorded a fresh result or echoed
+/// one already stored for the same task and assigned device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    Recorded,
+    Duplicate,
+}
+
 /// A task's budget as offsets from creation: when B may still claim it, when
 /// B must have started executing it, and when the result is due back to A.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -796,17 +804,29 @@ impl TaskStore {
     }
 
     /// Complete a task with a result reported by the B-side.
-    /// Returns Ok(()) if the task existed, Err(msg) otherwise.
+    /// Returns Ok(Completion::Recorded) for a fresh result, Ok(Completion::Duplicate)
+    /// when the assigned device resends an identical result, Err(msg) otherwise.
     pub async fn complete_task(
         &self,
         task_id: &str,
         result: Value,
         device_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Completion, String> {
         let mut inner = self.inner.lock().await;
         let Some(task) = inner.tasks.get_mut(task_id) else {
             return Err("task not found".to_string());
         };
+        // A retried upload may resend a result that was already recorded: the
+        // earlier POST landed but its ack was lost. Acknowledge an identical
+        // resend from the same assigned device without re-recording or
+        // republishing anything.
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed)
+            && !device_id.is_empty()
+            && task.assigned_device_id.as_deref() == Some(device_id)
+            && task.result.as_ref() == Some(&result)
+        {
+            return Ok(Completion::Duplicate);
+        }
         if task.status != TaskStatus::Assigned {
             return Err(format!(
                 "task is not assigned (status={})",
@@ -850,7 +870,7 @@ impl TaskStore {
         );
         // Only this task's A-side watch receivers need the completion. B polls
         // wait for new work, not unrelated result uploads.
-        Ok(())
+        Ok(Completion::Recorded)
     }
 
     /// Wait until the task is completed or failed. Returns None on timeout.
@@ -1609,10 +1629,85 @@ mod tests {
             .complete_task(&task_id, json!({"ok": true}), "dev")
             .await
             .expect("correct device completes");
+        // An identical resend from the assigned device is acknowledged, not
+        // re-recorded; it must not corrupt or double-count the first result.
+        assert_eq!(
+            store
+                .complete_task(&task_id, json!({"ok": true}), "dev")
+                .await
+                .expect("identical resend is acknowledged"),
+            Completion::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_result_retry_after_completion_is_acknowledged_as_duplicate() {
+        let store = store();
+        let task_id = store
+            .create_task("attest", json!({}), "dev", Some("request-dup"))
+            .await;
+        store
+            .pop_for_b("dev", "machine", Duration::from_millis(1))
+            .await
+            .expect("assign task");
+
+        let result = json!({"cert_chain": ["a"]});
+        assert_eq!(
+            store
+                .complete_task(&task_id, result.clone(), "dev")
+                .await
+                .expect("first result"),
+            Completion::Recorded
+        );
+        // A retry whose first ack was lost resends the identical result.
+        assert_eq!(
+            store
+                .complete_task(&task_id, result.clone(), "dev")
+                .await
+                .expect("identical retry"),
+            Completion::Duplicate
+        );
+        {
+            let inner = store.inner.lock().await;
+            assert_eq!(
+                inner.tasks.get(&task_id).unwrap().result.as_ref(),
+                Some(&result)
+            );
+        }
+        assert_eq!(store.counts().await.completed, 1);
+        // Only an exact echo from the assigned device is acknowledged.
         assert!(store
-            .complete_task(&task_id, json!({"ok": true}), "dev")
+            .complete_task(&task_id, json!({"cert_chain": ["b"]}), "dev")
             .await
             .is_err());
+        assert!(store
+            .complete_task(&task_id, result, "other")
+            .await
+            .is_err());
+
+        // The same holds for a result the server recorded as a failure.
+        let task_id = store
+            .create_task("attest", json!({}), "dev", Some("request-dup-err"))
+            .await;
+        store
+            .pop_for_b("dev", "machine", Duration::from_millis(1))
+            .await
+            .expect("assign task");
+        let result = json!({"error": "x"});
+        assert_eq!(
+            store
+                .complete_task(&task_id, result.clone(), "dev")
+                .await
+                .expect("first result"),
+            Completion::Recorded
+        );
+        assert_eq!(
+            store
+                .complete_task(&task_id, result, "dev")
+                .await
+                .expect("identical retry"),
+            Completion::Duplicate
+        );
     }
 
     /// An unrelated completion or enqueue must not wake a waiter: each open

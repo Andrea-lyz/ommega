@@ -125,8 +125,11 @@ deadline does not interrupt work already claimed by B. `sign`/`delete` keep
 the 10-second wait and cancel unclaimed work.
 
 A result is published through that task's watch channel, not broadcast to B
-polls. Both the HTTP and Rustls HTTPS listeners enable `TCP_NODELAY`; TLS,
-authentication, request IDs, assignment checks and result contents are unchanged.
+polls. An identical resend of an already-recorded result from the assigned
+device is acknowledged as a duplicate (200) instead of a 409, so a B retry
+that lost its first ack is not misreported as an upload failure. Both the
+HTTP and Rustls HTTPS listeners enable `TCP_NODELAY`; TLS, authentication,
+request IDs, assignment checks and result contents are unchanged.
 Reverse proxies must allow a 20-second hold (use a read timeout of at least
 30 seconds); no buffering or retry setting may replay a stateful task.
 
