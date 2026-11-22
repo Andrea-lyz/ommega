@@ -78,11 +78,23 @@ git push origin master
 发布资产由 [Build workflow](https://github.com/Andrea-lyz/ommega/actions/workflows/build.yml)
 在 `master` 上构建。缓存、NDK 与工具链细节见 [.github/BUILD.md](.github/BUILD.md)。
 
-发布 GitHub Release 时使用 tag `ommega_fix-X.Y.Z`，附上：
+发版提交推到 `master` 后，打并推送 tag `vX.Y.Z`：
 
-- 两个模块 ZIP、`relay_rs-linux-x86_64-musl`、两个 APK；
-- `SHA256SUMS` 与 `build-info.json`；
-- 与 CHANGELOG 对应的中英发布说明。
+```sh
+git tag -a vX.Y.Z -m "Ommega X.Y.Z"
+git push origin vX.Y.Z
+```
+
+只有 `v*` tag 会触发 `Publish KSU release` 作业。它创建（或刷新）名为 `Ommega X.Y.Z` 的
+Release 并标记为 Latest，附上：
+
+- 两个模块 ZIP 与 `ommega-a-latest.zip` / `ommega-b-latest.zip`、`ommega-a-update.json` /
+  `ommega-b-update.json`（KSU 更新元数据）；
+- `relay_rs-linux-x86_64-musl`、`relay_rs-linux-aarch64-static`、两个 APK；
+- `SHA256SUMS` 与 `build-info.json`。
+
+作业生成的是自动说明。发布后把说明替换为 CHANGELOG 中该版本的中英条目（`## 中文` 与
+`## English` 两节），例如 `gh release edit vX.Y.Z --notes-file <file>`。
 
 ## 2.1.4 及更早版本
 
