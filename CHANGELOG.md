@@ -10,6 +10,18 @@
 README 不再内嵌逐版本更新要点：发版时只更新版本号，并在这里追加条目。发布步骤见
 [RELEASING.md](RELEASING.md)。
 
+## 2.4.6 — 2026-11-22
+
+本版涉及 B 和 Server；A、B-app 与 StrongBoxCapabilityMask 仅同步产品版本号。随包 AProbe 未更新。
+
+- **中继任务有时限，过期任务不再进入 TEE（[#111](https://github.com/Andrea-lyz/ommega/pull/111)）。** physical 模式下 `attest`、`profile`、`decrypt`、`agree` 最多等待 25 秒（`RELAY_WAIT_RESULT_TIMEOUT` 更小时以它为准）：20 秒后不再派发给 B，22.5 秒后 B 拒绝开始执行，回报 `task expired on B before execution`，不调用 HAL。此前除 `attest` 外的任务在 A 放弃后最长 300 秒内仍可能被 B 执行，被回收的 `decrypt` 还会重新派发。丢失的 `attest` 分配不再重放（重放会替换同一别名下的密钥），迟到的结果被拒绝。`sign` / `delete` 不变。
+- **B 的结果回传不再阻塞 TEE。** 结果上传及其重试改在独立线程进行，不再拖住下一笔任务；TEE 调用仍严格串行。断网后 poll 的重试间隔上限从 15 秒降到 5 秒。
+- **确认丢失后的重传不再记为失败。** B 重传一份 Server 已记录的相同结果时，Server 返回重复确认（200，`duplicate: true`），不再返回 409；网络错误之后收到的 404 记为 `upload_ok=unknown`。
+
+升级：Server 和 B 都更新后才完整生效。只更新 Server 时，时限与不重放生效，但 B 已领取的过期任务仍会执行；只更新 B 时没有截止时间，其余改进照常生效。A 无需更新。行为变化：A 的 attest 等请求最多约 25 秒就返回错误（此前可能拖到约 63 秒）；B 断网超过约 20 秒时，这期间的请求会直接失败。
+
+验证：Server 单元测试（queue 30 项、handlers 32 项）通过；B 端 Android 目标的 fmt、clippy 与测试编译通过，新增 B 端测试只编译、未执行；CI 全绿。未在 B 或 Server 上部署实测。
+
 ## 2.4.5 — 2026-11-21
 
 本版涉及 A、B 和 Server；B-app 与 StrongBoxCapabilityMask 仅同步产品版本号。随包 AProbe 更新到 1.9.4-review。

@@ -12,6 +12,18 @@ running Server and does not install the optional APKs.
 The README no longer embeds per-version notes: a release only bumps the version
 and appends an entry here. See [RELEASING.md](RELEASING.md) for the steps.
 
+## 2.4.6 — 2026-11-22
+
+This release changes B and Server. A, B-app and StrongBoxCapabilityMask only receive the synchronized product version. The bundled AProbe is unchanged.
+
+- **Relay tasks are time-bounded and expired work no longer enters the TEE ([#111](https://github.com/Andrea-lyz/ommega/pull/111)).** In physical mode, `attest`, `profile`, `decrypt` and `agree` wait at most 25 s (or `RELAY_WAIT_RESULT_TIMEOUT` if lower). After 20 s a task is no longer dispatched to B; after 22.5 s B refuses to start it and reports `task expired on B before execution` without calling the HAL. Previously every task type except `attest` could still be executed by B for up to 300 s after A had given up, and a reclaimed `decrypt` was dispatched again. A lost `attest` assignment is no longer replayed (a replay would replace the key at that alias), and its late result is rejected. `sign` / `delete` are unchanged.
+- **Result uploads on B no longer block the TEE.** Uploads and their retries run on a separate thread instead of holding up the next task; TEE calls stay strictly serial. After a network drop, the poll retry interval is capped at 5 s instead of 15 s.
+- **A resend after a lost ack is no longer counted as a failure.** When B resends a result identical to one the Server already recorded, the Server acknowledges it as a duplicate (200, `duplicate: true`) instead of returning 409. A 404 after a network error is logged as `upload_ok=unknown`.
+
+Upgrade: the full effect needs both Server and B updated. With only Server updated, the time limits and no-replay apply, but expired tasks B has already claimed still run. With only B updated there are no deadlines, but the other improvements apply. A does not need updating. Behavior change: A's attest and other relay requests now fail after about 25 s (previously up to about 63 s), so requests made while B is offline for more than about 20 s fail outright.
+
+Validation: Server unit tests (queue 30, handlers 32) pass; B passes fmt, clippy and test compilation for the Android target, and the new B tests are compile-only; CI is green. Not deployed or tested on B or Server.
+
 ## 2.4.5 — 2026-11-21
 
 This release changes A, B and Server. B-app and StrongBoxCapabilityMask only receive the synchronized product version. The bundled AProbe is updated to 1.9.4-review.
