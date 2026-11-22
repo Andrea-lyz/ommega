@@ -2,7 +2,7 @@
 //!
 //! A-side endpoints create tasks, wait for a B-side device to claim them
 //! (`pop_for_b`), process them and report the result back (`complete_task`).
-//! Timed-out assignments are reclaimed so they are not lost forever.
+//! Lost assignments are reclaimed only when replay is allowed.
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -22,6 +22,31 @@ pub enum TaskStatus {
     Failed,
 }
 
+/// Whether a `complete_task` submission recorded a fresh result or echoed
+/// one already stored for the same task and assigned device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    Recorded,
+    Duplicate,
+}
+
+/// A task's budget as offsets from creation: when B may still claim it, when
+/// B must have started executing it, and when the result is due back to A.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TaskWindow {
+    pub claim: Duration,
+    pub start: Duration,
+    pub result: Duration,
+}
+
+/// Absolute deadlines resolved once from the task's creation instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TaskDeadlines {
+    pub claim: Instant,
+    pub start: Instant,
+    pub result: Instant,
+}
+
 #[derive(Debug, Clone)]
 pub struct Task {
     pub task_id: String,
@@ -36,23 +61,27 @@ pub struct Task {
     pub completed_at_ms: u64,
     pub status: TaskStatus,
     created_at: Instant,
+    deadlines: Option<TaskDeadlines>,
     assigned_at: Option<Instant>,
 }
 
 impl Task {
-    fn is_agreement(&self) -> bool {
-        self.task_type == "agree"
-            || (self.task_type == "attest"
-                && self
-                    .payload
-                    .get("purpose")
-                    .or_else(|| self.payload.get("device_attest_context")?.get("purpose"))
-                    .and_then(Value::as_array)
-                    .is_some_and(|purposes| purposes.iter().any(|p| p.as_i64() == Some(6))))
+    fn must_not_replay(&self) -> bool {
+        matches!(self.task_type.as_str(), "attest" | "agree" | "soter")
     }
 
-    fn must_not_replay(&self) -> bool {
-        self.is_agreement() || self.task_type == "soter"
+    fn claim_expired_at(&self, now: Instant) -> bool {
+        self.deadlines.is_some_and(|d| d.claim <= now)
+    }
+
+    /// Milliseconds left for B to begin executing when the task is dispatched.
+    /// `None` for work without a window (sign/delete); old B clients ignore it.
+    pub fn start_within_ms(&self) -> Option<u64> {
+        self.deadlines.map(|d| {
+            d.start
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64
+        })
     }
 
     pub fn status_str(&self) -> &'static str {
@@ -233,6 +262,20 @@ impl TaskStore {
         target_device_id: &str,
         request_id: Option<&str>,
     ) -> String {
+        self.create_task_with_deadline(task_type, payload, target_device_id, request_id, None)
+            .await
+            .0
+    }
+
+    /// A retry joins the existing task without extending its deadlines.
+    pub(crate) async fn create_task_with_deadline(
+        &self,
+        task_type: &str,
+        payload: Value,
+        target_device_id: &str,
+        request_id: Option<&str>,
+        window: Option<TaskWindow>,
+    ) -> (String, Option<TaskDeadlines>) {
         let now = Self::now_ms();
         let mut inner = self.inner.lock().await;
         let request_id = request_id
@@ -244,13 +287,19 @@ impl TaskStore {
             .map(|value| format!("{task_type}:{target_device_id}:{value}"));
         if let Some(key) = request_key.as_ref() {
             if let Some(existing) = inner.request_index.get(key).cloned() {
-                if inner.tasks.contains_key(&existing) {
-                    return existing;
+                if let Some(task) = inner.tasks.get(&existing) {
+                    return (existing, task.deadlines);
                 }
                 inner.request_index.remove(key);
             }
         }
         let task_id = uuid::Uuid::new_v4().to_string();
+        let created_at = Instant::now();
+        let deadlines = window.map(|window| TaskDeadlines {
+            claim: created_at + window.claim,
+            start: created_at + window.start,
+            result: created_at + window.result,
+        });
         inner.tasks.insert(
             task_id.clone(),
             Task {
@@ -265,7 +314,8 @@ impl TaskStore {
                 created_at_ms: now,
                 completed_at_ms: 0,
                 status: TaskStatus::Pending,
-                created_at: Instant::now(),
+                created_at,
+                deadlines,
                 assigned_at: None,
             },
         );
@@ -286,7 +336,7 @@ impl TaskStore {
                 .push_back(task_id.clone());
         }
         Self::notify_pending_locked(&inner, target_device_id);
-        task_id
+        (task_id, deadlines)
     }
 
     /// Targeted work wakes only that device; wildcard work may wake any poll.
@@ -608,25 +658,30 @@ impl TaskStore {
         completed_ttl: Duration,
     ) {
         let now = Self::now_ms();
+        let now_instant = Instant::now();
         let pending_ttl_ms = pending_ttl.as_millis() as u64;
         let completed_ttl_ms = completed_ttl.as_millis() as u64;
 
-        // 1) Expire pending tasks older than pending_ttl → mark as Failed.
+        // 1) Expire pending tasks at their claim deadline or the store TTL.
         let expired_pending: Vec<String> = inner
             .tasks
             .iter()
             .filter(|(_, t)| {
                 t.status == TaskStatus::Pending
-                    && now.saturating_sub(t.created_at_ms) > pending_ttl_ms
+                    && (t.claim_expired_at(now_instant)
+                        || now.saturating_sub(t.created_at_ms) > pending_ttl_ms)
             })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &expired_pending {
             if let Some(t) = inner.tasks.get_mut(id) {
                 t.status = TaskStatus::Failed;
-                t.result = Some(serde_json::json!({
-                    "error": "task expired: pending TTL exceeded"
-                }));
+                let reason = if t.claim_expired_at(now_instant) {
+                    "task expired: B-side claim deadline exceeded"
+                } else {
+                    "task expired: pending TTL exceeded"
+                };
+                t.result = Some(serde_json::json!({ "error": reason }));
                 t.completed_at_ms = now;
                 inner.failed_queue.push_back((now, id.clone()));
             }
@@ -702,8 +757,8 @@ impl TaskStore {
             let mut requeued_target = None;
             if let Some(t) = inner.tasks.get_mut(&id) {
                 // A lost poller does not prove its secure-world call ended.
-                // Never replay an agreement or SOTER operation that may still
-                // be in flight in the real TEE.
+                // Attestation can replace the key at its alias, so it is not
+                // replayable either. Do not treat a lost result as a HAL error.
                 if t.must_not_replay() {
                     t.status = TaskStatus::Failed;
                     t.result = Some(serde_json::json!({
@@ -749,17 +804,29 @@ impl TaskStore {
     }
 
     /// Complete a task with a result reported by the B-side.
-    /// Returns Ok(()) if the task existed, Err(msg) otherwise.
+    /// Returns Ok(Completion::Recorded) for a fresh result, Ok(Completion::Duplicate)
+    /// when the assigned device resends an identical result, Err(msg) otherwise.
     pub async fn complete_task(
         &self,
         task_id: &str,
         result: Value,
         device_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Completion, String> {
         let mut inner = self.inner.lock().await;
         let Some(task) = inner.tasks.get_mut(task_id) else {
             return Err("task not found".to_string());
         };
+        // A retried upload may resend a result that was already recorded: the
+        // earlier POST landed but its ack was lost. Acknowledge an identical
+        // resend from the same assigned device without re-recording or
+        // republishing anything.
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed)
+            && !device_id.is_empty()
+            && task.assigned_device_id.as_deref() == Some(device_id)
+            && task.result.as_ref() == Some(&result)
+        {
+            return Ok(Completion::Duplicate);
+        }
         if task.status != TaskStatus::Assigned {
             return Err(format!(
                 "task is not assigned (status={})",
@@ -803,7 +870,7 @@ impl TaskStore {
         );
         // Only this task's A-side watch receivers need the completion. B polls
         // wait for new work, not unrelated result uploads.
-        Ok(())
+        Ok(Completion::Recorded)
     }
 
     /// Wait until the task is completed or failed. Returns None on timeout.
@@ -1383,16 +1450,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_id_reuses_the_existing_task() {
+    async fn request_id_reuses_the_existing_task_and_deadline() {
         let store = store();
         let first = store
-            .create_task("attest", json!({"n": 1}), "dev", Some("request-1"))
+            .create_task_with_deadline(
+                "attest",
+                json!({}),
+                "dev",
+                Some("request-1"),
+                Some(TaskWindow {
+                    claim: Duration::from_secs(1),
+                    start: Duration::from_secs(1),
+                    result: Duration::from_secs(1),
+                }),
+            )
             .await;
-        let second = store
-            .create_task("attest", json!({"n": 1}), "dev", Some("request-1"))
+        let retry = store
+            .create_task_with_deadline(
+                "attest",
+                json!({}),
+                "dev",
+                Some("request-1"),
+                Some(TaskWindow {
+                    claim: Duration::from_secs(20),
+                    start: Duration::from_secs(22),
+                    result: Duration::from_secs(25),
+                }),
+            )
             .await;
-        assert_eq!(first, second);
+        assert!(first.1.is_some());
+        assert_eq!(first, retry);
         assert_eq!(store.counts().await.pending, 1);
+    }
+
+    /// B is told how long it has to begin: a windowed task carries the
+    /// remaining start budget, windowless work carries nothing.
+    #[tokio::test]
+    async fn polled_task_reports_its_start_deadline_to_b() {
+        let store = store();
+        let window = TaskWindow {
+            claim: Duration::from_secs(20),
+            start: Duration::from_secs(22),
+            result: Duration::from_secs(25),
+        };
+        let (id, _) = store
+            .create_task_with_deadline("attest", json!({}), "dev", None, Some(window))
+            .await;
+        let task = store
+            .pop_for_b("dev", "m1", Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(task.task_id, id);
+        let within = task
+            .start_within_ms()
+            .expect("windowed task has a start deadline");
+        assert!(within > 0 && within <= window.start.as_millis() as u64);
+
+        let sign = store.create_task("sign", json!({}), "dev", None).await;
+        let task = store
+            .pop_for_b("dev", "m1", Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(task.task_id, sign);
+        assert_eq!(task.start_within_ms(), None);
     }
 
     #[tokio::test]
@@ -1426,35 +1546,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lost_agreement_generation_is_not_requeued_but_signing_generation_is() {
-        for (payload, agreement) in [
-            (json!({"purpose": [6]}), true),
-            (json!({"device_attest_context": {"purpose": [6]}}), true),
-            (
-                json!({"purpose": [2], "device_attest_context": {"purpose": [6]}}),
-                false,
-            ),
-        ] {
-            let store = store();
-            let id = store.create_task("attest", payload, "dev", None).await;
-            store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
+    async fn lost_attestation_is_not_replayed_or_completed_by_a_late_result() {
+        let store = store();
+        let id = store.create_task("attest", json!({}), "dev", None).await;
+        store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
+        {
             let mut inner = store.inner.lock().await;
             inner.tasks.get_mut(&id).unwrap().assigned_at_ms = 1;
             inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
-            TaskStore::reclaim_locked(&mut inner, Duration::ZERO);
-            assert_eq!(
-                inner.tasks[&id].status,
-                if agreement {
-                    TaskStatus::Failed
-                } else {
-                    TaskStatus::Pending
-                }
-            );
-            assert_eq!(
-                inner.pending_by_device.get("dev").map_or(0, |q| q.len()),
-                usize::from(!agreement)
-            );
         }
+        // A different device polls while the assignee is stale.
+        store.pop_for_b("other", "m2", Duration::ZERO).await;
+        assert!(store.pop_for_b("dev", "m1", Duration::ZERO).await.is_none());
+        assert!(store
+            .complete_task(&id, json!({"ok": true}), "dev")
+            .await
+            .is_err());
+        let result = store.wait_for_result(&id, Duration::ZERO).await.unwrap();
+        assert!(result["error"]
+            .as_str()
+            .unwrap()
+            .contains("execution state unknown"));
+    }
+
+    /// A replayable task reclaimed after its claim deadline must be expired in
+    /// the same poll, not handed to the next claimant.
+    #[tokio::test]
+    async fn reclaimed_task_past_claim_deadline_is_expired_not_redispatched() {
+        let store = store();
+        let (id, _) = store
+            .create_task_with_deadline(
+                "decrypt",
+                json!({}),
+                "dev",
+                None,
+                Some(TaskWindow {
+                    claim: Duration::from_secs(3600),
+                    start: Duration::from_secs(3600),
+                    result: Duration::from_secs(3600),
+                }),
+            )
+            .await;
+        store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
+        {
+            let mut inner = store.inner.lock().await;
+            let past = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+            let task = inner.tasks.get_mut(&id).unwrap();
+            task.assigned_at_ms = 1;
+            task.deadlines = Some(TaskDeadlines {
+                claim: past,
+                start: past,
+                result: past,
+            });
+            inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
+        }
+        // A different device polls while the assignee is stale: the reclaim
+        // requeues the task and the expiry pass must fail it before dispatch.
+        store.pop_for_b("other", "m2", Duration::ZERO).await;
+        assert!(store.pop_for_b("dev", "m1", Duration::ZERO).await.is_none());
+        let result = store.wait_for_result(&id, Duration::ZERO).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("claim deadline"));
     }
 
     #[tokio::test]
@@ -1476,10 +1629,85 @@ mod tests {
             .complete_task(&task_id, json!({"ok": true}), "dev")
             .await
             .expect("correct device completes");
+        // An identical resend from the assigned device is acknowledged, not
+        // re-recorded; it must not corrupt or double-count the first result.
+        assert_eq!(
+            store
+                .complete_task(&task_id, json!({"ok": true}), "dev")
+                .await
+                .expect("identical resend is acknowledged"),
+            Completion::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_result_retry_after_completion_is_acknowledged_as_duplicate() {
+        let store = store();
+        let task_id = store
+            .create_task("attest", json!({}), "dev", Some("request-dup"))
+            .await;
+        store
+            .pop_for_b("dev", "machine", Duration::from_millis(1))
+            .await
+            .expect("assign task");
+
+        let result = json!({"cert_chain": ["a"]});
+        assert_eq!(
+            store
+                .complete_task(&task_id, result.clone(), "dev")
+                .await
+                .expect("first result"),
+            Completion::Recorded
+        );
+        // A retry whose first ack was lost resends the identical result.
+        assert_eq!(
+            store
+                .complete_task(&task_id, result.clone(), "dev")
+                .await
+                .expect("identical retry"),
+            Completion::Duplicate
+        );
+        {
+            let inner = store.inner.lock().await;
+            assert_eq!(
+                inner.tasks.get(&task_id).unwrap().result.as_ref(),
+                Some(&result)
+            );
+        }
+        assert_eq!(store.counts().await.completed, 1);
+        // Only an exact echo from the assigned device is acknowledged.
         assert!(store
-            .complete_task(&task_id, json!({"ok": true}), "dev")
+            .complete_task(&task_id, json!({"cert_chain": ["b"]}), "dev")
             .await
             .is_err());
+        assert!(store
+            .complete_task(&task_id, result, "other")
+            .await
+            .is_err());
+
+        // The same holds for a result the server recorded as a failure.
+        let task_id = store
+            .create_task("attest", json!({}), "dev", Some("request-dup-err"))
+            .await;
+        store
+            .pop_for_b("dev", "machine", Duration::from_millis(1))
+            .await
+            .expect("assign task");
+        let result = json!({"error": "x"});
+        assert_eq!(
+            store
+                .complete_task(&task_id, result.clone(), "dev")
+                .await
+                .expect("first result"),
+            Completion::Recorded
+        );
+        assert_eq!(
+            store
+                .complete_task(&task_id, result, "dev")
+                .await
+                .expect("identical retry"),
+            Completion::Duplicate
+        );
     }
 
     /// An unrelated completion or enqueue must not wake a waiter: each open

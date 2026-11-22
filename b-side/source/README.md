@@ -190,7 +190,8 @@ upload use the shared client's independent connections, not a global request loc
 Logs go to logcat (tag `ommegaclient-b`) and `/data/adb/ommega/logs/relay.log`.
 Each poll, config reload, task receipt and result submission is logged.
 `event=relay_task` records monotonic `dispatch_us`, `execute_us`, `upload_us`
-and `upload_ok` after the upload attempt. Execution includes parsing, local
+and `upload_ok` (`true`, `unknown` when a retry may have been delivered before
+a 404, or `false`) after the upload attempt. Execution includes parsing, local
 policy/profile work and HAL time; it is not a pure TEE timer.
 `event=relay_upload` includes task ID, attempts and cumulative upload time
 (including retries). A held idle poll's HTTP duration is not network RTT.

@@ -127,7 +127,7 @@ fn held_poll_does_not_block_result_upload_on_shared_client() {
         .unwrap()
         .unwrap_or_else(|error| panic!("poll: {:#}", error.error))
         .unwrap();
-    assert_eq!(task.0, "mock-task");
+    assert_eq!(task.task_id, "mock-task");
     assert_eq!(result.unwrap().status, 200);
     assert!(poll_tasks(&cfg, &mut BatteryTelemetry::default())
         .unwrap_or_else(|error| panic!("held poll: {:#}", error.error))

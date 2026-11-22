@@ -11,13 +11,13 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::auth::{AuthState, DeviceBinding, TokenCheck};
 use crate::config::Config;
 use crate::db::Db;
 use crate::fulfill::Fulfill;
-use crate::queue::TaskStore;
+use crate::queue::{Completion, TaskStore, TaskWindow};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -256,6 +256,27 @@ fn check_b_device(state: &AppState, headers: &HeaderMap, device_id: &str) -> Res
     }
 }
 
+// Leave headroom for the response before the A-side 30-second HTTP timeout.
+const B_TASK_WAIT_LIMIT_SECS: u64 = 25;
+
+/// (result wait, task window). B may claim the task only during the claim
+/// window and must start executing it by the start deadline, so work B runs
+/// can still be returned to A before the result deadline.
+fn b_task_timeouts(task_type: &str, configured_secs: u64) -> (Duration, Option<TaskWindow>) {
+    match task_type {
+        "sign" | "delete" => (Duration::from_secs(configured_secs.min(10)), None),
+        _ => {
+            let result = Duration::from_secs(configured_secs.min(B_TASK_WAIT_LIMIT_SECS));
+            let window = TaskWindow {
+                claim: result - result / 5,
+                start: result - result / 10,
+                result,
+            };
+            (result, Some(window))
+        }
+    }
+}
+
 /// Physical-mode fulfilment: enqueue a task for the exact requested B device
 /// and wait for the result. Device substitution is deliberately forbidden.
 async fn try_b_device_layer(
@@ -268,16 +289,16 @@ async fn try_b_device_layer(
         return Some(json!({ "error": format!("B-side device {device_id} is not online") }));
     }
     let request_id = body.get("request_id").and_then(Value::as_str);
-    let task_id = state
+    let (wait, window) = b_task_timeouts(task_type, state.cfg.wait_result_timeout_secs);
+    let (task_id, deadlines) = state
         .store
-        .create_task(task_type, body.clone(), device_id, request_id)
+        .create_task_with_deadline(task_type, body.clone(), device_id, request_id, window)
         .await;
-    let timeout = if matches!(task_type, "sign" | "delete") {
-        Duration::from_secs(state.cfg.wait_result_timeout_secs.min(10))
-    } else {
-        Duration::from_secs(state.cfg.wait_result_timeout_secs)
-    };
-    match state.store.wait_for_result(&task_id, timeout).await {
+    // A retry joins the existing task's deadlines, so its wait still ends at
+    // the original result deadline even when B already claimed the work.
+    let wait = deadlines
+        .map_or(wait, |d| d.result.saturating_duration_since(Instant::now()));
+    match state.store.wait_for_result(&task_id, wait).await {
         Some(mut result) => {
             if let Some(obj) = result.as_object_mut() {
                 obj.insert("task_id".to_string(), json!(task_id));
@@ -517,7 +538,19 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
                         .unwrap_or("unknown error")
                         .to_string()
                 };
-                tracing::info!("run_a_side_task: type={task_type} layer={layer} failed: {msg}");
+                let request_id = body
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let task_id = v.get("task_id").and_then(Value::as_str).unwrap_or_default();
+                tracing::info!(
+                    event = "relay_task_failed",
+                    task_type,
+                    layer,
+                    request_id,
+                    task_id,
+                    "run_a_side_task failed: {msg}"
+                );
                 last_error = Some(msg);
             }
             None => {
@@ -877,6 +910,7 @@ pub async fn b_poll(
             "task_type": task.task_type,
             "payload": task.payload,
             "target_device_id": task.target_device_id,
+            "start_within_ms": task.start_within_ms(),
         }))
         .into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
@@ -913,7 +947,11 @@ pub async fn b_result(
         .complete_task(&task_id, result, &device_id)
         .await
     {
-        Ok(()) => Json(json!({ "status": "ok" })).into_response(),
+        Ok(Completion::Recorded) => Json(json!({ "status": "ok" })).into_response(),
+        Ok(Completion::Duplicate) => {
+            tracing::info!(event = "relay_result_duplicate", task_id, device_id);
+            Json(json!({ "status": "ok", "duplicate": true })).into_response()
+        }
         Err(error) if error == "task not found" => json_err(StatusCode::NOT_FOUND, &error),
         Err(error) => json_err(StatusCode::CONFLICT, &error),
     }
@@ -1083,7 +1121,8 @@ mod tests {
         assert_eq!(
             task,
             json!({
-                "task_id": task_id, "task_type": "profile", "payload": {}, "target_device_id": "synthetic-b"
+                "task_id": task_id, "task_type": "profile", "payload": {},
+                "target_device_id": "synthetic-b", "start_within_ms": null
             })
         );
         let device = battery_status(&state).await;
@@ -1252,6 +1291,36 @@ mod tests {
         assert_eq!(aaid_package("not base64"), "");
     }
 
+    #[test]
+    fn b_task_timeouts_cap_all_tee_work_and_close_claims_early() {
+        fn windowed(result_ms: u64, claim_ms: u64, start_ms: u64) -> (Duration, Option<TaskWindow>) {
+            (
+                Duration::from_millis(result_ms),
+                Some(TaskWindow {
+                    claim: Duration::from_millis(claim_ms),
+                    start: Duration::from_millis(start_ms),
+                    result: Duration::from_millis(result_ms),
+                }),
+            )
+        }
+        for task_type in ["attest", "profile", "decrypt", "agree"] {
+            assert_eq!(
+                b_task_timeouts(task_type, 120),
+                windowed(25_000, 20_000, 22_500),
+                "{task_type}"
+            );
+        }
+        assert_eq!(b_task_timeouts("attest", 5), windowed(5_000, 4_000, 4_500));
+        assert_eq!(b_task_timeouts("attest", 0), windowed(0, 0, 0));
+        for task_type in ["sign", "delete"] {
+            assert_eq!(
+                b_task_timeouts(task_type, 120),
+                (Duration::from_secs(10), None),
+                "{task_type}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn timed_out_signature_cancels_only_unassigned_work() {
         let mut state = soter_state(false);
@@ -1312,6 +1381,38 @@ mod tests {
         );
         assert!(response.unwrap().get("error").is_some());
         assert_eq!(state.store.counts().await.completed, 1);
+    }
+
+    #[tokio::test]
+    async fn expired_attestation_is_not_dispatched_after_b_resumes_polling() {
+        let mut state = soter_state(false);
+        state.cfg = Arc::new(Config {
+            wait_result_timeout_secs: 0,
+            ..Config::default()
+        });
+        let device_id = "synthetic-b";
+        state
+            .store
+            .pop_for_b(device_id, "mock", Duration::ZERO)
+            .await;
+        let body = json!({"request_id": "expired-attest"});
+        let expired = try_b_device_layer(&state, "attest", &body, device_id)
+            .await
+            .unwrap();
+        assert!(expired.get("error").is_some());
+        assert!(state
+            .store
+            .pop_for_b(device_id, "mock", Duration::ZERO)
+            .await
+            .is_none());
+        let retry = try_b_device_layer(&state, "attest", &body, device_id)
+            .await
+            .unwrap();
+        assert_eq!(expired["task_id"], retry["task_id"]);
+        assert_eq!(
+            retry["error"],
+            "task expired: B-side claim deadline exceeded"
+        );
     }
 
     fn soter_state(enabled: bool) -> AppState {

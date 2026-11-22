@@ -4,8 +4,11 @@
 //! relay_server (ommega-old) using its B-side protocol:
 //!
 //!   * `GET  /api/b/poll/?device_id=..&machine_id=..&timeout=N` (X-Relay-Token)
-//!     -> 200: {task_id, task_type, payload, target_device_id}
+//!     -> 200: {task_id, task_type, payload, target_device_id, start_within_ms?}
 //!     -> 204: no task (long poll timed out)
+//!     `start_within_ms` is the remaining budget before the server's
+//!     start-execution deadline; a task already past it is reported expired
+//!     and never enters the TEE.
 //!     Optional heartbeat query: battery_percent=0..100, battery_charging=true|false.
 //!     Unsupported readings are omitted; server status adds receipt-time freshness.
 //!   * `POST /api/b/result/` body {task_id, result, device_id}
@@ -95,7 +98,7 @@ const WAKELOCK_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// device is locked out for the rest of the window — turning a brief server-side
 /// outage into an hour of downtime. Rejections now back off.
 const POLL_BACKOFF_MIN_MS: u64 = 1000;
-const POLL_BACKOFF_MAX_MS: u64 = 15_000;
+const POLL_BACKOFF_MAX_MS: u64 = 5_000;
 /// A rejected credential is not going to be accepted a second later. The
 /// ceiling is chosen so that steady-state retries stay well under the server's
 /// 40-per-hour invalid-request budget: at 5 minutes apart that is 12 an hour,
@@ -681,10 +684,46 @@ fn reported_caps(cfg: &RelayConfig) -> String {
     }
 }
 
+/// A task handed to B by the poll response. `start_within` is the remaining
+/// budget before the server's start-execution deadline; old servers omit it.
+struct PolledTask {
+    task_id: String,
+    task_type: String,
+    payload: Value,
+    start_within: Option<Duration>,
+}
+
+/// Parse a 200 poll body. A missing, null, or non-u64 `start_within_ms`
+/// degrades to "no start deadline" instead of rejecting valid work.
+fn parse_polled_task(body: &[u8]) -> Result<PolledTask> {
+    let v: Value = serde_json::from_slice(body).with_context(|| "b/poll bad json")?;
+    let task_id = v
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("b/poll missing task_id"))?
+        .to_string();
+    let task_type = v
+        .get("task_type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let payload = v.get("payload").cloned().unwrap_or(Value::Null);
+    let start_within = v
+        .get("start_within_ms")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis);
+    Ok(PolledTask {
+        task_id,
+        task_type,
+        payload,
+        start_within,
+    })
+}
+
 fn poll_tasks(
     cfg: &RelayConfig,
     battery: &mut BatteryTelemetry,
-) -> std::result::Result<Option<(String, String, Value)>, PollError> {
+) -> std::result::Result<Option<PolledTask>, PollError> {
     let caps = reported_caps(cfg);
     let mut url = format!(
         "{}/api/b/poll/?device_id={}&machine_id={}&timeout={}&caps={}&ver={}",
@@ -708,24 +747,9 @@ fn poll_tasks(
     log::debug!("b/poll status={status} body_len={}", body.len());
     match status {
         204 => Ok(None),
-        200 => {
-            let parse = |body: &[u8]| -> Result<(String, String, Value)> {
-                let v: Value = serde_json::from_slice(body).with_context(|| "b/poll bad json")?;
-                let task_id = v
-                    .get("task_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("b/poll missing task_id"))?
-                    .to_string();
-                let task_type = v
-                    .get("task_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let payload = v.get("payload").cloned().unwrap_or(Value::Null);
-                Ok((task_id, task_type, payload))
-            };
-            parse(&body).map(Some).map_err(PollError::transient)
-        }
+        200 => parse_polled_task(&body)
+            .map(Some)
+            .map_err(PollError::transient),
         other => Err(PollError {
             error: anyhow!("b/poll unexpected status {other}"),
             failure: poll_failure_for(other, retry_after),
@@ -784,11 +808,34 @@ fn result_status_is_permanent(status: u16) -> bool {
     (400..500).contains(&status) && status != 429 && status != 408
 }
 
+/// What a finished result upload ended as. `Unknown` means a retry may have
+/// been recorded before the server answered 404; the upload is done either
+/// way, so it is not a failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UploadStatus {
+    Delivered,
+    Unknown,
+}
+
+/// Decide what a permanent rejection means for a retried upload. A 404 after
+/// an earlier network error is `Unknown`: the first POST may have been
+/// recorded and its task pruned before this attempt arrived. Any other
+/// permanent status, including a 409 on a server that acknowledges identical
+/// resends, means the result was genuinely rejected (`None`).
+fn rejected_upload_status(status: u16, maybe_delivered: bool) -> Option<UploadStatus> {
+    if status == 404 && maybe_delivered {
+        Some(UploadStatus::Unknown)
+    } else {
+        None
+    }
+}
+
 /// POST the task result to the server, retrying transient failures
 /// (network errors, 5xx, and throttling) with exponential backoff so a task is
 /// not lost to a single glitch. Permanent 4xx rejections (bad token, unknown
-/// task) are not retried.
-fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
+/// task) are not retried; a 404 after an earlier network error is reported
+/// as `UploadStatus::Unknown` rather than a failure.
+fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<UploadStatus> {
     const MAX_ATTEMPTS: u32 = 6;
     let url = format!("{}/api/b/result/", cfg.server);
     let body = json!({
@@ -803,16 +850,26 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
     let body = serde_json::to_vec(&body)?;
     let started = Instant::now();
     let mut last_err: Option<anyhow::Error> = None;
+    // True once any attempt failed at the transport layer: that request may
+    // have reached the server even though its reply never came back.
+    let mut maybe_delivered = false;
     for attempt in 1..=MAX_ATTEMPTS {
         // The server's own `Retry-After`, when it sent one, wins over our
         // exponential guess.
         let retry_hint = match http_request("POST", &url, &headers, Some(&body)) {
-            Ok(HttpResponse { status: 200, .. }) => {
+            Ok(HttpResponse {
+                status: 200, body, ..
+            }) => {
+                let duplicate = serde_json::from_slice::<Value>(&body)
+                    .ok()
+                    .and_then(|body| body.get("duplicate").and_then(Value::as_bool))
+                    .unwrap_or(false);
                 log::info!(
-                    "event=relay_upload task={task_id} attempts={attempt} elapsed_us={} status=200",
-                    started.elapsed().as_micros()
+                    "event=relay_upload task={task_id} attempts={attempt} elapsed_us={} status=200{}",
+                    started.elapsed().as_micros(),
+                    if duplicate { " duplicate=true" } else { "" }
                 );
-                return Ok(());
+                return Ok(UploadStatus::Delivered);
             }
             Ok(HttpResponse {
                 status,
@@ -820,6 +877,19 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
                 ..
             }) => {
                 if result_status_is_permanent(status) {
+                    if let Some(outcome) = rejected_upload_status(status, maybe_delivered) {
+                        log::warn!(
+                            "b/result task={task_id} HTTP {status} after a network error: \
+                             an earlier attempt may have been delivered and pruned; \
+                             outcome unknown"
+                        );
+                        log::info!(
+                            "event=relay_upload task={task_id} attempts={attempt} \
+                             elapsed_us={} status={status} outcome=unknown",
+                            started.elapsed().as_micros()
+                        );
+                        return Ok(outcome);
+                    }
                     log::warn!("b/result task={task_id} rejected: HTTP {status}");
                     return Err(anyhow!("b/result rejected with HTTP {status}"));
                 }
@@ -830,6 +900,7 @@ fn post_result(cfg: &RelayConfig, task_id: &str, result: &Value) -> Result<()> {
                 retry_after
             }
             Err(e) => {
+                maybe_delivered = true;
                 log::warn!(
                     "b/result task={task_id} network error: {e:#} (attempt {attempt}/{MAX_ATTEMPTS})"
                 );
@@ -1501,15 +1572,104 @@ fn handle_delete(_task_type: &str, payload: &Value) -> Result<Value> {
     }))
 }
 
-fn handle_task(
+/// Whether the server's start-execution deadline has already passed. Work
+/// claimed this late can no longer return a result in time and must not
+/// enter the TEE at all.
+fn start_deadline_passed(start_by: Option<Instant>, now: Instant) -> bool {
+    start_by.is_some_and(|deadline| now >= deadline)
+}
+
+/// Upload a finished result and emit the per-task completion log, shared by
+/// the detached uploader thread and the inline fallback path.
+fn upload_result_and_log(
     cfg: &RelayConfig,
     task_id: &str,
     task_type: &str,
-    payload: &Value,
-    received_at: Instant,
+    result: &Value,
+    outcome: &str,
+    dispatch_us: u128,
+    execute_us: u128,
 ) -> Result<()> {
+    let upload_started = Instant::now();
+    let posted = post_result(cfg, task_id, result);
+    // `unknown`: a retry may have been delivered before the server replied
+    // 404; neither confirmed nor failed.
+    let upload_ok = match posted {
+        Ok(UploadStatus::Delivered) => "true",
+        Ok(UploadStatus::Unknown) => "unknown",
+        Err(_) => "false",
+    };
+    log::info!(
+        "event=relay_task task={task_id} type={task_type} outcome={outcome} \
+         dispatch_us={dispatch_us} execute_us={execute_us} upload_us={} upload_ok={upload_ok}",
+        upload_started.elapsed().as_micros(),
+    );
+    posted.map(|_| ())
+}
+
+/// Hand a finished result to a detached uploader thread so `post_result`
+/// retries never stall the single TEE worker while the poll loop is holding
+/// the next claimed task. Falls back to an inline upload if the spawn fails.
+fn spawn_result_upload(
+    cfg: RelayConfig,
+    task_id: String,
+    task_type: String,
+    result: Value,
+    outcome: &'static str,
+    dispatch_us: u128,
+    execute_us: u128,
+) -> Result<()> {
+    // Thread names are capped at 15 bytes; keep a short task-id prefix.
+    let name = format!("upload-{}", task_id.chars().take(8).collect::<String>());
+    let spawned = {
+        let (cfg, task_id, task_type, result) = (
+            cfg.clone(),
+            task_id.clone(),
+            task_type.clone(),
+            result.clone(),
+        );
+        thread::Builder::new().name(name).spawn(move || {
+            if let Err(e) = upload_result_and_log(
+                &cfg,
+                &task_id,
+                &task_type,
+                &result,
+                outcome,
+                dispatch_us,
+                execute_us,
+            ) {
+                log::error!("result upload task={task_id} failed: {e:#}");
+            }
+        })
+    };
+    match spawned {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            log::warn!("result upload thread spawn failed: {e:#}; uploading inline");
+            upload_result_and_log(
+                &cfg,
+                &task_id,
+                &task_type,
+                &result,
+                outcome,
+                dispatch_us,
+                execute_us,
+            )
+        }
+    }
+}
+
+fn handle_task(work: TeeWork) -> Result<()> {
+    let TeeWork {
+        cfg,
+        task_id,
+        task_type,
+        payload,
+        received_at,
+        start_by,
+    } = work;
     let dispatch_us = received_at.elapsed().as_micros();
-    let handler: fn(&RelayConfig, &str, &Value) -> Result<Value> = match task_type {
+    let handler: fn(&RelayConfig, &str, &Value) -> Result<Value> = match task_type.as_str() {
         "profile" => |_cfg, task_type, payload| handle_profile(task_type, payload),
         "attest" => |_cfg, task_type, payload| handle_generate_attest(task_type, payload),
         "sign" => |_cfg, task_type, payload| handle_sign(task_type, payload),
@@ -1525,17 +1685,32 @@ fn handle_task(
         other => {
             log::warn!("task {task_id} type={other} not supported, reporting failure");
             post_result(
-                cfg,
-                task_id,
+                &cfg,
+                &task_id,
                 &json!({ "error": format!("unsupported task type: {other}") }),
             )?;
             return Ok(());
         }
     };
 
+    // A task already past its start deadline cannot return a result in time;
+    // report the expiry without entering the TEE.
+    if start_deadline_passed(start_by, Instant::now()) {
+        log::warn!(
+            "event=relay_task_expired task={task_id} type={task_type} \
+             held_us={dispatch_us} reason=start deadline passed before execution"
+        );
+        post_result(
+            &cfg,
+            &task_id,
+            &json!({"error": "task expired on B before execution: start deadline passed"}),
+        )?;
+        return Ok(());
+    }
+
     let start = std::time::Instant::now();
     log::info!("processing task {task_id} type={task_type}");
-    let result = match handler(cfg, task_type, payload) {
+    let result = match handler(&cfg, &task_type, &payload) {
         Ok(v) => v,
         Err(e) => {
             log::error!("task {task_id} type={task_type} failed: {e:#}");
@@ -1548,15 +1723,15 @@ fn handle_task(
         "ok"
     };
     let execute_us = start.elapsed().as_micros();
-    let upload_started = Instant::now();
-    let posted = post_result(cfg, task_id, &result);
-    log::info!(
-        "event=relay_task task={task_id} type={task_type} outcome={outcome} \
-         dispatch_us={dispatch_us} execute_us={execute_us} upload_us={} upload_ok={}",
-        upload_started.elapsed().as_micros(),
-        posted.is_ok()
-    );
-    posted
+    spawn_result_upload(
+        cfg,
+        task_id,
+        task_type,
+        result,
+        outcome,
+        dispatch_us,
+        execute_us,
+    )
 }
 
 /// Background thread: hot-reload the config when `relay.conf` changes or the
@@ -1612,6 +1787,9 @@ struct TeeWork {
     task_type: String,
     payload: Value,
     received_at: Instant,
+    /// Local instant by which execution must start (`received_at` plus the
+    /// server's `start_within_ms`); `None` on older servers or windowless work.
+    start_by: Option<Instant>,
 }
 
 fn spawn_tee_workers() -> mpsc::SyncSender<TeeWork> {
@@ -1631,13 +1809,7 @@ fn spawn_tee_workers() -> mpsc::SyncSender<TeeWork> {
                 };
                 match work {
                     Ok(work) => {
-                        if let Err(e) = handle_task(
-                            &work.cfg,
-                            &work.task_id,
-                            &work.task_type,
-                            &work.payload,
-                            work.received_at,
-                        ) {
+                        if let Err(e) = handle_task(work) {
                             log::error!("handle_task failed: {e:#}");
                         }
                     }
@@ -1681,18 +1853,24 @@ fn run_poll_loop(shared: Arc<RwLock<RelayConfig>>, tx: mpsc::SyncSender<TeeWork>
         }
         let poll_started = std::time::Instant::now();
         match poll_tasks(&cfg, &mut battery) {
-            Ok(Some((task_id, task_type, payload))) => {
+            Ok(Some(task)) => {
                 let received_at = Instant::now();
+                let start_by = task.start_within.map(|within| received_at + within);
                 transient_ms = POLL_BACKOFF_MIN_MS;
                 rejected_ms = AUTH_BACKOFF_MIN_MS;
-                log::info!("poll received task {task_id} type={task_type}");
+                log::info!(
+                    "poll received task {} type={}",
+                    task.task_id,
+                    task.task_type
+                );
                 if tx
                     .send(TeeWork {
                         cfg,
-                        task_id,
-                        task_type,
-                        payload,
+                        task_id: task.task_id,
+                        task_type: task.task_type,
+                        payload: task.payload,
                         received_at,
+                        start_by,
                     })
                     .is_err()
                 {
@@ -2322,6 +2500,40 @@ mod tests {
     }
 
     #[test]
+    fn poll_body_parses_start_within_and_rejects_a_missing_task_id() {
+        let task = parse_polled_task(
+            br#"{"task_id":"t1","task_type":"attest","payload":{},"start_within_ms":1500}"#,
+        )
+        .unwrap();
+        assert_eq!(task.task_id, "t1");
+        assert_eq!(task.task_type, "attest");
+        assert_eq!(task.payload, json!({}));
+        assert_eq!(task.start_within, Some(Duration::from_millis(1500)));
+        for body in [
+            br#"{"task_id":"t1","task_type":"sign","payload":{}}"# as &[u8],
+            br#"{"task_id":"t1","task_type":"sign","start_within_ms":null}"#,
+            br#"{"task_id":"t1","task_type":"sign","start_within_ms":-5}"#,
+            br#"{"task_id":"t1","task_type":"sign","start_within_ms":"1500"}"#,
+        ] {
+            assert_eq!(parse_polled_task(body).unwrap().start_within, None);
+        }
+        assert!(parse_polled_task(br#"{"task_type":"sign"}"#).is_err());
+    }
+
+    #[test]
+    fn start_deadline_is_passed_only_once_it_elapses() {
+        let now = Instant::now();
+        let past = now.checked_sub(Duration::from_millis(1)).unwrap_or(now);
+        assert!(!start_deadline_passed(None, now));
+        assert!(!start_deadline_passed(
+            Some(now + Duration::from_secs(1)),
+            now
+        ));
+        assert!(start_deadline_passed(Some(now), now));
+        assert!(start_deadline_passed(Some(past), now));
+    }
+
+    #[test]
     fn a_throttled_result_upload_is_retried_not_discarded() {
         // The finished TEE work is already in hand; these only mean "wait".
         assert!(!result_status_is_permanent(429));
@@ -2334,6 +2546,22 @@ mod tests {
         // 5xx is retried by the caller's own branch.
         assert!(!result_status_is_permanent(500));
         assert!(!result_status_is_permanent(503));
+    }
+
+    #[test]
+    fn a_lost_ack_makes_a_late_404_unknown_not_failed() {
+        // The first POST may have been recorded and its task pruned before
+        // this retry arrived, so a 404 after a network error is not a
+        // confirmed failure.
+        assert_eq!(
+            rejected_upload_status(404, true),
+            Some(UploadStatus::Unknown)
+        );
+        // Without a transport failure the 404 stands on its own, and the
+        // idempotent server keeps other rejections hard even after one.
+        assert_eq!(rejected_upload_status(404, false), None);
+        assert_eq!(rejected_upload_status(409, true), None);
+        assert_eq!(rejected_upload_status(403, true), None);
     }
 
     #[test]
