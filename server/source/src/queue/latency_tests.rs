@@ -121,7 +121,7 @@ async fn concurrent_same_device_polls_share_notification_without_duplicate_claim
 #[tokio::test]
 async fn reclaim_notifies_wildcard_waiter_but_never_replays_sensitive_work() {
     let store = store();
-    let id = store.create_task("attest", json!({}), "", None).await;
+    let id = store.create_task("profile", json!({}), "", None).await;
     store.pop_for_b("dead", "m", Duration::ZERO).await.unwrap();
     let sensitive = store.create_task("agree", json!({}), "dead", None).await;
     store.pop_for_b("dead", "m", Duration::ZERO).await.unwrap();

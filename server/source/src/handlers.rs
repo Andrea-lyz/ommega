@@ -11,7 +11,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::auth::{AuthState, DeviceBinding, TokenCheck};
 use crate::config::Config;
@@ -256,6 +256,9 @@ fn check_b_device(state: &AppState, headers: &HeaderMap, device_id: &str) -> Res
     }
 }
 
+// Leave headroom for the response before the A-side 30-second HTTP timeout.
+const ATTEST_WAIT_LIMIT_SECS: u64 = 25;
+
 /// Physical-mode fulfilment: enqueue a task for the exact requested B device
 /// and wait for the result. Device substitution is deliberately forbidden.
 async fn try_b_device_layer(
@@ -268,15 +271,25 @@ async fn try_b_device_layer(
         return Some(json!({ "error": format!("B-side device {device_id} is not online") }));
     }
     let request_id = body.get("request_id").and_then(Value::as_str);
-    let task_id = state
+    let configured = state.cfg.wait_result_timeout_secs;
+    let timeout = Duration::from_secs(match task_type {
+        "sign" | "delete" => configured.min(10),
+        "attest" => configured.min(ATTEST_WAIT_LIMIT_SECS),
+        _ => configured,
+    });
+    let (task_id, claim_deadline) = state
         .store
-        .create_task(task_type, body.clone(), device_id, request_id)
+        .create_task_with_deadline(
+            task_type,
+            body.clone(),
+            device_id,
+            request_id,
+            (task_type == "attest").then_some(timeout),
+        )
         .await;
-    let timeout = if matches!(task_type, "sign" | "delete") {
-        Duration::from_secs(state.cfg.wait_result_timeout_secs.min(10))
-    } else {
-        Duration::from_secs(state.cfg.wait_result_timeout_secs)
-    };
+    let timeout = claim_deadline.map_or(timeout, |deadline| {
+        deadline.saturating_duration_since(Instant::now())
+    });
     match state.store.wait_for_result(&task_id, timeout).await {
         Some(mut result) => {
             if let Some(obj) = result.as_object_mut() {
@@ -517,7 +530,19 @@ async fn run_a_side_task(state: &AppState, task_type: &str, body: &Value) -> Res
                         .unwrap_or("unknown error")
                         .to_string()
                 };
-                tracing::info!("run_a_side_task: type={task_type} layer={layer} failed: {msg}");
+                let request_id = body
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let task_id = v.get("task_id").and_then(Value::as_str).unwrap_or_default();
+                tracing::info!(
+                    event = "relay_task_failed",
+                    task_type,
+                    layer,
+                    request_id,
+                    task_id,
+                    "run_a_side_task failed: {msg}"
+                );
                 last_error = Some(msg);
             }
             None => {
@@ -1312,6 +1337,38 @@ mod tests {
         );
         assert!(response.unwrap().get("error").is_some());
         assert_eq!(state.store.counts().await.completed, 1);
+    }
+
+    #[tokio::test]
+    async fn expired_attestation_is_not_dispatched_after_b_resumes_polling() {
+        let mut state = soter_state(false);
+        state.cfg = Arc::new(Config {
+            wait_result_timeout_secs: 0,
+            ..Config::default()
+        });
+        let device_id = "synthetic-b";
+        state
+            .store
+            .pop_for_b(device_id, "mock", Duration::ZERO)
+            .await;
+        let body = json!({"request_id": "expired-attest"});
+        let expired = try_b_device_layer(&state, "attest", &body, device_id)
+            .await
+            .unwrap();
+        assert!(expired.get("error").is_some());
+        assert!(state
+            .store
+            .pop_for_b(device_id, "mock", Duration::ZERO)
+            .await
+            .is_none());
+        let retry = try_b_device_layer(&state, "attest", &body, device_id)
+            .await
+            .unwrap();
+        assert_eq!(expired["task_id"], retry["task_id"]);
+        assert_eq!(
+            retry["error"],
+            "task expired: B-side claim deadline exceeded"
+        );
     }
 
     fn soter_state(enabled: bool) -> AppState {

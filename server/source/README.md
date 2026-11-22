@@ -110,7 +110,14 @@ can wake any device; queue locking still permits exactly one claim per task.
 Notifications are enabled before checking the queue so arrivals cannot be lost
 in a check-to-sleep race. Cancelled polls release their waiter; a later poll
 checks already queued work before waiting. Reclaimed work notifies the
-appropriate poll, without replaying agreement/SOTER assignments.
+appropriate poll. Lost attest/agree/SOTER assignments fail with execution
+state unknown; the server does not replay them or accept a late result for
+the failed assignment.
+
+Physical `attest` waits at most 25 seconds (or `RELAY_WAIT_RESULT_TIMEOUT` if
+it is lower). A retry with the same request ID keeps the original deadline.
+An unclaimed task past that deadline is expired before dispatch; reaching the
+HTTP deadline does not interrupt work already claimed by B.
 
 A result is published through that task's watch channel, not broadcast to B
 polls. Both the HTTP and Rustls HTTPS listeners enable `TCP_NODELAY`; TLS,

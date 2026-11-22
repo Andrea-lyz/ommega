@@ -2,7 +2,7 @@
 //!
 //! A-side endpoints create tasks, wait for a B-side device to claim them
 //! (`pop_for_b`), process them and report the result back (`complete_task`).
-//! Timed-out assignments are reclaimed so they are not lost forever.
+//! Lost assignments are reclaimed only when replay is allowed.
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -36,23 +36,17 @@ pub struct Task {
     pub completed_at_ms: u64,
     pub status: TaskStatus,
     created_at: Instant,
+    claim_deadline: Option<Instant>,
     assigned_at: Option<Instant>,
 }
 
 impl Task {
-    fn is_agreement(&self) -> bool {
-        self.task_type == "agree"
-            || (self.task_type == "attest"
-                && self
-                    .payload
-                    .get("purpose")
-                    .or_else(|| self.payload.get("device_attest_context")?.get("purpose"))
-                    .and_then(Value::as_array)
-                    .is_some_and(|purposes| purposes.iter().any(|p| p.as_i64() == Some(6))))
+    fn must_not_replay(&self) -> bool {
+        matches!(self.task_type.as_str(), "attest" | "agree" | "soter")
     }
 
-    fn must_not_replay(&self) -> bool {
-        self.is_agreement() || self.task_type == "soter"
+    fn claim_expired_at(&self, now: Instant) -> bool {
+        self.claim_deadline.is_some_and(|deadline| deadline <= now)
     }
 
     pub fn status_str(&self) -> &'static str {
@@ -233,6 +227,20 @@ impl TaskStore {
         target_device_id: &str,
         request_id: Option<&str>,
     ) -> String {
+        self.create_task_with_deadline(task_type, payload, target_device_id, request_id, None)
+            .await
+            .0
+    }
+
+    /// A retry joins the existing task without extending its claim deadline.
+    pub(crate) async fn create_task_with_deadline(
+        &self,
+        task_type: &str,
+        payload: Value,
+        target_device_id: &str,
+        request_id: Option<&str>,
+        claim_timeout: Option<Duration>,
+    ) -> (String, Option<Instant>) {
         let now = Self::now_ms();
         let mut inner = self.inner.lock().await;
         let request_id = request_id
@@ -244,13 +252,15 @@ impl TaskStore {
             .map(|value| format!("{task_type}:{target_device_id}:{value}"));
         if let Some(key) = request_key.as_ref() {
             if let Some(existing) = inner.request_index.get(key).cloned() {
-                if inner.tasks.contains_key(&existing) {
-                    return existing;
+                if let Some(task) = inner.tasks.get(&existing) {
+                    return (existing, task.claim_deadline);
                 }
                 inner.request_index.remove(key);
             }
         }
         let task_id = uuid::Uuid::new_v4().to_string();
+        let created_at = Instant::now();
+        let claim_deadline = claim_timeout.map(|timeout| created_at + timeout);
         inner.tasks.insert(
             task_id.clone(),
             Task {
@@ -265,7 +275,8 @@ impl TaskStore {
                 created_at_ms: now,
                 completed_at_ms: 0,
                 status: TaskStatus::Pending,
-                created_at: Instant::now(),
+                created_at,
+                claim_deadline,
                 assigned_at: None,
             },
         );
@@ -286,7 +297,7 @@ impl TaskStore {
                 .push_back(task_id.clone());
         }
         Self::notify_pending_locked(&inner, target_device_id);
-        task_id
+        (task_id, claim_deadline)
     }
 
     /// Targeted work wakes only that device; wildcard work may wake any poll.
@@ -608,25 +619,30 @@ impl TaskStore {
         completed_ttl: Duration,
     ) {
         let now = Self::now_ms();
+        let now_instant = Instant::now();
         let pending_ttl_ms = pending_ttl.as_millis() as u64;
         let completed_ttl_ms = completed_ttl.as_millis() as u64;
 
-        // 1) Expire pending tasks older than pending_ttl → mark as Failed.
+        // 1) Expire pending tasks at their claim deadline or the store TTL.
         let expired_pending: Vec<String> = inner
             .tasks
             .iter()
             .filter(|(_, t)| {
                 t.status == TaskStatus::Pending
-                    && now.saturating_sub(t.created_at_ms) > pending_ttl_ms
+                    && (t.claim_expired_at(now_instant)
+                        || now.saturating_sub(t.created_at_ms) > pending_ttl_ms)
             })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &expired_pending {
             if let Some(t) = inner.tasks.get_mut(id) {
                 t.status = TaskStatus::Failed;
-                t.result = Some(serde_json::json!({
-                    "error": "task expired: pending TTL exceeded"
-                }));
+                let reason = if t.claim_expired_at(now_instant) {
+                    "task expired: B-side claim deadline exceeded"
+                } else {
+                    "task expired: pending TTL exceeded"
+                };
+                t.result = Some(serde_json::json!({ "error": reason }));
                 t.completed_at_ms = now;
                 inner.failed_queue.push_back((now, id.clone()));
             }
@@ -702,8 +718,8 @@ impl TaskStore {
             let mut requeued_target = None;
             if let Some(t) = inner.tasks.get_mut(&id) {
                 // A lost poller does not prove its secure-world call ended.
-                // Never replay an agreement or SOTER operation that may still
-                // be in flight in the real TEE.
+                // Attestation can replace the key at its alias, so it is not
+                // replayable either. Do not treat a lost result as a HAL error.
                 if t.must_not_replay() {
                     t.status = TaskStatus::Failed;
                     t.result = Some(serde_json::json!({
@@ -1383,15 +1399,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_id_reuses_the_existing_task() {
+    async fn request_id_reuses_the_existing_task_and_deadline() {
         let store = store();
         let first = store
-            .create_task("attest", json!({"n": 1}), "dev", Some("request-1"))
+            .create_task_with_deadline(
+                "attest",
+                json!({}),
+                "dev",
+                Some("request-1"),
+                Some(Duration::from_secs(1)),
+            )
             .await;
-        let second = store
-            .create_task("attest", json!({"n": 1}), "dev", Some("request-1"))
+        let retry = store
+            .create_task_with_deadline(
+                "attest",
+                json!({}),
+                "dev",
+                Some("request-1"),
+                Some(Duration::from_secs(25)),
+            )
             .await;
-        assert_eq!(first, second);
+        assert!(first.1.is_some());
+        assert_eq!(first, retry);
         assert_eq!(store.counts().await.pending, 1);
     }
 
@@ -1426,35 +1455,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lost_agreement_generation_is_not_requeued_but_signing_generation_is() {
-        for (payload, agreement) in [
-            (json!({"purpose": [6]}), true),
-            (json!({"device_attest_context": {"purpose": [6]}}), true),
-            (
-                json!({"purpose": [2], "device_attest_context": {"purpose": [6]}}),
-                false,
-            ),
-        ] {
-            let store = store();
-            let id = store.create_task("attest", payload, "dev", None).await;
-            store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
+    async fn lost_attestation_is_not_replayed_or_completed_by_a_late_result() {
+        let store = store();
+        let id = store.create_task("attest", json!({}), "dev", None).await;
+        store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
+        {
             let mut inner = store.inner.lock().await;
             inner.tasks.get_mut(&id).unwrap().assigned_at_ms = 1;
             inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
-            TaskStore::reclaim_locked(&mut inner, Duration::ZERO);
-            assert_eq!(
-                inner.tasks[&id].status,
-                if agreement {
-                    TaskStatus::Failed
-                } else {
-                    TaskStatus::Pending
-                }
-            );
-            assert_eq!(
-                inner.pending_by_device.get("dev").map_or(0, |q| q.len()),
-                usize::from(!agreement)
-            );
         }
+        // A different device polls while the assignee is stale.
+        store.pop_for_b("other", "m2", Duration::ZERO).await;
+        assert!(store.pop_for_b("dev", "m1", Duration::ZERO).await.is_none());
+        assert!(store
+            .complete_task(&id, json!({"ok": true}), "dev")
+            .await
+            .is_err());
+        let result = store.wait_for_result(&id, Duration::ZERO).await.unwrap();
+        assert!(result["error"]
+            .as_str()
+            .unwrap()
+            .contains("execution state unknown"));
     }
 
     #[tokio::test]
