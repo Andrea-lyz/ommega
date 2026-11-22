@@ -22,6 +22,23 @@ pub enum TaskStatus {
     Failed,
 }
 
+/// A task's budget as offsets from creation: when B may still claim it, when
+/// B must have started executing it, and when the result is due back to A.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TaskWindow {
+    pub claim: Duration,
+    pub start: Duration,
+    pub result: Duration,
+}
+
+/// Absolute deadlines resolved once from the task's creation instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TaskDeadlines {
+    pub claim: Instant,
+    pub start: Instant,
+    pub result: Instant,
+}
+
 #[derive(Debug, Clone)]
 pub struct Task {
     pub task_id: String,
@@ -36,7 +53,7 @@ pub struct Task {
     pub completed_at_ms: u64,
     pub status: TaskStatus,
     created_at: Instant,
-    claim_deadline: Option<Instant>,
+    deadlines: Option<TaskDeadlines>,
     assigned_at: Option<Instant>,
 }
 
@@ -46,7 +63,17 @@ impl Task {
     }
 
     fn claim_expired_at(&self, now: Instant) -> bool {
-        self.claim_deadline.is_some_and(|deadline| deadline <= now)
+        self.deadlines.is_some_and(|d| d.claim <= now)
+    }
+
+    /// Milliseconds left for B to begin executing when the task is dispatched.
+    /// `None` for work without a window (sign/delete); old B clients ignore it.
+    pub fn start_within_ms(&self) -> Option<u64> {
+        self.deadlines.map(|d| {
+            d.start
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64
+        })
     }
 
     pub fn status_str(&self) -> &'static str {
@@ -232,15 +259,15 @@ impl TaskStore {
             .0
     }
 
-    /// A retry joins the existing task without extending its claim deadline.
+    /// A retry joins the existing task without extending its deadlines.
     pub(crate) async fn create_task_with_deadline(
         &self,
         task_type: &str,
         payload: Value,
         target_device_id: &str,
         request_id: Option<&str>,
-        claim_timeout: Option<Duration>,
-    ) -> (String, Option<Instant>) {
+        window: Option<TaskWindow>,
+    ) -> (String, Option<TaskDeadlines>) {
         let now = Self::now_ms();
         let mut inner = self.inner.lock().await;
         let request_id = request_id
@@ -253,14 +280,18 @@ impl TaskStore {
         if let Some(key) = request_key.as_ref() {
             if let Some(existing) = inner.request_index.get(key).cloned() {
                 if let Some(task) = inner.tasks.get(&existing) {
-                    return (existing, task.claim_deadline);
+                    return (existing, task.deadlines);
                 }
                 inner.request_index.remove(key);
             }
         }
         let task_id = uuid::Uuid::new_v4().to_string();
         let created_at = Instant::now();
-        let claim_deadline = claim_timeout.map(|timeout| created_at + timeout);
+        let deadlines = window.map(|window| TaskDeadlines {
+            claim: created_at + window.claim,
+            start: created_at + window.start,
+            result: created_at + window.result,
+        });
         inner.tasks.insert(
             task_id.clone(),
             Task {
@@ -276,7 +307,7 @@ impl TaskStore {
                 completed_at_ms: 0,
                 status: TaskStatus::Pending,
                 created_at,
-                claim_deadline,
+                deadlines,
                 assigned_at: None,
             },
         );
@@ -297,7 +328,7 @@ impl TaskStore {
                 .push_back(task_id.clone());
         }
         Self::notify_pending_locked(&inner, target_device_id);
-        (task_id, claim_deadline)
+        (task_id, deadlines)
     }
 
     /// Targeted work wakes only that device; wildcard work may wake any poll.
@@ -1407,7 +1438,11 @@ mod tests {
                 json!({}),
                 "dev",
                 Some("request-1"),
-                Some(Duration::from_secs(1)),
+                Some(TaskWindow {
+                    claim: Duration::from_secs(1),
+                    start: Duration::from_secs(1),
+                    result: Duration::from_secs(1),
+                }),
             )
             .await;
         let retry = store
@@ -1416,12 +1451,48 @@ mod tests {
                 json!({}),
                 "dev",
                 Some("request-1"),
-                Some(Duration::from_secs(25)),
+                Some(TaskWindow {
+                    claim: Duration::from_secs(20),
+                    start: Duration::from_secs(22),
+                    result: Duration::from_secs(25),
+                }),
             )
             .await;
         assert!(first.1.is_some());
         assert_eq!(first, retry);
         assert_eq!(store.counts().await.pending, 1);
+    }
+
+    /// B is told how long it has to begin: a windowed task carries the
+    /// remaining start budget, windowless work carries nothing.
+    #[tokio::test]
+    async fn polled_task_reports_its_start_deadline_to_b() {
+        let store = store();
+        let window = TaskWindow {
+            claim: Duration::from_secs(20),
+            start: Duration::from_secs(22),
+            result: Duration::from_secs(25),
+        };
+        let (id, _) = store
+            .create_task_with_deadline("attest", json!({}), "dev", None, Some(window))
+            .await;
+        let task = store
+            .pop_for_b("dev", "m1", Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(task.task_id, id);
+        let within = task
+            .start_within_ms()
+            .expect("windowed task has a start deadline");
+        assert!(within > 0 && within <= window.start.as_millis() as u64);
+
+        let sign = store.create_task("sign", json!({}), "dev", None).await;
+        let task = store
+            .pop_for_b("dev", "m1", Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(task.task_id, sign);
+        assert_eq!(task.start_within_ms(), None);
     }
 
     #[tokio::test]
@@ -1489,19 +1560,26 @@ mod tests {
                 json!({}),
                 "dev",
                 None,
-                Some(Duration::from_secs(3600)),
+                Some(TaskWindow {
+                    claim: Duration::from_secs(3600),
+                    start: Duration::from_secs(3600),
+                    result: Duration::from_secs(3600),
+                }),
             )
             .await;
         store.pop_for_b("dev", "m1", Duration::ZERO).await.unwrap();
         {
             let mut inner = store.inner.lock().await;
+            let past = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
             let task = inner.tasks.get_mut(&id).unwrap();
             task.assigned_at_ms = 1;
-            task.claim_deadline = Some(
-                Instant::now()
-                    .checked_sub(Duration::from_secs(1))
-                    .unwrap_or_else(Instant::now),
-            );
+            task.deadlines = Some(TaskDeadlines {
+                claim: past,
+                start: past,
+                result: past,
+            });
             inner.devices.get_mut("dev").unwrap().last_seen_ms = 1;
         }
         // A different device polls while the assignee is stale: the reclaim

@@ -79,8 +79,11 @@ The relay daemon supports every task type the relay_server can dispatch:
 - Poll `GET /api/b/poll/` (query: `device_id`, `machine_id`, `timeout`, optional
   `caps`, `ver`, `battery_percent=0..100`, `battery_charging=true|false`;
   header `X-Relay-Token`); a `200` returns `{task_id, task_type, payload,
-  target_device_id}`, a `204` means no task. Battery data comes from read-only
-  primary-battery sysfs with a five-second in-memory sample cache, never HAL/TEE.
+  target_device_id, start_within_ms?}`, a `204` means no task. `start_within_ms`
+  is the remaining budget before the server's start-execution deadline; a task
+  already past it is reported expired and never reaches the TEE. Battery data
+  comes from read-only primary-battery sysfs with a five-second in-memory
+  sample cache, never HAL/TEE.
   Unsupported attributes are omitted, not zero. Server status rows expose nullable
   `battery_percent`, `battery_charging`, `battery_updated_at_ms` (server receipt
   time, not B sample time); missing/invalid telemetry clears previous values.

@@ -116,8 +116,10 @@ the failed assignment.
 
 Physical `attest`/`profile`/`decrypt`/`agree` waits at most 25 seconds (or
 `RELAY_WAIT_RESULT_TIMEOUT` if it is lower). B may claim the task only during
-the first 80% of that wait so a claimed result can still be returned. A retry
-with the same request ID keeps the original deadlines; unclaimed or reclaimed
+the first 80% of that wait and must start executing it by 90%: the poll
+response carries the remaining budget as `start_within_ms`, and B reports an
+expiry error instead of entering the HAL once it has passed. A retry with
+the same request ID keeps the original deadlines; unclaimed or reclaimed
 work past the claim deadline is expired before dispatch; reaching the HTTP
 deadline does not interrupt work already claimed by B. `sign`/`delete` keep
 the 10-second wait and cancel unclaimed work.

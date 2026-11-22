@@ -17,7 +17,7 @@ use crate::auth::{AuthState, DeviceBinding, TokenCheck};
 use crate::config::Config;
 use crate::db::Db;
 use crate::fulfill::Fulfill;
-use crate::queue::TaskStore;
+use crate::queue::{TaskStore, TaskWindow};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -259,14 +259,20 @@ fn check_b_device(state: &AppState, headers: &HeaderMap, device_id: &str) -> Res
 // Leave headroom for the response before the A-side 30-second HTTP timeout.
 const B_TASK_WAIT_LIMIT_SECS: u64 = 25;
 
-/// (result wait, claim window). The claim window closes before the result
-/// deadline so B is not handed work whose result can no longer be returned.
-fn b_task_timeouts(task_type: &str, configured_secs: u64) -> (Duration, Option<Duration>) {
+/// (result wait, task window). B may claim the task only during the claim
+/// window and must start executing it by the start deadline, so work B runs
+/// can still be returned to A before the result deadline.
+fn b_task_timeouts(task_type: &str, configured_secs: u64) -> (Duration, Option<TaskWindow>) {
     match task_type {
         "sign" | "delete" => (Duration::from_secs(configured_secs.min(10)), None),
         _ => {
-            let wait = Duration::from_secs(configured_secs.min(B_TASK_WAIT_LIMIT_SECS));
-            (wait, Some(wait - wait / 5))
+            let result = Duration::from_secs(configured_secs.min(B_TASK_WAIT_LIMIT_SECS));
+            let window = TaskWindow {
+                claim: result - result / 5,
+                start: result - result / 10,
+                result,
+            };
+            (result, Some(window))
         }
     }
 }
@@ -283,17 +289,15 @@ async fn try_b_device_layer(
         return Some(json!({ "error": format!("B-side device {device_id} is not online") }));
     }
     let request_id = body.get("request_id").and_then(Value::as_str);
-    let (wait, claim) = b_task_timeouts(task_type, state.cfg.wait_result_timeout_secs);
-    let (task_id, claim_deadline) = state
+    let (wait, window) = b_task_timeouts(task_type, state.cfg.wait_result_timeout_secs);
+    let (task_id, deadlines) = state
         .store
-        .create_task_with_deadline(task_type, body.clone(), device_id, request_id, claim)
+        .create_task_with_deadline(task_type, body.clone(), device_id, request_id, window)
         .await;
-    // The result deadline is the claim deadline plus the margin, so a retry
-    // joining an already-claimed task still waits for the original deadline.
-    let wait = claim_deadline.map_or(wait, |deadline| {
-        (deadline + (wait - claim.unwrap_or_default()))
-            .saturating_duration_since(Instant::now())
-    });
+    // A retry joins the existing task's deadlines, so its wait still ends at
+    // the original result deadline even when B already claimed the work.
+    let wait = deadlines
+        .map_or(wait, |d| d.result.saturating_duration_since(Instant::now()));
     match state.store.wait_for_result(&task_id, wait).await {
         Some(mut result) => {
             if let Some(obj) = result.as_object_mut() {
@@ -906,6 +910,7 @@ pub async fn b_poll(
             "task_type": task.task_type,
             "payload": task.payload,
             "target_device_id": task.target_device_id,
+            "start_within_ms": task.start_within_ms(),
         }))
         .into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
@@ -1112,7 +1117,8 @@ mod tests {
         assert_eq!(
             task,
             json!({
-                "task_id": task_id, "task_type": "profile", "payload": {}, "target_device_id": "synthetic-b"
+                "task_id": task_id, "task_type": "profile", "payload": {},
+                "target_device_id": "synthetic-b", "start_within_ms": null
             })
         );
         let device = battery_status(&state).await;
@@ -1283,21 +1289,25 @@ mod tests {
 
     #[test]
     fn b_task_timeouts_cap_all_tee_work_and_close_claims_early() {
+        fn windowed(result_ms: u64, claim_ms: u64, start_ms: u64) -> (Duration, Option<TaskWindow>) {
+            (
+                Duration::from_millis(result_ms),
+                Some(TaskWindow {
+                    claim: Duration::from_millis(claim_ms),
+                    start: Duration::from_millis(start_ms),
+                    result: Duration::from_millis(result_ms),
+                }),
+            )
+        }
         for task_type in ["attest", "profile", "decrypt", "agree"] {
             assert_eq!(
                 b_task_timeouts(task_type, 120),
-                (Duration::from_secs(25), Some(Duration::from_secs(20))),
+                windowed(25_000, 20_000, 22_500),
                 "{task_type}"
             );
         }
-        assert_eq!(
-            b_task_timeouts("attest", 5),
-            (Duration::from_secs(5), Some(Duration::from_secs(4)))
-        );
-        assert_eq!(
-            b_task_timeouts("attest", 0),
-            (Duration::ZERO, Some(Duration::ZERO))
-        );
+        assert_eq!(b_task_timeouts("attest", 5), windowed(5_000, 4_000, 4_500));
+        assert_eq!(b_task_timeouts("attest", 0), windowed(0, 0, 0));
         for task_type in ["sign", "delete"] {
             assert_eq!(
                 b_task_timeouts(task_type, 120),
