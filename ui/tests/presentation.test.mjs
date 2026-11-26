@@ -5,7 +5,8 @@ import {resolveLanguage, parseProperties, freshness, escapeHtml, healthMessage} 
 const aSource = readFileSync(new URL('../../a-side/source/template/webroot/modern.js',import.meta.url),'utf8')
   .replace(/from '\.\/ui-kit\.js(?:\?[^']*)?'/,`from '${new URL('../shared/ui-kit.js',import.meta.url).href}'`)
   .replace(/from '\.\/app-search\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/app-search.js',import.meta.url).href}'`)
-  .replace(/from '\.\/soter\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/soter.js',import.meta.url).href}'`);
+  .replace(/from '\.\/soter\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/soter.js',import.meta.url).href}'`)
+  .replace(/from '\.\/liquid-glass\.js(?:\?[^']*)?'/,`from '${new URL('../../a-side/source/template/webroot/liquid-glass.js',import.meta.url).href}'`);
 const {relayVerdict,requestIcon,deviceSnapshot,formatRelayLatency,parseBStatusConfig,bOnlineState,mergeAttestationHealth,bBatterySnapshot,
   relayMode,parseRelaySettings,parseTomlRemote,certificateBytes,certificateSummary,keyboxSummary,formatKeyboxDays,
   localActivityVerdict,localVerdictIcon,parseLogTime,formatAge} = await import(`data:text/javascript;base64,${Buffer.from(aSource).toString('base64')}`);
