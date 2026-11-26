@@ -48,17 +48,116 @@ export function setText(id, value) { const element = document.getElementById(id)
 // The icon set is shared with the design prototype; see icons.js.
 export {icon} from './icons.js';
 
-export function createBridge(scope, timeoutMs = 12000) {
+// `spawn: true` starts commands through ksu.spawn when the manager offers it.
+// ksu.exec runs the whole command inside the JavaScript call, so a 400 ms read
+// freezes scrolling and taps for 400 ms; spawn returns after a fixed start cost
+// and streams the output back. Spawned commands still run one at a time in the
+// order they were issued, exactly like the synchronous exec they replace, and
+// each one waits until the finger is lifted and scrolling has settled.
+export function createBridge(scope, timeoutMs = 12000, {spawn = false} = {}) {
   let sequence = 0;
+  const unsupported = () => ({errno:1, stdout:'', stderr:text('请从支持 WebUI 的模块管理器打开。', 'Open from a module manager with WebUI support.')});
   return command => new Promise(resolve => {
     const callback = `ommega_${scope}_${Date.now()}_${sequence++}`;
-    // Read operations may fail to deliver a callback. Never interrupt a device process.
-    const timer = timeoutMs > 0 ? setTimeout(() => { delete window[callback]; resolve({errno:1, stdout:'', stderr:text('读取超时，请刷新重试。', 'Read timed out. Refresh to retry.')}); }, timeoutMs) : null;
-    window[callback] = (errno, stdout, stderr) => {
-      clearTimeout(timer); delete window[callback]; resolve({errno:Number(errno), stdout:stdout || '', stderr:stderr || ''});
+    let settled = false, viaSpawn = false, timer = null, release = () => {};
+    const settle = result => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      // A late spawn event must still find a receiver after the promise settled.
+      if (viaSpawn) { window[callback] = bridgeInertReceiver; setTimeout(() => { delete window[callback]; }, 3000); }
+      else delete window[callback];
+      release();
+      resolve(result);
     };
-    try { window.ksu.exec(command, '{}', callback); }
-    catch { clearTimeout(timer); delete window[callback]; resolve({errno:1, stdout:'', stderr:text('请从支持 WebUI 的模块管理器打开。', 'Open from a module manager with WebUI support.')}); }
+    // Read operations may fail to deliver a callback. Never interrupt a device
+    // process. The read timeout covers the command itself, not its queue wait.
+    const arm = () => {
+      if (timeoutMs > 0) timer = setTimeout(() => settle({errno:1, stdout:'', stderr:text('读取超时，请刷新重试。', 'Read timed out. Refresh to retry.')}), timeoutMs);
+    };
+    const runExec = () => {
+      window[callback] = (errno, stdout, stderr) => settle({errno:Number(errno), stdout:stdout || '', stderr:stderr || ''});
+      try { window.ksu.exec(command, '{}', callback); }
+      catch { settle(unsupported()); }
+    };
+    if (!spawn || typeof window.ksu?.spawn !== 'function') { arm(); runExec(); return; }
+    bridgeSpawnProbe(ok => { if (ok) bridgeEnqueue(runSpawn); else { arm(); runExec(); } });
+    function runSpawn(done) {
+      release = done;
+      viaSpawn = true;
+      const out = [], err = [];
+      window[callback] = {
+        stdout: {emit: (event, data) => { if (event === 'data') out.push(String(data ?? '')); }},
+        stderr: {emit: (event, data) => { if (event === 'data') err.push(String(data ?? '')); }},
+        // A failing command reports `exit` and then `error`; a command that could
+        // not start reports only `error`. ksu.exec also drops the final newline.
+        emit: (event, data) => {
+          if (event === 'exit') settle({errno:Number(data) || 0, stdout:out.join('\n'), stderr:err.join('\n')});
+          else if (event === 'error') settle({errno:Number(data?.exitCode) || 1, stdout:out.join('\n'), stderr:err.join('\n') || String(data?.message || '')});
+        }
+      };
+      arm();
+      try { window.ksu.spawn(command, '[]', '{}', callback); }
+      catch { settle(unsupported()); }
+    }
+  });
+}
+const bridgeInertReceiver = {stdout:{emit() {}}, stderr:{emit() {}}, emit() {}};
+// A manager may expose spawn without ever answering it. One `true` must report
+// a clean exit within 3 s before any command relies on spawn; otherwise every
+// command keeps using exec.
+let bridgeProbe = null;
+function bridgeSpawnProbe(next) {
+  if (bridgeProbe?.done) { next(bridgeProbe.ok); return; }
+  if (bridgeProbe) { bridgeProbe.waiters.push(next); return; }
+  const probe = bridgeProbe = {done:false, ok:false, waiters:[next]};
+  const name = 'ommega_spawn_probe_' + Date.now();
+  const finish = ok => {
+    if (probe.done) return;
+    probe.done = true; probe.ok = ok;
+    window[name] = bridgeInertReceiver; setTimeout(() => { delete window[name]; }, 3000);
+    for (const waiter of probe.waiters.splice(0)) waiter(ok);
+  };
+  window[name] = {stdout:{emit() {}}, stderr:{emit() {}}, emit: (event, code) => { if (event === 'exit') finish(Number(code) === 0); else if (event === 'error') finish(false); }};
+  setTimeout(() => finish(false), 3000);
+  try { window.ksu.spawn('true', '[]', '{}', name); } catch { finish(false); }
+}
+const bridgeQueue = [];
+let bridgeBusy = false, bridgeHeadSince = 0, bridgeTimer = 0;
+let bridgeLastInput = 0, bridgePointers = 0, bridgeTracking = false;
+function bridgeTrack() {
+  if (bridgeTracking || typeof window.addEventListener !== 'function') return;
+  bridgeTracking = true;
+  const mark = () => { bridgeLastInput = performance.now(); };
+  const lift = () => { bridgePointers = Math.max(0, bridgePointers - 1); mark(); };
+  const options = {capture:true, passive:true};
+  window.addEventListener('pointerdown', () => { bridgePointers++; mark(); }, options);
+  window.addEventListener('pointerup', lift, options);
+  window.addEventListener('pointercancel', lift, options);
+  window.addEventListener('scroll', mark, options);
+}
+function bridgeEnqueue(job) {
+  bridgeTrack();
+  bridgeQueue.push(job);
+  bridgePump();
+}
+// Start the next command once input has been quiet for 160 ms, or after the
+// head has waited 600 ms so a long scroll cannot starve reads or a write the
+// user just confirmed. Each start is its own task, so frames run in between.
+function bridgePump() {
+  if (bridgeBusy || bridgeTimer || !bridgeQueue.length) return;
+  const now = performance.now();
+  if (!bridgeHeadSince) bridgeHeadSince = now;
+  if ((bridgePointers || now - bridgeLastInput < 160) && now - bridgeHeadSince < 600) {
+    bridgeTimer = setTimeout(() => { bridgeTimer = 0; bridgePump(); }, 50);
+    return;
+  }
+  bridgeHeadSince = 0;
+  bridgeBusy = true;
+  let released = false;
+  bridgeQueue.shift()(() => {
+    if (released) return;
+    released = true; bridgeBusy = false;
+    bridgeTimer = setTimeout(() => { bridgeTimer = 0; bridgePump(); }, 0);
   });
 }
 export function pollWhenVisible(refresh, delay = 10000, button = null) {

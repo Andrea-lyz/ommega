@@ -226,3 +226,41 @@ test("native diagnostics ignore old properties/config keys and report missing SP
   ctx.ommegaDiagRenderNativeProbe(target, items);
   assert.match(target.innerHTML, /未知 1 项/);
 });
+
+test("cleared failures hide only entries up to the stored log timestamp", async () => {
+  const ctx = load();
+  const errors = [
+    "==keymint",
+    "2026-11-09 03:26:50 UTC Error::Km(ErrorCode(-30)) for AppUid(10134)",
+    "2026-11-09 04:00:00 UTC Error::Km(ErrorCode(-30)) for AppUid(10134)",
+    "==injector"
+  ].join("\n");
+  ctx.ommegaReadOnly = async command =>
+    String(command).includes("pm list packages")
+      ? {errno: 0, stdout: "package:com.example.app uid:10134\n"}
+      : {errno: 0, stdout: errors};
+  const all = await ctx.ommegaDiagCollectErrors("");
+  assert.equal(all[0].count, 2);
+  assert.equal(ctx.ommegaDiagErrorStats.latest, "2026-11-09 04:00:00");
+  const later = await ctx.ommegaDiagCollectErrors("2026-11-09 03:26:50");
+  assert.equal(later.length, 1);
+  assert.equal(later[0].count, 1);
+  assert.equal(ctx.ommegaDiagErrorStats.cleared, 1);
+  assert.equal((await ctx.ommegaDiagCollectErrors("2026-11-09 04:00:00")).length, 0);
+  assert.equal(ctx.ommegaDiagErrorStats.cleared, 2);
+});
+
+test("concurrent overview renders share one read, a forced one reads again", async () => {
+  const ctx = load();
+  let reads = 0, release;
+  ctx.ommegaDiagRenderOverviewOnce = () => { reads++; return new Promise(r => { release = r; }); };
+  const first = ctx.ommegaDiagRenderOverview();
+  const second = ctx.ommegaDiagRenderOverview();
+  assert.equal(first, second);
+  assert.equal(reads, 1);
+  ctx.ommegaDiagRenderOverview(true);
+  release(); await new Promise(r => setTimeout(r, 0));
+  assert.equal(reads, 2);
+  release(); await first;
+  assert.equal(reads, 2);
+});

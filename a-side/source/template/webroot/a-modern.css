@@ -10,9 +10,14 @@
 .om-modern[data-om-view=apps] { padding-bottom:0; }
 .om-modern[data-om-view=apps] #apps-list { padding-bottom:calc(var(--om-dock-gap) + var(--om-dock-h) + 24px + env(safe-area-inset-bottom,0px)); }
 .om-modern[data-om-view]:not([data-om-view=apps]) > .header,
-.om-modern[data-om-view]:not([data-om-view=apps]) > #apps-list,
 .om-modern[data-om-view]:not([data-om-view=apps]) > .loading,
 .om-modern[data-om-view]:not([data-om-view=apps]) > #save { display:none !important; }
+/* The app list is ~30k nodes of Material components. display:none would drop
+   its style and layout, costing ~90 ms each time the Apps tab is shown again;
+   content-visibility:hidden keeps them cached while it is not painted,
+   focusable or exposed to accessibility. */
+.om-modern[data-om-view]:not([data-om-view=apps]) > #apps-list,
+.om-modern[data-om-app-detail] > #apps-list { content-visibility:hidden; contain-intrinsic-size:0 0; height:0; min-height:0; margin-top:0; margin-bottom:0; padding:0 !important; border:0; overflow:hidden; }
 /* A pending app bootstrap must not cover the global refresh/navigation. */
 .om-modern > .loading { position:static; inset:auto; width:auto; height:auto; min-height:80px; z-index:auto; background:transparent; pointer-events:none; }
 .om-modern > .footer { max-width:900px; margin:20px auto; padding:0; }
@@ -134,7 +139,6 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 .om-modern[data-om-app-detail] > #om-app-search-region,
 .om-modern[data-om-app-detail] > #om-global-scope-slot,
 .om-modern[data-om-app-detail] > #om-app-operations,
-.om-modern[data-om-app-detail] > #apps-list,
 .om-modern[data-om-app-detail] > #save,
 .om-modern[data-om-app-detail] #om-apps-heading { display:none !important; }
 #om-app-detail { max-width:780px; margin:0 auto; }
@@ -380,6 +384,9 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 /* Overview failure card joins the dashboard grid and carries its own insets. */
 .om-diag-overview-card { grid-column: 1 / -1; padding: 12px 16px 14px; }
 .om-diag-overview-card > .group-header { padding: 0 0 6px; }
+.om-diag-overview-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.om-diag-overview-header .text-button { flex: none; margin: -10px -10px -10px 0; }
+.om-diag-overview-header .text-button[hidden] { display: none; }
 #om-overview-errors-body .note { margin: 6px 0 0; font-size: 12px; color: var(--om-muted); }
 #om-overview-errors-body .om-diag-list { padding: 0; }
 
@@ -391,3 +398,23 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 /* The app list renders 400+ cards; skip offscreen layout so revealing the page
    and scrolling stay responsive. */
 #apps-list .card { content-visibility: auto; contain-intrinsic-size: 88px; }
+
+/* Liquid glass dock (phone layout). liquid-glass.js adds .om-liquid, the pill
+   and, on Chromium WebViews, .om-liquid-refract with the SVG refraction filter.
+   The tint and the halo keep icons and labels legible over busy content;
+   their --om-glass-* tokens live in the shared theme. */
+.om-nav-pill { display:none; }
+@media(max-width:760px) {
+  .om-modern .om-nav.om-liquid { border-color:transparent; background:rgb(var(--om-glass-tint) / var(--om-glass-alpha)); box-shadow:0 12px 32px var(--om-glass-shadow), 0 1px 3px rgb(0 0 0 / 10%); touch-action:none; user-select:none; -webkit-user-select:none; -webkit-backdrop-filter:blur(14px) saturate(1.6); backdrop-filter:blur(14px) saturate(1.6); }
+  .om-modern .om-nav.om-liquid-refract { -webkit-backdrop-filter:url(#om-liquid-glass); backdrop-filter:url(#om-liquid-glass); }
+  .om-modern .om-nav.om-liquid::before { display:none; }
+  .om-modern .om-nav.om-liquid::after { content:""; position:absolute; inset:0; z-index:2; border-radius:inherit; pointer-events:none; box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-edge), inset -1px -1px 0 -.5px var(--om-glass-edge), inset 0 0 14px rgb(255 255 255 / 10%); }
+  .om-nav-pill { display:block; position:absolute; z-index:0; top:5px; bottom:5px; left:5px; width:var(--om-pill-w, calc((100% - 10px) / 3)); border-radius:999px; background:var(--om-glass-pill); box-shadow:inset 1px 1px 0 -.5px rgb(255 255 255 / 70%), inset -1px -1px 0 -.5px rgb(255 255 255 / 25%), 0 2px 8px rgb(0 0 0 / 8%); pointer-events:none; transform:translate3d(var(--om-pill-x, 0px), 0, 0) scale(var(--om-pill-s, 1)); transition:transform .45s cubic-bezier(.34, 1.56, .64, 1); }
+  .om-nav-pill.pressed { --om-pill-s:1.12; }
+  .om-nav-pill.dragging { transition:transform .08s linear; will-change:transform; }
+  .om-modern .om-nav.om-liquid button { position:relative; z-index:1; color:var(--om-ink); opacity:.88; text-shadow:0 0 3px var(--om-glass-halo), 0 0 6px var(--om-glass-halo); transition:color .2s, opacity .2s; }
+  .om-modern .om-nav.om-liquid button svg { filter:drop-shadow(0 0 2px var(--om-glass-halo)) drop-shadow(0 0 4px var(--om-glass-halo)); transition:transform .35s cubic-bezier(.34, 1.56, .64, 1); }
+  .om-modern .om-nav.om-liquid button[aria-current=page], .om-modern .om-nav.om-liquid button.om-nav-hover { color:var(--om-accent); opacity:1; }
+  .om-modern .om-nav.om-liquid.om-dragging button[aria-current=page]:not(.om-nav-hover) { color:var(--om-ink); opacity:.88; }
+  .om-modern .om-nav.om-liquid button[aria-current=page] svg { transform:translateY(-1px) scale(1.06); }
+}

@@ -1,6 +1,7 @@
-import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js?v=material-ui-36';
+import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js?v=material-ui-38';
 import {installAppSearch,prepareSearchEditor} from './app-search.js?v=app-search-3';
-import {mountSoter, soterShow} from './soter.js?v=material-ui-36';
+import {mountSoter, soterShow} from './soter.js?v=material-ui-38';
+import {installLiquidGlass} from './liquid-glass.js?v=liquid-glass-4';
 
 if (typeof document !== 'undefined') {
   const style = document.createElement('link');
@@ -607,8 +608,8 @@ function bindAutomation() {
   const issueSb = document.getElementById('om-rkp-issue-sb');
   if (issueSb) issueSb.onclick = () => armAutomationIssue('strongbox');
 }
-const exec = createBridge('a_dashboard');
-const execBStatus = createBridge('a_b_status');
+const exec = createBridge('a_dashboard', 12000, {spawn:true});
+const execBStatus = createBridge('a_b_status', 12000, {spawn:true});
 if (typeof document !== 'undefined') document.addEventListener('ommega-readonly', event => {
   if (typeof event.detail?.command === 'string') event.detail.promise = exec(event.detail.command);
 });
@@ -1077,7 +1078,17 @@ function install() {
     // Keep the user's navigation focus. A route change is not an edit action.
   }
   document.querySelectorAll('[data-om-view]').forEach(button => button.onclick = () => { location.replace('#om-' + button.dataset.omView); });
-  window.addEventListener('hashchange', () => { navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview'); });
+  // The dock routes synchronously when the finger lifts: the hashchange task can
+  // queue behind bridge callbacks for tens of milliseconds. Its later event is
+  // then skipped because the view already matches.
+  let routed = {raw: null, at: 0};
+  const routeTo = raw => { routed = {raw, at: performance.now()}; navigate(raw); };
+  installLiquidGlass(document.querySelector('.om-nav'), {onSelect: view => { location.replace('#om-' + view); routeTo(view); }});
+  window.addEventListener('hashchange', () => {
+    const raw = location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview';
+    if (raw === routed.raw && performance.now() - routed.at < 1000) return;
+    routeTo(raw);
+  });
   navigate(location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview');
   for (const button of document.querySelectorAll('[data-om-action]')) button.onclick = () => {
     if (button.dataset.omAction === 'ommega-soterta') { location.hash = 'om-soter'; return; }

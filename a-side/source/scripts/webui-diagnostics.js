@@ -846,6 +846,25 @@ async function ommegaDiagCached(key, command, ttl = OMMEGA_DIAG_TTL) {
   return value;
 }
 
+// The overview card can hide failures already seen without touching the logs:
+// it stores the newest log timestamp at clear time and shows only later ones.
+const OMMEGA_DIAG_ERRORS_CLEARED_KEY = "ommega.diag.errors.clearedAt";
+var ommegaDiagErrorStats = {latest: "", cleared: 0};
+function ommegaDiagErrorsClearedAt() {
+  try { return localStorage.getItem(OMMEGA_DIAG_ERRORS_CLEARED_KEY) || ""; } catch { return ""; }
+}
+function ommegaDiagStoreErrorsClearedAt(value) {
+  try {
+    value ? localStorage.setItem(OMMEGA_DIAG_ERRORS_CLEARED_KEY, value)
+      : localStorage.removeItem(OMMEGA_DIAG_ERRORS_CLEARED_KEY);
+  } catch {}
+}
+// Log stamps are "YYYY-MM-DD HH:MM:SS", so string order is time order.
+function ommegaDiagFilterCleared(entries, clearedAt) {
+  if (!clearedAt) return entries;
+  return entries.filter(entry => entry.ts && entry.ts > clearedAt);
+}
+
 const OMMEGA_DIAG_UID_KEY = "ommega.diag.uidmap";
 let ommegaDiagUidMap = (() => {
   try {
@@ -918,7 +937,7 @@ async function ommegaDiagPackageLabels(packages) {
   return ommegaDiagBridgeLabels.map;
 }
 
-async function ommegaDiagCollectErrors() {
+async function ommegaDiagCollectErrors(clearedAt = "") {
   const response = await ommegaReadOnly(["set +e",
     'L=/data/adb/ommega/ommegadata/logs',
     'echo "==keymint"',
@@ -959,11 +978,18 @@ async function ommegaDiagCollectErrors() {
       }
     }
   }
+  ommegaDiagErrorStats = {
+    latest: entries.reduce((max, entry) => entry.ts > max ? entry.ts : max, ""), cleared: 0
+  };
+  const visible = ommegaDiagFilterCleared(entries, clearedAt);
+  ommegaDiagErrorStats.cleared = entries.length - visible.length;
+  uids.clear();
+  for (const entry of visible) uids.add(entry.uid);
   if (!uids.size) return [];
   const byUid = await ommegaDiagUidPackages([...uids]);
   const appInfo = ommegaDiagAppInfo();
   const bridgeLabels = await ommegaDiagPackageLabels([...new Set([...byUid.values()].filter(Boolean))]);
-  return ommegaDiagAggregateErrors(entries).slice(0, 12).map(entry => {
+  return ommegaDiagAggregateErrors(visible).slice(0, 12).map(entry => {
     const pkg = byUid.get(entry.uid) || "";
     // A package outside the enumerated app list still has a resolvable icon.
     const meta = appInfo.get(pkg) || {label: "", icon: pkg ? "ksu://icon/" + pkg : ""};
@@ -992,10 +1018,16 @@ function ommegaDiagErrorRows(list) {
   }).join("");
 }
 
-async function ommegaDiagRenderErrors(target) {
-  if (!target) return;
-  target.textContent = ommegaDiagT("读取中…", "Reading…");
-  const list = await ommegaDiagCollectErrors();
+async function ommegaDiagRenderErrors(target, clearedAt = "") {
+  if (!target) return [];
+  // A re-read keeps the previous list on screen instead of flashing "Reading…".
+  if (!target.childElementCount) target.textContent = ommegaDiagT("读取中…", "Reading…");
+  const list = await ommegaDiagCollectErrors(clearedAt);
+  const cleared = ommegaDiagErrorStats.cleared > 0
+    ? "<p class=\"note\">" + ommegaDiagEsc(ommegaDiagT(
+        "已清除 " + ommegaDiagErrorStats.cleared + " 条更早的记录（日志未删除）。",
+        "Cleared " + ommegaDiagErrorStats.cleared + " earlier records (logs are kept).")) + "</p>"
+    : "";
   const hidden = ommegaDiagHiddenSystem > 0
     ? "<p class=\"note\">" + ommegaDiagEsc(ommegaDiagT(
         "已隐藏 " + ommegaDiagHiddenSystem + " 条系统身份（keystore/system 等）记录，只显示应用层异常。",
@@ -1003,10 +1035,37 @@ async function ommegaDiagRenderErrors(target) {
     : "";
   target.innerHTML = (list.length
     ? "<ul class=\"om-diag-list\">" + ommegaDiagErrorRows(list) + "</ul>"
-    : "<p class=\"note\">" + ommegaDiagEsc(ommegaDiagT("最近没有链路级错误。", "No link-level errors recorded recently.")) + "</p>") + hidden;
+    : "<p class=\"note\">" + ommegaDiagEsc(ommegaDiagT("最近没有链路级错误。", "No link-level errors recorded recently.")) + "</p>") + cleared + hidden;
+  return list;
 }
 
-async function ommegaDiagRenderOverview() {
+function ommegaDiagUpdateErrorsAction(button, list, clearedAt) {
+  if (!button) return;
+  const restore = !list.length && !!clearedAt;
+  button.hidden = !list.length && !restore;
+  button.dataset.mode = restore ? "restore" : "clear";
+  button.textContent = restore ? ommegaDiagT("恢复", "Restore") : ommegaDiagT("清除", "Clear");
+  button.title = restore
+    ? ommegaDiagT("重新显示已清除的记录", "Show cleared records again")
+    : ommegaDiagT("隐藏当前记录，只显示之后的新异常；日志不会删除", "Hide current records and show only newer failures; logs are kept");
+}
+
+// The shell and this glue both route on hashchange, so one navigation asks for
+// the overview twice; share the read that is already running. `force` (the
+// clear button) queues one more read after it with the new watermark.
+let ommegaDiagOverviewRun = null, ommegaDiagOverviewAgain = false;
+function ommegaDiagRenderOverview(force = false) {
+  if (ommegaDiagOverviewRun) {
+    if (force) ommegaDiagOverviewAgain = true;
+    return ommegaDiagOverviewRun;
+  }
+  ommegaDiagOverviewRun = (async () => {
+    do { ommegaDiagOverviewAgain = false; await ommegaDiagRenderOverviewOnce(); } while (ommegaDiagOverviewAgain);
+  })().finally(() => { ommegaDiagOverviewRun = null; });
+  return ommegaDiagOverviewRun;
+}
+
+async function ommegaDiagRenderOverviewOnce() {
   const host = document.getElementById("om-overview");
   if (!host) return;
   // The overview lays its panels out in a grid; joining that grid gives the card
@@ -1017,12 +1076,22 @@ async function ommegaDiagRenderOverview() {
     card = document.createElement("section");
     card.id = "om-overview-errors";
     card.className = "panel settings-group om-diag-overview-card";
-    card.innerHTML = "<div class=\"group-header\"><h2 class=\"group-heading\">" +
-      ommegaDiagEsc(ommegaDiagT("最近请求异常", "Recent request failures")) + "</h2></div>" +
+    card.innerHTML = "<div class=\"group-header om-diag-overview-header\"><h2 class=\"group-heading\">" +
+      ommegaDiagEsc(ommegaDiagT("最近请求异常", "Recent request failures")) + "</h2>" +
+      "<button type=\"button\" class=\"text-button\" id=\"om-overview-errors-clear\" hidden></button></div>" +
       "<div id=\"om-overview-errors-body\"></div>";
+    card.querySelector("#om-overview-errors-clear").addEventListener("click", async event => {
+      const button = event.currentTarget;
+      if (button.disabled) return;
+      ommegaDiagStoreErrorsClearedAt(button.dataset.mode === "restore" ? "" : ommegaDiagErrorStats.latest);
+      button.disabled = true;
+      try { await ommegaDiagRenderOverview(true); } finally { button.disabled = false; }
+    });
   }
   if (card.parentElement !== grid) grid.appendChild(card);
-  await ommegaDiagRenderErrors(document.getElementById("om-overview-errors-body"));
+  const clearedAt = ommegaDiagErrorsClearedAt();
+  const list = await ommegaDiagRenderErrors(document.getElementById("om-overview-errors-body"), clearedAt);
+  ommegaDiagUpdateErrorsAction(document.getElementById("om-overview-errors-clear"), list, clearedAt);
 }
 
 // ------------------------------------------------------- device probe (AProbe)

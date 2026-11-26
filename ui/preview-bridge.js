@@ -134,7 +134,24 @@ window.ksu = {
     if (this !== window.ksu) throw new Error("Java bridge method can't be invoked on a non-injected object");
     return JSON.stringify(apps.filter(app=>JSON.parse(packages).includes(app.packageName)));
   },
-  toast: () => {}, spawn: () => {},
+  toast: () => {},
+  // Mirrors the KernelSU streaming bridge on top of the exec fixtures: one
+  // stdout event per line, then exit (and error for a non-zero status).
+  spawn(command, args, options, name) {
+    const temporary = name + '_preview_exec';
+    window[temporary] = (errno, stdout, stderr) => {
+      delete window[temporary];
+      setTimeout(() => {
+        const child = window[name];
+        if (!child) return;
+        if (stdout !== '') for (const line of String(stdout).split('\n')) child.stdout.emit('data', line);
+        if (stderr) for (const line of String(stderr).split('\n')) child.stderr.emit('data', line);
+        child.emit('exit', Number(errno) ? 1 : 0);
+        if (Number(errno)) child.emit('error', {exitCode: 1, message: ''});
+      }, 0);
+    };
+    this.exec(command, options, temporary);
+  },
 };
 document.addEventListener('DOMContentLoaded',() => {
   const note = document.createElement('div'); note.textContent = /^zh/.test(navigator.language)?'界面预览 · 所有状态均为示例数据':'UI preview · all status values are sample data';
