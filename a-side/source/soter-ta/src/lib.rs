@@ -25,6 +25,7 @@ pub mod parcel;
 pub mod platform;
 pub mod remote;
 mod routing;
+pub mod seal;
 pub mod state;
 
 pub use error::{

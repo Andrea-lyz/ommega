@@ -19,6 +19,7 @@ use crate::error::{
 };
 use crate::identities;
 use crate::platform::{same_boot, Platform};
+use crate::seal::{self, SealKey};
 
 /// Key size the stock TA uses for ASK and AuthKey.
 const RSA_BITS: usize = 2048;
@@ -37,6 +38,7 @@ pub const BIO_WINDOW_MS: u64 = 120_000;
 const SIDECAR_TEMP: &str = ".tmp";
 /// Suffix of the previous revision kept beside the ledger.
 const SIDECAR_BACKUP: &str = ".bak";
+const LEDGER_KEY_AAD: &[u8] = b"ommega-soter-ledger-key-v1";
 
 /// `state.json` + `.bak` / `.tmp`, without touching the extension.
 fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
@@ -56,6 +58,116 @@ fn set_owner_only(path: &Path) -> std::io::Result<()> {
     {
         let _ = path;
     }
+    Ok(())
+}
+
+fn ledger_aad(public_pem: &str) -> Vec<u8> {
+    let mut aad = LEDGER_KEY_AAD.to_vec();
+    aad.extend_from_slice(public_pem.as_bytes());
+    aad
+}
+
+fn seal_key_fields(value: &mut serde_json::Value, key: &SealKey) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            let pair = object
+                .get("private_pem")
+                .and_then(|v| v.as_str())
+                .zip(object.get("public_pem").and_then(|v| v.as_str()))
+                .map(|(private, public)| (private.to_owned(), public.to_owned()));
+            if let Some((private, public)) = pair {
+                let sealed =
+                    key.seal(private.as_bytes(), &ledger_aad(&public))
+                        .map_err(|error| {
+                            format!("ledger field private_pem cannot be sealed: {error}")
+                        })?;
+                object.insert("private_pem".into(), serde_json::Value::String(sealed));
+            }
+            for child in object.values_mut() {
+                seal_key_fields(child, key)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                seal_key_fields(child, key)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+enum LedgerOpenError {
+    Parse,
+    Secure(String),
+}
+
+fn open_key_fields(
+    value: &mut serde_json::Value,
+    key: Option<&SealKey>,
+    had_plaintext: &mut bool,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            let pair = object
+                .get("private_pem")
+                .and_then(|v| v.as_str())
+                .zip(object.get("public_pem").and_then(|v| v.as_str()))
+                .map(|(private, public)| (private.to_owned(), public.to_owned()));
+            if let Some((private, public)) = pair {
+                if seal::is_sealed(&private) {
+                    let Some(key) = key else {
+                        return Err(
+                            "ledger field private_pem is sealed but the seal key is unavailable"
+                                .to_string(),
+                        );
+                    };
+                    let opened = key.open(&private, &ledger_aad(&public)).map_err(|error| {
+                        format!("ledger field private_pem cannot be opened: {error}")
+                    })?;
+                    let opened = String::from_utf8(opened).map_err(|_| {
+                        "ledger field private_pem is not UTF-8 after opening".to_string()
+                    })?;
+                    object.insert("private_pem".into(), serde_json::Value::String(opened));
+                } else if !private.is_empty() {
+                    *had_plaintext = true;
+                }
+            }
+            for child in object.values_mut() {
+                open_key_fields(child, key, had_plaintext)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                open_key_fields(child, key, had_plaintext)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn open_ledger_inner(
+    bytes: &[u8],
+    key: Option<&SealKey>,
+) -> Result<(TaState, bool), LedgerOpenError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| LedgerOpenError::Parse)?;
+    let mut had_plaintext = false;
+    open_key_fields(&mut value, key, &mut had_plaintext).map_err(LedgerOpenError::Secure)?;
+    let state = serde_json::from_value(value).map_err(|_| LedgerOpenError::Parse)?;
+    Ok((state, had_plaintext))
+}
+
+fn write_ledger_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = sibling_path(path, SIDECAR_TEMP);
+    std::fs::write(&tmp, bytes)?;
+    set_owner_only(&tmp)?;
+    if path.exists() {
+        std::fs::copy(path, sibling_path(path, SIDECAR_BACKUP))?;
+    }
+    std::fs::rename(&tmp, path)?;
+    set_owner_only(path)?;
     Ok(())
 }
 
@@ -223,9 +335,9 @@ impl TaState {
     }
 
     pub fn load(path: &Path) -> Option<Self> {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| Self::from_json(&bytes))
+        let key = seal::active().ok();
+        let bytes = std::fs::read(path).ok()?;
+        Self::open_ledger(&bytes, key).ok().map(|(state, _)| state)
     }
 
     /// Load the ledger, falling back to the previous revision.
@@ -236,29 +348,112 @@ impl TaState {
     /// would look like a different device to every client that remembers this
     /// one (including the relay-era material they were registered against).
     pub fn load_or_error(path: &Path) -> Result<Option<Self>, String> {
+        Self::load_or_error_with(path, seal::active())
+    }
+
+    pub(crate) fn load_or_error_with(
+        path: &Path,
+        key: Result<&SealKey, String>,
+    ) -> Result<Option<Self>, String> {
         if !path.exists() {
             return Ok(None);
         }
+        let key_option = key.as_ref().ok().copied();
+        let key_unavailable = key.as_ref().err().cloned();
         let bytes = std::fs::read(path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        if let Some(state) = Self::from_json(&bytes) {
-            return Ok(Some(state));
-        }
-        let backup = sibling_path(path, SIDECAR_BACKUP);
-        match std::fs::read(&backup).map(|bytes| Self::from_json(&bytes)) {
-            Ok(Some(state)) => {
-                // Restore the last good revision so the next start is clean.
-                state
-                    .store(path)
-                    .map_err(|error| format!("cannot restore {}: {error}", path.display()))?;
+        match open_ledger_inner(&bytes, key_option) {
+            Ok((state, had_plaintext)) => {
+                Self::finish_load(
+                    path,
+                    &state,
+                    had_plaintext,
+                    false,
+                    key_option,
+                    key_unavailable.as_deref(),
+                )?;
                 Ok(Some(state))
             }
-            _ => Err(format!(
-                "{} is unreadable and {} cannot be used either",
-                path.display(),
-                backup.display()
-            )),
+            Err(LedgerOpenError::Secure(reason)) => {
+                Err(format!("{} cannot be opened: {reason}", path.display()))
+            }
+            Err(LedgerOpenError::Parse) => {
+                let backup = sibling_path(path, SIDECAR_BACKUP);
+                let backup_bytes = std::fs::read(&backup).map_err(|_| {
+                    format!(
+                        "{} is unreadable and {} cannot be used either",
+                        path.display(),
+                        backup.display()
+                    )
+                })?;
+                match open_ledger_inner(&backup_bytes, key_option) {
+                    Ok((state, had_plaintext)) => {
+                        Self::finish_load(
+                            path,
+                            &state,
+                            had_plaintext,
+                            true,
+                            key_option,
+                            key_unavailable.as_deref(),
+                        )?;
+                        Ok(Some(state))
+                    }
+                    Err(LedgerOpenError::Secure(reason)) => Err(format!(
+                        "{} is unreadable and {} cannot be opened: {reason}",
+                        path.display(),
+                        backup.display()
+                    )),
+                    Err(LedgerOpenError::Parse) => Err(format!(
+                        "{} is unreadable and {} cannot be used either",
+                        path.display(),
+                        backup.display()
+                    )),
+                }
+            }
         }
+    }
+
+    fn finish_load(
+        path: &Path,
+        state: &Self,
+        had_plaintext: bool,
+        restore_primary: bool,
+        key: Option<&SealKey>,
+        key_unavailable: Option<&str>,
+    ) -> Result<(), String> {
+        if !had_plaintext && !restore_primary {
+            return Ok(());
+        }
+        let Some(key) = key else {
+            if had_plaintext {
+                let sentence = "seal key unavailable; refusing to keep plaintext keys";
+                return Err(match key_unavailable {
+                    Some(reason) => format!("{sentence}: {reason}"),
+                    None => sentence.to_string(),
+                });
+            }
+            return Err(key_unavailable
+                .unwrap_or("seal key unavailable")
+                .to_string());
+        };
+        let bytes = state
+            .seal_ledger(key)
+            .map_err(|error| format!("cannot seal {}: {error}", path.display()))?;
+        write_ledger_bytes(path, &bytes)
+            .map_err(|error| format!("cannot rewrite {}: {error}", path.display()))?;
+        if had_plaintext {
+            let backup = sibling_path(path, SIDECAR_BACKUP);
+            std::fs::write(&backup, &bytes)
+                .map_err(|error| format!("cannot rewrite {}: {error}", backup.display()))?;
+            set_owner_only(&backup)
+                .map_err(|error| format!("cannot protect {}: {error}", backup.display()))?;
+            let tmp = sibling_path(path, SIDECAR_TEMP);
+            if tmp.exists() {
+                std::fs::remove_file(&tmp)
+                    .map_err(|error| format!("cannot remove {}: {error}", tmp.display()))?;
+            }
+        }
+        Ok(())
     }
 
     /// Persist the ledger atomically and keep the previous revision beside it.
@@ -268,17 +463,28 @@ impl TaState {
     /// full disk can never leave a truncated file that the next start would
     /// read as "no identity yet".
     pub fn store(&self, path: &Path) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(self)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let tmp = sibling_path(path, SIDECAR_TEMP);
-        std::fs::write(&tmp, &bytes)?;
-        set_owner_only(&tmp)?;
-        if path.exists() {
-            std::fs::copy(path, sibling_path(path, SIDECAR_BACKUP))?;
-        }
-        std::fs::rename(&tmp, path)?;
-        set_owner_only(path)?;
-        Ok(())
+        let key = seal::active().map_err(std::io::Error::other)?;
+        self.store_with(path, key)
+    }
+
+    pub(crate) fn store_with(&self, path: &Path, key: &SealKey) -> std::io::Result<()> {
+        let bytes = self.seal_ledger(key).map_err(std::io::Error::other)?;
+        write_ledger_bytes(path, &bytes)
+    }
+
+    pub(crate) fn seal_ledger(&self, key: &SealKey) -> Result<Vec<u8>, String> {
+        let mut value = serde_json::to_value(self)
+            .map_err(|_| "ledger cannot be encoded as JSON".to_string())?;
+        seal_key_fields(&mut value, key)?;
+        serde_json::to_vec_pretty(&value)
+            .map_err(|_| "sealed ledger cannot be encoded as JSON".to_string())
+    }
+
+    pub(crate) fn open_ledger(bytes: &[u8], key: Option<&SealKey>) -> Result<(Self, bool), String> {
+        open_ledger_inner(bytes, key).map_err(|error| match error {
+            LedgerOpenError::Parse => "ledger cannot be parsed".to_string(),
+            LedgerOpenError::Secure(reason) => reason,
+        })
     }
 
     /// Anti-rollback counter for one application.

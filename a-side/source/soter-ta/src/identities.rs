@@ -61,6 +61,11 @@ impl Default for Store {
         }
     }
 }
+#[cfg(test)]
+fn test_managed_key_directory() -> PathBuf {
+    std::env::temp_dir().join("ommega-soter-test-keys")
+}
+
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 80
@@ -124,8 +129,13 @@ impl Store {
                 let path = Path::new(&r.pem);
                 let canonical = Path::new(STORE).parent().unwrap().join("keys");
                 let legacy = Path::new(LEGACY_STORE).parent().unwrap().join("identities");
+                #[cfg(test)]
+                let test_managed = path.parent() == Some(test_managed_key_directory().as_path());
+                #[cfg(not(test))]
+                let test_managed = false;
                 if path.parent() != Some(canonical.as_path())
                     && path.parent() != Some(legacy.as_path())
+                    && !test_managed
                 {
                     return Err("SOTER key must be in the managed key directory".into());
                 }
@@ -316,10 +326,7 @@ impl Snapshot {
                 if !valid_cpu_id(&r.cpu_id) || r.pem.is_empty() {
                     return Err("The selected SOTER key identity is not configured".into());
                 }
-                let raw =
-                    fs::read(&r.pem).map_err(|_| "Cannot read the selected SOTER private key")?;
-                let text = std::str::from_utf8(&raw).map_err(|_| "Invalid SOTER PEM encoding")?;
-                let pair = validate_key(text)?;
+                let pair = read_identity_key(Path::new(&r.pem))?;
                 Ok(Selection::Key {
                     id,
                     cpu_id: r.cpu_id.to_ascii_lowercase(),
@@ -333,6 +340,83 @@ impl Snapshot {
             _ => Err("Unknown SOTER identity type".into()),
         }
     }
+}
+
+pub(crate) const IDENTITY_KEY_AAD: &[u8] = b"ommega-soter-identity-key-v1";
+
+fn identity_tmp_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
+fn rewrite_identity_key(path: &Path, sealed: &str) -> Result<(), String> {
+    let tmp = identity_tmp_path(path);
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .map_err(|_| "cannot create the temporary identity key file".to_string())?;
+        use std::io::Write;
+        file.write_all(sealed.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "cannot write the temporary identity key file".to_string())?;
+        drop(file);
+        fs::rename(&tmp, path).map_err(|_| "cannot replace the identity key file".to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+pub(crate) fn read_identity_key(path: &Path) -> Result<KeyPair, String> {
+    read_identity_key_with(path, crate::seal::active())
+}
+
+pub(crate) fn read_identity_key_with(
+    path: &Path,
+    key: Result<&crate::seal::SealKey, String>,
+) -> Result<KeyPair, String> {
+    let raw =
+        fs::read(path).map_err(|_| format!("cannot read identity key file {}", path.display()))?;
+    let text = std::str::from_utf8(&raw)
+        .map_err(|_| format!("identity key file {} is not UTF-8", path.display()))?;
+    if crate::seal::is_sealed(text) {
+        let key = key.map_err(|error| {
+            format!(
+                "cannot open identity key file {}: seal key unavailable: {error}",
+                path.display()
+            )
+        })?;
+        let opened = key.open(text, IDENTITY_KEY_AAD).map_err(|error| {
+            format!("cannot open identity key file {}: {error}", path.display())
+        })?;
+        let pem = std::str::from_utf8(&opened).map_err(|_| {
+            format!(
+                "identity key file {} is not UTF-8 after opening",
+                path.display()
+            )
+        })?;
+        return validate_key(pem);
+    }
+    let pair = validate_key(text)?;
+    if let Ok(key) = key {
+        if let Ok(sealed) = key.seal(pair.private_pem.as_bytes(), IDENTITY_KEY_AAD) {
+            let _ = rewrite_identity_key(path, &sealed);
+        }
+    }
+    Ok(pair)
 }
 
 pub fn relay_config(r: &Record) -> Result<remote::Config, String> {

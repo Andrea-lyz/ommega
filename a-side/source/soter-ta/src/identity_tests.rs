@@ -329,7 +329,7 @@ fn bad_configuration_does_not_mutate_valid_material() {
     seed(&mut state, &pair);
     let path = dir.join("state.json");
     state.store(&path).unwrap();
-    let raw = state.to_json();
+    let raw = fs::read(&path).unwrap();
     let arg = CString::new(path.to_str().unwrap()).unwrap();
     unsafe {
         ffi::soterta_init(arg.as_ptr());
@@ -351,7 +351,7 @@ fn bad_configuration_does_not_mutate_valid_material() {
         |_, _, _, _| panic!("must not call network")
     )
     .is_err());
-    assert_eq!(fs::read(&path).unwrap(), raw);
+    assert!(fs::read(&path).unwrap() == raw);
     fs::remove_dir_all(dir).unwrap();
 }
 #[test]

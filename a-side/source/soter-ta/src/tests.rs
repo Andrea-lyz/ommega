@@ -1124,3 +1124,349 @@ fn ffi_serves_the_daemon_path_end_to_end() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn sealing_fixture() -> TaState {
+    static BASE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    TaState::from_json(BASE.get_or_init(|| TaState::generate_local().unwrap().to_json()))
+        .expect("base ledger")
+}
+
+fn second_key_pair() -> crate::state::KeyPair {
+    static SECOND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let pem = SECOND.get_or_init(|| {
+        TaState::generate_local()
+            .expect("second ledger")
+            .attk
+            .private_pem
+    });
+    crate::identities::validate_key(pem).expect("generated key validates")
+}
+
+fn sealing_key(byte: u8) -> crate::seal::SealKey {
+    crate::seal::SealKey::from_seed(&[byte; 32])
+}
+
+fn sealing_dir(name: &str) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "soter-sealing-{name}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&path).expect("temporary sealing directory");
+    path
+}
+
+fn managed_identity_key_path(name: &str) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let directory = std::env::temp_dir().join("ommega-soter-test-keys");
+    std::fs::create_dir_all(&directory).expect("managed test key directory");
+    directory.join(format!(
+        "{name}-{}-{}.pem",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
+fn identity_snapshot(path: &std::path::Path) -> crate::identities::Snapshot {
+    let record = crate::identities::Record {
+        id: "imported".into(),
+        name: "imported".into(),
+        kind: "key".into(),
+        cpu_id: "a".repeat(32),
+        pem: path.to_str().expect("UTF-8 test path").to_owned(),
+        ..crate::identities::Record::default()
+    };
+    crate::identities::Snapshot::memory(crate::identities::Store {
+        default: record.id.clone(),
+        identities: vec![record],
+        ..crate::identities::Store::default()
+    })
+}
+
+fn ledger_with_two_keys() -> TaState {
+    let mut state = sealing_fixture();
+    let app = second_key_pair();
+    let entry = state.uids.entry(UID).or_default();
+    entry.ask = Some(app.clone());
+    entry.auth.insert(KNAME.into(), app);
+    state
+}
+
+fn cpu_id_from_line(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("\"cpu_id\":")?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let hex = rest.trim_end_matches(',').strip_suffix('"')?;
+    (hex.len() == 32
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(hex)
+}
+
+fn cpu_id_line_is_plaintext(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|line| cpu_id_from_line(line).is_some())
+}
+
+#[test]
+fn ledger_store_seals_every_private_key_and_loads_the_same_state() {
+    let dir = sealing_dir("roundtrip");
+    let path = dir.join("state.json");
+    let key = sealing_key(0x51);
+    let state = ledger_with_two_keys();
+    state.store_with(&path, &key).expect("sealed store");
+    let bytes = std::fs::read(&path).expect("sealed ledger");
+    assert!(!bytes
+        .windows(b"PRIVATE KEY".len())
+        .any(|w| w == b"PRIVATE KEY"));
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("ledger json");
+    let mut private_values = Vec::new();
+    fn collect_private(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(private) = object.get("private_pem").and_then(|v| v.as_str()) {
+                    out.push(private.to_owned());
+                }
+                for child in object.values() {
+                    collect_private(child, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    collect_private(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    collect_private(&json, &mut private_values);
+    assert!(private_values.len() >= 3);
+    assert!(private_values
+        .iter()
+        .all(|value| crate::seal::is_sealed(value)));
+    assert!(cpu_id_line_is_plaintext(&bytes));
+
+    let loaded = TaState::load_or_error_with(&path, Ok(&key))
+        .expect("sealed ledger opens")
+        .expect("ledger exists");
+    assert_eq!(loaded.cpu_id, state.cpu_id);
+    assert_eq!(loaded.attk.public_pem, state.attk.public_pem);
+    assert_eq!(
+        loaded.uids[&UID].ask.as_ref().map(|key| &key.public_pem),
+        state.uids[&UID].ask.as_ref().map(|key| &key.public_pem)
+    );
+    assert!(loaded.attk.private().is_some());
+    assert!(loaded.uids[&UID]
+        .ask
+        .as_ref()
+        .and_then(|key| key.private())
+        .is_some());
+    state.attk.private().expect("original private key");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn ledger_device_id_is_the_first_cpu_id_line() {
+    let dir = sealing_dir("device-id-line");
+    let path = dir.join("state.json");
+    let key = sealing_key(0x56);
+    let mut state = sealing_fixture();
+    let other_cpu_id = "b".repeat(32);
+    assert!(other_cpu_id != state.cpu_id);
+    state.identities.insert(
+        "local-other".into(),
+        crate::state::IdentityKey {
+            cpu_id: other_cpu_id.clone(),
+            key: second_key_pair(),
+        },
+    );
+    state.store_with(&path, &key).expect("sealed store");
+    let text =
+        String::from_utf8(std::fs::read(&path).expect("sealed ledger")).expect("ledger text");
+    let mut first = None;
+    let mut other_position = None;
+    for (position, line) in text.lines().enumerate() {
+        let Some(cpu_id) = cpu_id_from_line(line) else {
+            continue;
+        };
+        if first.is_none() {
+            first = Some((position, cpu_id.to_owned()));
+        }
+        if cpu_id == other_cpu_id {
+            other_position = Some(position);
+        }
+    }
+    let (first_position, first) = first.expect("a cpu_id line");
+    assert!(first == state.cpu_id);
+    let other_position = other_position.expect("other cpu id appears");
+    assert!(other_position > first_position);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn plaintext_ledger_and_backup_are_migrated_on_first_load() {
+    let dir = sealing_dir("migration");
+    let path = dir.join("state.json");
+    let backup = path.with_file_name("state.json.bak");
+    let tmp = path.with_file_name("state.json.tmp");
+    let key = sealing_key(0x52);
+    let state = sealing_fixture();
+    std::fs::write(&path, state.to_json()).expect("plaintext ledger");
+    std::fs::write(&backup, state.to_json()).expect("plaintext backup");
+    std::fs::write(&tmp, b"leftover").expect("leftover tmp");
+
+    let loaded = TaState::load_or_error_with(&path, Ok(&key))
+        .expect("plaintext migration loads")
+        .expect("ledger exists");
+    assert_eq!(loaded.cpu_id, state.cpu_id);
+    for file in [&path, &backup] {
+        let bytes = std::fs::read(file).expect("rewritten ledger file");
+        assert!(!bytes
+            .windows(b"PRIVATE KEY".len())
+            .any(|w| w == b"PRIVATE KEY"));
+    }
+    assert!(!tmp.exists());
+    assert!(TaState::load_or_error_with(&path, Ok(&key))
+        .expect("second load")
+        .is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn sealed_ledger_with_wrong_or_missing_key_fails_without_rewriting() {
+    let dir = sealing_dir("wrong-key");
+    let path = dir.join("state.json");
+    let backup = path.with_file_name("state.json.bak");
+    let key = sealing_key(0x53);
+    let state = sealing_fixture();
+    state.store_with(&path, &key).expect("sealed store");
+    std::fs::copy(&path, &backup).expect("sealed backup");
+    let before = std::fs::read(&path).expect("original sealed bytes");
+
+    assert!(TaState::load_or_error_with(&path, Ok(&sealing_key(0x54))).is_err());
+    assert!(std::fs::read(&path).expect("primary after wrong key") == before);
+    assert!(TaState::load_or_error_with(&path, Err("seal key unavailable".into())).is_err());
+    assert!(std::fs::read(&path).expect("primary after missing key") == before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn plaintext_ledger_with_unavailable_key_is_refused_untouched() {
+    let dir = sealing_dir("plaintext-no-key");
+    let path = dir.join("state.json");
+    let state = sealing_fixture();
+    std::fs::write(&path, state.to_json()).expect("plaintext ledger");
+    let before = std::fs::read(&path).expect("plaintext bytes");
+    let error = TaState::load_or_error_with(&path, Err("seal key unavailable".into()))
+        .expect_err("plaintext without a seal key is refused");
+    assert!(error.contains("refusing to keep plaintext keys"));
+    assert!(std::fs::read(&path).expect("untouched plaintext") == before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn ledger_sealing_is_bound_to_the_entry_public_key() {
+    let dir = sealing_dir("aad");
+    let path = dir.join("state.json");
+    let key = sealing_key(0x55);
+    let state = ledger_with_two_keys();
+    state.store_with(&path, &key).expect("sealed store");
+    let bytes = std::fs::read(&path).expect("sealed bytes");
+    let mut json: serde_json::Value = serde_json::from_slice(&bytes).expect("ledger json");
+    let attk = json
+        .get_mut("attk")
+        .and_then(|v| v.as_object_mut())
+        .expect("attk object");
+    let first = attk
+        .get("private_pem")
+        .and_then(|v| v.as_str())
+        .expect("attk private field")
+        .to_owned();
+    let uid_entry = json
+        .get_mut("uids")
+        .and_then(|v| v.as_object_mut())
+        .and_then(|uids| uids.get_mut(&UID.to_string()))
+        .and_then(|v| v.as_object_mut())
+        .and_then(|entry| entry.get_mut("ask"))
+        .and_then(|v| v.as_object_mut())
+        .expect("ask object");
+    let second = uid_entry
+        .get("private_pem")
+        .and_then(|v| v.as_str())
+        .expect("ask private field")
+        .to_owned();
+    uid_entry.insert("private_pem".into(), serde_json::Value::String(first));
+    let attk = json
+        .get_mut("attk")
+        .and_then(|v| v.as_object_mut())
+        .expect("attk object");
+    attk.insert("private_pem".into(), serde_json::Value::String(second));
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json).expect("swapped json"),
+    )
+    .expect("write swapped ledger");
+    assert!(TaState::load_or_error_with(&path, Ok(&key)).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn imported_identity_key_is_sealed_and_resolve_reads_back() {
+    let path = managed_identity_key_path("imported");
+    let key = sealing_key(0x5a);
+    let pair = sealing_fixture().attk;
+    crate::management::write_imported_identity_key(&path, &pair, &key)
+        .expect("write imported identity key");
+    let bytes = std::fs::read(&path).expect("stored identity key");
+    assert!(!bytes
+        .windows(b"PRIVATE KEY".len())
+        .any(|w| w == b"PRIVATE KEY"));
+    assert!(crate::seal::is_sealed(
+        std::str::from_utf8(&bytes).expect("sealed text")
+    ));
+    let selection = identity_snapshot(&path)
+        .resolve(Some(0), "")
+        .expect("resolve opens the sealed identity key");
+    let crate::identities::Selection::Key { pair: loaded, .. } = selection else {
+        panic!("expected a key identity")
+    };
+    assert_eq!(loaded.public_pem, pair.public_pem);
+    assert!(loaded.private().is_some());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn legacy_identity_key_resolves_and_is_sealed_in_place() {
+    let path = managed_identity_key_path("legacy");
+    let pair = sealing_fixture().attk;
+    std::fs::write(&path, &pair.private_pem).expect("legacy plaintext key");
+    let selection = identity_snapshot(&path)
+        .resolve(Some(0), "")
+        .expect("legacy key resolves");
+    let crate::identities::Selection::Key { pair: loaded, .. } = selection else {
+        panic!("expected a key identity")
+    };
+    assert_eq!(loaded.public_pem, pair.public_pem);
+    let bytes = std::fs::read(&path).expect("migrated identity key");
+    assert!(!bytes
+        .windows(b"PRIVATE KEY".len())
+        .any(|w| w == b"PRIVATE KEY"));
+    assert!(crate::seal::is_sealed(
+        std::str::from_utf8(&bytes).expect("sealed text")
+    ));
+    assert!(identity_snapshot(&path).resolve(Some(0), "").is_ok());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn sealed_identity_key_with_the_wrong_key_fails() {
+    let dir = sealing_dir("identity-wrong-key");
+    let path = dir.join("sealed.pem");
+    let key = sealing_key(0x5a);
+    let pair = sealing_fixture().attk;
+    crate::management::write_imported_identity_key(&path, &pair, &key).expect("write sealed key");
+    assert!(crate::identities::read_identity_key_with(&path, Ok(&sealing_key(0x5b))).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}

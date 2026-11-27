@@ -224,6 +224,36 @@ fn owned_key(path: &str) -> bool {
                 .as_deref()
 }
 
+pub(crate) fn write_imported_identity_key(
+    path: &Path,
+    pair: &crate::state::KeyPair,
+    key: &crate::seal::SealKey,
+) -> Result<(), String> {
+    let sealed = key
+        .seal(pair.private_pem.as_bytes(), identities::IDENTITY_KEY_AAD)
+        .map_err(|_| "Cannot seal SOTER private key".to_string())?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|_| "Cannot create SOTER private-key file")?;
+    if file
+        .write_all(sealed.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.sync_all())
+        .is_err()
+    {
+        let _ = fs::remove_file(path);
+        return Err("Cannot persist SOTER private key".into());
+    }
+    Ok(())
+}
+
 /// The caller supplies the repository's locked, atomic compare-and-replace helper.
 pub fn mutate(
     operation: &str,
@@ -300,24 +330,8 @@ pub fn mutate(
         let mut nonce = [0u8; 16];
         OsRng.fill_bytes(&mut nonce);
         let path = directory.join(format!("{}-{}.pem", r.id, hex::encode(nonce)));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&path)
-            .map_err(|_| "Cannot create SOTER private-key file")?;
-        if file
-            .write_all(pair.private_pem.as_bytes())
-            .and_then(|_| file.sync_all())
-            .is_err()
-        {
-            let _ = fs::remove_file(&path);
-            return Err("Cannot persist SOTER private key".into());
-        }
+        let key = crate::seal::active().map_err(|_| "SOTER seal key unavailable".to_string())?;
+        write_imported_identity_key(&path, &pair, key)?;
         #[cfg(unix)]
         if fs::File::open(&directory)
             .and_then(|dir| dir.sync_all())

@@ -2,11 +2,17 @@
 
 ## Configuration and storage
 
-The canonical identity policy is `/data/misc/keystore/ommega/data/soter/identities.json` (0600). Imported private keys live in its owner-only `keys/` directory. The version-1 policy contains a default identity id, named `local`/`key`/`relay` records, and package-to-identity assignments. A missing app assignment inherits the configured default. An empty default explicitly selects the compatible global configuration, including its optional `/data/adb/ommega/soterta/remote.conf` relay.
+The canonical identity policy is `/data/misc/keystore/ommega/data/soter/identities.json` (0600). Imported private keys live sealed in its owner-only `keys/` directory. The version-1 policy contains a default identity id, named `local`/`key`/`relay` records, and package-to-identity assignments. A missing app assignment inherits the configured default. An empty default explicitly selects the compatible global configuration, including its optional `/data/adb/ommega/soterta/remote.conf` relay.
 
 The reader checks the canonical path first and accepts `/data/adb/ommega/soterta/identities.json` only when the canonical file is absent. The management writer compares both canonical bytes and the legacy source digest before committing to the canonical path. The TA ledger remains in its established `/data/adb/ommega/soterta/state.json` location; the WebUI never edits a running daemon ledger.
 
 Malformed, unreadable, oversized, unsupported or dangling configuration fails closed. A selected incomplete key/relay identity is an error, not an instruction to use the global identity. Once a policy has been observed and persisted, disappearance of all policy files also fails closed across daemon reloads. A genuinely unconfigured installation retains global behavior.
+
+## Key material at rest
+
+Private keys in the TA ledger `/data/adb/ommega/soterta/state.json` and imported identity key files under `/data/misc/keystore/ommega/data/soter/keys/` are sealed with AES-256-GCM. The sealing key is derived with HKDF-SHA256 from `[crypto].root_kek_seed` in `/data/misc/keystore/ommega/config.toml`. Ledger values are additionally bound to their entry public key as authenticated data, and identity key files use a separate authenticated-data label, so a sealed value cannot be moved to another key entry or file purpose. `cpu_id`, public keys, counters and routing metadata remain readable JSON; in particular the ledger keeps its plain 32-hex `cpu_id` line.
+
+A plaintext ledger or imported key file is sealed the first time it is loaded. The ledger backup beside it is rewritten sealed as part of that migration. If the seed is missing or no longer matches the sealed material, the daemon refuses to start rather than minting a replacement identity. Sealing protects copied files and accidental reads; it does not protect key material from root on the same device, because the seed is stored on that device.
 
 ## Caller and metadata semantics
 
@@ -34,7 +40,7 @@ A named relay never receives this device ledger id: that id belongs to another d
 
 The existing Rust `ommega-auth-policy` tool exposes `soter-read`, `soter-write` and `soter-import`. Read responses expose policy metadata, readiness, public-key digests and local device ids, never private PEM or ledger bytes. The shared-UID group is reported only for the package a caller asks about, so one application page never carries every cluster on the device. Imports carry only an absolute device file path, identity id, optional CPU id and original policy snapshot. Raw PEM requires a CPU id; JSON may include it with `private_pem`, `attk_private_pem` or `attk_priv`.
 
-Mutations are serialized by a directory lock, compare original bytes, commit by atomic rename with fsync, and verify readback. Private keys use unique immutable filenames, mode 0600, and are synced before policy publication. Failed imports never publish paths; stale imports reject and remove unreferenced new files. Retired managed key files are removed after commit. Delete removes app/default references; the daemon revokes local material on observing the new policy. This is logical deletion, not guaranteed physical flash erasure. Source import files are never deleted.
+Mutations are serialized by a directory lock, compare original bytes, commit by atomic rename with fsync, and verify readback. Sealed private keys use unique stable filenames, mode 0600, and are synced before policy publication. Failed imports never publish paths; stale imports reject and remove unreferenced new files. Retired managed key files are removed after commit. Delete removes app/default references; the daemon revokes local material on observing the new policy. This is logical deletion, not guaranteed physical flash erasure. Source import files are never deleted.
 
 Both identity pages and app cards use this management interface. Reads may time out without terminating a process. Writes have no timeout, cancellation or automatic retry, and keep controls busy until the actual callback. Read errors never create an empty writable policy. Errors retain drafts. Incomplete identities cannot be selected. With no identities the Default option is selected but disabled and accompanied by a note.
 
@@ -48,7 +54,7 @@ The application list shows a SOTER badge with the number of transactions that ap
 
 ## Validation
 
-Regressions use synthetic keys, isolated files and mock transports: default selection; malformed/incomplete policy; shared UIDs/profiles; key rotation; old-session revocation; revision counters; local overrides of global relay; full named-relay init/finish with global relay on/off; named local_only refusal; missing policy; CAS conflicts; import validation. No test issues a real HAL/TEE request.
+Regressions use synthetic keys, isolated files and mock transports: default selection; malformed/incomplete policy; shared UIDs/profiles; key rotation; old-session revocation; revision counters; local overrides of global relay; full named-relay init/finish with global relay on/off; named local_only refusal; missing policy; CAS conflicts; import validation; at-rest key sealing and first-load migration. No test issues a real HAL/TEE request.
 
 ## Biometric gate
 
