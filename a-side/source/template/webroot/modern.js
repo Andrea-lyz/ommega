@@ -1,7 +1,7 @@
 import {applyAppearance, appearanceControls, bindAppearance, createBridge, formatTime, freshness, healthMessage, icon, installDialogGuard, language, parseJson, pollWhenVisible, setText, text} from './ui-kit.js?v=material-ui-38';
 import {installAppSearch,prepareSearchEditor} from './app-search.js?v=app-search-3';
 import {mountSoter, soterShow} from './soter.js?v=material-ui-38';
-import {installLiquidGlass} from './liquid-glass.js?v=liquid-glass-4';
+import {installGlassLens, installLiquidGlass} from './liquid-glass.js?v=liquid-glass-7';
 
 if (typeof document !== 'undefined') {
   const style = document.createElement('link');
@@ -719,7 +719,10 @@ function adaptLegacyDialogs() {
     const style = document.createElement('style');
     style.dataset.omSheet = 'true';
     style.textContent = `
-      .scrim { background: rgb(24 25 35 / 48%); }
+      .scrim { background: var(--om-glass-scrim, rgb(24 25 35 / 48%)); }
+      .container { border-radius: inherit; -webkit-backdrop-filter: blur(18px) saturate(1.9) brightness(1.04); backdrop-filter: blur(18px) saturate(1.9) brightness(1.04); box-shadow: inset 1.5px 1.5px 0 -.5px var(--om-glass-rim, transparent), inset 0 0 0 1px var(--om-glass-glow, transparent); }
+      .container::before { background: var(--om-glass-dialog, var(--_container-color)) linear-gradient(180deg, var(--om-glass-sheen, transparent), transparent 140px) !important; }
+      @media (prefers-reduced-transparency: reduce) { .container { -webkit-backdrop-filter: none; backdrop-filter: none; } .container::before { background: var(--_container-color) !important; } }
       .headline { position: relative; padding: 20px 20px 8px; }
       .headline::before { content: ''; display: block; width: 34px; height: 4px; border-radius: 99px; background: var(--border, #dcdde8); margin: 0 auto 16px; }
       .headline h2 { margin: 0; padding-right: 48px; font-size: 21px; letter-spacing: -.035em; }
@@ -1084,6 +1087,7 @@ function install() {
   let routed = {raw: null, at: 0};
   const routeTo = raw => { routed = {raw, at: performance.now()}; navigate(raw); };
   installLiquidGlass(document.querySelector('.om-nav'), {onSelect: view => { location.replace('#om-' + view); routeTo(view); }});
+  installGlassLens();
   window.addEventListener('hashchange', () => {
     const raw = location.hash.startsWith('#om-') ? location.hash.slice(4) : 'overview';
     if (raw === routed.raw && performance.now() - routed.at < 1000) return;

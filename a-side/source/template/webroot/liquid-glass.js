@@ -1,13 +1,18 @@
-// Liquid glass for the phone navigation dock.
-// The dock refracts the page behind it through an SVG displacement filter
-// (backdrop-filter: url(), Chromium/Android WebView only); other engines keep
-// the plain frosted dock. The selection pill follows the finger and the view
-// changes as soon as the finger is lifted, without waiting for a click.
+// Liquid glass for the phone navigation dock and the switch thumbs.
+// Refraction uses an SVG displacement filter (backdrop-filter: url(),
+// Chromium/Android WebView only); other engines keep plain frosted glass. The
+// dock pill follows the finger and the view changes as soon as the finger is
+// lifted, without waiting for a click.
 
 const FILTER_ID = 'om-liquid-glass';
+const LENS_ID = 'om-liquid-lens';
 // Tuned on the reference dock: refraction, bezel width, chromatic spread,
 // backdrop blur and saturation.
-export const LIQUID_GLASS_PARAMS = Object.freeze({scale: 70, bezel: 18, chroma: 6, blur: 4, saturate: 1.5});
+export const LIQUID_GLASS_PARAMS = Object.freeze({scale: 88, bezel: 22, chroma: 9, blur: 4, saturate: 1.6});
+// A pressed switch thumb is a small lens: a thin, sharp bezel that bends the
+// track colour at its rim without blurring it. The map must match the thumb,
+// so there is one filter per thumb size (`om-liquid-lens-<size>`).
+export const LIQUID_LENS_PARAMS = Object.freeze({scale: 14, bezel: 7, chroma: 3, blur: 0, saturate: 1.6, sizes: Object.freeze([20, 18])});
 
 // Signed-distance displacement map of a rounded rectangle. The centre stays
 // neutral (128); inside the bezel R/G point inwards with a convex falloff.
@@ -51,27 +56,50 @@ function supportsRefraction() {
   return !!globalThis.CSS?.supports?.('backdrop-filter', 'url(#a)');
 }
 
-function ensureFilter() {
+// One hidden <svg> holds every glass filter; each filter owns a displacement
+// map (`<id>-map`) sized to the element it is applied to.
+function ensureFilter(id, {scale, chroma, blur, saturate}) {
+  if (document.getElementById(id)) return;
   let svg = document.getElementById(FILTER_ID + '-defs');
-  if (svg) return svg;
-  const {scale, chroma, blur, saturate} = LIQUID_GLASS_PARAMS;
-  svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.id = FILTER_ID + '-defs';
-  svg.setAttribute('width', '0'); svg.setAttribute('height', '0'); svg.setAttribute('aria-hidden', 'true');
-  svg.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden';
-  const channel = (row, id, amount) =>
-    `<feDisplacementMap in="src" in2="map" scale="${amount}" xChannelSelector="R" yChannelSelector="G" result="d${id}"/>` +
-    `<feColorMatrix in="d${id}" type="matrix" values="${row}" result="${id}"/>`;
-  svg.innerHTML = `<filter id="${FILTER_ID}" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">` +
-    '<feImage id="' + FILTER_ID + '-map" x="0" y="0" width="1" height="1" preserveAspectRatio="none" result="map"/>' +
+  if (!svg) {
+    svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.id = FILTER_ID + '-defs';
+    svg.setAttribute('width', '0'); svg.setAttribute('height', '0'); svg.setAttribute('aria-hidden', 'true');
+    svg.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden';
+    document.body.append(svg);
+  }
+  const channel = (row, name, amount) =>
+    `<feDisplacementMap in="src" in2="map" scale="${amount}" xChannelSelector="R" yChannelSelector="G" result="d${name}"/>` +
+    `<feColorMatrix in="d${name}" type="matrix" values="${row}" result="${name}"/>`;
+  svg.insertAdjacentHTML('beforeend', `<filter id="${id}" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">` +
+    '<feImage id="' + id + '-map" x="0" y="0" width="1" height="1" preserveAspectRatio="none" result="map"/>' +
     `<feGaussianBlur in="SourceGraphic" stdDeviation="${blur}" result="src"/>` +
     channel('1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0', 'r', scale + chroma) +
     channel('0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0', 'g', scale) +
     channel('0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0', 'b', Math.max(0, scale - chroma)) +
     '<feBlend in="r" in2="g" mode="screen" result="rg"/><feBlend in="rg" in2="b" mode="screen" result="rgb"/>' +
-    `<feColorMatrix in="rgb" type="saturate" values="${saturate}"/></filter>`;
-  document.body.append(svg);
-  return svg;
+    `<feColorMatrix in="rgb" type="saturate" values="${saturate}"/></filter>`);
+}
+
+function setFilterMap(id, width, height, radius, bezel) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  canvas.getContext('2d').putImageData(new ImageData(liquidGlassMap(width, height, radius, bezel), width, height), 0, 0);
+  const map = document.getElementById(id + '-map');
+  map.setAttribute('href', canvas.toDataURL());
+  map.setAttribute('width', width); map.setAttribute('height', height);
+}
+
+// Switch thumbs turn into a refracting lens while pressed (see a-modern.css).
+// Thumbs never change their layout size, so each map is built once.
+export function installGlassLens() {
+  if (!supportsRefraction()) return;
+  document.documentElement.classList.add('om-refract');
+  for (const size of LIQUID_LENS_PARAMS.sizes) {
+    const id = LENS_ID + '-' + size;
+    ensureFilter(id, LIQUID_LENS_PARAMS);
+    setFilterMap(id, size, size, size / 2, LIQUID_LENS_PARAMS.bezel);
+  }
 }
 
 export function installLiquidGlass(nav, {onSelect = () => {}} = {}) {
@@ -131,13 +159,8 @@ export function installLiquidGlass(nav, {onSelect = () => {}} = {}) {
     const width = Math.round(nav.offsetWidth), height = Math.round(nav.offsetHeight);
     if (width < 2 || height < 2) return;
     const radius = Math.min(height / 2, parseFloat(getComputedStyle(nav).borderTopLeftRadius) || height / 2);
-    const canvas = document.createElement('canvas');
-    canvas.width = width; canvas.height = height;
-    canvas.getContext('2d').putImageData(new ImageData(liquidGlassMap(width, height, radius, LIQUID_GLASS_PARAMS.bezel), width, height), 0, 0);
-    ensureFilter();
-    const map = document.getElementById(FILTER_ID + '-map');
-    map.setAttribute('href', canvas.toDataURL());
-    map.setAttribute('width', width); map.setAttribute('height', height);
+    ensureFilter(FILTER_ID, LIQUID_GLASS_PARAMS);
+    setFilterMap(FILTER_ID, width, height, radius, LIQUID_GLASS_PARAMS.bezel);
     // Some WebView builds keep the old filter output until the property changes.
     nav.style.backdropFilter = 'none';
     requestAnimationFrame(() => { nav.style.backdropFilter = ''; });

@@ -89,7 +89,8 @@ body.om-modern { margin:0; background:var(--om-bg); color:var(--om-ink); font-fa
   --om-bad:#a12e29; --om-alert-bg:#ffdad6; --om-hero:#f0f2ff;
   --om-dock-selection:#e8e7ec; --om-dock-surface:rgba(255,255,255,.90);
   --om-surface-alt:#f3f4fa;
-  --om-glass-tint:255 255 255; --om-glass-alpha:.4; --om-glass-edge:rgb(255 255 255 / 75%); --om-glass-shadow:rgb(20 30 60 / 20%); --om-glass-pill:rgb(255 255 255 / 60%); --om-glass-halo:rgb(255 255 255 / 95%);
+  --om-glass-card:rgb(255 255 255 / 40%); --om-glass-list:rgb(255 255 255 / 28%); --om-glass-rim:rgb(255 255 255 / 96%); --om-glass-shade:rgb(30 37 70 / 9%); --om-glass-sheen:rgb(255 255 255 / 80%); --om-glass-drop:rgb(30 37 70 / 9%); --om-glass-glow:rgb(255 255 255 / 45%); --om-glass-dialog:rgb(255 255 255 / 50%); --om-glass-scrim:rgb(24 25 35 / 22%); --om-glass-well:rgb(30 37 70 / 16%); --om-glass-blob-a:rgb(72 95 174 / 42%); --om-glass-blob-b:rgb(35 140 120 / 30%); --om-glass-blob-c:rgb(200 90 150 / 26%); --om-glass-blob-d:rgb(240 150 80 / 18%);
+  --om-glass-tint:255 255 255; --om-glass-alpha:.26; --om-glass-edge:rgb(255 255 255 / 88%); --om-glass-shadow:rgb(20 30 60 / 22%); --om-glass-pill:rgb(255 255 255 / 46%); --om-glass-halo:rgb(255 255 255 / 95%);
 }
 @media(prefers-color-scheme:dark) { :root:not([data-theme=light]) {
   --om-bg:#12131a; --om-surface:#20212a; --om-raised:#2b2d38; --om-ink:#f0eff7;
@@ -98,7 +99,8 @@ body.om-modern { margin:0; background:var(--om-bg); color:var(--om-ink); font-fa
   --om-bad:#ffb4ab; --om-alert-bg:#5a302d; --om-hero:#272f4a;
   --om-dock-selection:#42434e; --om-dock-surface:rgba(35,36,45,.92);
   --om-surface-alt:#1b1e27;
-  --om-glass-tint:22 25 33; --om-glass-alpha:.45; --om-glass-edge:rgb(255 255 255 / 30%); --om-glass-shadow:rgb(0 0 0 / 50%); --om-glass-pill:rgb(255 255 255 / 18%); --om-glass-halo:rgb(0 0 0 / 75%);
+  --om-glass-card:rgb(32 33 42 / 44%); --om-glass-list:rgb(32 33 42 / 34%); --om-glass-rim:rgb(255 255 255 / 20%); --om-glass-shade:rgb(0 0 0 / 38%); --om-glass-sheen:rgb(255 255 255 / 14%); --om-glass-drop:rgb(0 0 0 / 34%); --om-glass-glow:rgb(255 255 255 / 6%); --om-glass-dialog:rgb(32 33 42 / 60%); --om-glass-scrim:rgb(0 0 0 / 34%); --om-glass-well:rgb(0 0 0 / 45%); --om-glass-blob-a:rgb(120 140 255 / 26%); --om-glass-blob-b:rgb(60 170 150 / 18%); --om-glass-blob-c:rgb(200 90 160 / 16%); --om-glass-blob-d:rgb(255 150 90 / 6%);
+  --om-glass-tint:22 25 33; --om-glass-alpha:.32; --om-glass-edge:rgb(255 255 255 / 38%); --om-glass-shadow:rgb(0 0 0 / 52%); --om-glass-pill:rgb(255 255 255 / 15%); --om-glass-halo:rgb(0 0 0 / 75%);
 } }
 :root[data-theme=dark] {
   --om-bg:#12131a; --om-surface:#20212a; --om-raised:#2b2d38; --om-ink:#f0eff7;
@@ -107,7 +109,8 @@ body.om-modern { margin:0; background:var(--om-bg); color:var(--om-ink); font-fa
   --om-bad:#ffb4ab; --om-alert-bg:#5a302d; --om-hero:#272f4a;
   --om-dock-selection:#42434e; --om-dock-surface:rgba(35,36,45,.92);
   --om-surface-alt:#1b1e27;
-  --om-glass-tint:22 25 33; --om-glass-alpha:.45; --om-glass-edge:rgb(255 255 255 / 30%); --om-glass-shadow:rgb(0 0 0 / 50%); --om-glass-pill:rgb(255 255 255 / 18%); --om-glass-halo:rgb(0 0 0 / 75%);
+  --om-glass-card:rgb(32 33 42 / 44%); --om-glass-list:rgb(32 33 42 / 34%); --om-glass-rim:rgb(255 255 255 / 20%); --om-glass-shade:rgb(0 0 0 / 38%); --om-glass-sheen:rgb(255 255 255 / 14%); --om-glass-drop:rgb(0 0 0 / 34%); --om-glass-glow:rgb(255 255 255 / 6%); --om-glass-dialog:rgb(32 33 42 / 60%); --om-glass-scrim:rgb(0 0 0 / 34%); --om-glass-well:rgb(0 0 0 / 45%); --om-glass-blob-a:rgb(120 140 255 / 26%); --om-glass-blob-b:rgb(60 170 150 / 18%); --om-glass-blob-c:rgb(200 90 160 / 16%); --om-glass-blob-d:rgb(255 150 90 / 6%);
+  --om-glass-tint:22 25 33; --om-glass-alpha:.32; --om-glass-edge:rgb(255 255 255 / 38%); --om-glass-shadow:rgb(0 0 0 / 52%); --om-glass-pill:rgb(255 255 255 / 15%); --om-glass-halo:rgb(0 0 0 / 75%);
 }
 .om-content,.om-topbar { max-width:1040px; }
 .om-topbar { padding-top:calc(18px + env(safe-area-inset-top,0px)); }

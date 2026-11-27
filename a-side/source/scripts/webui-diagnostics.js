@@ -779,7 +779,10 @@ if (typeof window !== "undefined" && typeof location !== "undefined") {
   });
 }
 if (typeof document !== "undefined" && typeof location !== "undefined") {
-  if (document.readyState !== "loading") ommegaDiagRoute((location.hash || "").replace("#om-", ""));
+  // A parsed page runs this bundle at once. Route after the whole glue has
+  // been evaluated: the overview path reads let/const state declared further
+  // down, which is still uninitialised during evaluation.
+  if (document.readyState !== "loading") Promise.resolve().then(() => ommegaDiagRoute((location.hash || "").replace("#om-", "")));
   else document.addEventListener("DOMContentLoaded", () => ommegaDiagRoute((location.hash || "").replace("#om-", "")));
 }
 
@@ -1002,7 +1005,7 @@ function ommegaDiagErrorRows(list) {
     const title = item.label || item.pkg || (system ? ommegaDiagT("系统进程", "System process") : ommegaDiagT("未知应用", "Unknown app"));
     const tail = item.pkg && item.pkg !== title ? " · " + item.pkg : (item.pkg ? "" : " · uid " + item.uid);
     const icon = item.icon
-      ? "<img class=\"om-diag-icon\" src=\"" + ommegaDiagEsc(item.icon) + "\" alt=\"\">"
+      ? "<span class=\"om-diag-icon-glass\"><img class=\"om-diag-icon\" src=\"" + ommegaDiagEsc(item.icon) + "\" alt=\"\"></span>"
       : "";
     const meta = [];
     if (item.count > 1) meta.push(ommegaDiagT("发生 " + item.count + " 次", "seen " + item.count + " times"));
