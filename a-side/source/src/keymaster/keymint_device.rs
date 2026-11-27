@@ -1238,10 +1238,12 @@ struct ResolvedHardwareProfile {
     author_name: &'static str,
     unique_id: &'static str,
     max_operations: Option<usize>,
+    from_remote: bool,
 }
 
+static TEE_PROFILE: OnceLock<ResolvedHardwareProfile> = OnceLock::new();
+
 fn resolve_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwareProfile {
-    static TEE_PROFILE: OnceLock<ResolvedHardwareProfile> = OnceLock::new();
     static STRONGBOX_PROFILE: OnceLock<ResolvedHardwareProfile> = OnceLock::new();
     let build = || {
         let profile = crate::plat::keymint_profile::resolve_hardware_profile(security_level);
@@ -1251,6 +1253,7 @@ fn resolve_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwarePr
             author_name: Box::leak(profile.author_name.into_boxed_str()),
             unique_id: Box::leak(profile.unique_id.into_boxed_str()),
             max_operations: profile.max_operations,
+            from_remote: profile.from_remote,
         }
     };
 
@@ -1258,6 +1261,39 @@ fn resolve_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwarePr
         SecurityLevel::TRUSTED_ENVIRONMENT => *TEE_PROFILE.get_or_init(build),
         SecurityLevel::STRONGBOX => *STRONGBOX_PROFILE.get_or_init(build),
         _ => build(),
+    }
+}
+
+/// Restart after a fetched relay identity cannot be represented by the TEE
+/// identity frozen at process startup.
+pub(crate) fn restart_if_frozen_identity_conflicts(remote: &crate::remote::RemoteIdentityProfile) {
+    let Some(frozen) = TEE_PROFILE.get() else {
+        return;
+    };
+    if crate::remote::frozen_ta_identity_conflicts(
+        frozen.version_number,
+        frozen.impl_name,
+        frozen.author_name,
+        frozen.max_operations,
+        remote,
+    ) {
+        log::warn!(
+            "relay identity profile version {} conflicts with frozen KeyMint identity version {}; restarting keymint",
+            remote.profile_version,
+            frozen.version_number
+        );
+        std::process::exit(0);
+    }
+}
+
+/// Restart when relay mode has been disabled but the frozen TEE identity is
+/// still the relay-side implementation.
+pub(crate) fn restart_if_frozen_identity_is_remote() {
+    if TEE_PROFILE.get().is_some_and(|profile| profile.from_remote) {
+        log::warn!(
+            "relay mode disabled while a relay KeyMint identity is frozen; restarting keymint"
+        );
+        std::process::exit(0);
     }
 }
 

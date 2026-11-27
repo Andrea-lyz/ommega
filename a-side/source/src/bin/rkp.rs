@@ -98,12 +98,33 @@ fn ensure_dir() -> Result<()> {
     Ok(())
 }
 
-fn write_private(path: &str, bytes: &[u8]) -> Result<()> {
+fn write_private_with(
+    path: &str,
+    bytes: &[u8],
+    before_rename: impl Fn(&str) -> Result<()>,
+) -> Result<()> {
     let temp = format!("{path}.tmp-{}", std::process::id());
-    fs::write(&temp, bytes).with_context(|| format!("write {temp}"))?;
-    fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
-    fs::rename(&temp, path).with_context(|| format!("replace {path}"))?;
-    Ok(())
+    let result = (|| {
+        fs::write(&temp, bytes).with_context(|| format!("write {temp}"))?;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
+        before_rename(&temp)?;
+        fs::rename(&temp, path).with_context(|| format!("replace {path}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn write_private(path: &str, bytes: &[u8]) -> Result<()> {
+    write_private_with(path, bytes, |_| Ok(()))
+}
+
+/// Write a slot file already owned by the keystore user before it becomes
+/// visible at its final path, so KeyMint never observes a root-owned file.
+fn write_private_for_keystore(path: &str, bytes: &[u8]) -> Result<()> {
+    write_private_with(path, bytes, hand_to_keystore)
 }
 
 /// KeyMint runs as the `keystore` user and must be able to read the slot file.
@@ -504,8 +525,7 @@ fn install_keybox(level: &str, bytes: &[u8]) -> Result<Value> {
         bail!("this keybox carries a {label} chain but the {level} slot was selected");
     }
     ensure_dir()?;
-    write_private(target, bytes)?;
-    hand_to_keystore(target)?;
+    write_private_for_keystore(target, bytes)?;
     Ok(json!({
         "saved": true,
         "level": level,

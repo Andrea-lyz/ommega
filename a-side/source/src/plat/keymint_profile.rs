@@ -34,6 +34,8 @@ pub(crate) struct KeyMintHardwareProfile {
     pub unique_id: String,
     /// Operation limit reported by the mirrored implementation, if any.
     pub max_operations: Option<usize>,
+    /// Whether this identity describes the relay-side KeyMint implementation.
+    pub from_remote: bool,
 }
 
 pub(crate) fn strongbox_keymint_present() -> bool {
@@ -102,6 +104,7 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
                         author_name: remote.keymint_author,
                         unique_id,
                         max_operations: remote.max_operations,
+                        from_remote: true,
                     };
                 }
                 Err(error) => {
@@ -207,6 +210,7 @@ fn resolve_property_profile_from_namespace(
         impl_name,
         author_name,
         unique_id,
+        from_remote: false,
     })
 }
 
@@ -294,6 +298,7 @@ fn profile_from_system_hardware_info(
         impl_name,
         author_name,
         unique_id,
+        from_remote: false,
     })
 }
 
@@ -391,6 +396,7 @@ fn fallback_profile(security_level: SecurityLevel, version_number: i32) -> KeyMi
         author_name: AOSP_AUTHOR_NAME.to_string(),
         unique_id: format!("android-{sec_label}-keymint-{line}"),
         max_operations: None,
+        from_remote: false,
     }
 }
 

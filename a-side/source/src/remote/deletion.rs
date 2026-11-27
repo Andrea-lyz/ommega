@@ -35,6 +35,8 @@ const WORKER_THREAD_NAME: &str = "ommega-remote-gc";
 /// Periodic wake-up for the worker; also caps the wait until the next due
 /// retry.
 const WAKE_INTERVAL: Duration = Duration::from_secs(60);
+/// Shortest sleep while deletion is enabled, so a due row cannot spin the worker.
+const MIN_WAIT: Duration = Duration::from_secs(1);
 /// Base of the exponential retry backoff.
 const BASE_BACKOFF_MS: i64 = 60_000;
 /// Maximum backoff between remote deletion attempts.
@@ -247,6 +249,29 @@ impl Registry {
         Ok(queued)
     }
 
+    /// Device id an alias is already known under, whether through a live blob
+    /// reference or a deletion that is still pending.
+    fn device_for_alias(&self, alias: &str) -> rusqlite::Result<Option<String>> {
+        if let Some(device_id) = self
+            .conn
+            .query_row(
+                "SELECT device_id FROM blob_refs WHERE alias = ?1 LIMIT 1",
+                params![alias],
+                |row| row.get(0),
+            )
+            .optional()?
+        {
+            return Ok(Some(device_id));
+        }
+        self.conn
+            .query_row(
+                "SELECT device_id FROM pending_deletes WHERE alias = ?1 ORDER BY enqueued_ms DESC LIMIT 1",
+                params![alias],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     /// The next row the worker should handle: prefer an expired row (even if
     /// it is not due yet) so it can be dropped, else the earliest due row.
     /// The bool flag marks the expired-row case.
@@ -381,18 +406,28 @@ impl RemoteDeletion {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Record that `digest` references `alias` on the currently configured
-    /// remote device. Skipped entirely when remote is not configured.
+    /// Record that `digest` references `alias`. Registration is independent of
+    /// the relay switch so an upgraded live blob keeps ownership of its session.
     fn register(&self, alias: &str, digest: &[u8; 32]) {
-        if !super::remote_enabled() {
-            return;
-        }
-        let device_id = match super::RemoteRelay::device_id() {
-            Ok(device_id) => device_id,
-            Err(_) => return,
-        };
+        let configured_device = super::RemoteRelay::device_id().ok();
+        self.register_with(alias, digest, configured_device.as_deref());
+    }
+
+    /// Register with an already resolved configured device id. A device already
+    /// associated with the alias wins over the configured fallback.
+    fn register_with(&self, alias: &str, digest: &[u8; 32], configured_device: Option<&str>) {
         let mut guard = self.lock();
         let Some(registry) = guard.as_mut() else {
+            return;
+        };
+        let known_device = match registry.device_for_alias(alias) {
+            Ok(device_id) => device_id,
+            Err(e) => {
+                warn!("failed to inspect remote blob reference device: {e}");
+                return;
+            }
+        };
+        let Some(device_id) = known_device.or_else(|| configured_device.map(str::to_string)) else {
             return;
         };
         if let Err(e) = registry.register(alias, &device_id, digest, now_ms()) {
@@ -515,18 +550,31 @@ impl RemoteDeletion {
     }
 }
 
+/// Pick the worker sleep. A disabled relay never scans due rows, and an
+/// enabled relay never waits less than one second even when work is due now.
+fn worker_wait(enabled: bool, next_wait_ms: Option<u64>) -> Duration {
+    if !enabled {
+        return WAKE_INTERVAL;
+    }
+    next_wait_ms
+        .map(Duration::from_millis)
+        .unwrap_or(WAKE_INTERVAL)
+        .clamp(MIN_WAIT, WAKE_INTERVAL)
+}
+
 fn worker_loop(deletion: &Arc<RemoteDeletion>) {
     loop {
         if super::remote_enabled() {
             deletion.process_due(&super::remote_enabled);
         }
+        let enabled = super::remote_enabled();
         let guard = deletion.lock();
-        let wait = guard
-            .as_ref()
-            .and_then(|registry| registry.next_wait_ms().ok().flatten())
-            .map(Duration::from_millis)
-            .unwrap_or(WAKE_INTERVAL)
-            .min(WAKE_INTERVAL);
+        let wait = worker_wait(
+            enabled,
+            guard
+                .as_ref()
+                .and_then(|registry| registry.next_wait_ms().ok().flatten()),
+        );
         let _ = deletion
             .wake
             .wait_timeout(guard, wait)
@@ -795,5 +843,71 @@ mod tests {
         assert_eq!(retry_delay_ms(8), 15_360_000);
         assert_eq!(retry_delay_ms(9), MAX_BACKOFF_MS);
         assert_eq!(retry_delay_ms(100), MAX_BACKOFF_MS);
+    }
+
+    fn pending_rows_for(deletion: &RemoteDeletion) -> Vec<PendingDelete> {
+        deletion
+            .lock()
+            .as_ref()
+            .expect("test registry")
+            .pending_rows()
+            .expect("pending rows")
+    }
+
+    #[test]
+    fn upgrade_while_remote_unconfigured_keeps_session() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let deletion = RemoteDeletion::new(temp.path(), Arc::new(ScriptedDeleter::new(vec![])));
+        deletion.register_with("a", &digest(1), Some("dev-b"));
+        deletion.register_with("a", &digest(2), None);
+        deletion.release(&digest(1));
+        assert!(pending_rows_for(&deletion).is_empty());
+        deletion.release(&digest(2));
+        let rows = pending_rows_for(&deletion);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].alias == "a" && rows[0].device_id == "dev-b");
+    }
+
+    #[test]
+    fn live_blob_cancels_pending_delete_without_configured_device() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let deletion = RemoteDeletion::new(temp.path(), Arc::new(ScriptedDeleter::new(vec![])));
+        deletion.register_with("a", &digest(1), Some("dev-b"));
+        deletion.release(&digest(1));
+        assert_eq!(pending_rows_for(&deletion).len(), 1);
+        deletion.register_with("a", &digest(2), None);
+        assert!(pending_rows_for(&deletion).is_empty());
+        deletion.release(&digest(2));
+        let rows = pending_rows_for(&deletion);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].device_id == "dev-b");
+    }
+
+    #[test]
+    fn unknown_alias_without_configured_device_is_not_registered() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let deletion = RemoteDeletion::new(temp.path(), Arc::new(ScriptedDeleter::new(vec![])));
+        deletion.register_with("a", &digest(1), None);
+        deletion.release(&digest(1));
+        assert!(pending_rows_for(&deletion).is_empty());
+    }
+
+    #[test]
+    fn known_alias_device_wins_over_configured_device() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let deletion = RemoteDeletion::new(temp.path(), Arc::new(ScriptedDeleter::new(vec![])));
+        deletion.register_with("a", &digest(1), Some("dev-b"));
+        deletion.register_with("a", &digest(2), Some("dev-c"));
+        deletion.release(&digest(1));
+        assert!(pending_rows_for(&deletion).is_empty());
+    }
+
+    #[test]
+    fn worker_wait_never_spins() {
+        assert_eq!(worker_wait(false, Some(0)), WAKE_INTERVAL);
+        assert_eq!(worker_wait(true, Some(0)), MIN_WAIT);
+        assert_eq!(worker_wait(true, None), WAKE_INTERVAL);
+        assert_eq!(worker_wait(true, Some(5_000)), Duration::from_secs(5));
+        assert_eq!(worker_wait(true, Some(600_000)), WAKE_INTERVAL);
     }
 }

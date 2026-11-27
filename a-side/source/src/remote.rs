@@ -999,6 +999,21 @@ fn frozen_identity_changed(a: &RemoteIdentityProfile, b: &RemoteIdentityProfile)
         || a.max_operations != b.max_operations
 }
 
+/// Whether identity fields frozen into the TA at startup conflict with a
+/// freshly fetched relay profile.
+pub(crate) fn frozen_ta_identity_conflicts(
+    version_number: i32,
+    impl_name: &str,
+    author_name: &str,
+    max_operations: Option<usize>,
+    profile: &RemoteIdentityProfile,
+) -> bool {
+    version_number != profile.profile_version
+        || impl_name != profile.keymint_name
+        || author_name != profile.keymint_author
+        || max_operations != profile.max_operations
+}
+
 fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
     let field_i32 = |name: &str| -> Result<i32> {
         value
@@ -1118,6 +1133,7 @@ pub(crate) fn remote_identity_profile() -> Result<RemoteIdentityProfile> {
         });
     }
     publish_spl_status();
+    crate::keymaster::keymint_device::restart_if_frozen_identity_conflicts(&profile);
     Ok(profile)
 }
 
@@ -1783,6 +1799,46 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&invalid_document).unwrap()).unwrap();
         assert!(load_persisted_identity_profile_from(&path, "https://relay", "op11-b").is_none());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn frozen_ta_identity_conflicts_tracks_frozen_fields() {
+        let profile = parse_identity_profile(&valid_profile_json()).unwrap();
+        assert!(!frozen_ta_identity_conflicts(
+            profile.profile_version,
+            &profile.keymint_name,
+            &profile.keymint_author,
+            profile.max_operations,
+            &profile
+        ));
+        assert!(frozen_ta_identity_conflicts(
+            profile.profile_version + 100,
+            &profile.keymint_name,
+            &profile.keymint_author,
+            profile.max_operations,
+            &profile
+        ));
+        assert!(frozen_ta_identity_conflicts(
+            profile.profile_version,
+            "changed implementation",
+            &profile.keymint_author,
+            profile.max_operations,
+            &profile
+        ));
+        assert!(frozen_ta_identity_conflicts(
+            profile.profile_version,
+            &profile.keymint_name,
+            "changed author",
+            profile.max_operations,
+            &profile
+        ));
+        assert!(frozen_ta_identity_conflicts(
+            profile.profile_version,
+            &profile.keymint_name,
+            &profile.keymint_author,
+            Some(32),
+            &profile
+        ));
     }
 
     #[test]

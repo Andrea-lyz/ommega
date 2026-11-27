@@ -134,11 +134,14 @@ remote alias because hidden parameters are unavailable at delete time. The TA
 therefore reports the SHA-256 digest of every serialized remote blob it emits
 or sees, and of every blob passed to `deleteKey`, to a persistent registry at
 `data/remote-blobs.db` (under the standard ommega data directory). Each digest
-maps to the remote alias and the configured B device id. Registration happens
-at remote key generation, at remote blob upgrade, lazily at `beginOperation`
-for keys created before the registry existed, and is a no-op when remote is
-not configured. Release happens unconditionally at `deleteKey`; an unknown
-digest is a no-op, so local keys are unaffected.
+maps to the remote alias and its B device id. Registration happens at remote
+key generation, at remote blob upgrade, and lazily at `beginOperation` for keys
+created before the registry existed, regardless of the current relay switch.
+The device id is the one the alias is already known under, whether from a live
+reference or a pending delete; otherwise it is the configured B device id. An
+alias unknown to the registry with no configured device id is not registered,
+failing toward not deleting. Release happens unconditionally at `deleteKey`;
+an unknown digest is a no-op, so local keys are unaffected.
 
 An alias is scheduled for remote deletion only when its last registered blob
 digest is released. Because `upgradeKey` emits a new blob for the same alias
@@ -150,8 +153,10 @@ logged and swallowed, and a missed registration only means a session is never
 removed.
 
 Queued deletions are drained by the `ommega-remote-gc` worker thread, which
-runs only while the remote relay is configured and never holds the TA lock
-during network I/O. It POSTs `/api/delete/` with a deterministic
+processes rows only while the remote relay is configured and never holds the TA
+lock during network I/O. While the relay is not configured the worker idles for
+its normal wake interval; while enabled it never waits less than one second,
+even when a row is already due. It POSTs `/api/delete/` with a deterministic
 `delete:<alias>` request id so retries collapse into the same server-side
 task. A server answer of `deleted: true` or `false` completes the row; a
 validation rejection drops it permanently; every other failure (unreachable

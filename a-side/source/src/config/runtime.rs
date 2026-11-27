@@ -27,10 +27,11 @@ pub(super) fn start_config_watcher() -> Result<()> {
     )?;
     // The legacy A-side flat config (`/data/misc/keystore/ommega/config`,
     // written by the WebUI) also carries `remote`/`token`/`device_id`. Watch
-    // it too so toggling "remote mode" in the WebUI applies without a restart:
+    // it too so the WebUI relay toggle is reloaded promptly:
     // reload_runtime_config re-reads it via load_clienta_remote_override()
-    // inside Config::from_file(). Watch the parent dir, so a missing file is
-    // picked up when it first appears.
+    // inside Config::from_file(). If the frozen KeyMint identity cannot serve
+    // the new relay state, keymint exits so its daemon restarts it. Watch the
+    // parent dir, so a missing file is picked up when it first appears.
     file_watch::spawn_path_watcher(
         "ommega-clienta-config-watch",
         PathBuf::from(CLIENTA_CONFIG_PATH),
@@ -124,6 +125,12 @@ fn reload_runtime_config(trigger: WatchTrigger) {
             }
             log::set_max_level(level);
             log::info!("config updated via {}", trigger.label());
+            if runtime_snapshot.remote.enabled
+                && !runtime_snapshot.remote.url.is_empty()
+                && !crate::remote::remote_enabled()
+            {
+                crate::keymaster::keymint_device::restart_if_frozen_identity_is_remote();
+            }
         }
         Err(error) => log::error!(
             "failed to apply config update via {}; keeping previous runtime: {error:#}",
