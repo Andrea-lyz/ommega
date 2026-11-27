@@ -1,7 +1,13 @@
+use std::cell::Cell;
+
 use super::lock_state::{
     replay_requests, retain_authorization, retain_maintenance, RETAINED_LOCK_STATE,
 };
 use super::*;
+
+std::thread_local! {
+    static ON_MIRROR_WORKER: Cell<bool> = const { Cell::new(false) };
+}
 
 static MIRROR_RECOVERY_STATE: LazyLock<Mutex<MirrorRecoveryState>> =
     LazyLock::new(|| Mutex::new(MirrorRecoveryState::default()));
@@ -199,13 +205,13 @@ fn execute_lock_state_restore() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn queue_lock_state_restore() {
+fn queue_lock_state_restore() -> bool {
     let empty = RETAINED_LOCK_STATE
         .lock()
         .expect("retained lock state poisoned")
         .is_empty();
     if empty {
-        return;
+        return false;
     }
     {
         let state = MIRROR_RECOVERY_STATE
@@ -218,19 +224,35 @@ fn queue_lock_state_restore() {
             .skip(usize::from(lane.draining))
             .any(|pending| matches!(pending.event, Some(MirrorReplayEvent::LockStateRestore)))
         {
-            return;
+            return false;
         }
     }
     match reserve_mirror_update(
         MirrorStateKind::Authorization,
         MirrorFailurePolicy::BestEffort,
     ) {
-        Ok(reservation) => {
-            if let Err(error) = reservation.enqueue(MirrorReplayEvent::LockStateRestore) {
+        Ok(reservation) => match reservation.enqueue(MirrorReplayEvent::LockStateRestore) {
+            Ok(()) => true,
+            Err(error) => {
                 warn!("failed to queue keymint lock-state restore: {error:#}");
+                false
             }
+        },
+        Err(error) => {
+            warn!("keymint lock-state restore reservation refused: {error:#}");
+            false
         }
-        Err(error) => warn!("keymint lock-state restore reservation refused: {error:#}"),
+    }
+}
+
+fn restore_lock_state_on_new_session() {
+    if queue_lock_state_restore() && !ON_MIRROR_WORKER.get() {
+        // The reconnecting caller is about to retry immediately, so drain the restore first.
+        if let Err(error) = ensure_mirror_state_recovered() {
+            warn!(
+                "keymint lock-state restore did not finish before the reconnecting call continues: {error:#}"
+            );
+        }
     }
 }
 
@@ -637,7 +659,7 @@ fn wake_mirror_recovery_worker() {
 }
 
 pub(in crate::hook) fn start_mirror_recovery_worker() -> Result<(), String> {
-    crate::ipc::set_rpc_session_listener(queue_lock_state_restore);
+    crate::ipc::set_rpc_session_listener(restore_lock_state_on_new_session);
     let worker = MIRROR_RECOVERY_WORKER.get_or_init(|| {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -656,6 +678,7 @@ pub(in crate::hook) fn start_mirror_recovery_worker() -> Result<(), String> {
 }
 
 fn mirror_recovery_worker(receiver: std::sync::mpsc::Receiver<()>) {
+    ON_MIRROR_WORKER.set(true);
     loop {
         let _ = recover_mirror_state();
         let wait = {

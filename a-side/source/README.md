@@ -366,7 +366,9 @@ still pending. RPC warm-up runs in the keystore2 process, and the in-memory
 mirror queue replays captured state changes after the service becomes ready.
 The injector also keeps each user's latest lock state and unlock secret only in
 keystore2 memory and replays them when keymint reconnects, so a keymint-only
-restart does not require the lock-screen credential again. Auth tokens are not
+restart does not require the lock-screen credential again; the request that
+re-establishes the session waits, within a bounded limit, for this replay before
+it continues. Auth tokens are not
 replayed, so a time-bound key needs a fresh authentication. Restarting the
 injector restarts keystore2 itself, after which the credential must be entered
 once.

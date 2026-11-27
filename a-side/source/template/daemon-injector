@@ -2,7 +2,6 @@
 
 MODDIR=${0%/*}
 STATE_DIR=/data/adb/ommega
-PAYLOAD_STATE_FILE=$STATE_DIR/injector.payload
 RESTART_FILE=$STATE_DIR/restart.injector
 PEER_RESTART_FILE=$STATE_DIR/restart.keymint
 RESTART_ALL_FILE=$STATE_DIR/restart.all
@@ -67,32 +66,20 @@ get_keystore_pid() {
 }
 
 is_injected() {
-  local pid maps
+  local pid maps candidate
   pid=$1
   maps=/proc/$pid/maps
   [ -r "$maps" ] || return 1
 
-  if [ -r "$PAYLOAD_STATE_FILE" ]; then
-    if toybox awk -v want_pid="$pid" '
-      FNR == NR {
-        if ($1 == want_pid && $2 != "") {
-          ident = $2
-        }
-        next
-      }
-      ident != "" && index($0, ident) {
-        found = 1
-        exit
-      }
-      END {
-        exit found ? 0 : 1
-      }
-    ' "$PAYLOAD_STATE_FILE" "$maps" >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
-
-  grep -F "$TARGET_INJECTOR" "$maps" >/dev/null 2>&1 && return 0
+  # keystore2 maps the payload from the injector file that was current when it
+  # was injected; a hot update changes the current target without changing that.
+  for candidate in \
+    "$STATE_DIR/ommega-inject" \
+    "$MODDIR/ommega-inject" \
+    "$MODDIR/libs/arm64-v8a/ommega-inject" \
+    "$MODDIR/libs/x86_64/ommega-inject"; do
+    grep -F "$candidate" "$maps" >/dev/null 2>&1 && return 0
+  done
   return 1
 }
 
@@ -169,7 +156,7 @@ while true; do
 
   # Clear a stale inject instance (exact binary path) before injecting, so a
   # leftover injector from a previous run cannot coexist with the new one.
-  pkill -9 -f "$TARGET_INJECTOR" 2>/dev/null
+  pkill -9 -f "^$TARGET_INJECTOR" 2>/dev/null
   sleep 1
   echo "[injector-daemon] injecting into keystore2 pid=$pid via $TARGET_INJECTOR"
   "$TARGET_INJECTOR"

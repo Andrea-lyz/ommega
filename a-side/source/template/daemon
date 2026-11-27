@@ -74,7 +74,7 @@ while true; do
   # Clear a stale keymint instance (exact binary path) before starting a
   # fresh one, so a leftover child from a previous daemon run can never
   # coexist with the new instance. No other module process is matched.
-  pkill -9 -f "$TARGET" 2>/dev/null
+  pkill -9 -f "^$TARGET" 2>/dev/null
   sleep 1
   # Unix socket inodes survive an unclean process exit and a device reboot.
   # Remove the previous instance before starting keymint so the injector's

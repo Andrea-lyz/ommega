@@ -771,7 +771,7 @@ fn seed_retained_lock_user(user_id: i32) {
 #[test]
 fn lock_state_restore_listener_skips_empty_state_and_coalesces_pending_restore() {
     let _guard = route_state_test_guard();
-    queue_lock_state_restore();
+    assert!(!queue_lock_state_restore());
     assert!(MIRROR_RECOVERY_STATE
         .lock()
         .expect("mirror recovery state poisoned")
@@ -780,8 +780,8 @@ fn lock_state_restore_listener_skips_empty_state_and_coalesces_pending_restore()
         .is_empty());
 
     seed_retained_lock_user(10);
-    queue_lock_state_restore();
-    queue_lock_state_restore();
+    assert!(queue_lock_state_restore());
+    assert!(!queue_lock_state_restore());
     let state = MIRROR_RECOVERY_STATE
         .lock()
         .expect("mirror recovery state poisoned");
@@ -797,16 +797,56 @@ fn lock_state_restore_listener_skips_empty_state_and_coalesces_pending_restore()
 }
 
 #[test]
+fn restore_lock_state_on_new_session_does_not_wait_on_mirror_worker_thread() {
+    let _guard = route_state_test_guard();
+    seed_retained_lock_user(10);
+    ON_MIRROR_WORKER.set(true);
+    let started = Instant::now();
+    restore_lock_state_on_new_session();
+    let elapsed = started.elapsed();
+    ON_MIRROR_WORKER.set(false);
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "worker-thread listener must not wait for itself: {elapsed:?}"
+    );
+    assert!(MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned")
+        .authorization
+        .pending
+        .iter()
+        .any(|pending| matches!(pending.event, Some(MirrorReplayEvent::LockStateRestore))));
+}
+
+#[test]
+fn restore_lock_state_on_new_session_waits_until_replay_drains() {
+    let _guard = route_state_test_guard();
+    seed_retained_lock_user(10);
+    let drainer = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(20));
+        recover_mirror_state_with(&mut |_| Ok(())).expect("queued restore should drain");
+    });
+    restore_lock_state_on_new_session();
+    drainer.join().expect("drainer thread should finish");
+    assert!(MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned")
+        .authorization
+        .pending
+        .is_empty());
+}
+
+#[test]
 fn lock_state_restore_listener_ignores_front_restore_while_draining() {
     let _guard = route_state_test_guard();
     seed_retained_lock_user(10);
-    queue_lock_state_restore();
+    assert!(queue_lock_state_restore());
     MIRROR_RECOVERY_STATE
         .lock()
         .expect("mirror recovery state poisoned")
         .authorization
         .draining = true;
-    queue_lock_state_restore();
+    assert!(queue_lock_state_restore());
     assert_eq!(
         MIRROR_RECOVERY_STATE
             .lock()
