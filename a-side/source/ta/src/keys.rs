@@ -1565,16 +1565,30 @@ impl crate::KeyMintTa {
                     ) => *v,
                     _ => continue,
                 };
-                let (stored, is_os, name) = match param {
-                    KeyParam::OsVersion(v) => (v, true, "OS version"),
-                    KeyParam::OsPatchlevel(v) => (v, false, "OS patchlevel"),
-                    KeyParam::VendorPatchlevel(v) => (v, false, "vendor patchlevel"),
-                    KeyParam::BootPatchlevel(v) => (v, false, "boot patchlevel"),
+                let (stored, field, name) = match param {
+                    KeyParam::OsVersion(v) => {
+                        (v, crate::versions::VersionField::OsVersion, "OS version")
+                    }
+                    KeyParam::OsPatchlevel(v) => (
+                        v,
+                        crate::versions::VersionField::PatchLevel,
+                        "OS patchlevel",
+                    ),
+                    KeyParam::VendorPatchlevel(v) => (
+                        v,
+                        crate::versions::VersionField::PatchLevel,
+                        "vendor patchlevel",
+                    ),
+                    KeyParam::BootPatchlevel(v) => (
+                        v,
+                        crate::versions::VersionField::BootPatchLevel,
+                        "boot patchlevel",
+                    ),
                     _ => continue,
                 };
                 let before = *stored;
                 modified |=
-                    crate::versions::upgrade(stored, current_value, is_os).map_err(|_| {
+                    crate::versions::upgrade(stored, current_value, field).map_err(|_| {
                         km_err!(
                             InvalidArgument,
                             "refusing to downgrade keyblob {name} from {before} to {current_value}"

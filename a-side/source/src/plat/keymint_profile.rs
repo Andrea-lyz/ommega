@@ -78,7 +78,7 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
         // validation until the process is restarted.
         let mut attempts = 0_u64;
         loop {
-            match crate::remote::remote_identity_profile() {
+            match crate::remote::startup_identity_profile() {
                 Ok(remote) => {
                     let unique_id = derive_unique_id(
                         &remote.keymint_author,

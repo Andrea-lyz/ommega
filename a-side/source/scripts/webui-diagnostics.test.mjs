@@ -264,3 +264,36 @@ test("concurrent overview renders share one read, a forced one reads again", asy
   release(); await first;
   assert.equal(reads, 2);
 });
+
+test("debug clear and rotation actions never request a service restart", async () => {
+  const ctx = load(), commands = [], writes = [];
+  ctx._ = async command => {
+    commands.push(String(command));
+    return {errno: 0, stdout: "count=2 bytes=2048", stderr: ""};
+  };
+  ctx.ommegaDiagWrite = async (path, text) => { writes.push([path, text]); return {errno: 0}; };
+  ctx.ommegaDiagRefreshMaster = async () => {};
+
+  await ctx.ommegaDiagSetMaster(true);
+
+  const clearNote = {textContent: ""};
+  ctx.document.getElementById = id => id === "om-diag-clear-note" ? clearNote : null;
+  await ctx.ommegaDiagClearLogs();
+  assert.match(clearNote.textContent, /服务会在下一条日志时自动新建文件/);
+
+  const rotation = {dataset: {}, value: "8"};
+  const rotationNote = {textContent: ""};
+  const elements = {
+    "om-diag-rotation": rotation,
+    "om-diag-rotation-note": rotationNote
+  };
+  ctx.document.getElementById = id => elements[id] || null;
+  ctx.ommegaDiagInit();
+  assert.equal(typeof rotation.onchange, "function");
+  await rotation.onchange();
+  assert.match(rotationNote.textContent, /下次模块服务启动/);
+
+  assert.ok(commands.length > 0);
+  assert.ok(writes.length > 0);
+  assert.ok(commands.every(command => !command.includes("restart.")));
+});

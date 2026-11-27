@@ -1,11 +1,14 @@
 # Software keyblob version checks
 
 Software keyblob generation, import, normal loading and explicit upgrade use
-A's frozen native firmware version target, in both local and remote modes. B's
-profile is an admission check against that target, not a source that replaces A's
-versions. The key's origin, alias, descriptor and remote/local material never
-select a different backend or version policy. All-or-nothing per-caller routing
-is unchanged.
+the version source selected by the active configuration, never by key provenance.
+Local mode, local fallback without an admitted profile, and failed admission use
+A's frozen native firmware target. Relay mode with an admitted B profile uses
+the B-sampled tags. B admission requires OS version, System SPL and Vendor SPL
+to equal A's native target, so those three are identical in both sources; Boot
+SPL is each device's own value, a difference is informational, and relay mode
+seals B's Boot value because B mints the certificate chain. All-or-nothing
+per-caller routing is unchanged.
 
 ## Native firmware target
 
@@ -33,30 +36,39 @@ remain independent.
 ## Remote admission
 
 A requires B to publish `version_policy = a-native-v1`, a valid
-`version_revision` and all four version tags exactly matching A's native target.
-Each attestation request carries that target and expected revision. A compatible
-B checks the same revision and tags again before its normal HAL call; a changed,
-missing or mismatched snapshot is rejected, not silently refreshed or accepted.
-The signed certificate and returned authorizations must also agree. B adapts to
-A only through a separately reviewed and authorized B-side procedure; A never
-lowers its own target to accommodate B. Relays without the capability fail closed
-and need a separate upgrade. Remote StrongBox cannot borrow a default TEE
-profile, and `server_keybox` does not supply this physical-B guarantee.
+`version_revision`, and OS version, System SPL and Vendor SPL exactly matching
+A's native target. Boot SPL is reported but not gated because each device uses
+its own boot image. Each attestation request carries the aligned target and
+expected revision. A compatible B checks the same revision and the three aligned
+tags again before its normal HAL call; a changed, missing or mismatched snapshot
+is rejected, not silently refreshed or accepted. The signed certificate and
+returned authorizations must agree with the selected source. B adapts to A only
+through a separately reviewed and authorized B-side procedure; A never lowers
+its own target to accommodate B. Relays without the capability fail closed and
+need a separate upgrade. Remote StrongBox cannot borrow a default TEE profile,
+and `server_keybox` does not supply this physical-B guarantee.
 
 ## Loading and upgrade
 
 - Equal recorded/current values are accepted.
 - Older recorded values cause KEY_REQUIRES_UPGRADE on normal loading.
-- Future recorded values cause INVALID_KEY_BLOB on normal loading.
+- Future recorded OS version, System SPL or Vendor SPL values cause
+  INVALID_KEY_BLOB on normal loading.
 - Explicit upgrade can increase available version values and add new published
-  tags. A requested numeric downgrade returns INVALID_ARGUMENT.
+  tags. A requested numeric downgrade of OS version, System SPL or Vendor SPL
+  returns INVALID_ARGUMENT.
+- Boot patch level is exempt from future-value rejection because the current
+  Boot source changes with relay mode: a lower recorded value requires upgrade,
+  while a higher recorded value is accepted on load and left unchanged by
+  upgrade.
 - Android's OS-version-zero exception is retained: a nonzero OS version with
   current OS version zero requires explicit upgrade to zero. This exception does
   not apply to any system/vendor/boot patch level.
 - Absence of a value in a blob comparison is not permission to delete an existing
   bound tag. Such a tag is retained and logged as unavailable for comparison; this
-  does not relax the complete four-tag native target required for normal startup
-  and remote admission. An upgrade that changes nothing returns the existing
+  does not relax the complete four-tag native target required for normal startup;
+  remote admission gates the three aligned tags and reports Boot. An upgrade
+  that changes nothing returns the existing
   empty-result/no-op signal.
 - A rejected operation returns no new blob and never rewrites the caller's input.
   Successful upgrade produces a new encrypted software blob with the same key
@@ -72,7 +84,7 @@ part of version admission. Any B-side adaptation is a separate operation.
 
 ## Operational limits
 
-A blob bound above the native target can legitimately be unusable; strict checks
+A blob bound above the native target in OS version, System SPL or Vendor SPL can legitimately be unusable; strict checks
 do not repair it by lowering its recorded values. Preserve the module, original
 config and metadata state for recovery review. Existing explicit overrides and
 mixed-source blobs require a human migration decision, never automatic config
@@ -90,7 +102,7 @@ or invoke hardware. Unknown TA/certificate evidence remains unknown.
 
 Pure ordering tests run without dependencies, Binder or a device. Software TA
 fixtures cover successful forward upgrade with unchanged key material, no-op
-upgrade, each future tag, error/input preservation, missing optional partition
+upgrade, future OS/System/Vendor tags, the Boot future-value exemption, error/input preservation, missing optional partition
 values and the OS-zero exception. These fixtures use the software crypto backend
 and mock remote metadata only; Android device execution is a separate gate.
 

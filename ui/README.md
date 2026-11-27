@@ -120,9 +120,9 @@ switches:
 - **Settings → Diagnostics and support** is the only entry point.
 - **Level 2** owns the single debug-logging master switch. Turning it on writes
   `config.toml [main].log_level` (debug, or trace when already trace),
-  `[remote].debug_logging` and the flat `debug_logging` key, then touches
-  `restart.all` so KeyMint and the injector both reopen their logs. The old
-  switch inside the remote-connection dialog was removed.
+  `[remote].debug_logging` and the flat `debug_logging` key. KeyMint applies the
+  level through its config watcher and nothing is restarted. The old switch
+  inside the remote-connection dialog was removed.
 - After reproducing a problem the user unlocks the feature pages; the unlock is
   persisted in `localStorage` and cleared when the master switch is turned off.
 - **Level 3** pages, each a problem/result/advice checklist:
@@ -135,8 +135,8 @@ switches:
   AProbe app ships in `probe/a-probe.apk` (release signed) and is installed from
   the page, which also registers the package for CPU/device properties and sets
   its auth-signing policy to auto.
-- **Clear logs** deletes every module log and requests a full service reload so
-  files restart from zero.
+- **Clear logs** deletes every module log. The services recreate their log
+  files on the next write, so nothing is restarted.
 
 Strings are bilingual through `text(zh, en)` / `ommegaUiLocalize`. Unit tests
 for the pure parsers live in `a-side/source/scripts/webui-diagnostics.test.mjs`.

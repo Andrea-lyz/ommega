@@ -43,6 +43,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -237,15 +238,46 @@ static int64_t fingerprint_accept_count(void) {
     if (stream == NULL) {
         return -1;
     }
-    char dump[16384];
-    size_t used = fread(dump, 1, sizeof(dump) - 1, stream);
+    size_t capacity = 16 * 1024;
+    const size_t maximum = 1024 * 1024;
+    char *dump = malloc(capacity);
+    if (dump == NULL) {
+        pclose(stream);
+        return -1;
+    }
+    size_t used = 0;
+    for (;;) {
+        if (used + 1 == capacity && capacity < maximum) {
+            size_t next = capacity * 2;
+            if (next > maximum) {
+                next = maximum;
+            }
+            char *larger = realloc(dump, next);
+            if (larger == NULL) {
+                break;
+            }
+            dump = larger;
+            capacity = next;
+        }
+        size_t room = capacity - used - 1;
+        if (room == 0) {
+            break;
+        }
+        size_t count = fread(dump + used, 1, room, stream);
+        used += count;
+        if (count == 0) {
+            break;
+        }
+    }
     int status = pclose(stream);
     dump[used] = '\0';
     if (status != 0) {
+        free(dump);
         return -1;
     }
     int64_t plain = sum_dump_counter(dump, "\"accept\"");
     int64_t crypto = sum_dump_counter(dump, "\"acceptCrypto\"");
+    free(dump);
     if (plain < 0 && crypto < 0) {
         return -1;
     }
@@ -258,13 +290,20 @@ static int64_t fingerprint_accept_count(void) {
     return plain + crypto;
 }
 
+static atomic_bool bio_counter_was_readable = false;
+
 /* The mark the Rust half compares before and after a sign session. */
 static int64_t platform_bio_mark(void) {
     int64_t accepted = fingerprint_accept_count();
     if (accepted < 0) {
-        LOGE("bio gate: cannot read the fingerprint accept counter");
+        if (atomic_load_explicit(&bio_counter_was_readable, memory_order_relaxed)) {
+            LOGE("bio gate: fingerprint accept counter was readable before but is not now");
+            return -2;
+        }
+        LOGE("bio gate: fingerprint accept counter has never been readable");
         return -1;
     }
+    atomic_store_explicit(&bio_counter_was_readable, true, memory_order_relaxed);
     /* The tag has to stay inside 31 bits: the Rust half reads a negative hook
      * answer as "cannot tell", and a tag whose top bit is set would make the
      * packed mark negative, so the gate would fail open for that whole boot

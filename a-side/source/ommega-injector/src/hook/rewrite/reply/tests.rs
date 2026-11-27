@@ -8,6 +8,13 @@ use crate::android::system::keystore2::{
     KeyEntryResponse::KeyEntryResponse, KeyMetadata::KeyMetadata,
 };
 use crate::hook::rewrite::tests::*;
+fn unavailable_test_caller() -> CallerInfo {
+    CallerInfo {
+        uid: 1000,
+        sid: String::new(),
+        pid: 2000,
+    }
+}
 
 pub(super) fn assert_unknown_transaction_reply(reply: SyntheticReply) {
     let SyntheticReply::Status(status) = reply else {
@@ -115,10 +122,10 @@ fn unavailable_ommega_errors_preserve_system_reply() {
     ] {
         let error = anyhow::Error::new(Status::from(status));
         assert!(
-            build_ommega_error_reply_or_preserve_system(&error)
+            ommega_error_reply_for_method("test", &unavailable_test_caller(), &error)
                 .expect("unavailable ommega errors should classify cleanly")
-                .is_none(),
-            "{status:?} after retry means ommega is unavailable, not authoritative"
+                .is_some(),
+            "{status:?} after retry means ommega is unavailable and returns SYSTEM_ERROR"
         );
     }
 
@@ -163,10 +170,10 @@ fn unavailable_ommega_errors_preserve_system_reply() {
 
     let missing_service = anyhow::Error::new(StatusCode::NameNotFound);
     assert!(
-        build_ommega_error_reply_or_preserve_system(&missing_service)
+        ommega_error_reply_for_method("test", &unavailable_test_caller(), &missing_service)
             .expect("missing RPC service should classify cleanly")
-            .is_none(),
-        "missing ommega RPC service means ommega is unavailable"
+            .is_some(),
+        "missing ommega RPC service means ommega is unavailable and returns SYSTEM_ERROR"
     );
 
     for status in [
@@ -178,15 +185,17 @@ fn unavailable_ommega_errors_preserve_system_reply() {
             anyhow::Error::new(Status::from(status)).context("wrapped status"),
             anyhow::Error::new(status).context("wrapped status code"),
         ] {
-            assert!(build_ommega_error_reply_or_preserve_system(&error)
-                .expect("wrapped unavailable errors should classify cleanly")
-                .is_none());
+            assert!(
+                ommega_error_reply_for_method("test", &unavailable_test_caller(), &error)
+                    .expect("wrapped unavailable errors should classify cleanly")
+                    .is_some()
+            );
         }
     }
 
     let local = anyhow::anyhow!("plain ommega failure");
     assert!(
-        build_ommega_error_reply_or_preserve_system(&local)
+        ommega_error_reply_for_method("test", &unavailable_test_caller(), &local)
             .expect("plain ommega errors should classify cleanly")
             .is_some(),
         "non-connection ommega errors must be returned instead of preserving system"
@@ -204,7 +213,7 @@ fn reachable_non_stale_ommega_status_code_errors_become_system_error_reply() {
         StatusCode::UnknownTransaction,
     ] {
         let error = anyhow::Error::new(status);
-        let mut reply = build_ommega_error_reply_or_preserve_system(&error)
+        let mut reply = ommega_error_reply_for_method("test", &unavailable_test_caller(), &error)
             .expect("reachable ommega errors should classify cleanly")
             .expect("non-stale ommega errors must replace system reply");
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
@@ -224,7 +233,7 @@ fn reachable_non_stale_ommega_status_code_errors_become_system_error_reply() {
 #[test]
 fn reachable_ommega_status_error_becomes_authoritative_reply() {
     let status = Status::new_service_specific_error(ResponseCode::PERMISSION_DENIED.0, None);
-    let reply = build_ommega_status_reply_or_preserve_system(&status)
+    let reply = ommega_status_reply_for_method("test", &unavailable_test_caller(), &status)
         .expect("service-specific status should build")
         .expect("reachable ommega status should replace system");
     let mut reply = reply;

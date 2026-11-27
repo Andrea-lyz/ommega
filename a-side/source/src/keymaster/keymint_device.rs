@@ -57,6 +57,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use kmr_common::consts::AID_KEYSTORE;
+use kmr_common::crypto::MonotonicClock;
 use kmr_crypto_ommega::ec::OmmegaEc;
 use kmr_crypto_ommega::hmac::OmmegaHmac;
 use kmr_crypto_ommega::rng::OmmegaRng;
@@ -1013,9 +1014,8 @@ impl KeyMintWrapper {
     }
 
     pub fn localize_auth_token(&self, auth_token: &HardwareAuthToken) -> Result<HardwareAuthToken> {
-        let km_token = auth_token
-            .to_km()
-            .context(err!("invalid auth token fields"))?;
+        let rebased = rebase_auth_token_timestamp(auth_token, clock::StdClock::new().now().0);
+        let km_token = rebased.to_km().context(err!("invalid auth token fields"))?;
         let mac_input = kmr_ta::hardware_auth_token_mac_input(&km_token)
             .map_err(|error| anyhow::anyhow!("{error:?}"))
             .context(err!("failed to build auth token MAC input"))?;
@@ -1031,7 +1031,7 @@ impl KeyMintWrapper {
             .map_err(|error| anyhow::anyhow!("{error:?}"))
             .context(err!("failed to localize auth token MAC"))?;
 
-        let mut localized = auth_token.clone();
+        let mut localized = rebased;
         localized.mac = mac;
         Ok(localized)
     }
@@ -1491,6 +1491,12 @@ pub fn get_keymint_wrapper(security_level: SecurityLevel) -> Result<KeyMintWrapp
     KeyMintWrapper::new(security_level)
 }
 
+fn rebase_auth_token_timestamp(token: &HardwareAuthToken, now_ms: i64) -> HardwareAuthToken {
+    let mut rebased = token.clone();
+    rebased.timestamp.milliSeconds = now_ms;
+    rebased
+}
+
 pub fn localize_auth_token_for_ommega(auth_token: &HardwareAuthToken) -> Result<HardwareAuthToken> {
     get_keymint_wrapper(SecurityLevel::TRUSTED_ENVIRONMENT)?.localize_auth_token(auth_token)
 }
@@ -1552,6 +1558,8 @@ fn shared_keymint_wrapper_inner(security_level: SecurityLevel) -> Result<Arc<Key
     if let Some(wrapper) = wrapper.get() {
         return Ok(wrapper.clone());
     }
+    // Relay profile resolution can wait indefinitely; keep it outside the lifecycle lock.
+    let _ = resolve_hardware_profile(security_level);
     let _lifecycle = KM_WRAPPER_LIFECYCLE
         .lock()
         .map_err(|_| anyhow!("keymint wrapper lifecycle lock poisoned"))?;
@@ -1874,5 +1882,23 @@ mod tests {
             auth_token: None,
         }));
         assert_eq!(second_begin.error_code, ErrorCode::KEY_MAX_OPS_EXCEEDED.0);
+    }
+
+    #[test]
+    fn rebase_auth_token_timestamp_changes_only_the_timestamp() {
+        let token = HardwareAuthToken {
+            challenge: 7,
+            userId: 11,
+            authenticatorId: 13,
+            mac: vec![1, 2, 3],
+            ..Default::default()
+        };
+        let rebased = rebase_auth_token_timestamp(&token, 123456);
+        assert_eq!(rebased.timestamp.milliSeconds, 123456);
+        assert_eq!(rebased.challenge, token.challenge);
+        assert_eq!(rebased.userId, token.userId);
+        assert_eq!(rebased.authenticatorId, token.authenticatorId);
+        assert_eq!(rebased.authenticatorType, token.authenticatorType);
+        assert_eq!(rebased.mac, token.mac);
     }
 }

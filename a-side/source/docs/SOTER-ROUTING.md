@@ -49,3 +49,7 @@ The application list shows a SOTER badge with the number of transactions that ap
 ## Validation
 
 Regressions use synthetic keys, isolated files and mock transports: default selection; malformed/incomplete policy; shared UIDs/profiles; key rotation; old-session revocation; revision counters; local overrides of global relay; full named-relay init/finish with global relay on/off; named local_only refusal; missing policy; CAS conflicts; import validation. No test issues a real HAL/TEE request.
+
+## Biometric gate
+
+The biometric evidence is the fingerprint provider accepted-capture counter read at initSign and finishSign. A read that fails after the counter was readable in the same daemon process, or evidence present on only one side, answers the no-fingerprint error. A platform that never exposes the counter signs without the gate and the daemon logs that the counter was never readable.

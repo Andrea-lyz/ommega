@@ -277,12 +277,12 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                 );
                 return false;
             }
+            poison_mirror_lane(MirrorStateKind::Authorization);
             warn!(
-                "event=mirror cannot confirm one-way authorization {:?} for uid={} pid={}; blocking System mutation",
+                "event=mirror cannot confirm one-way authorization {:?} for uid={} pid={}; preserving System mutation while ommega routes fail closed until keystore2 restarts",
                 method, caller_uid, pending.caller.pid
             );
-            block_system_request(tr);
-            return true;
+            return false;
         }
         if requires_mirror {
             match reserve_mirror_update(MirrorStateKind::Authorization, failure_policy) {
@@ -294,19 +294,11 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                     );
                 }
                 Err(error) => {
+                    poison_mirror_lane(MirrorStateKind::Authorization);
                     warn!(
-                        "event=mirror failed to reserve in-memory authorization {:?} update for uid={} pid={}: {:#}; blocking System mutation",
+                        "event=mirror failed to reserve in-memory authorization {:?} update for uid={} pid={}: {:#}; preserving System mutation while ommega routes fail closed until keystore2 restarts",
                         method, caller_uid, pending.caller.pid, error
                     );
-                    block_system_request(tr);
-                    replace_top_pending(
-                        connection,
-                        PendingCall::PrecomputedAuthorization(
-                            pending,
-                            Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
-                        ),
-                    );
-                    return true;
                 }
             }
         }
@@ -359,7 +351,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             route,
             mirror_update: None,
         };
-        let mut precomputed = if pending.route == RouteTarget::Ommega
+        let precomputed = if pending.route == RouteTarget::Ommega
             && matches!(
                 &pending.request,
                 ParsedMaintenanceRequest::MigrateKeyNamespace { .. }
@@ -369,15 +361,11 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                     block_system_request(tr);
                     Some(reply)
                 }
-                OmmegaMigratePrecompute::PreserveSystem => {
-                    pending.route = RouteTarget::System;
-                    None
-                }
             }
         } else {
             None
         };
-        let mut request_rewritten = precomputed.is_some();
+        let request_rewritten = precomputed.is_some();
         let route_note = if matches!(
             &pending.request,
             ParsedMaintenanceRequest::MigrateKeyNamespace { .. }
@@ -403,12 +391,12 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         let requires_mirror =
             pending.route == RouteTarget::System && maintenance_requires_mirror(&pending.request);
         if requires_mirror && !expects_reply {
+            poison_mirror_lane(MirrorStateKind::Maintenance);
             warn!(
-                "event=mirror cannot confirm one-way maintenance {:?} for uid={} pid={}; blocking System mutation",
+                "event=mirror cannot confirm one-way maintenance {:?} for uid={} pid={}; preserving System mutation while ommega routes fail closed until keystore2 restarts",
                 method, caller_uid, pending.caller.pid
             );
-            block_system_request(tr);
-            return true;
+            return request_rewritten;
         }
         if requires_mirror {
             match reserve_mirror_update(
@@ -417,15 +405,11 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             ) {
                 Ok(reservation) => pending.mirror_update = Some(reservation),
                 Err(error) => {
+                    poison_mirror_lane(MirrorStateKind::Maintenance);
                     warn!(
-                        "event=mirror failed to reserve in-memory maintenance {:?} update for uid={} pid={}: {:#}; blocking System mutation",
+                        "event=mirror failed to reserve in-memory maintenance {:?} update for uid={} pid={}: {:#}; preserving System mutation while ommega routes fail closed until keystore2 restarts",
                         method, caller_uid, pending.caller.pid, error
                     );
-                    block_system_request(tr);
-                    precomputed = Some(PrecomputedMaintenanceReply::Error(
-                        Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
-                    ));
-                    request_rewritten = true;
                 }
             }
         }
@@ -620,14 +604,6 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                     block_system_request(tr);
                     Some(reply)
                 }
-                OmmegaServicePrecompute::PreserveSystem => {
-                    info!(
-                        "event=route method={:?} uid={} pid={} route={:?} ommega_unavailable=true; preserving original system request",
-                        method, caller.uid, caller.pid, route
-                    );
-                    route = RouteTarget::System;
-                    None
-                }
             }
         } else {
             None
@@ -801,7 +777,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             method, caller.uid, caller.pid, route, target_info.security_level
         );
 
-        let mut pending = PendingSecurityLevelCall {
+        let pending = PendingSecurityLevelCall {
             request,
             caller,
             packages: decision.packages,
@@ -812,13 +788,11 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             let reply = match build_ommega_security_level_reply(&pending, true) {
                 Ok(Some(reply)) => reply,
                 Ok(None) => {
-                    info!(
-                        "event=route security-level {:?} ommega unavailable for uid={} pid={}; preserving original system request",
+                    warn!(
+                        "event=route security-level {:?} ommega unavailable for uid={} pid={}; returning SYSTEM_ERROR without executing System",
                         method, caller_uid, pending.caller.pid
                     );
-                    pending.route = RouteTarget::System;
-                    replace_top_pending(connection, PendingCall::SecurityLevel(pending));
-                    return false;
+                    synthetic_fallback_reply()
                 }
                 Err(error) => {
                     warn!(
@@ -925,7 +899,10 @@ unsafe fn handle_ommega_one_way_security_level_request(
             block_system_request(tr);
             true
         }
-        Ok(None) => false,
+        Ok(None) => {
+            block_system_request(tr);
+            true
+        }
         Err(error) => {
             warn!(
                 "event=route failed to execute one-way ommega security-level {:?} for uid={} pid={}: {:#}; consuming original system request",

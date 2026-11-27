@@ -803,6 +803,15 @@ impl Default for MainConfig {
     }
 }
 
+impl MainConfig {
+    pub fn log_level_filter(&self) -> log::LevelFilter {
+        self.log_level
+            .trim()
+            .parse()
+            .unwrap_or(log::LevelFilter::Debug)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CryptoConfig {
     pub root_kek_seed: [u8; 32],
@@ -1306,6 +1315,29 @@ mod tests {
         let serialized = toml::to_string(&MainConfig::default()).unwrap();
         assert!(serialized.contains(r#"backend = "injector""#));
         assert!(serialized.contains(r#"log_level = "info""#));
+    }
+
+    #[test]
+    fn main_config_log_level_filter_trims_and_falls_back_to_debug() {
+        fn config_with_level(level: &str) -> MainConfig {
+            MainConfig {
+                log_level: level.to_string(),
+                ..Default::default()
+            }
+        }
+
+        assert_eq!(
+            config_with_level("warn").log_level_filter(),
+            log::LevelFilter::Warn
+        );
+        assert_eq!(
+            config_with_level("  trace\n").log_level_filter(),
+            log::LevelFilter::Trace
+        );
+        assert_eq!(
+            config_with_level("not-a-level").log_level_filter(),
+            log::LevelFilter::Debug
+        );
     }
 
     #[test]

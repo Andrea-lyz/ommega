@@ -51,17 +51,14 @@ pub(super) enum PrecomputedMaintenanceReply {
 
 pub(super) enum OmmegaServicePrecompute {
     Reply(PrecomputedServiceReply),
-    PreserveSystem,
 }
 
 pub(super) enum OmmegaMigratePrecompute {
     Reply(PrecomputedMaintenanceReply),
-    PreserveSystem,
 }
 
 pub(super) enum PendingCall {
     Authorization(PendingAuthorizationCall),
-    PrecomputedAuthorization(PendingAuthorizationCall, Status),
     Maintenance(PendingMaintenanceCall),
     PrecomputedMaintenance(PendingMaintenanceCall, PrecomputedMaintenanceReply),
     Service(PendingServiceCall),
@@ -81,7 +78,7 @@ struct PendingReplyFrame {
 impl PendingCall {
     fn reply_log_context(&self) -> (&'static str, String, i64, i64) {
         match self {
-            Self::Authorization(call) | Self::PrecomputedAuthorization(call, _) => (
+            Self::Authorization(call) => (
                 "authorization",
                 format!("{:?}", call.method),
                 call.caller.uid,
@@ -151,13 +148,6 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
                 call.method, call.caller.uid, call.caller.pid
             );
             build_authorization_reply_mirror(tr, call)
-        }
-        PendingCall::PrecomputedAuthorization(call, status) => {
-            debug!(
-                "event=reply handling precomputed authorization {:?} uid={} pid={}",
-                call.method, call.caller.uid, call.caller.pid
-            );
-            build_ommega_status_reply(status).map(Some)
         }
         PendingCall::Maintenance(call) => {
             debug!(
@@ -247,24 +237,14 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
             );
         }
         Ok(None) => {
-            let observed = match &pending {
-                PendingCall::Service(call) if call.route == RouteTarget::Ommega => {
-                    observe_system_service_reply(tr, call)
-                }
-                PendingCall::SecurityLevel(call) if call.route == RouteTarget::Ommega => {
-                    observe_system_security_level_reply(tr, call)
-                }
-                _ => Ok(None),
-            };
-            match observed {
-                Ok(Some(reply)) => install_outbound_reply(connection, tr, reply),
-                Ok(None) => {}
-                Err(error) => {
-                    warn!(
-                        "event=route failed to observe preserved system fallback reply: {:#}",
-                        error
-                    );
-                }
+            if matches!(
+                &pending,
+                PendingCall::Service(call) if call.route == RouteTarget::Ommega
+            ) || matches!(
+                &pending,
+                PendingCall::SecurityLevel(call) if call.route == RouteTarget::Ommega
+            ) {
+                install_outbound_reply(connection, tr, synthetic_fallback_reply());
             }
         }
         Err(error) => {
@@ -288,7 +268,6 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
 fn pending_preserves_system_on_rewrite_failure(pending: &PendingCall) -> bool {
     match pending {
         PendingCall::Authorization(_) => true,
-        PendingCall::PrecomputedAuthorization(_, _) => false,
         PendingCall::Maintenance(call) => call.route != RouteTarget::Ommega,
         PendingCall::PrecomputedMaintenance(_, _) => false,
         PendingCall::Service(call) => call.route != RouteTarget::Ommega,

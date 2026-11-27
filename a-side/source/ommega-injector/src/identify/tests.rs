@@ -47,7 +47,7 @@ fn authorization_method_codes_follow_supported_layouts() {
         (tx(1), AuthorizationMethod::LegacyOnLockScreenEvent),
         (tx(2), AuthorizationMethod::GetAuthTokensForCredStore),
     ];
-    let android_15_to_16_cases = [
+    let android_15_and_16_base_cases = [
         (tx(0), AuthorizationMethod::AddAuthToken),
         (tx(1), AuthorizationMethod::OnDeviceUnlocked),
         (tx(2), AuthorizationMethod::OnDeviceLocked),
@@ -57,31 +57,59 @@ fn authorization_method_codes_follow_supported_layouts() {
         (tx(6), AuthorizationMethod::GetLastAuthTime),
     ];
 
-    let layouts: [MethodLayout<'_, AuthorizationMethod>; 3] = [
-        (&[Some(17), None], CURRENT_CASES, u32::MAX),
-        (
-            &[Some(12), Some(13), Some(14)],
-            &android_12_to_14_cases,
-            tx(3),
-        ),
-        (&[Some(15), Some(16)], &android_15_to_16_cases, tx(7)),
-    ];
-    for (versions, cases, invalid_code) in layouts {
-        for &version in versions {
-            for &(code, expected) in cases {
-                assert_eq!(
-                    authorization_method_from_code_for(version, code),
-                    Some(expected),
-                    "version={version:?} code={code}"
-                );
-            }
+    fn assert_layout(
+        version: Option<i32>,
+        user_storage_locked: bool,
+        cases: &[(u32, AuthorizationMethod)],
+        invalid_code: u32,
+    ) {
+        for &(code, expected) in cases {
             assert_eq!(
-                authorization_method_from_code_for(version, invalid_code),
-                None,
-                "version={version:?} out of range"
+                authorization_method_from_code_for(version, code, user_storage_locked),
+                Some(expected),
+                "version={version:?} user_storage_locked={user_storage_locked} code={code}"
             );
         }
+        assert_eq!(
+            authorization_method_from_code_for(version, invalid_code, user_storage_locked),
+            None,
+            "version={version:?} user_storage_locked={user_storage_locked} out of range"
+        );
     }
+
+    for user_storage_locked in [false, true] {
+        for version in [Some(12), Some(13), Some(14)] {
+            assert_layout(version, user_storage_locked, &android_12_to_14_cases, tx(3));
+        }
+        assert_layout(
+            Some(15),
+            user_storage_locked,
+            &android_15_and_16_base_cases,
+            tx(7),
+        );
+    }
+    assert_layout(Some(16), false, &android_15_and_16_base_cases, tx(7));
+    for (version, user_storage_locked) in [
+        (Some(16), true),
+        (Some(17), false),
+        (Some(17), true),
+        (None, false),
+        (None, true),
+    ] {
+        assert_layout(version, user_storage_locked, CURRENT_CASES, u32::MAX);
+    }
+}
+
+#[test]
+fn user_storage_locked_marker_requires_contiguous_bytes() {
+    assert!(contains_user_storage_locked_marker(
+        b"prefix onUserStorageLocked suffix"
+    ));
+    assert!(!contains_user_storage_locked_marker(
+        b"onUserStorage\0Locked"
+    ));
+    assert!(!contains_user_storage_locked_marker(b"onUserStorage"));
+    assert!(!contains_user_storage_locked_marker(b""));
 }
 
 #[test]

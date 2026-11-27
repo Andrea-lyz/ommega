@@ -30,8 +30,10 @@
 //! requests are not serialised, and natively supports chunked transfer
 //! encoding and HTTP keep-alive.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -106,6 +108,7 @@ impl RemoteRoute {
 struct CachedIdentityProfile {
     route: RemoteRoute,
     profile: RemoteIdentityProfile,
+    persisted: bool,
 }
 /// Why the relay last refused us, if it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +145,15 @@ impl RemoteRejection {
     }
 }
 
+pub(crate) fn identity_route_changed(
+    old: &config::RemoteConfig,
+    new: &config::RemoteConfig,
+) -> bool {
+    old.enabled != new.enabled || RemoteRoute::from_config(old) != RemoteRoute::from_config(new)
+}
+
 /// Drop the cached identity profile so the next attestation re-reads it from
-/// the relay. Called when the runtime config is applied.
+/// the relay. Called when the relay route or remote switch changes.
 pub fn invalidate_identity_profile() {
     REMOTE_PROFILE_EPOCH.fetch_add(1, Ordering::AcqRel);
     // A different relay route must never leave the previous B's application view active.
@@ -530,6 +540,12 @@ impl RemoteRelay {
             return Err(anyhow!("remote profile failed: {error}"));
         }
         let profile = parse_identity_profile(result)?;
+        if let Ok(route) = RemoteRoute::current() {
+            let document = persisted_identity_document(&route.url, &route.device_id, result);
+            if let Err(error) = persist_identity_profile(&document) {
+                log::warn!("failed to persist relay identity profile: {error:#}");
+            }
+        }
         match profile.version_tags {
             Some(versions) => log::info!("event=remote_version_tags source=hal tags={versions:?}"),
             None => log::warn!(
@@ -897,6 +913,92 @@ fn parse_version_tags(value: &Value) -> Result<kmr_ta::device::KeyMintVersionTag
     })
 }
 
+pub(crate) const REMOTE_PROFILE_PATH: &str = "/data/misc/keystore/ommega/data/remote-profile.json";
+
+fn persisted_identity_document(url: &str, device_id: &str, profile: &Value) -> Value {
+    let mut profile = profile.clone();
+    if let Some(object) = profile.as_object_mut() {
+        object.remove("app_identity");
+    }
+    json!({
+        "version": 1,
+        "route": { "url": url, "device_id": device_id },
+        "profile": profile,
+    })
+}
+
+fn persist_identity_profile(document: &Value) -> Result<()> {
+    let path = Path::new(REMOTE_PROFILE_PATH);
+    let contents = serde_json::to_vec(document)?;
+    let previous = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if previous.as_deref() == Some(contents.as_slice()) {
+        return Ok(());
+    }
+    kmr_common::runtime::fs::atomic_compare_replace_preserving_metadata(
+        path,
+        previous.as_deref(),
+        &contents,
+        0o600,
+        kmr_common::consts::KEYSTORE_UID,
+        kmr_common::consts::KEYSTORE_GID,
+    )
+    .context("persist relay identity profile")
+}
+
+fn load_persisted_identity_profile_from(
+    path: &Path,
+    url: &str,
+    device_id: &str,
+) -> Option<RemoteIdentityProfile> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::debug!(
+                "persisted relay identity profile unavailable at {}: {error}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let document = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(document) => document,
+        Err(error) => {
+            log::warn!("persisted relay identity profile is malformed: {error}");
+            return None;
+        }
+    };
+    if document.get("version").and_then(Value::as_u64) != Some(1) {
+        log::warn!("persisted relay identity profile has an unsupported version");
+        return None;
+    }
+    let route = document.get("route")?;
+    if route.get("url").and_then(Value::as_str) != Some(url)
+        || route.get("device_id").and_then(Value::as_str) != Some(device_id)
+    {
+        log::debug!("persisted relay identity profile is for another relay route");
+        return None;
+    }
+    let profile = document.get("profile")?;
+    match parse_identity_profile(profile) {
+        Ok(profile) => Some(profile),
+        Err(error) => {
+            log::warn!("persisted relay identity profile is invalid: {error:#}");
+            None
+        }
+    }
+}
+
+fn frozen_identity_changed(a: &RemoteIdentityProfile, b: &RemoteIdentityProfile) -> bool {
+    a.profile_version != b.profile_version
+        || a.keymint_name != b.keymint_name
+        || a.keymint_author != b.keymint_author
+        || a.max_operations != b.max_operations
+}
+
 fn parse_identity_profile(value: &Value) -> Result<RemoteIdentityProfile> {
     let field_i32 = |name: &str| -> Result<i32> {
         value
@@ -1012,10 +1114,108 @@ pub(crate) fn remote_identity_profile() -> Result<RemoteIdentityProfile> {
         *guard = Some(CachedIdentityProfile {
             route,
             profile: profile.clone(),
+            persisted: false,
         });
     }
     publish_spl_status();
     Ok(profile)
+}
+
+static PROFILE_REFRESH_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn start_identity_profile_refresher(epoch: u64, route: RemoteRoute) {
+    if PROFILE_REFRESH_ACTIVE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = thread::Builder::new()
+        .name("ommega-profile-refresh".to_string())
+        .spawn(move || {
+            let mut failures = 0_u32;
+            loop {
+                failures = failures.saturating_add(1);
+                thread::sleep(profile_retry_delay(failures));
+                if REMOTE_PROFILE_EPOCH.load(Ordering::Acquire) != epoch {
+                    break;
+                }
+                let persisted = {
+                    let Ok(guard) = REMOTE_IDENTITY_PROFILE.read() else { break };
+                    guard
+                        .as_ref()
+                        .filter(|entry| entry.route == route && entry.persisted)
+                        .map(|entry| entry.profile.clone())
+                };
+                let Some(persisted) = persisted else { break };
+                match RemoteRelay::fetch_identity_profile() {
+                    Ok(fresh) => {
+                        if frozen_identity_changed(&persisted, &fresh) {
+                            log::warn!(
+                                "relay identity profile changed while using the persisted profile; restarting keymint"
+                            );
+                            std::process::exit(0);
+                        }
+                        if REMOTE_PROFILE_EPOCH.load(Ordering::Acquire) == epoch {
+                            if let Ok(mut guard) = REMOTE_IDENTITY_PROFILE.write() {
+                                if guard
+                                    .as_ref()
+                                    .is_some_and(|entry| entry.route == route && entry.persisted)
+                                {
+                                    *guard = Some(CachedIdentityProfile {
+                                        route: route.clone(),
+                                        profile: fresh,
+                                        persisted: false,
+                                    });
+                                }
+                            }
+                            publish_spl_status();
+                        }
+                        break;
+                    }
+                    Err(error) => log::debug!("relay identity profile refresh failed: {error:#}"),
+                }
+            }
+            PROFILE_REFRESH_ACTIVE.store(false, Ordering::Release);
+        });
+    if let Err(error) = spawned {
+        PROFILE_REFRESH_ACTIVE.store(false, Ordering::Release);
+        log::warn!("failed to start relay identity profile refresher: {error}");
+    }
+}
+
+pub(crate) fn startup_identity_profile() -> Result<RemoteIdentityProfile> {
+    match remote_identity_profile() {
+        Ok(profile) => Ok(profile),
+        Err(error) => {
+            let epoch = REMOTE_PROFILE_EPOCH.load(Ordering::Acquire);
+            let route = RemoteRoute::current()?;
+            let Some(profile) = load_persisted_identity_profile_from(
+                Path::new(REMOTE_PROFILE_PATH),
+                &route.url,
+                &route.device_id,
+            ) else {
+                return Err(error);
+            };
+            log::warn!(
+                "using persisted relay identity profile because the relay is unavailable: {error:#}"
+            );
+            if REMOTE_PROFILE_EPOCH.load(Ordering::Acquire) != epoch
+                || RemoteRoute::current()? != route
+            {
+                return Err(error);
+            }
+            if let Ok(mut guard) = REMOTE_IDENTITY_PROFILE.write() {
+                if REMOTE_PROFILE_EPOCH.load(Ordering::Acquire) == epoch {
+                    *guard = Some(CachedIdentityProfile {
+                        route: route.clone(),
+                        profile: profile.clone(),
+                        persisted: true,
+                    });
+                }
+            }
+            start_identity_profile_refresher(epoch, route);
+            publish_spl_status();
+            Ok(profile)
+        }
+    }
 }
 
 /// Identity profile already cached for the current relay route. Never
@@ -1105,6 +1305,45 @@ pub fn remote_enabled() -> bool {
 mod tests {
     use super::*;
     use kmr_wire::keymint::SecurityLevel;
+
+    fn remote_config() -> config::RemoteConfig {
+        config::RemoteConfig {
+            enabled: true,
+            url: "https://relay.example".into(),
+            token: "token".into(),
+            device_id: "op11-b".into(),
+            tls_insecure: false,
+            tls_pin_sha256: String::new(),
+            fallback_local: false,
+            debug_logging: false,
+        }
+    }
+
+    #[test]
+    fn identity_route_changes_only_with_the_route_or_remote_switch() {
+        let base = remote_config();
+        assert!(!identity_route_changed(&base, &base.clone()));
+
+        let mut changed = base.clone();
+        changed.token = "corrected".into();
+        assert!(identity_route_changed(&base, &changed));
+
+        let mut changed = base.clone();
+        changed.url = "https://other.example".into();
+        assert!(identity_route_changed(&base, &changed));
+
+        let mut changed = base.clone();
+        changed.enabled = false;
+        assert!(identity_route_changed(&base, &changed));
+
+        let mut changed = base.clone();
+        changed.debug_logging = true;
+        assert!(!identity_route_changed(&base, &changed));
+
+        let mut changed = base.clone();
+        changed.fallback_local = true;
+        assert!(!identity_route_changed(&base, &changed));
+    }
 
     #[test]
     fn version_tags_preserve_full_dates_absence_and_zero_and_reject_invalid_values() {
@@ -1313,10 +1552,14 @@ mod tests {
             tls_insecure: false,
             tls_pin_sha256: String::new(),
         };
-        *REMOTE_IDENTITY_PROFILE.write().unwrap() = Some(CachedIdentityProfile { route, profile });
+        *REMOTE_IDENTITY_PROFILE.write().unwrap() = Some(CachedIdentityProfile {
+            route,
+            profile,
+            persisted: false,
+        });
         assert!(REMOTE_IDENTITY_PROFILE.read().unwrap().is_some());
-        // Saving the config has to actually drop this, otherwise a corrected
-        // token or server URL keeps serving the stale profile.
+        // A route-changing config save has to actually drop this, otherwise a
+        // corrected token or server URL keeps serving the stale profile.
         invalidate_identity_profile();
         assert!(REMOTE_IDENTITY_PROFILE.read().unwrap().is_none());
     }
@@ -1455,5 +1698,125 @@ mod tests {
         });
 
         assert!(reject_strongbox_demotion(&result, Some(SecurityLevel::Strongbox as i32)).is_err());
+    }
+
+    fn valid_profile_json() -> Value {
+        json!({
+            "interface_version": 2,
+            "interface_hash": "207c9f218b9b9e4e74ff5232eb16511eca9d7d2e",
+            "profile_version": 200,
+            "hardware_version": 400,
+            "security_level": 1,
+            "keymint_name": "QTI KeyMint",
+            "keymint_author": "Qualcomm",
+            "has_strongbox": false,
+        })
+    }
+
+    fn profile_test_dir(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ommega-remote-profile-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn persisted_identity_document_strips_app_identity_and_contains_only_route_identity() {
+        let mut profile = valid_profile_json();
+        profile["app_identity"] = json!({"secret":"not persisted"});
+        let document = persisted_identity_document("https://relay", "op11-b", &profile);
+        assert_eq!(document["version"], json!(1));
+        let route = document["route"].as_object().unwrap();
+        assert_eq!(route.len(), 2);
+        assert_eq!(route["url"], json!("https://relay"));
+        assert_eq!(route["device_id"], json!("op11-b"));
+        assert!(document["profile"].get("app_identity").is_none());
+        let bytes = serde_json::to_vec(&document).unwrap();
+        for forbidden in ["token", "tls_insecure", "tls_pin_sha256", "app_identity"] {
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(forbidden),
+                "persisted document must not contain {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_identity_profile_loader_accepts_matching_document_and_rejects_invalid_inputs() {
+        let root = profile_test_dir("load");
+        let path = root.join("remote-profile.json");
+        assert!(load_persisted_identity_profile_from(&path, "https://relay", "op11-b").is_none());
+
+        let document =
+            persisted_identity_document("https://relay", "op11-b", &valid_profile_json());
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        let loaded = load_persisted_identity_profile_from(&path, "https://relay", "op11-b")
+            .expect("matching persisted profile should load");
+        assert_eq!(loaded.keymint_name, "QTI KeyMint");
+
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(load_persisted_identity_profile_from(&path, "https://relay", "op11-b").is_none());
+
+        let mut wrong_version = document.clone();
+        wrong_version["version"] = json!(2);
+        std::fs::write(&path, serde_json::to_vec(&wrong_version).unwrap()).unwrap();
+        assert!(load_persisted_identity_profile_from(&path, "https://relay", "op11-b").is_none());
+
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(load_persisted_identity_profile_from(&path, "https://other", "op11-b").is_none());
+        assert!(
+            load_persisted_identity_profile_from(&path, "https://relay", "other-device").is_none()
+        );
+
+        let mut invalid_profile = valid_profile_json();
+        invalid_profile
+            .as_object_mut()
+            .unwrap()
+            .remove("keymint_name");
+        let invalid_document =
+            persisted_identity_document("https://relay", "op11-b", &invalid_profile);
+        std::fs::write(&path, serde_json::to_vec(&invalid_document).unwrap()).unwrap();
+        assert!(load_persisted_identity_profile_from(&path, "https://relay", "op11-b").is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn frozen_identity_changed_tracks_only_ta_frozen_fields() {
+        let base = parse_identity_profile(&valid_profile_json()).unwrap();
+        for mutate in [
+            (|profile: &mut RemoteIdentityProfile| profile.profile_version += 100)
+                as fn(&mut RemoteIdentityProfile),
+            (|profile| profile.keymint_name.push_str(" changed")) as fn(&mut RemoteIdentityProfile),
+            (|profile| profile.keymint_author.push_str(" changed"))
+                as fn(&mut RemoteIdentityProfile),
+            (|profile| profile.max_operations = Some(32)) as fn(&mut RemoteIdentityProfile),
+        ] {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert!(frozen_identity_changed(&base, &changed));
+        }
+
+        let mut changed = base.clone();
+        changed.version_tags = Some(kmr_ta::device::KeyMintVersionTags {
+            os_version: 170000,
+            os_patchlevel: 202609,
+            vendor_patchlevel: Some(20260901),
+            boot_patchlevel: Some(20260900),
+        });
+        assert!(!frozen_identity_changed(&base, &changed));
+        let mut changed = base.clone();
+        changed.version_revision = Some("2".into());
+        assert!(!frozen_identity_changed(&base, &changed));
+        let mut changed = base.clone();
+        changed.interface_hash = "0".repeat(40);
+        assert!(!frozen_identity_changed(&base, &changed));
+        let mut changed = base.clone();
+        changed.has_strongbox = !changed.has_strongbox;
+        assert!(!frozen_identity_changed(&base, &changed));
     }
 }

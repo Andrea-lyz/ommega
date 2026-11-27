@@ -8,7 +8,7 @@ use std::{ffi::CString, os::unix::fs::PermissionsExt, path::Path};
 use kmr_common::consts::{AID_INET, KEYSTORE_GID, KEYSTORE_UID};
 use kmr_common::rpc;
 use kmr_common::selinux::{clear_sockcreate_con, set_sockcreate_con};
-use log::{debug, error, info, warn, LevelFilter};
+use log::{debug, error, info, warn};
 use rsbinder::rpc::{PeerIdentity, RpcServer};
 
 use crate::{
@@ -271,35 +271,51 @@ fn is_root_of_trust_mismatch(error: &anyhow::Error) -> bool {
     )
 }
 
-/// Remove the persistent keystore database (and the secure-deletion data file)
-/// so that a fresh one is built against the new root of trust on restart.
-/// The SDD file is re-created on demand, so dropping it is harmless.
-fn clear_ommega_keymaster_db() -> Result<()> {
-    let db_root = crate::global::db_root_path();
-    for name in [
-        "keymaster.db",
-        "keymaster.db-wal",
-        "keymaster.db-shm",
-        "keymint.dat",
-    ] {
-        let path = db_root.join(name);
+const KEYMASTER_DB_FILES: [&str; 4] = [
+    "keymaster.db",
+    "keymaster.db-wal",
+    "keymaster.db-shm",
+    "keymint.dat",
+];
+
+fn archive_keymaster_db_in(db_root: &Path) -> Result<()> {
+    let backup = db_root.join("rot-backup");
+    for name in KEYMASTER_DB_FILES {
+        let path = backup.join(name);
         match std::fs::remove_file(&path) {
-            Ok(()) => info!("removed {path:?} after root-of-trust change"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => warn!("failed to remove {path:?}: {e}"),
+            Ok(()) => info!("replaced previous root-of-trust backup {path:?}"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to remove previous backup file"),
+        }
+    }
+    std::fs::create_dir_all(&backup).context("failed to create root-of-trust backup directory")?;
+    std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o700))
+        .context("failed to protect root-of-trust backup directory")?;
+    for name in KEYMASTER_DB_FILES {
+        let source = db_root.join(name);
+        let target = backup.join(name);
+        match std::fs::rename(&source, &target) {
+            Ok(()) => info!("archived {source:?} to {target:?} after root-of-trust change"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("failed to archive root-of-trust database file")
+            }
         }
     }
     Ok(())
 }
 
+/// Archive the persistent keystore database (and the secure-deletion data file)
+/// under `data/rot-backup/` so that a fresh one is built against the new root
+/// of trust on restart. The SDD file is re-created on demand, and only the
+/// latest backup is kept.
+fn archive_ommega_keymaster_db() -> Result<()> {
+    archive_keymaster_db_in(crate::global::db_root_path())
+}
+
 fn run() -> Result<()> {
     let config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
-    let level = config_file
-        .main
-        .log_level
-        .trim()
-        .parse()
-        .unwrap_or(LevelFilter::Debug);
+    let level = config_file.main.log_level_filter();
     log::set_max_level(level);
 
     info!("starting ommega");
@@ -331,15 +347,16 @@ fn run() -> Result<()> {
         // Changing ro.boot.vbmeta.digest / ro.boot.vbmeta.public_key_digest (the
         // WebUI boot-hash / boot-key settings) changes the device root of trust,
         // which makes every keyblob in keymaster.db undecryptable.  The old keys
-        // are unusable no matter what, so drop the database and exit cleanly:
-        // the daemon watchdog restarts us and a fresh DB is built against the
-        // new ROT.  Any other error is a real startup failure.
+        // are unusable no matter what under the new root of trust, so archive
+        // the database in data/rot-backup and exit cleanly: the daemon watchdog
+        // restarts us and a fresh DB is built against the new ROT. Any other
+        // error is a real startup failure.
         if is_root_of_trust_mismatch(&error) {
             warn!(
-                "boot root-of-trust changed; clearing ommega keymaster.db and restarting to rebuild: {error:#}"
+                "boot root-of-trust changed; archiving ommega keymaster.db and restarting to rebuild: {error:#}"
             );
-            if let Err(cleanup_error) = clear_ommega_keymaster_db() {
-                error!("failed to clear ommega keymaster.db after ROT change: {cleanup_error:#}");
+            if let Err(cleanup_error) = archive_ommega_keymaster_db() {
+                error!("failed to archive ommega keymaster.db after ROT change: {cleanup_error:#}");
                 return Err(error);
             }
             std::process::exit(0);
@@ -425,10 +442,71 @@ fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::keystore_supplementary_groups;
+    use super::{archive_keymaster_db_in, keystore_supplementary_groups, KEYMASTER_DB_FILES};
+
+    fn test_db_root(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ommega-rot-archive-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn keystore_supplementary_groups_include_only_inet() {
         assert_eq!(keystore_supplementary_groups(), [3003]);
+    }
+
+    #[test]
+    fn archive_keymaster_db_moves_files_and_replaces_previous_backup() {
+        let root = test_db_root("replace");
+        for name in KEYMASTER_DB_FILES {
+            std::fs::write(root.join(name), format!("first-{name}")).unwrap();
+        }
+
+        archive_keymaster_db_in(&root).unwrap();
+        for name in KEYMASTER_DB_FILES {
+            assert!(!root.join(name).exists());
+            assert_eq!(
+                std::fs::read_to_string(root.join("rot-backup").join(name)).unwrap(),
+                format!("first-{name}")
+            );
+        }
+
+        std::fs::write(root.join("keymaster.db"), "second-db").unwrap();
+        std::fs::write(root.join("keymint.dat"), "second-dat").unwrap();
+        archive_keymaster_db_in(&root).unwrap();
+
+        let backup = root.join("rot-backup");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("keymaster.db")).unwrap(),
+            "second-db"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("keymint.dat")).unwrap(),
+            "second-dat"
+        );
+        assert!(!backup.join("keymaster.db-wal").exists());
+        assert!(!backup.join("keymaster.db-shm").exists());
+        assert!(!root.join("keymaster.db").exists());
+        assert!(!root.join("keymint.dat").exists());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn archive_keymaster_db_tolerates_missing_files() {
+        let root = test_db_root("missing");
+        archive_keymaster_db_in(&root).unwrap();
+        assert!(root.join("rot-backup").is_dir());
+        for name in KEYMASTER_DB_FILES {
+            assert!(!root.join("rot-backup").join(name).exists());
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

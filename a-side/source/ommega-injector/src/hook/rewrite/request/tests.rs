@@ -354,7 +354,7 @@ fn ommega_grant_blocker_preserves_inbound_binder_buffer() {
 }
 
 #[test]
-fn grant_and_ungrant_preserve_system_only_when_ommega_unavailable() {
+fn grant_and_ungrant_return_system_error_when_ommega_unavailable() {
     let _guard = route_state_test_guard();
     let request = ParsedServiceRequest::Grant {
         key: sample_key_descriptor(),
@@ -374,7 +374,10 @@ fn grant_and_ungrant_preserve_system_only_when_ommega_unavailable() {
         |_, _, _| panic!("grant requests must not call ungrant"),
     );
 
-    assert!(matches!(result, OmmegaServicePrecompute::PreserveSystem));
+    assert!(matches!(
+        result,
+        OmmegaServicePrecompute::Reply(PrecomputedServiceReply::Error(_))
+    ));
 
     let request = ParsedServiceRequest::Ungrant {
         key: sample_key_descriptor(),
@@ -393,7 +396,10 @@ fn grant_and_ungrant_preserve_system_only_when_ommega_unavailable() {
         |_, _, _| Err(anyhow::Error::new(Status::from(StatusCode::NotEnoughData))),
     );
 
-    assert!(matches!(result, OmmegaServicePrecompute::PreserveSystem));
+    assert!(matches!(
+        result,
+        OmmegaServicePrecompute::Reply(PrecomputedServiceReply::Error(_))
+    ));
 }
 
 #[test]
@@ -685,4 +691,44 @@ fn denylisted_grant_readback_does_not_probe_ommega() {
         },
     )
     .expect("denylisted grant lookup should succeed"));
+}
+
+#[test]
+fn poisoned_authorization_mirror_preserves_system_lock_request() {
+    let _guard = route_state_test_guard();
+    poison_mirror_lane(MirrorStateKind::Authorization);
+
+    let mut request = request_parcel(identify::KEYSTORE_AUTHORIZATION_INTERFACE);
+    let legacy_layout = matches!(
+        kmr_common::android_version::android_major_version(),
+        Some(version) if version <= 14
+    );
+    let code = if legacy_layout {
+        request.write(&1i32).unwrap();
+        request.write(&0i32).unwrap();
+        request.write(&None::<Vec<u8>>).unwrap();
+        request.write(&Some(Vec::<i64>::new())).unwrap();
+        rsbinder::FIRST_CALL_TRANSACTION + 1
+    } else {
+        request.write(&0i32).unwrap();
+        request.write(&Vec::<i64>::new()).unwrap();
+        request.write(&false).unwrap();
+        rsbinder::FIRST_CALL_TRANSACTION + 2
+    };
+    let target = LocalBinderTarget {
+        ptr: 0x3120,
+        cookie: 0x4210,
+    };
+    let mut tr = transaction_for_parcel(target, code, &request);
+    let original_code = tr.code;
+    let fd = 53;
+
+    let rewritten = unsafe { handle_br_transaction(fd, &mut tr, None, "BR_TRANSACTION") };
+
+    assert!(!rewritten);
+    assert_eq!(tr.code, original_code);
+    let Some(Some(PendingCall::Authorization(pending))) = take_top_pending(fd) else {
+        panic!("authorization request should keep a normal pending reply");
+    };
+    assert!(pending.mirror_update.is_none());
 }

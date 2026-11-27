@@ -90,47 +90,24 @@ pub(super) fn precomputed_ommega_error_reply(error: &anyhow::Error) -> Status {
     Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None)
 }
 
-fn build_ommega_error_reply_or_preserve_system(
-    error: &anyhow::Error,
-) -> anyhow::Result<Option<OutboundReply>> {
-    if ommega_unavailable_error(error) {
-        Ok(None)
-    } else {
-        build_ommega_error_reply(error).map(Some)
-    }
-}
-
-fn build_ommega_status_reply_or_preserve_system(
-    status: &Status,
-) -> anyhow::Result<Option<OutboundReply>> {
-    if ommega_unavailable_status(status) {
-        Ok(None)
-    } else {
-        build_ommega_status_reply(status).map(Some)
-    }
-}
-
 fn ommega_error_reply_for_method(
     method: &str,
     caller: &CallerInfo,
     error: &anyhow::Error,
 ) -> anyhow::Result<Option<OutboundReply>> {
-    match build_ommega_error_reply_or_preserve_system(error)? {
-        Some(reply) => {
-            warn!(
-                "event=reply ommega {} failed for uid={} pid={}: {:#}; returning ommega error",
-                method, caller.uid, caller.pid, error
-            );
-            Ok(Some(reply))
-        }
-        None => {
-            warn!(
-                "event=reply ommega {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
-                method, caller.uid, caller.pid, error
-            );
-            Ok(None)
-        }
+    if ommega_unavailable_error(error) {
+        warn!(
+            "event=reply ommega {} unavailable for uid={} pid={}: {:#}; returning SYSTEM_ERROR",
+            method, caller.uid, caller.pid, error
+        );
+        return Ok(Some(synthetic_fallback_reply()));
     }
+    let reply = build_ommega_error_reply(error)?;
+    warn!(
+        "event=reply ommega {} failed for uid={} pid={}: {:#}; returning ommega error",
+        method, caller.uid, caller.pid, error
+    );
+    Ok(Some(reply))
 }
 
 fn ommega_status_reply_for_method(
@@ -138,22 +115,19 @@ fn ommega_status_reply_for_method(
     caller: &CallerInfo,
     status: &Status,
 ) -> anyhow::Result<Option<OutboundReply>> {
-    match build_ommega_status_reply_or_preserve_system(status)? {
-        Some(reply) => {
-            warn!(
-                "event=reply ommega {} failed for uid={} pid={}: {:#}; returning ommega error",
-                method, caller.uid, caller.pid, status
-            );
-            Ok(Some(reply))
-        }
-        None => {
-            warn!(
-                "event=reply ommega {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
-                method, caller.uid, caller.pid, status
-            );
-            Ok(None)
-        }
+    if ommega_unavailable_status(status) {
+        warn!(
+            "event=reply ommega {} unavailable for uid={} pid={}: {}; returning SYSTEM_ERROR",
+            method, caller.uid, caller.pid, status
+        );
+        return Ok(Some(synthetic_fallback_reply()));
     }
+    let reply = build_ommega_status_reply(status)?;
+    warn!(
+        "event=reply ommega {} failed for uid={} pid={}: {}; returning ommega error",
+        method, caller.uid, caller.pid, status
+    );
+    Ok(Some(reply))
 }
 
 pub(super) fn build_service_specific_reply(code: i32) -> anyhow::Result<parcel::OwnedReply> {

@@ -1,12 +1,11 @@
 
 // ── Ommega diagnostics: level-2 overview and level-3 feature pages ──────────
 // Applied by scripts/webui-patch.py. All probes are read-only; the only write
-// is the debug-logging master switch, which rewrites the A-side config and
-// asks the KeyMint daemon to reload.
+// is the debug-logging master switch, which rewrites the A-side config. KeyMint
+// applies the level through its config watcher and nothing is restarted.
 const OMMEGA_DIAG_FLAT = "/data/adb/ommega/ommegadata/config";
 const OMMEGA_DIAG_TOML = "/data/adb/ommega/ommegadata/config.toml";
 const OMMEGA_DIAG_SPL_FILE = "/data/misc/keystore/ommega/data/spl-status.json";
-const OMMEGA_DIAG_RESTART = "/data/adb/ommega/restart.keymint";
 const OMMEGA_DIAG_PROBE_PKG = "aprobes.agap";
 const OMMEGA_DIAG_PROBE_FILE = "/storage/emulated/0/Android/data/aprobes.agap/files/a-gap-probe.txt";
 let ommegaDiagUnlocked = false, ommegaDiagBusy = false, ommegaDiagMaster = false;
@@ -377,7 +376,6 @@ async function ommegaDiagSetMaster(on) {
     await ommegaDiagWrite(OMMEGA_DIAG_FLAT, ommegaDiagSetFlat(flat, on));
     await _("mkdir -p /data/adb/ommega/soterta; " +
       (on ? "touch " + OMMEGA_DIAG_SOTER_DEBUG : "rm -f " + OMMEGA_DIAG_SOTER_DEBUG + " /data/adb/ommega/soterta/soterta.debug"));
-    await _("touch /data/adb/ommega/restart.all");
     ommegaDiagUnlocked = false;
     ommegaDiagStoreUnlock(false);
   } finally {
@@ -387,8 +385,8 @@ async function ommegaDiagSetMaster(on) {
 }
 
 
-// Clear every module log and let KeyMint reopen fresh files. The daemon watches
-// restart.keymint, so no service is killed directly from the UI.
+// Clear every module log. The services recreate their log files on the next
+// write, so nothing is restarted.
 async function ommegaDiagClearLogs() {
   const note = document.getElementById("om-diag-clear-note");
   const show = text => { if (note) note.textContent = text; };
@@ -405,7 +403,6 @@ async function ommegaDiagClearLogs() {
     '  s=$(stat -c %s /data/adb/ommega/soterta/soterta.err 2>/dev/null || echo 0)',
     '  bytes=$((bytes+s)); count=$((count+1)); rm -f /data/adb/ommega/soterta/soterta.err',
     'fi',
-    'touch /data/adb/ommega/restart.all',
     'echo "count=$count bytes=$bytes"'].join("\n");
   try {
     const response = await _ (command);
@@ -415,8 +412,8 @@ async function ommegaDiagClearLogs() {
     const size = Number(match[2]) >= 1048576
       ? (Number(match[2]) / 1048576).toFixed(1) + " MB"
       : Math.round(Number(match[2]) / 1024) + " KB";
-    show(ommegaDiagT("已清除 " + match[1] + " 个日志文件（" + size + "），KeyMint 正在重开新文件。",
-      "Cleared " + match[1] + " log files (" + size + "); KeyMint is reopening fresh files."));
+    show(ommegaDiagT("已清除 " + match[1] + " 个日志文件（" + size + "），服务会在下一条日志时自动新建文件。",
+      "Cleared " + match[1] + " log files (" + size + "); the services recreate them on their next log line."));
   } catch (error) {
     show(ommegaDiagT("清除失败：", "Clear failed: ") + String(error).slice(0, 120));
   }
@@ -451,10 +448,9 @@ function ommegaDiagInit() {
       const note = document.getElementById("om-diag-rotation-note");
       const megabytes = Number(rotation.value) || 4;
       await ommegaDiagWrite(OMMEGA_DIAG_ROTATION, "max_size_mb=" + megabytes + "\n");
-      await _("touch /data/adb/ommega/restart.all");
       if (note) note.textContent = ommegaDiagT(
-        "已设为 " + megabytes + " MB，服务正在重载以生效。",
-        "Set to " + megabytes + " MB; services are reloading to apply it.");
+        "已设为 " + megabytes + " MB，下次模块服务启动（例如重启设备）后生效。",
+        "Set to " + megabytes + " MB; it applies the next time the module services start (for example after a reboot).");
     };
   }
   const unlock = document.getElementById("om-diag-unlock");

@@ -9,8 +9,9 @@
 //! A mark packs the daemon's per-boot tag in the high [`BOOT_TAG_SHIFT`] bits and
 //! the counter in the low 32, so two marks are only comparable inside one boot:
 //! a counter that restarted with the device must never look like evidence. The
-//! daemon keeps the packed value non-negative on purpose — a negative answer is
-//! this module's "cannot tell" — so the tag has to fit in 31 bits.
+//! daemon keeps the packed value non-negative on purpose — -1 means the counter
+//! has never been readable and -2 means it was readable earlier but is not now —
+//! so the tag has to fit in 31 bits.
 
 use std::sync::Mutex;
 
@@ -24,9 +25,11 @@ pub struct Platform {
     pub boot_ms: Option<u64>,
     /// Fingerprint mark: accepted captures since boot, tagged with the boot.
     pub bio_mark: Option<u64>,
+    /// The platform exposed the counter before but cannot be read now.
+    pub bio_unreadable: bool,
 }
 
-/// A daemon hook. A negative answer means "cannot tell".
+/// A daemon hook. -1 means never readable; -2 means readable earlier but not now.
 pub type Probe = unsafe extern "C" fn() -> i64;
 
 #[derive(Clone, Copy)]
@@ -49,19 +52,29 @@ pub fn install(boot_ms: Option<Probe>, bio_mark: Option<Probe>) {
 /// Ask the hooks for the current values.
 pub fn current() -> Platform {
     let hooks = *HOOKS.lock().unwrap_or_else(|error| error.into_inner());
+    let bio = ask_with_status(hooks.bio_mark);
     Platform {
         boot_ms: ask(hooks.boot_ms),
-        bio_mark: ask(hooks.bio_mark),
+        bio_mark: bio.0,
+        bio_unreadable: bio.1,
     }
 }
 
 fn ask(hook: Option<Probe>) -> Option<u64> {
-    let hook = hook?;
+    ask_with_status(hook).0
+}
+
+fn ask_with_status(hook: Option<Probe>) -> (Option<u64>, bool) {
+    let Some(hook) = hook else {
+        return (None, false);
+    };
     let value = unsafe { hook() };
-    if value < 0 {
-        None
+    if value == -2 {
+        (None, true)
+    } else if value < 0 {
+        (None, false)
     } else {
-        Some(value as u64)
+        (Some(value as u64), false)
     }
 }
 

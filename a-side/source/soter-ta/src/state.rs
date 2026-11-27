@@ -689,21 +689,23 @@ impl TaState {
 
     /// Whether the platform shows a fingerprint match this session may spend.
     ///
-    /// Evidence has to be *verifiable* to count: both hooks installed, both
-    /// marks taken in this boot, the session still inside [`BIO_WINDOW_MS`], the
-    /// mark moved past the one the session opened with, and no earlier
-    /// signature having spent it. Missing hooks answer `true` — the software TA
-    /// must not stop signing because a platform dump changed shape, and the
-    /// daemon logs the hook it could not use — while evidence that is merely
-    /// absent answers `false`, the `-26` a stock TA gives without a match.
+    /// A counter that was readable earlier but cannot be read now denies the
+    /// signature. When the platform has never exposed the counter both marks
+    /// are absent and the gate is off. Evidence present on only one side also
+    /// denies; otherwise both marks have to be taken in this boot, the session
+    /// must be inside [`BIO_WINDOW_MS`], the mark must move past the one the
+    /// session opened with, and no earlier signature may have spent it.
     fn biometric_ok(&mut self, entry: &Session, platform: Platform) -> bool {
-        let (Some(opened), Some(before), Some(now), Some(after)) = (
-            entry.opened_ms,
-            entry.bio_mark,
-            platform.boot_ms,
-            platform.bio_mark,
-        ) else {
-            return true;
+        if platform.bio_unreadable {
+            return false;
+        }
+        let (before, after) = match (entry.bio_mark, platform.bio_mark) {
+            (None, None) => return true,
+            (Some(before), Some(after)) => (before, after),
+            _ => return false,
+        };
+        let (Some(opened), Some(now)) = (entry.opened_ms, platform.boot_ms) else {
+            return false;
         };
         if !same_boot(before, after) || now < opened || now - opened > BIO_WINDOW_MS {
             return false;

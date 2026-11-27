@@ -1,3 +1,6 @@
+use super::lock_state::{
+    replay_requests, retain_authorization, retain_maintenance, RETAINED_LOCK_STATE,
+};
 use super::*;
 
 static MIRROR_RECOVERY_STATE: LazyLock<Mutex<MirrorRecoveryState>> =
@@ -6,6 +9,7 @@ static MIRROR_RECOVERY_WORKER: OnceLock<Result<std::sync::mpsc::SyncSender<()>, 
     OnceLock::new();
 
 const MAX_PENDING_MIRROR_REPLAYS: usize = 64;
+const MAX_PENDING_FAIL_CLOSED_MIRROR_REPLAYS: usize = 1024;
 const MIRROR_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// How long an ommega-routed call waits for in-flight mirror work before it
 /// falls back to the fail-closed refusal.
@@ -43,6 +47,7 @@ enum MirrorReplayEvent {
         request: ParsedMaintenanceRequest,
         caller: CallerInfo,
     },
+    LockStateRestore,
 }
 
 #[derive(Clone)]
@@ -142,7 +147,7 @@ impl MirrorStateKind {
 impl MirrorReplayEvent {
     fn kind(&self) -> MirrorStateKind {
         match self {
-            Self::Authorization { .. } => MirrorStateKind::Authorization,
+            Self::Authorization { .. } | Self::LockStateRestore => MirrorStateKind::Authorization,
             Self::Maintenance { .. } => MirrorStateKind::Maintenance,
         }
     }
@@ -151,12 +156,14 @@ impl MirrorReplayEvent {
         match self {
             Self::Authorization { request, .. } => format!("{:?}", request.method()),
             Self::Maintenance { request, .. } => format!("{:?}", request.method()),
+            Self::LockStateRestore => "LockStateRestore".to_string(),
         }
     }
 
-    fn caller(&self) -> &CallerInfo {
+    fn caller(&self) -> Option<&CallerInfo> {
         match self {
-            Self::Authorization { caller, .. } | Self::Maintenance { caller, .. } => caller,
+            Self::Authorization { caller, .. } | Self::Maintenance { caller, .. } => Some(caller),
+            Self::LockStateRestore => None,
         }
     }
 
@@ -164,6 +171,7 @@ impl MirrorReplayEvent {
         match self {
             Self::Authorization { request, .. } => authorization_mirror_failure_policy(request),
             Self::Maintenance { .. } => MirrorFailurePolicy::FailClosed,
+            Self::LockStateRestore => MirrorFailurePolicy::BestEffort,
         }
     }
 
@@ -173,7 +181,56 @@ impl MirrorReplayEvent {
                 execute_authorization_mirror(request, caller)
             }
             Self::Maintenance { request, caller } => execute_maintenance_mirror(request, caller),
+            Self::LockStateRestore => execute_lock_state_restore(),
         }
+    }
+}
+
+fn execute_lock_state_restore() -> anyhow::Result<()> {
+    let replay = {
+        let state = RETAINED_LOCK_STATE
+            .lock()
+            .expect("retained lock state poisoned");
+        replay_requests(&state)
+    };
+    for (caller, request) in replay {
+        execute_authorization_mirror(&request, &caller)?;
+    }
+    Ok(())
+}
+
+fn queue_lock_state_restore() {
+    let empty = RETAINED_LOCK_STATE
+        .lock()
+        .expect("retained lock state poisoned")
+        .is_empty();
+    if empty {
+        return;
+    }
+    {
+        let state = MIRROR_RECOVERY_STATE
+            .lock()
+            .expect("mirror recovery state poisoned");
+        let lane = state.lane(MirrorStateKind::Authorization);
+        if lane
+            .pending
+            .iter()
+            .skip(usize::from(lane.draining))
+            .any(|pending| matches!(pending.event, Some(MirrorReplayEvent::LockStateRestore)))
+        {
+            return;
+        }
+    }
+    match reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::BestEffort,
+    ) {
+        Ok(reservation) => {
+            if let Err(error) = reservation.enqueue(MirrorReplayEvent::LockStateRestore) {
+                warn!("failed to queue keymint lock-state restore: {error:#}");
+            }
+        }
+        Err(error) => warn!("keymint lock-state restore reservation refused: {error:#}"),
     }
 }
 
@@ -222,12 +279,22 @@ fn poison_mirror_state(state: &mut MirrorRecoveryState, kind: MirrorStateKind) {
     lane.draining = false;
 }
 
+pub(super) fn poison_mirror_lane(kind: MirrorStateKind) {
+    let mut state = MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned");
+    poison_mirror_state(&mut state, kind);
+    drop(state);
+    wake_mirror_recovery_worker();
+}
+
 #[cfg(test)]
 pub(super) fn reset_mirror_state_for_tests() {
     let mut state = MIRROR_RECOVERY_STATE
         .lock()
         .expect("mirror recovery state poisoned");
     *state = MirrorRecoveryState::default();
+    super::lock_state::reset_retained_lock_state_for_tests();
 }
 
 fn remove_reserved_mirror_update(
@@ -251,11 +318,15 @@ pub(super) fn reserve_mirror_update(
     if state.authorization.poisoned || state.maintenance.poisoned {
         anyhow::bail!("ommega mirror recovery is poisoned by a non-retryable failure");
     }
-    if state.lane(kind).pending.len() >= MAX_PENDING_MIRROR_REPLAYS {
+    let limit = match failure_policy {
+        MirrorFailurePolicy::BestEffort => MAX_PENDING_MIRROR_REPLAYS,
+        MirrorFailurePolicy::FailClosed => MAX_PENDING_FAIL_CLOSED_MIRROR_REPLAYS,
+    };
+    if state.lane(kind).pending.len() >= limit {
         anyhow::bail!(
             "{} mirror recovery queue reached {} events",
             kind.label(),
-            MAX_PENDING_MIRROR_REPLAYS
+            limit
         );
     }
 
@@ -283,8 +354,8 @@ impl MirrorUpdateReservation {
         debug_assert_eq!(event.kind(), self.kind);
         debug_assert_eq!(event.failure_policy(), self.failure_policy);
         let method = event.method();
-        let caller_uid = event.caller().uid;
-        let caller_pid = event.caller().pid;
+        let caller_uid = event.caller().map_or(-1, |caller| caller.uid);
+        let caller_pid = event.caller().map_or(-1, |caller| caller.pid);
         let mut state = MIRROR_RECOVERY_STATE
             .lock()
             .expect("mirror recovery state poisoned");
@@ -382,9 +453,9 @@ pub(super) fn ensure_mirror_state_recovered() -> anyhow::Result<()> {
 
 /// Block until no mirror replay is in flight or queued, up to `wait_limit`.
 ///
-/// `poisoned` lanes keep the previous fail-closed behaviour: a FailClosed event
-/// lost its System reply, so no retry can be trusted until the process
-/// restarts. `draining` and pending lanes are transient, so the caller wakes the
+/// `poisoned` lanes keep the fail-closed behaviour: the mirror can no longer be
+/// ordered or confirmed, so no retry can be trusted until the process restarts.
+/// `draining` and pending lanes are transient, so the caller wakes the
 /// recovery worker and waits for it instead of refusing the call outright. The
 /// previous `busy`/`pending` errors are still returned once `wait_limit`
 /// expires, so a stuck worker degrades to the old behaviour instead of blocking
@@ -566,6 +637,7 @@ fn wake_mirror_recovery_worker() {
 }
 
 pub(in crate::hook) fn start_mirror_recovery_worker() -> Result<(), String> {
+    crate::ipc::set_rpc_session_listener(queue_lock_state_restore);
     let worker = MIRROR_RECOVERY_WORKER.get_or_init(|| {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -640,12 +712,22 @@ pub(super) unsafe fn build_authorization_reply_mirror(
                 "event=mirror domain=authorization no queue reservation for best-effort {:?} uid={} pid={}; preserving System success without an ommega mirror",
                 method, call.caller.uid, call.caller.pid
             );
-            return Ok(None);
+        } else {
+            debug!(
+                "event=mirror domain=authorization no queue reservation for {:?} uid={} pid={}; reservation was refused at request time and the lane is already fail-closed; preserving System success",
+                method, call.caller.uid, call.caller.pid
+            );
         }
-        anyhow::bail!("authorization mirror reservation is missing");
+        return Ok(None);
     };
     match reservation.enqueue(event) {
-        Ok(()) => Ok(None),
+        Ok(()) => {
+            let mut state = RETAINED_LOCK_STATE
+                .lock()
+                .expect("retained lock state poisoned");
+            retain_authorization(&mut state, &call.request, &call.caller);
+            Ok(None)
+        }
         Err(error) if failure_policy == MirrorFailurePolicy::BestEffort => {
             warn!(
                 "event=mirror domain=authorization failed to queue best-effort {:?} for ommega for uid={} pid={}: {:#}; preserving System success",
@@ -654,11 +736,12 @@ pub(super) unsafe fn build_authorization_reply_mirror(
             Ok(None)
         }
         Err(error) => {
+            poison_mirror_lane(MirrorStateKind::Authorization);
             warn!(
-                "event=mirror domain=authorization failed to queue {:?} for ommega for uid={} pid={}: {:#}",
+                "event=mirror domain=authorization failed to queue {:?} for ommega for uid={} pid={}: {:#}; preserving System success while ommega routes fail closed",
                 method, call.caller.uid, call.caller.pid, error
             );
-            Ok(Some(synthetic_fallback_reply()))
+            Ok(None)
         }
     }
 }
@@ -739,18 +822,28 @@ pub(super) unsafe fn build_maintenance_reply_mirror(
         request: call.request.clone(),
         caller: call.caller.clone(),
     };
-    let reservation = call
-        .mirror_update
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("maintenance mirror reservation is missing"))?;
+    let Some(reservation) = call.mirror_update.take() else {
+        debug!(
+            "event=mirror domain=maintenance no queue reservation for {:?} uid={} pid={}; reservation was refused at request time and the lane is already fail-closed; preserving System success",
+            method, call.caller.uid, call.caller.pid
+        );
+        return Ok(None);
+    };
     match reservation.enqueue(event) {
-        Ok(()) => Ok(None),
+        Ok(()) => {
+            let mut state = RETAINED_LOCK_STATE
+                .lock()
+                .expect("retained lock state poisoned");
+            retain_maintenance(&mut state, &call.request, &call.caller);
+            Ok(None)
+        }
         Err(error) => {
+            poison_mirror_lane(MirrorStateKind::Maintenance);
             warn!(
-                "event=mirror domain=maintenance failed to queue {:?} for ommega for uid={} pid={}: {:#}",
+                "event=mirror domain=maintenance failed to queue {:?} for ommega for uid={} pid={}: {:#}; preserving System success while ommega routes fail closed",
                 method, call.caller.uid, call.caller.pid, error
             );
-            Ok(Some(synthetic_fallback_reply()))
+            Ok(None)
         }
     }
 }

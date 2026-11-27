@@ -1,6 +1,16 @@
 use super::*;
 use crate::hook::rewrite::tests::{raw_parts, route_state_test_guard};
 
+fn success_reply_transaction(reply: &mut parcel::OwnedReply) -> binder_transaction_data {
+    let (data, data_size, offsets, offsets_size) = raw_parts(reply);
+    let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+    tr.data.ptr.buffer = data as libc::c_ulong;
+    tr.data.ptr.offsets = offsets as libc::c_ulong;
+    tr.data_size = data_size;
+    tr.offsets_size = offsets_size;
+    tr
+}
+
 #[test]
 fn mirror_recovery_retries_sensitive_events_in_global_sequence() {
     let _guard = route_state_test_guard();
@@ -194,7 +204,7 @@ fn full_mirror_queue_rejects_only_the_new_fail_closed_mutation() {
         sid: String::new(),
         pid: 2000,
     };
-    for _ in 0..MAX_PENDING_MIRROR_REPLAYS {
+    for _ in 0..MAX_PENDING_FAIL_CLOSED_MIRROR_REPLAYS {
         reserve_mirror_update(
             MirrorStateKind::Authorization,
             MirrorFailurePolicy::FailClosed,
@@ -227,7 +237,7 @@ fn full_mirror_queue_rejects_only_the_new_fail_closed_mutation() {
         Ok(())
     })
     .expect("the existing queue should remain recoverable");
-    assert_eq!(replayed, MAX_PENDING_MIRROR_REPLAYS);
+    assert_eq!(replayed, MAX_PENDING_FAIL_CLOSED_MIRROR_REPLAYS);
     assert!(ensure_mirror_state_recovered().is_ok());
 }
 
@@ -551,4 +561,331 @@ fn mirror_gate_refuses_a_poisoned_lane_without_waiting() {
         .expect_err("poisoned mirror state must stay fail-closed");
     assert!(format!("{error:#}").contains("poisoned"), "{error:#}");
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn full_best_effort_queue_still_admits_fail_closed_events() {
+    let _guard = route_state_test_guard();
+    let caller = CallerInfo {
+        uid: 1000,
+        sid: String::new(),
+        pid: 2000,
+    };
+    for _ in 0..MAX_PENDING_MIRROR_REPLAYS {
+        reserve_mirror_update(
+            MirrorStateKind::Authorization,
+            MirrorFailurePolicy::BestEffort,
+        )
+        .expect("best-effort update should reserve")
+        .enqueue(MirrorReplayEvent::Authorization {
+            request: ParsedAuthorizationRequest::AddAuthToken {
+                auth_token: Default::default(),
+            },
+            caller: caller.clone(),
+        })
+        .expect("best-effort update should queue");
+    }
+
+    assert!(reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::BestEffort,
+    )
+    .is_err());
+    reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::FailClosed,
+    )
+    .expect("fail-closed update should use the larger admission limit")
+    .enqueue(MirrorReplayEvent::Authorization {
+        request: ParsedAuthorizationRequest::OnUserStorageLocked { user_id: 10 },
+        caller,
+    })
+    .expect("fail-closed update should queue");
+
+    let mut replayed = 0;
+    recover_mirror_state_with(&mut |_| {
+        replayed += 1;
+        Ok(())
+    })
+    .expect("queued events should remain recoverable");
+    assert_eq!(replayed, MAX_PENDING_MIRROR_REPLAYS + 1);
+    assert!(ensure_mirror_state_recovered().is_ok());
+}
+
+#[test]
+fn poison_mirror_lane_marks_only_the_selected_lane() {
+    let _guard = route_state_test_guard();
+    poison_mirror_lane(MirrorStateKind::Authorization);
+
+    let state = MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned");
+    assert!(state.authorization.poisoned);
+    assert!(!state.maintenance.poisoned);
+    drop(state);
+
+    let error = ensure_mirror_state_recovered().expect_err("poisoned lane must fail closed");
+    assert!(format!("{error:#}").contains("poisoned"), "{error:#}");
+}
+
+#[test]
+fn missing_fail_closed_authorization_reservation_preserves_system_success() {
+    let _guard = route_state_test_guard();
+    let mut reply = parcel::build_status_reply(&Status::from(StatusCode::Ok))
+        .expect("success reply should build");
+    let tr = success_reply_transaction(&mut reply);
+    let mut call = PendingAuthorizationCall {
+        request: ParsedAuthorizationRequest::OnUserStorageLocked { user_id: 10 },
+        method: AuthorizationMethod::OnUserStorageLocked,
+        caller: CallerInfo {
+            uid: 1000,
+            sid: String::new(),
+            pid: 2000,
+        },
+        mirror_update: None,
+    };
+
+    assert!(unsafe { build_authorization_reply_mirror(&tr, &mut call) }
+        .expect("missing fail-closed reservation should preserve System success")
+        .is_none());
+}
+
+#[test]
+fn lost_fail_closed_authorization_reservation_preserves_system_and_poisons_lane() {
+    let _guard = route_state_test_guard();
+    let reservation = reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::FailClosed,
+    )
+    .expect("authorization update should reserve");
+    {
+        let mut state = MIRROR_RECOVERY_STATE
+            .lock()
+            .expect("mirror recovery state poisoned");
+        remove_reserved_mirror_update(
+            &mut state,
+            MirrorStateKind::Authorization,
+            reservation.sequence,
+        );
+    }
+    let mut reply = parcel::build_status_reply(&Status::from(StatusCode::Ok))
+        .expect("success reply should build");
+    let tr = success_reply_transaction(&mut reply);
+    let mut call = PendingAuthorizationCall {
+        request: ParsedAuthorizationRequest::OnUserStorageLocked { user_id: 10 },
+        method: AuthorizationMethod::OnUserStorageLocked,
+        caller: CallerInfo {
+            uid: 1000,
+            sid: String::new(),
+            pid: 2000,
+        },
+        mirror_update: Some(reservation),
+    };
+
+    assert!(unsafe { build_authorization_reply_mirror(&tr, &mut call) }
+        .expect("lost fail-closed reservation should preserve System success")
+        .is_none());
+    assert!(
+        MIRROR_RECOVERY_STATE
+            .lock()
+            .expect("mirror recovery state poisoned")
+            .authorization
+            .poisoned
+    );
+}
+
+fn maintenance_call(mirror_update: Option<MirrorUpdateReservation>) -> PendingMaintenanceCall {
+    PendingMaintenanceCall {
+        request: ParsedMaintenanceRequest::OnUserAdded { user_id: 10 },
+        caller: CallerInfo {
+            uid: 1000,
+            sid: String::new(),
+            pid: 2000,
+        },
+        route: RouteTarget::System,
+        mirror_update,
+    }
+}
+
+#[test]
+fn missing_fail_closed_maintenance_reservation_preserves_system_success() {
+    let _guard = route_state_test_guard();
+    let mut reply = parcel::build_status_reply(&Status::from(StatusCode::Ok))
+        .expect("success reply should build");
+    let tr = success_reply_transaction(&mut reply);
+    let mut call = maintenance_call(None);
+
+    assert!(unsafe { build_maintenance_reply_mirror(&tr, &mut call) }
+        .expect("missing maintenance reservation should preserve System success")
+        .is_none());
+}
+
+#[test]
+fn lost_fail_closed_maintenance_reservation_preserves_system_and_poisons_lane() {
+    let _guard = route_state_test_guard();
+    let reservation = reserve_mirror_update(
+        MirrorStateKind::Maintenance,
+        MirrorFailurePolicy::FailClosed,
+    )
+    .expect("maintenance update should reserve");
+    {
+        let mut state = MIRROR_RECOVERY_STATE
+            .lock()
+            .expect("mirror recovery state poisoned");
+        remove_reserved_mirror_update(
+            &mut state,
+            MirrorStateKind::Maintenance,
+            reservation.sequence,
+        );
+    }
+    let mut reply = parcel::build_status_reply(&Status::from(StatusCode::Ok))
+        .expect("success reply should build");
+    let tr = success_reply_transaction(&mut reply);
+    let mut call = maintenance_call(Some(reservation));
+
+    assert!(unsafe { build_maintenance_reply_mirror(&tr, &mut call) }
+        .expect("lost maintenance reservation should preserve System success")
+        .is_none());
+    assert!(
+        MIRROR_RECOVERY_STATE
+            .lock()
+            .expect("mirror recovery state poisoned")
+            .maintenance
+            .poisoned
+    );
+}
+
+fn seed_retained_lock_user(user_id: i32) {
+    RETAINED_LOCK_STATE
+        .lock()
+        .expect("retained lock state poisoned")
+        .insert(
+            user_id,
+            super::super::lock_state::RetainedUser {
+                unlock_secret: None,
+                phase: super::super::lock_state::Phase::Unknown,
+            },
+        );
+}
+
+#[test]
+fn lock_state_restore_listener_skips_empty_state_and_coalesces_pending_restore() {
+    let _guard = route_state_test_guard();
+    queue_lock_state_restore();
+    assert!(MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned")
+        .authorization
+        .pending
+        .is_empty());
+
+    seed_retained_lock_user(10);
+    queue_lock_state_restore();
+    queue_lock_state_restore();
+    let state = MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned");
+    assert_eq!(state.authorization.pending.len(), 1);
+    assert!(matches!(
+        state
+            .authorization
+            .pending
+            .front()
+            .and_then(|pending| pending.event.as_ref()),
+        Some(MirrorReplayEvent::LockStateRestore)
+    ));
+}
+
+#[test]
+fn lock_state_restore_listener_ignores_front_restore_while_draining() {
+    let _guard = route_state_test_guard();
+    seed_retained_lock_user(10);
+    queue_lock_state_restore();
+    MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned")
+        .authorization
+        .draining = true;
+    queue_lock_state_restore();
+    assert_eq!(
+        MIRROR_RECOVERY_STATE
+            .lock()
+            .expect("mirror recovery state poisoned")
+            .authorization
+            .pending
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn lock_state_restore_is_executed_once_and_removed_on_success() {
+    let _guard = route_state_test_guard();
+    reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::BestEffort,
+    )
+    .expect("restore should reserve")
+    .enqueue(MirrorReplayEvent::LockStateRestore)
+    .expect("restore should queue");
+    let mut restore_executions = 0;
+    recover_mirror_state_with(&mut |event| {
+        assert!(matches!(event, MirrorReplayEvent::LockStateRestore));
+        restore_executions += 1;
+        Ok(())
+    })
+    .expect("restore should execute");
+    assert_eq!(restore_executions, 1);
+    assert!(MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned")
+        .authorization
+        .pending
+        .is_empty());
+}
+
+#[test]
+fn failing_lock_state_restore_is_best_effort_and_does_not_block_fail_closed_events() {
+    let _guard = route_state_test_guard();
+    let caller = CallerInfo {
+        uid: 1000,
+        sid: String::new(),
+        pid: 2000,
+    };
+    reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::BestEffort,
+    )
+    .expect("restore should reserve")
+    .enqueue(MirrorReplayEvent::LockStateRestore)
+    .expect("restore should queue");
+    reserve_mirror_update(
+        MirrorStateKind::Authorization,
+        MirrorFailurePolicy::FailClosed,
+    )
+    .expect("authorization event should reserve")
+    .enqueue(MirrorReplayEvent::Authorization {
+        request: ParsedAuthorizationRequest::OnUserStorageLocked { user_id: 10 },
+        caller,
+    })
+    .expect("authorization event should queue");
+
+    let mut executed = Vec::new();
+    recover_mirror_state_with(&mut |event| {
+        let method = event.method();
+        executed.push(method.clone());
+        if method == "LockStateRestore" {
+            Err(anyhow::anyhow!("restore executor failed"))
+        } else {
+            Ok(())
+        }
+    })
+    .expect("best-effort restore failure should not stop later events");
+    assert_eq!(executed, ["LockStateRestore", "OnUserStorageLocked"]);
+    let state = MIRROR_RECOVERY_STATE
+        .lock()
+        .expect("mirror recovery state poisoned");
+    assert!(!state.authorization.poisoned);
+    assert!(!state.maintenance.poisoned);
+    assert!(state.authorization.pending.is_empty());
 }

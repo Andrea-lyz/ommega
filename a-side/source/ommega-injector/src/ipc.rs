@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Condvar, Mutex, Once};
+use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 use std::{cmp, thread};
 
@@ -41,6 +41,17 @@ static RPC_CACHE: Mutex<RpcCacheState> = Mutex::new(RpcCacheState {
     last_connect_error: None,
 });
 static RPC_CACHE_READY: Condvar = Condvar::new();
+static RPC_SESSION_LISTENER: OnceLock<fn()> = OnceLock::new();
+
+pub fn set_rpc_session_listener(listener: fn()) {
+    let _ = RPC_SESSION_LISTENER.set(listener);
+}
+
+fn notify_rpc_session_listener() {
+    if let Some(listener) = RPC_SESSION_LISTENER.get() {
+        listener();
+    }
+}
 
 struct RpcCacheState {
     generation: u64,
@@ -107,6 +118,7 @@ pub fn install_direct_rpc_session() -> Result<()> {
     };
     RPC_CACHE_READY.notify_all();
     drop(old);
+    notify_rpc_session_listener();
     Ok(())
 }
 
@@ -177,12 +189,14 @@ fn ensure_rpc_cache(connect_context: &'static str) -> Result<()> {
             state.connecting = None;
         }
         let mut stale_cache = None;
+        let mut installed = false;
         let outcome = if state.cache.is_none() && state.generation == generation {
             match candidate {
                 Ok(cache) => {
                     state.cache = Some(cache);
                     state.generation = state.generation.wrapping_add(1);
                     state.last_connect_error = None;
+                    installed = true;
                     Some(Ok(()))
                 }
                 Err(error) => {
@@ -200,6 +214,9 @@ fn ensure_rpc_cache(connect_context: &'static str) -> Result<()> {
         RPC_CACHE_READY.notify_all();
         drop(state);
         drop(stale_cache);
+        if installed {
+            notify_rpc_session_listener();
+        }
         if let Some(outcome) = outcome {
             return outcome;
         }

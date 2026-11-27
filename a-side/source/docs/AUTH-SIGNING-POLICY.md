@@ -28,6 +28,8 @@ switching to a local keybox. A's native StrongBox backend is outside this policy
 
 ## Token verification boundary
 
+Localization also rebases the token timestamp onto A's boot clock, so timeout checks compare one clock.
+
 Before a system HAT is re-MACed with Ommega's local key, its shape and original
 MAC are verified through A's native KeyMint verifier. This applies to direct and
 mirrored ingestion. System addAuthToken success means caching, not a TEE MAC

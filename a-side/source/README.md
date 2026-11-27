@@ -17,9 +17,12 @@ relay_server.
   B-side stable-AIDL version/hash, canonical profile version, vendor hardware
   version, security level, and StrongBox availability. Every attestation result
   must match that profile. If the relay is temporarily unavailable during boot,
-  startup retries until the remote profile is available instead of freezing a
-  mismatched local profile. Profile or certificate mismatches fail closed;
-  enabling local fallback does not bypass identity checks.
+  the last profile saved for the same URL and device id in
+  `data/remote-profile.json` is used and refreshed in the background; keymint
+  restarts itself when the frozen KeyMint identity changes. Without a saved
+  profile, startup retries until the remote profile is available instead of
+  freezing a mismatched local profile. Profile or certificate mismatches fail
+  closed; enabling local fallback does not bypass identity checks.
 - **Authentication-signing policy** is configured at runtime in the WebUI.
   The default **Auto** mode preserves B authentication for known detector probes
   and uses A authorization with B signing for other eligible EC/RSA
@@ -246,6 +249,10 @@ error is logged. A configured `verified_boot_state = true` is likewise only
 honoured together with `device_locked = true`, because `Verified` (green) implies
 a locked bootloader on a real device.
 
+When the root of trust changes, the previous keystore database is moved to
+`data/rot-backup/` before a new one is built. Only the latest backup is kept;
+the archived database is usable again only under its original root of trust.
+
 The number of concurrently open KeyMint operations (the value behind
 `TOO_MANY_OPERATIONS`) follows the mirrored implementation: the relay profile may
 carry an optional integer `max_operations` (1..=1024), which is validated and applied
@@ -357,6 +364,12 @@ injector installs its Binder hooks immediately so boot-time authorization and
 maintenance events are captured even while remote identity and RPC startup are
 still pending. RPC warm-up runs in the keystore2 process, and the in-memory
 mirror queue replays captured state changes after the service becomes ready.
+The injector also keeps each user's latest lock state and unlock secret only in
+keystore2 memory and replays them when keymint reconnects, so a keymint-only
+restart does not require the lock-screen credential again. Auth tokens are not
+replayed, so a time-bound key needs a fresh authentication. Restarting the
+injector restarts keystore2 itself, after which the credential must be entered
+once.
 
 ## Key consistency and lifecycle
 
@@ -368,11 +381,12 @@ software-keyblob loading and explicit upgrade use the same current version sourc
 New optional partition tags remain absent when the HAL omits them; explicit upgrade
 does not erase an existing bound tag merely because current metadata omits it.
 Older software keyblobs require upgrade; future versions are rejected and are never
-silently lowered. See [Software keyblob version checks](docs/KEYBLOB-VERSIONS.md)
+silently lowered, except that a higher Boot patch level is accepted and retained. See [Software keyblob version checks](docs/KEYBLOB-VERSIONS.md)
 for the OS-zero exception and deployment/migration constraints. A rejects
 a new remote certificate whose version tags differ from the profile. This does
 not change A's global properties, boot/RoT encryption inputs, B's SPL or hardware
-keyblobs. The snapshot is refreshed by the existing profile-cache invalidation;
+keyblobs. The snapshot is refreshed when the relay route (URL, device id, token,
+TLS policy) or the remote switch changes, or when keymint restarts;
 relays without this optional field retain configured local version metadata and
 emit a warning. The default TEE snapshot is never applied to StrongBox.
 A does not add a synthetic child leaf for authentication or unlock constraints.
@@ -417,7 +431,9 @@ After System succeeds, `AddAuthToken` mirroring is best-effort: a failed or lost
 mirror can be dropped without poisoning the global replay state. Direct token
 calls retain their validation; lock, user and maintenance events remain ordered
 and fail-closed. A dropped token does not authorize an operation and may require
-a later authentication to replenish the cache.
+a later authentication to replenish the cache. A lock, user or maintenance mirror
+that cannot be queued or confirmed never blocks or rewrites the System call;
+System proceeds and ommega routes fail closed until keystore2 restarts.
 
 ## License
 

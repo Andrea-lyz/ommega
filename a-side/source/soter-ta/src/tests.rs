@@ -295,6 +295,7 @@ fn platform_at(boot_ms: u64, accepted: u64) -> Platform {
     Platform {
         boot_ms: Some(boot_ms),
         bio_mark: Some(BOOT_TAG | accepted),
+        bio_unreadable: false,
     }
 }
 
@@ -351,6 +352,7 @@ fn stale_and_cross_boot_sessions_have_no_evidence() {
     let next_boot = Platform {
         boot_ms: Some(6_000),
         bio_mark: Some((BOOT_TAG + (1 << 40)) | 2),
+        bio_unreadable: false,
     };
     assert_eq!(
         state.finish_sign(crossed, next_boot).0,
@@ -367,6 +369,64 @@ fn a_missing_platform_hook_keeps_signing() {
         SOTER_OK,
         "no hooks: answer like the revision before the biometric gate"
     );
+}
+
+#[test]
+fn unreadable_biometric_evidence_denies_without_closing_the_session() {
+    let mut state = signable_state();
+    let (_, session) = state.init_sign(UID, KNAME, "challenge", platform_at(1_000, 7));
+    let unreadable = Platform {
+        boot_ms: Some(1_200),
+        bio_mark: None,
+        bio_unreadable: true,
+    };
+    assert_eq!(
+        state.finish_sign(session, unreadable).0,
+        SOTER_ERR_NO_FINGERPRINT
+    );
+    assert!(state.sessions.contains_key(&session));
+    assert_eq!(
+        state.finish_sign(session, platform_at(1_500, 8)).0,
+        SOTER_OK
+    );
+}
+
+#[test]
+fn biometric_evidence_on_only_one_side_denies() {
+    let mut state = signable_state();
+    let opened_without_mark = Platform {
+        boot_ms: Some(1_000),
+        bio_mark: None,
+        bio_unreadable: false,
+    };
+    let (_, session) = state.init_sign(UID, KNAME, "challenge", opened_without_mark);
+    assert_eq!(
+        state.finish_sign(session, platform_at(1_200, 8)).0,
+        SOTER_ERR_NO_FINGERPRINT
+    );
+
+    let (_, session) = state.init_sign(UID, KNAME, "challenge", platform_at(1_000, 7));
+    let missing_finish_mark = Platform {
+        boot_ms: Some(1_200),
+        bio_mark: None,
+        bio_unreadable: false,
+    };
+    assert_eq!(
+        state.finish_sign(session, missing_finish_mark).0,
+        SOTER_ERR_NO_FINGERPRINT
+    );
+}
+
+#[test]
+fn platform_without_a_biometric_counter_signs_without_the_gate() {
+    let mut state = signable_state();
+    let no_counter = Platform {
+        boot_ms: Some(1_000),
+        bio_mark: None,
+        bio_unreadable: false,
+    };
+    let (_, session) = state.init_sign(UID, KNAME, "challenge", no_counter);
+    assert_eq!(state.finish_sign(session, no_counter).0, SOTER_OK);
 }
 
 #[test]

@@ -269,6 +269,7 @@ fn old_session_is_revoked_and_counters_survive_switching_back() {
         Platform {
             boot_ms: Some(1000),
             bio_mark: Some(1u64 << 32),
+            bio_unreadable: false,
         },
     );
     s.prepare_identity(Some(UID), &b).unwrap();
@@ -278,7 +279,8 @@ fn old_session_is_revoked_and_counters_survive_switching_back() {
             handle,
             Platform {
                 boot_ms: Some(1100),
-                bio_mark: Some((1u64 << 32) + 1)
+                bio_mark: Some((1u64 << 32) + 1),
+                bio_unreadable: false,
             }
         )
         .0,

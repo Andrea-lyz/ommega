@@ -35,6 +35,7 @@ use log::{debug, info, warn};
 use rsbinder::{ExceptionCode, Status, StatusCode, Strong};
 
 mod binding;
+mod lock_state;
 mod mirror;
 mod pending;
 mod platform_surface;
@@ -318,10 +319,12 @@ fn precompute_ommega_service_mutator_reply(
                 ),
                 Err(error) if ommega_unavailable_error(&error) => {
                     warn!(
-                    "event=route ommega updateSubcomponent unavailable for uid={} pid={}: {:#}; leaving original system request untouched",
+                    "event=route ommega updateSubcomponent unavailable for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
                     caller.uid, caller.pid, error
                 );
-                    OmmegaServicePrecompute::PreserveSystem
+                    OmmegaServicePrecompute::Reply(PrecomputedServiceReply::Error(
+                        Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
+                    ))
                 }
                 Err(error) => OmmegaServicePrecompute::Reply(PrecomputedServiceReply::Error(
                     precomputed_ommega_error_reply(&error),
@@ -333,10 +336,12 @@ fn precompute_ommega_service_mutator_reply(
                 Ok(()) => OmmegaServicePrecompute::Reply(PrecomputedServiceReply::DeleteKeySuccess),
                 Err(error) if ommega_unavailable_error(&error) => {
                     warn!(
-                        "event=route ommega deleteKey unavailable for uid={} pid={}: {:#}; leaving original system request untouched",
+                        "event=route ommega deleteKey unavailable for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
                         caller.uid, caller.pid, error
                     );
-                    OmmegaServicePrecompute::PreserveSystem
+                    OmmegaServicePrecompute::Reply(PrecomputedServiceReply::Error(
+                        Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
+                    ))
                 }
                 Err(error) => OmmegaServicePrecompute::Reply(PrecomputedServiceReply::Error(
                     precomputed_ommega_error_reply(&error),
@@ -380,10 +385,12 @@ fn precompute_ommega_grant_service_reply_with(
             }
             Err(error) if ommega_unavailable_error(&error) => {
                 warn!(
-                    "event=route ommega grant unavailable for uid={} pid={}: {:#}; leaving original system request untouched",
+                    "event=route ommega grant unavailable for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
                     caller.uid, caller.pid, error
                 );
-                OmmegaServicePrecompute::PreserveSystem
+                OmmegaServicePrecompute::Reply(PrecomputedServiceReply::Error(
+                    Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
+                ))
             }
             Err(error) => {
                 warn!(
@@ -400,10 +407,12 @@ fn precompute_ommega_grant_service_reply_with(
                 Ok(()) => OmmegaServicePrecompute::Reply(PrecomputedServiceReply::UngrantSuccess),
                 Err(error) if ommega_unavailable_error(&error) => {
                     warn!(
-                        "event=route ommega ungrant unavailable for uid={} pid={}: {:#}; leaving original system request untouched",
+                        "event=route ommega ungrant unavailable for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
                         caller.uid, caller.pid, error
                     );
-                    OmmegaServicePrecompute::PreserveSystem
+                    OmmegaServicePrecompute::Reply(PrecomputedServiceReply::Error(
+                        Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
+                    ))
                 }
                 Err(error) => {
                     warn!(
@@ -504,10 +513,12 @@ fn precompute_ommega_migrate_reply(call: &PendingMaintenanceCall) -> OmmegaMigra
         }
         Err(error) if ommega_unavailable_error(&error) => {
             warn!(
-                "event=route ommega migrateKeyNamespace unavailable for uid={} pid={}: {:#}; preserving original system request",
+                "event=route ommega migrateKeyNamespace unavailable for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
                 call.caller.uid, call.caller.pid, error
             );
-            OmmegaMigratePrecompute::PreserveSystem
+            OmmegaMigratePrecompute::Reply(PrecomputedMaintenanceReply::Error(
+                Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
+            ))
         }
         Err(error) => {
             warn!(

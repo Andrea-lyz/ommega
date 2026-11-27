@@ -1162,7 +1162,7 @@ fn software_keyblob_older_profile_requires_upgrade_and_preserves_key_material() 
 
 #[test]
 fn software_future_blob_and_explicit_downgrade_fail_without_modifying_input() {
-    for which in 0..4 {
+    for which in 0..3 {
         let mut ta = test_ta();
         let params = imported_aes_params();
         let old = ta
@@ -1180,7 +1180,6 @@ fn software_future_blob_and_explicit_downgrade_fail_without_modifying_input() {
             0 => current.os_version -= 10000,
             1 => current.os_patchlevel -= 1,
             2 => current.vendor_patchlevel = Some(20260701),
-            3 => current.boot_patchlevel = Some(20260701),
             _ => unreachable!(),
         }
         set_test_remote_versions(&mut ta, current);
@@ -1204,6 +1203,91 @@ fn software_future_blob_and_explicit_downgrade_fail_without_modifying_input() {
         set_test_remote_versions(&mut ta, fixed_test_versions());
         assert!(ta.keyblob_parse_decrypt(&original, &[]).is_ok());
     }
+}
+
+#[test]
+fn software_future_boot_blob_loads_and_upgrade_is_noop() {
+    let mut ta = test_ta();
+    let old = ta
+        .import_key(
+            &imported_aes_params(),
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let original = old.key_blob.clone();
+    let mut current = fixed_test_versions();
+    current.boot_patchlevel = Some(20260701);
+    set_test_remote_versions(&mut ta, current);
+    assert!(ta.keyblob_parse_decrypt(&old.key_blob, &[]).is_ok());
+    assert!(ta.upgrade_key(&old.key_blob, vec![]).unwrap().is_empty());
+    assert_eq!(old.key_blob, original);
+}
+
+#[test]
+fn software_future_boot_is_retained_while_lower_vendor_patchlevel_upgrades() {
+    let mut ta = test_ta();
+    let old = ta
+        .import_key(
+            &imported_aes_params(),
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let mut current = fixed_test_versions();
+    current.vendor_patchlevel = Some(20260901);
+    current.boot_patchlevel = Some(20260701);
+    set_test_remote_versions(&mut ta, current);
+    assert!(matches!(
+        ta.keyblob_parse_decrypt(&old.key_blob, &[])
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Hal(ErrorCode::KeyRequiresUpgrade, _)
+    ));
+    let upgraded = ta.upgrade_key(&old.key_blob, vec![]).unwrap();
+    assert!(!upgraded.is_empty());
+    let stored = ta.keyblob_parse_decrypt(&upgraded, &[]).unwrap().0;
+    let auths = stored
+        .characteristics_at(SecurityLevel::TrustedEnvironment)
+        .unwrap();
+    assert!(auths.contains(&KeyParam::VendorPatchlevel(20260901)));
+    assert!(auths.contains(&KeyParam::BootPatchlevel(20260801)));
+}
+
+#[test]
+fn software_lower_boot_requires_upgrade_and_upgrade_raises_it() {
+    let mut ta = test_ta();
+    let old = ta
+        .import_key(
+            &imported_aes_params(),
+            KeyFormat::Raw,
+            &[7; 32],
+            None,
+            KeyImport::NonWrapped,
+        )
+        .unwrap();
+    let mut current = fixed_test_versions();
+    current.boot_patchlevel = Some(20260901);
+    set_test_remote_versions(&mut ta, current);
+    assert!(matches!(
+        ta.keyblob_parse_decrypt(&old.key_blob, &[])
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Hal(ErrorCode::KeyRequiresUpgrade, _)
+    ));
+    let upgraded = ta.upgrade_key(&old.key_blob, vec![]).unwrap();
+    assert!(!upgraded.is_empty());
+    assert!(ta
+        .keyblob_parse_decrypt(&upgraded, &[])
+        .unwrap()
+        .0
+        .characteristics_at(SecurityLevel::TrustedEnvironment)
+        .unwrap()
+        .contains(&KeyParam::BootPatchlevel(20260901)));
 }
 
 #[test]
@@ -1287,7 +1371,7 @@ fn software_late_upgrade_failure_never_rewrites_the_original_blob() {
     let before = ta.keyblob_parse_decrypt(&original, &[]).unwrap().0;
     let mut current = fixed_test_versions();
     current.os_version = 170000; // Earlier in the loop this is a legal upgrade.
-    current.boot_patchlevel = Some(20260701); // Later this must reject the batch.
+    current.vendor_patchlevel = Some(20260701); // Later this must reject the batch.
     set_test_remote_versions(&mut ta, current);
     assert!(matches!(
         ta.upgrade_key(&old.key_blob, vec![]).unwrap_err().kind(),

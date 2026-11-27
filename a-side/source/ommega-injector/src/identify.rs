@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::android::security::authorization::IKeystoreAuthorization::transactions as authorization_tx;
 use crate::android::security::maintenance::IKeystoreMaintenance::transactions as maintenance_tx;
 use crate::android::system::keystore2::IKeystoreOperation::transactions as operation_tx;
@@ -105,9 +107,40 @@ fn transaction_offset(code: u32) -> Option<u32> {
     code.checked_sub(rsbinder::FIRST_CALL_TRANSACTION)
 }
 
+fn contains_user_storage_locked_marker(image: &[u8]) -> bool {
+    const MARKER: &[u8] = b"onUserStorageLocked";
+    image.windows(MARKER.len()).any(|window| window == MARKER)
+}
+
+static KEYSTORE2_USER_STORAGE_LOCKED: OnceLock<bool> = OnceLock::new();
+
+fn keystore2_serves_user_storage_locked() -> bool {
+    *KEYSTORE2_USER_STORAGE_LOCKED.get_or_init(|| {
+        let serves = match std::fs::read("/proc/self/exe") {
+            Ok(image) => contains_user_storage_locked_marker(&image),
+            Err(error) => {
+                log::warn!(
+                    "failed to inspect keystore2 for onUserStorageLocked; using the Android 16 base authorization layout: {error}"
+                );
+                false
+            }
+        };
+        log::info!(
+            "selected Android 16 IKeystoreAuthorization layout {}",
+            if serves {
+                "with onUserStorageLocked"
+            } else {
+                "without onUserStorageLocked"
+            }
+        );
+        serves
+    })
+}
+
 pub fn authorization_method_from_code_for(
     android_major_version: Option<i32>,
     code: u32,
+    user_storage_locked: bool,
 ) -> Option<AuthorizationMethod> {
     match android_major_version {
         Some(version) if version <= 14 => match transaction_offset(code)? {
@@ -116,22 +149,27 @@ pub fn authorization_method_from_code_for(
             2 => Some(AuthorizationMethod::GetAuthTokensForCredStore),
             _ => None,
         },
-        Some(15 | 16) => match transaction_offset(code)? {
-            0 => Some(AuthorizationMethod::AddAuthToken),
-            1 => Some(AuthorizationMethod::OnDeviceUnlocked),
-            2 => Some(AuthorizationMethod::OnDeviceLocked),
-            3 => Some(AuthorizationMethod::OnWeakUnlockMethodsExpired),
-            4 => Some(AuthorizationMethod::OnNonLskfUnlockMethodsExpired),
-            5 => Some(AuthorizationMethod::GetAuthTokensForCredStore),
-            6 => Some(AuthorizationMethod::GetLastAuthTime),
-            _ => None,
-        },
+        Some(version) if version == 15 || (version == 16 && !user_storage_locked) => {
+            match transaction_offset(code)? {
+                0 => Some(AuthorizationMethod::AddAuthToken),
+                1 => Some(AuthorizationMethod::OnDeviceUnlocked),
+                2 => Some(AuthorizationMethod::OnDeviceLocked),
+                3 => Some(AuthorizationMethod::OnWeakUnlockMethodsExpired),
+                4 => Some(AuthorizationMethod::OnNonLskfUnlockMethodsExpired),
+                5 => Some(AuthorizationMethod::GetAuthTokensForCredStore),
+                6 => Some(AuthorizationMethod::GetLastAuthTime),
+                _ => None,
+            }
+        }
         _ => current_authorization_method_from_code(code),
     }
 }
 
 pub fn authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> {
-    authorization_method_from_code_for(kmr_common::android_version::android_major_version(), code)
+    let major_version = kmr_common::android_version::android_major_version();
+    let user_storage_locked =
+        matches!(major_version, Some(16)) && keystore2_serves_user_storage_locked();
+    authorization_method_from_code_for(major_version, code, user_storage_locked)
 }
 
 fn current_authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> {

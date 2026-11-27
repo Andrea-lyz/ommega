@@ -39,10 +39,11 @@
 - Return ommega business errors as-is. Reachable transport, boundary, or injector failures that are
   not ommega-unavailable must not fall back to a successful system reply; normalize them to the
   existing AOSP-compatible error path, such as `SYSTEM_ERROR` where applicable.
-- Only confirmed ommega-unavailable failures may preserve the original system reply. These include a
-  missing service/backend, connection failure, and stale or dead RPC transport failures such as
-  `DeadObject`, `RpcError`, and `NotEnoughData`. Reuse the existing classifiers instead of
-  maintaining another status list.
+- A confirmed ommega-unavailable failure (missing service/backend, connection failure, and stale or
+  dead RPC transport failures such as `DeadObject`, `RpcError`, and `NotEnoughData`) never falls
+  back to System for an allowed caller: System does not execute the request and the caller receives
+  the AOSP-compatible `SYSTEM_ERROR`. Reuse the existing classifiers instead of maintaining another
+  status list.
 - Exception while `android.hardware.strongbox_keystore` is globally hidden in the active boot: the
   injector rejects `getSecurityLevel(STRONGBOX)` for all callers and turns System `getKeyEntry`
   replies for StrongBox keys into `SYSTEM_ERROR`, so Keystore2 matches PackageManager. This is the

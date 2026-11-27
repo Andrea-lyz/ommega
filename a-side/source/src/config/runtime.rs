@@ -106,15 +106,23 @@ fn reload_runtime_config(trigger: WatchTrigger) {
     // mutate TA versions or recreate the TA/its outstanding operations.
     let mut updated = Config::from_file(&new_config_file, runtime_snapshot.trust.clone());
     updated.preserve_startup_fields(&runtime_snapshot);
+    let level = new_config_file.main.log_level_filter();
+    let route_changed =
+        crate::remote::identity_route_changed(&runtime_snapshot.remote, &updated.remote);
     match crate::keymaster::keymint_device::apply_runtime_config_update(updated) {
         Ok(()) => {
-            // Drop the cached B-side identity profile. It is fetched once and
-            // reused, so without this a saved config change (a corrected token,
-            // a new server) left the daemon serving the old profile — which is
-            // why toggling "enable remote" off and on in the WebUI appeared to
-            // fix nothing.
-            crate::remote::invalidate_identity_profile();
+            // A corrected token, a new server or a remote off-on toggle must
+            // refetch the B-side profile; unrelated saves keep the cache so a
+            // relay outage does not break local keys.
+            if route_changed {
+                crate::remote::invalidate_identity_profile();
+            }
             crate::remote::publish_spl_status();
+            let previous_level = log::max_level();
+            if previous_level != level {
+                log::info!("log level changed from {previous_level} to {level}");
+            }
+            log::set_max_level(level);
             log::info!("config updated via {}", trigger.label());
         }
         Err(error) => log::error!(

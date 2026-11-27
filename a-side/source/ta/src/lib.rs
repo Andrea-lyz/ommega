@@ -581,7 +581,11 @@ impl KeyMintTa {
             versions::check(
                 stored,
                 current_value,
-                matches!(param, KeyParam::OsVersion(_)),
+                match param {
+                    KeyParam::OsVersion(_) => versions::VersionField::OsVersion,
+                    KeyParam::BootPatchlevel(_) => versions::VersionField::BootPatchLevel,
+                    _ => versions::VersionField::PatchLevel,
+                },
             )
             .map_err(|error| match error {
                 versions::VersionError::RequiresUpgrade => km_err!(
