@@ -125,31 +125,40 @@ def get_git_commit_hash() -> str:
     return result.stdout.strip()[:7]
 
 
-def build_binary(
+def build_binaries(
     *,
     abi: str,
     target: str,
     release: bool,
     package: str | None,
-    bin_name: str,
-) -> Path:
+    bin_names: list[str],
+) -> dict[str, Path]:
+    """Build every binary of one package with a single cargo invocation.
+
+    The binaries share the package's feature set, so the outputs are the same as
+    building them one by one, but cargo can run their fat-LTO links in parallel
+    instead of serially.
+    """
     build_type = "release" if release else "debug"
-    print(f"Building {bin_name} for {abi} ({target}, {build_type})...")
+    print(f"Building {', '.join(bin_names)} for {abi} ({target}, {build_type})...")
 
     cmd = ["cargo", "build", "--locked", "--target", target]
     if package:
-        cmd.extend(["-p", package, "--bin", bin_name])
-    else:
+        cmd.extend(["-p", package])
+    for bin_name in bin_names:
         cmd.extend(["--bin", bin_name])
     if release:
         cmd.append("--release")
 
     run(cmd)
 
-    binary_path = TARGET_ROOT / target / build_type / bin_name
-    if not binary_path.exists():
-        raise FileNotFoundError(f"Built binary not found at {binary_path}")
-    return binary_path
+    binaries: dict[str, Path] = {}
+    for bin_name in bin_names:
+        binary_path = TARGET_ROOT / target / build_type / bin_name
+        if not binary_path.exists():
+            raise FileNotFoundError(f"Built binary not found at {binary_path}")
+        binaries[bin_name] = binary_path
+    return binaries
 
 
 def copy_binary(binary: Path, output_name: str, abi: str, stage_dir: Path) -> None:
@@ -331,20 +340,25 @@ def build_package_for_abi(
     stage_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        built_binaries: list[tuple[Path, str]] = []
+        # Cargo unifies features per invocation, so binaries are grouped by
+        # package only: mixing packages could change a shared crate's features.
+        bins_by_package: dict[str | None, list[str]] = {}
         for spec in BINARY_SPECS:
-            built_binaries.append(
-                (
-                    build_binary(
-                        abi=abi,
-                        target=target,
-                        release=release,
-                        package=spec["package"],
-                        bin_name=spec["bin"],
-                    ),
-                    spec["output_name"],
+            bins_by_package.setdefault(spec["package"], []).append(spec["bin"])
+        built_paths: dict[str, Path] = {}
+        for package, bin_names in bins_by_package.items():
+            built_paths.update(
+                build_binaries(
+                    abi=abi,
+                    target=target,
+                    release=release,
+                    package=package,
+                    bin_names=bin_names,
                 )
             )
+        built_binaries: list[tuple[Path, str]] = [
+            (built_paths[spec["bin"]], spec["output_name"]) for spec in BINARY_SPECS
+        ]
         built_binaries.append(
             (build_soterta_svc(abi=abi, release=release), SOTERTA_SVC_OUTPUT_NAME)
         )

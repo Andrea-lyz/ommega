@@ -133,8 +133,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.component }}-side/source
-          key: android-${{ matrix.component }}-ndk28c-api26
-          cache-workspace-crates: true
+          # Fresh checkouts give every workspace source a new mtime, so cargo
+          # rebuilds all workspace crates anyway; caching them only inflated the
+          # archive. Bump the -vN suffix whenever the cached contents change.
+          key: android-${{ matrix.component }}-ndk28c-api26-v2
+          cache-workspace-crates: false
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Check Android workspace
         working-directory: ${{ matrix.component }}-side/source
@@ -147,7 +150,11 @@ jobs:
         if: matrix.component == 'a'
         working-directory: a-side/source
         run: |
-          env -u BINDGEN_EXTRA_CLANG_ARGS cargo test --locked --target x86_64-unknown-linux-gnu -p soter-ta --lib
+          # RSA key generation in unoptimized dependencies dominated this step.
+          # Optimize only the dependencies; soter-ta itself keeps the test
+          # profile's debug assertions and overflow checks.
+          env -u BINDGEN_EXTRA_CLANG_ARGS cargo test --locked --target x86_64-unknown-linux-gnu -p soter-ta --lib \
+            --config 'profile.test.package."*".opt-level=3'
           grant_test="$(mktemp --tmpdir ommega-grant-lifetime.XXXXXX)"
           trap 'rm -f "$grant_test"' EXIT
           rustc --edition=2021 --test src/keymaster/delegation.rs -o "$grant_test"
