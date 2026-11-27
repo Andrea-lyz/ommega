@@ -26,7 +26,7 @@
 /* Search is a body-level native editor, never a vendor header/text-field. */
 .om-modern > .header { display:none !important; }
 .om-modern .search-bg { background:transparent; color:var(--om-ink); }
-#om-app-search-region { max-width:900px; margin:0 auto 16px; }
+#om-app-search-region { max-width:900px; margin:12px auto 16px; }
 #om-app-search-region[hidden] { display:none !important; }
 .om-app-search-control { position:relative; min-width:0; }
 .om-search-label { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
@@ -321,7 +321,7 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 .om-diag-switch input[type=checkbox]:checked { background:#4a63d8; }
 .om-diag-switch input[type=checkbox]:checked::after { transform:translateX(20px); }
 .om-diag-list { list-style:none; margin:0; padding:0; }
-.om-diag-row { display:flex; gap:10px; align-items:flex-start; padding:9px 0; border-top:1px solid var(--om-line,#e6e7ef); }
+.om-diag-row { display:flex; gap:10px; align-items:center; padding:9px 0; border-top:1px solid var(--om-line,#e6e7ef); }
 .om-diag-row:first-child { border-top:0; }
 .om-diag-icon { width:32px; height:32px; border-radius:9px; flex:none; object-fit:contain; background:#f0f1f7; }
 .om-diag-row-body { min-width:0; }
@@ -399,6 +399,16 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
    and scrolling stay responsive. */
 #apps-list .card { content-visibility: auto; contain-intrinsic-size: 88px; }
 
+/* Android 12+ stretches the whole WebView natively when the root scroll
+   overshoots the top or bottom, distorting the fixed dock; CSS
+   overscroll-behavior does not reach that native effect. The page therefore
+   scrolls inside body and the root never scrolls. Body extends 1px past the
+   viewport so Chromium does not promote it to an implicit root scroller,
+   which would bring the stretch back. Scroll position helpers in the app
+   detail glue follow body. */
+html:has(body.om-modern) { height:100%; overflow:hidden; overscroll-behavior:none; }
+body.om-modern { position:fixed; inset:0 0 -1px 0; overflow-x:hidden; overflow-y:auto; overscroll-behavior:none; }
+
 /* Liquid glass dock (phone layout). liquid-glass.js adds .om-liquid, the pill
    and, on Chromium WebViews, .om-liquid-refract with the SVG refraction filter.
    The tint and the halo keep icons and labels legible over busy content;
@@ -407,9 +417,14 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
 @media(max-width:760px) {
   .om-modern .om-nav.om-liquid { border-color:transparent; background:rgb(var(--om-glass-tint) / var(--om-glass-alpha)); box-shadow:0 12px 32px var(--om-glass-shadow), 0 1px 3px rgb(0 0 0 / 10%); touch-action:none; user-select:none; -webkit-user-select:none; -webkit-backdrop-filter:blur(14px) saturate(1.6); backdrop-filter:blur(14px) saturate(1.6); }
   .om-modern .om-nav.om-liquid-refract { -webkit-backdrop-filter:url(#om-liquid-glass); backdrop-filter:url(#om-liquid-glass); }
+  /* The gesture bar sits low in the bottom inset (about 7px above the screen
+     edge on a 16px inset). The dock rests 5px above the inset: 3px more than
+     the measured 7px gap, because its drop shadow visually eats into the
+     space above the bar. Without an inset, keep the dock gap. */
+  .om-modern .om-nav.om-liquid { bottom:max(var(--om-dock-gap), calc(env(safe-area-inset-bottom, 0px) + 5px)); }
   .om-modern .om-nav.om-liquid::before { display:none; }
-  .om-modern .om-nav.om-liquid::after { content:""; position:absolute; inset:0; z-index:2; border-radius:inherit; pointer-events:none; box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-edge), inset -1px -1px 0 -.5px var(--om-glass-edge), inset 0 0 14px rgb(255 255 255 / 10%); }
-  .om-nav-pill { display:block; position:absolute; z-index:0; top:5px; bottom:5px; left:5px; width:var(--om-pill-w, calc((100% - 10px) / 3)); border-radius:999px; background:var(--om-glass-pill); box-shadow:inset 1px 1px 0 -.5px rgb(255 255 255 / 70%), inset -1px -1px 0 -.5px rgb(255 255 255 / 25%), 0 2px 8px rgb(0 0 0 / 8%); pointer-events:none; transform:translate3d(var(--om-pill-x, 0px), 0, 0) scale(var(--om-pill-s, 1)); transition:transform .45s cubic-bezier(.34, 1.56, .64, 1); }
+  .om-modern .om-nav.om-liquid::after { content:""; position:absolute; inset:0; z-index:2; border-radius:inherit; pointer-events:none; box-shadow:inset 2px 2px 0 -1px var(--om-glass-edge), inset -1.5px -1.5px 0 -1px var(--om-glass-edge), inset 0 12px 18px -14px var(--om-glass-edge), inset 0 0 20px rgb(255 255 255 / 14%); }
+  .om-nav-pill { display:block; position:absolute; z-index:0; top:5px; bottom:5px; left:5px; width:var(--om-pill-w, calc((100% - 10px) / 3)); border-radius:999px; background:var(--om-glass-pill) linear-gradient(180deg, var(--om-glass-glow), transparent 60%); box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-edge), inset -1px -1px 0 -.5px rgb(255 255 255 / 30%), inset 0 0 10px var(--om-glass-glow), 0 3px 10px rgb(0 0 0 / 10%); pointer-events:none; transform:translate3d(var(--om-pill-x, 0px), 0, 0) scale(var(--om-pill-s, 1)); transition:transform .45s cubic-bezier(.34, 1.56, .64, 1); }
   .om-nav-pill.pressed { --om-pill-s:1.12; }
   .om-nav-pill.dragging { transition:transform .08s linear; will-change:transform; }
   .om-modern .om-nav.om-liquid button { position:relative; z-index:1; color:var(--om-ink); opacity:.88; text-shadow:0 0 3px var(--om-glass-halo), 0 0 6px var(--om-glass-halo); transition:color .2s, opacity .2s; }
@@ -417,4 +432,111 @@ body.om-modern.om-dialog-open .floating-btn { opacity:0; pointer-events:none; tr
   .om-modern .om-nav.om-liquid button[aria-current=page], .om-modern .om-nav.om-liquid button.om-nav-hover { color:var(--om-accent); opacity:1; }
   .om-modern .om-nav.om-liquid.om-dragging button[aria-current=page]:not(.om-nav-hover) { color:var(--om-ink); opacity:.88; }
   .om-modern .om-nav.om-liquid button[aria-current=page] svg { transform:translateY(-1px) scale(1.06); }
+}
+
+/* Liquid glass for cards and icon tiles. Nothing here samples the backdrop,
+   so scrolling stays a pure composite: a fixed ambient layer (its own
+   compositor layer, never repainted on scroll) gives the translucent surfaces
+   colour to show through, and rims and sheens are static paint. The switch
+   thumb is the one refracting element, and only while it is pressed. */
+body.om-modern::before { content:""; position:fixed; inset:0; z-index:-1; pointer-events:none; will-change:transform; background:radial-gradient(58vmax 48vmax at 0% 0%, var(--om-glass-blob-a), transparent 70%), radial-gradient(50vmax 44vmax at 100% 34%, var(--om-glass-blob-b), transparent 70%), radial-gradient(56vmax 48vmax at 18% 100%, var(--om-glass-blob-c), transparent 70%), radial-gradient(40vmax 36vmax at 78% 74%, var(--om-glass-blob-d), transparent 70%); }
+.om-modern .panel,
+.om-modern #ommega-global-scope,
+.om-modern.om-app-detail-ready #apps-list { background-color:var(--om-glass-card); background-image:linear-gradient(172deg, var(--om-glass-glow), transparent 40%); box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-rim), inset -1.5px -1.5px 0 -.5px var(--om-glass-shade), inset 0 0 0 1px var(--om-glass-glow), inset 0 0 24px var(--om-glass-glow), 0 1px 2px var(--om-glass-drop), 0 12px 32px var(--om-glass-drop); }
+.om-modern .status-panel { background-color:color-mix(in srgb, var(--primary-faint) 62%, transparent); }
+/* The glue writes this card's surface and border as an inline style, which
+   only !important can override. */
+.om-modern #ommega-global-scope { background:var(--om-glass-card) linear-gradient(172deg, var(--om-glass-glow), transparent 40%) !important; border-color:transparent !important; }
+/* Sub-cards inside a card (the battery row, the trust route nodes) float
+   like the search field, with a lighter shadow to stay inside their card. */
+.om-modern :is(.battery-summary, .route-node) { background-color:var(--om-glass-list); background-image:linear-gradient(180deg, var(--om-glass-glow), transparent 55%); box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-rim), inset 0 0 12px var(--om-glass-glow), 0 1px 3px var(--om-glass-drop), 0 6px 16px var(--om-glass-drop); }
+/* App icons wear a glass mask. System icon bitmaps keep an uneven transparent
+   margin of about 7-8% around the drawn shape, which read as an off-centre
+   frame; the bitmap is scaled past that margin and clipped to one rounded
+   tile, so every icon fills the same glass shape. On top: a diagonal specular
+   sheen, a lower reflection, a 1px glass ring, lit upper and shaded lower
+   rims, and a soft drop shadow. */
+.om-modern :is(#apps-list .app-icon-container, #om-detail-icon, .om-diag-icon-glass) { position:relative; display:grid !important; place-items:center; overflow:hidden; isolation:isolate; box-shadow:0 1px 2px var(--om-glass-drop), 0 5px 14px var(--om-glass-drop); }
+.om-modern #apps-list .app-icon-container { width:46px; height:46px; margin-right:14px; border-radius:14px; }
+.om-modern #apps-list .app-icon-container > * { grid-area:1 / 1; }
+.om-modern .om-diag-icon-glass { flex:none; width:40px; height:40px; border-radius:12px; }
+.om-modern :is(#apps-list .app-icon, #om-detail-icon > img, .om-diag-icon) { width:100%; height:100%; object-fit:cover; border-radius:0; background:transparent; transform:scale(1.16); }
+.om-modern :is(#apps-list .app-icon-container, #om-detail-icon, .om-diag-icon-glass)::after { content:""; position:absolute; inset:0; z-index:1; border-radius:inherit; pointer-events:none; background:linear-gradient(150deg, rgb(255 255 255 / 62%) 0%, rgb(255 255 255 / 22%) 26%, rgb(255 255 255 / 0%) 46%), radial-gradient(120% 60% at 50% 118%, rgb(255 255 255 / 26%), transparent 62%); box-shadow:inset 0 0 0 1px rgb(255 255 255 / 38%), inset 1.5px 2px 0 -.5px rgb(255 255 255 / 85%), inset 0 -2px 3px rgb(0 0 0 / 18%); }
+/* Automation path fields: clear glass panes like the search field. */
+.om-modern .om-automation-field input { background-color:var(--om-glass-card); background-image:linear-gradient(180deg, var(--om-glass-sheen), transparent 60%); border-color:transparent; box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-rim), inset 0 0 12px var(--om-glass-glow), 0 1px 2px var(--om-glass-drop), 0 6px 16px var(--om-glass-drop); }
+/* The app list is one tall pane: clearer than a card, with a sheen of fixed
+   height instead of a share of its (very long) height. */
+.om-modern.om-app-detail-ready #apps-list { background-color:var(--om-glass-list); background-image:linear-gradient(180deg, var(--om-glass-glow), transparent 140px); }
+/* Icon tiles keep their own tint and gain a raised glass bead: a top-left
+   highlight, a lit upper rim and a shaded lower rim. */
+.om-modern :is(.row-icon, .identity-icon, .tiny-icon, .app-symbol, .source-icon, .icon-button, .om-logo, .om-icon-button) { background-image:radial-gradient(120% 90% at 28% 0%, var(--om-glass-sheen), transparent 62%); box-shadow:inset 1px 1.5px 0 -.5px var(--om-glass-rim), inset 0 -1.5px 2px var(--om-glass-shade), inset 0 0 8px var(--om-glass-glow), 0 2px 6px var(--om-glass-drop); }
+/* The brand mark and the top bar buttons let the ambient layer through. */
+.om-modern .om-logo { background-color:color-mix(in srgb, var(--om-accent-bg) 72%, transparent); }
+.om-modern .om-icon-button { background-color:var(--om-glass-card); border-color:transparent; }
+/* The search field is a pane of glass floating above the page: a specular
+   upper-left rim, a top sheen, an inner glow and a two-layer drop shadow.
+   It has no border and no lit lower rim, so no line runs along its base. */
+.om-modern #om-app-search { background-color:var(--om-glass-list); background-image:linear-gradient(180deg, var(--om-glass-glow), transparent 50%); border-width:0; box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-rim), inset 0 0 16px var(--om-glass-glow), 0 2px 4px var(--om-glass-drop), 0 14px 32px var(--om-glass-drop); transform:translateY(0); transition:box-shadow .25s, background-color .25s, transform .25s cubic-bezier(.34, 1.56, .64, 1); }
+/* Typing lifts the pane a little further and lights it with the accent.
+   The legacy focus rule above loses its ring to the glass shadow otherwise. */
+.om-modern #om-app-search:focus { outline:0; background-color:var(--om-glass-dialog); transform:translateY(-1px); box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-rim), inset 0 0 0 1.5px color-mix(in srgb, var(--om-accent) 55%, transparent), inset 0 0 18px color-mix(in srgb, var(--om-accent) 10%, transparent), 0 0 0 4px color-mix(in srgb, var(--om-accent) 18%, transparent), 0 4px 8px var(--om-glass-drop), 0 18px 38px color-mix(in srgb, var(--om-accent) 20%, transparent); }
+.om-modern .status-emblem { background-image:radial-gradient(110% 80% at 30% 0%, rgb(255 255 255 / 30%), transparent 62%); box-shadow:inset 0 1px 0 rgb(255 255 255 / 40%), inset 0 -2px 3px rgb(0 0 0 / 14%), 0 6px 16px var(--om-glass-drop); }
+.om-modern :is(.badge, .om-cert-count, .om-soter-count) { background-image:linear-gradient(180deg, var(--om-glass-sheen), transparent 75%); box-shadow:inset 0 1px 0 var(--om-glass-rim), inset 0 -1px 0 var(--om-glass-shade), 0 1px 3px var(--om-glass-drop); }
+/* Switch tracks are recessed glass: shaded upper inner rim, lit lower rim. */
+.om-modern :is(.switch span, .om-compat-settings input[type="checkbox"], #ommega-capability-dialog .ommega-capability-switch, #ommega-global-scope input) { background-image:linear-gradient(180deg, var(--om-glass-well), transparent 60%); box-shadow:inset 0 1.5px 3px var(--om-glass-well), 0 1px 0 var(--om-glass-rim); }
+/* On, the track becomes raised tinted glass: a glossy top and a soft accent
+   glow. A recessed rim on the coloured track read as a stray light edge. */
+.om-modern :is(.switch input:checked + span, .om-compat-settings input[type="checkbox"]:checked, #ommega-capability-dialog .ommega-capability-switch:checked, #ommega-global-scope input:checked) { background-image:linear-gradient(180deg, rgb(255 255 255 / 34%), rgb(255 255 255 / 0%) 58%); box-shadow:inset 0 1px 0 rgb(255 255 255 / 40%), inset 0 -1.5px 2px rgb(0 0 0 / 16%), 0 3px 10px color-mix(in srgb, var(--om-accent) 34%, transparent); }
+/* Switch thumb: a glossy bead at rest; pressed, it widens into a clear lens
+   that bends the track colour at its rim. Position and size are separate
+   variables so the checked offset and the press scale compose. */
+.om-modern .switch span::after { --om-thumb-x:0px; transform:translateX(var(--om-thumb-x)) scale(var(--om-thumb-s, 1)); background-image:radial-gradient(85% 65% at 35% 22%, rgb(255 255 255 / 85%), rgb(255 255 255 / 0%) 68%); box-shadow:inset 0 1px 0 rgb(255 255 255 / 70%), inset 0 -1.5px 2px rgb(0 0 0 / 16%), 0 2px 5px rgb(0 0 0 / 24%); transition:transform .32s cubic-bezier(.34, 1.56, .64, 1), background-color .18s, box-shadow .18s; }
+.om-modern .switch input:checked + span::after { --om-thumb-x:20px; transform:translateX(var(--om-thumb-x)) scale(var(--om-thumb-s, 1)); }
+.om-modern .switch input:active:not(:disabled) + span::after { --om-thumb-s:1.35; background-color:rgb(255 255 255 / 22%); background-image:none; box-shadow:inset 1px 1px 0 -.5px rgb(255 255 255 / 85%), inset -1px -1px 0 -.5px rgb(255 255 255 / 40%), 0 2px 8px rgb(0 0 0 / 18%); -webkit-backdrop-filter:blur(.5px) saturate(1.6) brightness(1.08); backdrop-filter:blur(.5px) saturate(1.6) brightness(1.08); }
+.om-refract .om-modern .switch input:active:not(:disabled) + span::after { -webkit-backdrop-filter:url(#om-liquid-lens-20); backdrop-filter:url(#om-liquid-lens-20); }
+/* The settings, capability and global scope switches draw their 18 px thumb
+   on ::before. */
+.om-modern .om-compat-settings input[type="checkbox"]::before,
+.om-modern #ommega-capability-dialog .ommega-capability-switch::before,
+.om-modern #ommega-global-scope input::before { --om-thumb-x:0px; transform:translateX(var(--om-thumb-x)) scale(var(--om-thumb-s, 1)); background-image:radial-gradient(85% 65% at 35% 22%, rgb(255 255 255 / 85%), rgb(255 255 255 / 0%) 68%); box-shadow:inset 0 1px 0 rgb(255 255 255 / 70%), inset 0 -1.5px 2px rgb(0 0 0 / 16%), 0 2px 5px rgb(0 0 0 / 24%); transition:transform .32s cubic-bezier(.34, 1.56, .64, 1), background-color .18s, box-shadow .18s; }
+.om-modern .om-compat-settings input[type="checkbox"]:checked::before,
+.om-modern #ommega-global-scope input:checked::before { --om-thumb-x:20px; transform:translateX(var(--om-thumb-x)) scale(var(--om-thumb-s, 1)); }
+.om-modern #ommega-capability-dialog .ommega-capability-switch:checked::before { --om-thumb-x:16px; transform:translateX(var(--om-thumb-x)) scale(var(--om-thumb-s, 1)); }
+.om-modern .om-compat-settings input[type="checkbox"]:active:not(:disabled)::before,
+.om-modern #ommega-capability-dialog .ommega-capability-switch:active:not(:disabled)::before,
+.om-modern #ommega-global-scope input:active:not(:disabled)::before { --om-thumb-s:1.35; background-color:rgb(255 255 255 / 22%); background-image:none; box-shadow:inset 1px 1px 0 -.5px rgb(255 255 255 / 85%), inset -1px -1px 0 -.5px rgb(255 255 255 / 40%), 0 2px 8px rgb(0 0 0 / 18%); -webkit-backdrop-filter:blur(.5px) saturate(1.6) brightness(1.08); backdrop-filter:blur(.5px) saturate(1.6) brightness(1.08); }
+.om-refract .om-modern .om-compat-settings input[type="checkbox"]:active:not(:disabled)::before,
+.om-refract .om-modern #ommega-capability-dialog .ommega-capability-switch:active:not(:disabled)::before,
+.om-refract .om-modern #ommega-global-scope input:active:not(:disabled)::before { -webkit-backdrop-filter:url(#om-liquid-lens-18); backdrop-filter:url(#om-liquid-lens-18); }
+/* Buttons are static glass. Primary ones stay tinted with a glossy top and a
+   shaded base; secondary buttons and choice cards are clear glass. */
+.om-modern :is(.primary-button, .om-button:not(.secondary), .unit-btn.selected) { background-image:linear-gradient(180deg, rgb(255 255 255 / 26%), rgb(255 255 255 / 0%) 55%); box-shadow:inset 0 1px 0 rgb(255 255 255 / 38%), inset 0 -1.5px 2px rgb(0 0 0 / 18%), 0 3px 10px color-mix(in srgb, var(--om-accent) 28%, transparent); }
+.om-modern :is(.om-button.secondary:not(.om-icon-button), .secondary-button, .interval-chip) { background-color:var(--om-glass-card); background-image:linear-gradient(180deg, var(--om-glass-sheen), transparent 70%); border-color:transparent; box-shadow:inset 1px 1.5px 0 -.5px var(--om-glass-rim), inset 0 -1px 1px var(--om-glass-shade), inset 0 0 0 1px var(--om-glass-glow), 0 1px 3px var(--om-glass-drop); }
+.om-modern .source-card { background-color:var(--om-glass-card); background-image:linear-gradient(180deg, var(--om-glass-sheen), transparent 60%); box-shadow:inset 1px 1.5px 0 -.5px var(--om-glass-rim), inset 0 0 0 1px var(--om-glass-glow), 0 1px 3px var(--om-glass-drop); }
+.om-modern .source-card.selected { box-shadow:inset 0 0 0 1.5px var(--om-accent), inset 1px 1.5px 0 -.5px var(--om-glass-rim), 0 2px 8px color-mix(in srgb, var(--om-accent) 22%, transparent); }
+/* Dialogs are frosted glass. The page behind an open dialog does not move,
+   so the blur is computed when it opens, not on every frame. The legacy
+   md-dialog surface gets the same treatment inside its shadow root
+   (adaptLegacyDialogs in modern.js). */
+.om-modern :is(.om-preference-dialog, .ommega-auth-modal)::backdrop { background:var(--om-glass-scrim); }
+.om-modern :is(.om-preference-dialog, .ommega-auth-modal) { background-color:var(--om-glass-dialog); background-image:linear-gradient(180deg, var(--om-glass-sheen), transparent 140px); border-color:transparent; -webkit-backdrop-filter:blur(18px) saturate(1.9) brightness(1.04); backdrop-filter:blur(18px) saturate(1.9) brightness(1.04); box-shadow:inset 1.5px 1.5px 0 -.5px var(--om-glass-rim), inset 0 0 0 1px var(--om-glass-glow), 0 18px 50px rgb(0 0 0 / 24%); }
+/* The global scope switch is off-white with a dark thumb in the injected
+   glue style; match the other switches' muted off state. */
+.om-modern #ommega-global-scope input:not(:checked) { border-color:var(--om-muted); color:var(--om-muted); background-color:var(--om-raised); }
+/* Reduce transparency: solid surfaces, no ambient layer, no lens. */
+@media (prefers-reduced-transparency: reduce) {
+  body.om-modern::before { display:none; }
+  .om-modern .panel, .om-modern.om-app-detail-ready #apps-list { background-color:var(--om-surface); background-image:none; }
+  .om-modern #ommega-global-scope { background:var(--om-surface) !important; }
+  .om-modern .om-automation-field input, .om-modern :is(.battery-summary, .route-node) { background-color:var(--om-raised); }
+  .om-modern .status-panel { background-color:var(--primary-faint); }
+  .om-modern .om-logo { background-color:var(--om-accent-bg); }
+  .om-modern .om-icon-button, .om-modern #om-app-search, .om-modern :is(.om-button.secondary, .secondary-button, .interval-chip, .source-card) { background-color:var(--om-raised); }
+  .om-modern :is(.om-preference-dialog, .ommega-auth-modal) { background-color:var(--om-surface); -webkit-backdrop-filter:none; backdrop-filter:none; }
+  .om-modern :is(.om-preference-dialog, .ommega-auth-modal)::backdrop { background:rgb(24 25 35 / 48%); }
+  .om-modern #ommega-global-scope input:active:not(:disabled)::before, .om-refract .om-modern #ommega-global-scope input:active:not(:disabled)::before { background-color:var(--om-surface); -webkit-backdrop-filter:none; backdrop-filter:none; }
+  .om-modern .switch input:active:not(:disabled) + span::after, .om-refract .om-modern .switch input:active:not(:disabled) + span::after,
+  .om-modern .om-compat-settings input[type="checkbox"]:active:not(:disabled)::before, .om-refract .om-modern .om-compat-settings input[type="checkbox"]:active:not(:disabled)::before,
+  .om-modern #ommega-capability-dialog .ommega-capability-switch:active:not(:disabled)::before, .om-refract .om-modern #ommega-capability-dialog .ommega-capability-switch:active:not(:disabled)::before { background-color:var(--om-surface); -webkit-backdrop-filter:none; backdrop-filter:none; }
+  .om-modern .om-nav.om-liquid, .om-modern .om-nav.om-liquid-refract { background:var(--om-surface); -webkit-backdrop-filter:none; backdrop-filter:none; }
 }

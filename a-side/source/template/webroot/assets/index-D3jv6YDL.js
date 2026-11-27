@@ -3857,9 +3857,20 @@ function ommegaCloseAppDetail() {
   document.body.removeAttribute("data-om-app-detail");
   const detail = document.getElementById("om-app-detail");
   if (detail) { detail.hidden = true; detail.innerHTML = ""; }
-  window.scrollTo(0, previous.scrollY);
+  ommegaSetPageScrollTop(previous.scrollY);
   previous.card?.focus({preventScroll:true});
 }
+
+// The A page scrolls inside body (a-modern.css): the WebView root never
+// scrolls, so Android's overscroll stretch never distorts the fixed dock.
+// Where body is not a scroller, the window is the page scroller.
+function ommegaPageScroller() {
+  const body = typeof document !== "undefined" ? document.body : null;
+  if (body && typeof getComputedStyle === "function" && /auto|scroll/.test(getComputedStyle(body).overflowY)) return body;
+  return null;
+}
+function ommegaPageScrollTop() { const scroller = ommegaPageScroller(); return scroller ? scroller.scrollTop : window.scrollY; }
+function ommegaSetPageScrollTop(y) { const scroller = ommegaPageScroller(); if (scroller) scroller.scrollTop = y; else window.scrollTo(0, y); }
 
 function ommegaOpenAppDetail(card) {
   const pkg = card.getAttribute("data-package"), box = card.querySelector("md-checkbox");
@@ -3869,7 +3880,7 @@ function ommegaOpenAppDetail(card) {
   void ommegaRefreshRelayMode();
   const session = ++ommegaDetailSession;
   const name = card.dataset.omOriginalName || card.querySelector(".app-name")?.textContent || pkg;
-  ommegaDetail = {pkg, card, box, session, scrollY:window.scrollY};
+  ommegaDetail = {pkg, card, box, session, scrollY:ommegaPageScrollTop()};
   const detail = document.getElementById("om-app-detail");
   detail.innerHTML = '<button type="button" class="back-button" id="om-detail-back">' + ommegaDetailIcon('back') + '<span>' + ommegaDetailText("返回应用列表", "Back to apps") + '</span></button>' +
     '<div class="app-detail-heading"><span class="app-symbol app-symbol-large" id="om-detail-icon"></span><div><span class="section-kicker">APPLICATION</span><h1 tabindex="-1">' + ommegaEsc(name) + '</h1><p>' + ommegaEsc(pkg) + '</p></div></div>' +
@@ -3905,7 +3916,7 @@ function ommegaOpenAppDetail(card) {
   else document.getElementById("om-detail-icon").textContent = name.slice(0, 1).toUpperCase();
   detail.hidden = false; document.body.dataset.omAppDetail = "open";
   history.pushState({...history.state, omAppDetail:pkg}, "");
-  window.scrollTo(0, 0); detail.querySelector("h1")?.focus({preventScroll:true});
+  ommegaSetPageScrollTop(0); detail.querySelector("h1")?.focus({preventScroll:true});
   document.getElementById("om-detail-back").onclick = () => history.back();
   document.getElementById("om-detail-scope").onchange = event => ommegaDetailSaveScope(event.target);
   detail.querySelectorAll('input[name="om-app-mode"]').forEach(input => input.onchange = () => ommegaDetailSaveMode(input));
@@ -4109,11 +4120,11 @@ async function ommegaRefreshApps() {
     ommegaAppsBaseline = ommegaAppSettingsSnapshot(Qe);
     if (scope) ommegaGlobalScopeEnabled = scope.global;
     ommegaGlobalScopeKnown = Boolean(scope); ommegaGlobalScopeMessage = scopeError; ommegaScopeSync();
-    const scrollY = window.scrollY;
+    const scrollY = ommegaPageScrollTop();
     $s(apps);
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     document.dispatchEvent(new Event("ommega-apps-rendered"));
-    window.scrollTo(0, scrollY);
+    ommegaSetPageScrollTop(scrollY);
     await ommegaRefreshCertificateCounts();
     if (scopeError) throw new Error(scopeError);
     return "";
@@ -4974,7 +4985,10 @@ if (typeof window !== "undefined" && typeof location !== "undefined") {
   });
 }
 if (typeof document !== "undefined" && typeof location !== "undefined") {
-  if (document.readyState !== "loading") ommegaDiagRoute((location.hash || "").replace("#om-", ""));
+  // A parsed page runs this bundle at once. Route after the whole glue has
+  // been evaluated: the overview path reads let/const state declared further
+  // down, which is still uninitialised during evaluation.
+  if (document.readyState !== "loading") Promise.resolve().then(() => ommegaDiagRoute((location.hash || "").replace("#om-", "")));
   else document.addEventListener("DOMContentLoaded", () => ommegaDiagRoute((location.hash || "").replace("#om-", "")));
 }
 
@@ -5197,7 +5211,7 @@ function ommegaDiagErrorRows(list) {
     const title = item.label || item.pkg || (system ? ommegaDiagT("系统进程", "System process") : ommegaDiagT("未知应用", "Unknown app"));
     const tail = item.pkg && item.pkg !== title ? " · " + item.pkg : (item.pkg ? "" : " · uid " + item.uid);
     const icon = item.icon
-      ? "<img class=\"om-diag-icon\" src=\"" + ommegaDiagEsc(item.icon) + "\" alt=\"\">"
+      ? "<span class=\"om-diag-icon-glass\"><img class=\"om-diag-icon\" src=\"" + ommegaDiagEsc(item.icon) + "\" alt=\"\"></span>"
       : "";
     const meta = [];
     if (item.count > 1) meta.push(ommegaDiagT("发生 " + item.count + " 次", "seen " + item.count + " times"));

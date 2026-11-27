@@ -297,3 +297,32 @@ test("debug clear and rotation actions never request a service restart", async (
   assert.ok(writes.length > 0);
   assert.ok(commands.every(command => !command.includes("restart.")));
 });
+
+test("a parsed page opened on the overview initialises the glue and routes after evaluation", async () => {
+  const routed = [];
+  const host = {querySelector: () => null, appendChild() {}};
+  const context = {
+    console, setTimeout, clearTimeout,
+    btoa: value => Buffer.from(String(value), "binary").toString("base64"),
+    localStorage: {getItem: () => null, setItem() {}, removeItem() {}},
+    navigator: {},
+    location: {hash: "#om-overview"},
+    window: {addEventListener() {}},
+    document: {
+      readyState: "interactive",
+      addEventListener() {},
+      getElementById: id => { routed.push(id); return id === "om-overview" ? host : null; },
+      querySelectorAll: () => [],
+      createElement: () => ({style: {}, setAttribute() {}, appendChild() {}, remove() {}, querySelector: () => ({addEventListener() {}}), dataset: {}}),
+      body: {appendChild() {}}
+    },
+    ommegaUiLocalize: value => String(value).split(" / ")[0],
+    ommegaReadOnly: async () => ({errno: 0, stdout: "", stderr: ""}),
+    _: async () => ({errno: 0, stdout: "", stderr: ""})
+  };
+  vm.createContext(context);
+  assert.doesNotThrow(() => vm.runInContext(source, context));
+  assert.equal(typeof context.window.ommegaDiagRoute, "function");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(routed.includes("om-overview"), "the overview route ran after evaluation");
+});
